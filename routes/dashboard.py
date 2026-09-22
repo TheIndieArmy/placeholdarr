@@ -44,6 +44,7 @@ from services.postgres.models import (
     SystemActivityHistory,
     Job,
     EventLog,
+    TmdbMovie,
 )
 from services.library_catalog_version import get_library_versions, library_etag_for_shelf
 from services.library_poster_paths import library_poster_cache_token, load_library_poster_path
@@ -67,7 +68,50 @@ def _launch_post_onboarding_startup_sync() -> None:
     was still incomplete at boot — start runtime services *before* enqueueing so a
     worker can claim the job (the handler also calls ``start_runtime_background_services``
     idempotently).
+
+    TMDB Discover mode always uses the Discover seed pipeline (never Arr full sync).
     """
+    try:
+        from services.discover.mode import is_tmdb_discover_mode
+
+        if is_tmdb_discover_mode():
+            def _discover_runner() -> None:
+                from services.startup_gate import startup_sync_complete
+                try:
+                    from main import ensure_sync_scheduler_started, start_runtime_background_services
+                    from services.discover.pipeline import run_discover_startup
+
+                    start_runtime_background_services(reason="post_onboarding_discover")
+                    logger.info(
+                        "Launching TMDB Discover seed after onboarding completion",
+                        extra={"emoji_type": "gear"},
+                    )
+                    result = run_discover_startup()
+                    logger.info(
+                        f"Post-onboarding Discover pipeline completed: {result}",
+                        extra={"emoji_type": "success"},
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"Post-onboarding Discover pipeline failed: {exc}",
+                        extra={"emoji_type": "error"},
+                    )
+                finally:
+                    try:
+                        ensure_sync_scheduler_started(reason="after_post_onboarding_discover")
+                    except Exception:
+                        pass
+                    startup_sync_complete.set()
+
+            threading.Thread(
+                target=_discover_runner,
+                name="post-onboarding-discover-seed",
+                daemon=True,
+            ).start()
+            return
+    except Exception:
+        pass
+
     try:
         from services.source_of_truth.startup_sync_job import (
             enqueue_startup_sync_runner_job,
@@ -108,21 +152,36 @@ def _launch_post_onboarding_startup_sync() -> None:
         from services.startup_gate import startup_sync_complete
         try:
             from main import ensure_sync_scheduler_started, start_runtime_background_services
-            from services.source_of_truth.startup import run_startup_source_of_truth
+            from services.discover.mode import is_tmdb_discover_mode
 
             start_runtime_background_services(reason='post_onboarding_completion')
 
-            logger.info(
-                "Launching first-run startup sync after onboarding completion",
-                extra={"emoji_type": "gear"},
-            )
-            result = run_startup_source_of_truth(require_first_full=True)
-            logger.info(
-                "Post-onboarding startup sync completed"
-                f" mode={result.get('startup_sync_mode')}"
-                f" run_ids={result.get('run_ids') or []}",
-                extra={"emoji_type": "success"},
-            )
+            if is_tmdb_discover_mode():
+                from services.discover.pipeline import run_discover_startup
+
+                logger.info(
+                    "Launching TMDB Discover seed after onboarding completion",
+                    extra={"emoji_type": "gear"},
+                )
+                result = run_discover_startup()
+                logger.info(
+                    f"Post-onboarding Discover pipeline completed: {result}",
+                    extra={"emoji_type": "success"},
+                )
+            else:
+                from services.source_of_truth.startup import run_startup_source_of_truth
+
+                logger.info(
+                    "Launching first-run startup sync after onboarding completion",
+                    extra={"emoji_type": "gear"},
+                )
+                result = run_startup_source_of_truth(require_first_full=True)
+                logger.info(
+                    "Post-onboarding startup sync completed"
+                    f" mode={result.get('startup_sync_mode')}"
+                    f" run_ids={result.get('run_ids') or []}",
+                    extra={"emoji_type": "success"},
+                )
         except Exception as exc:
             logger.error(f"Post-onboarding startup sync failed: {exc}", extra={"emoji_type": "error"})
         finally:
@@ -2687,20 +2746,74 @@ async def activity(
 
 def _resolve_history_item_titles(
     session, h: PlaceholderActivityHistory
-) -> tuple[str, str | None, int | None]:
-    """Fill item_title / series_title / series_id from history row or FK joins (hooks often leave titles empty)."""
+) -> tuple[str, str | None, int | None, str]:
+    """Fill item_title / series_title / series_id / item_type from history row or FK joins.
+
+    Hooks often leave titles empty. Discover placeholders use ``tmdb_movie_id`` (no Arr
+    ``movie_id``), and older rows were mis-tagged as ``episode``; resolve those via the
+    placeholder → ``tmdb_movie`` join.
+    """
     stored_title = (h.item_title or "").strip()
     stored_series_id = int(h.series_id) if h.series_id is not None else None
+    stored_type = str(h.item_type or "episode").strip().lower() or "episode"
+
+    def _discover_movie_title() -> tuple[str, str] | None:
+        """Return (title, item_type) for a Discover placeholder, or None."""
+        if h.movie_id or h.episode_id:
+            return None
+        ph = None
+        if h.placeholder_id:
+            ph = session.query(Placeholder).filter(Placeholder.id == h.placeholder_id).first()
+        tid = getattr(ph, "tmdb_movie_id", None) if ph is not None else None
+        if not tid and stored_type == "movie":
+            return None
+        if not tid:
+            # Mis-tagged Discover create/delete: no Arr FKs and path under movies with {tmdb-N}
+            path = str(h.path or "")
+            if "{tmdb-" not in path.lower() and "tmdb-" not in path.lower():
+                return None
+            # Still try placeholder; if missing, parse is last resort below
+        if tid:
+            tm = session.query(TmdbMovie).filter(TmdbMovie.tmdb_id == int(tid)).first()
+            if tm and getattr(tm, "title", None):
+                title = str(tm.title).strip()
+                year = getattr(tm, "year", None)
+                if year:
+                    title = f"{title} ({int(year)})"
+                return title, "movie"
+        # Fallback: folder name from path (.../Title (2026) {tmdb-123}/file)
+        path = str(h.path or "").rstrip("/")
+        if path:
+            parent = os.path.basename(os.path.dirname(path)) or os.path.basename(path)
+            if parent:
+                cleaned = parent
+                brace = cleaned.lower().find("{tmdb-")
+                if brace > 0:
+                    cleaned = cleaned[:brace].strip()
+                if cleaned:
+                    return cleaned, "movie"
+        return None
+
     if stored_title:
-        return stored_title, h.series_title, stored_series_id
-    item_type = str(h.item_type or "episode").strip().lower()
+        # Still correct mis-tagged Discover rows for item_type filtering
+        if stored_type == "episode" and not h.episode_id and not h.movie_id:
+            discovered = _discover_movie_title()
+            if discovered:
+                return stored_title, h.series_title, stored_series_id, "movie"
+        return stored_title, h.series_title, stored_series_id, stored_type
+
+    discovered = _discover_movie_title()
+    if discovered:
+        return discovered[0], None, None, discovered[1]
+
+    item_type = stored_type
     if item_type == "movie":
         movie = session.query(Movie).filter(Movie.id == h.movie_id).first() if h.movie_id else None
-        return (movie.title if movie else "Unknown Movie"), None, None
+        return (movie.title if movie else "Unknown Movie"), None, None, "movie"
     if item_type == "series":
         series = session.query(Series).filter(Series.id == h.series_id).first() if h.series_id else None
         title = series.title if series and getattr(series, "title", None) else "Unknown Series"
-        return title, title, stored_series_id or (int(series.id) if series else None)
+        return title, title, stored_series_id or (int(series.id) if series else None), "series"
     episode = (
         session.query(Episode)
         .options(joinedload(Episode.season).joinedload(Season.series))
@@ -2729,11 +2842,11 @@ def _resolve_history_item_titles(
     resolved_series_id = stored_series_id
     if resolved_series_id is None and series is not None and getattr(series, "id", None) is not None:
         resolved_series_id = int(series.id)
-    return item_title, series_title, resolved_series_id
+    return item_title, series_title, resolved_series_id, "episode"
 
 
 def _activity_dict_from_history_row(session, h: PlaceholderActivityHistory) -> dict[str, Any]:
-    item_title, series_title, resolved_series_id = _resolve_history_item_titles(session, h)
+    item_title, series_title, resolved_series_id, resolved_item_type = _resolve_history_item_titles(session, h)
     action = str(h.action or "").strip()
     action_cap = action if action in ("Created", "Deleted", "Status") else ("Status" if not action else action.title())
     path_val = str(h.path or "") if h.path is not None else ""
@@ -2760,15 +2873,16 @@ def _activity_dict_from_history_row(session, h: PlaceholderActivityHistory) -> d
         new_status_for_human or h.status_label or None,
     )
     occurred = h.occurred_at.isoformat() if h.occurred_at else None
+    itype = str(resolved_item_type or h.item_type or "").strip().lower()
     out: dict[str, Any] = {
         "id": h.id,
         "type": "placeholder",
         "action": action_cap,
         "item_type": (
             "movie"
-            if str(h.item_type or "").lower() == "movie"
+            if itype == "movie"
             else "series"
-            if str(h.item_type or "").lower() == "series"
+            if itype == "series"
             else "episode"
         ),
         "item_title": item_title,

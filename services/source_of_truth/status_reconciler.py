@@ -13,7 +13,7 @@ from services.placeholders import ensure_episode_nfo, ensure_movie_nfo, ensure_s
 from sqlalchemy import func
 
 from services.postgres.db import get_session
-from services.postgres.models import AppConfig, Episode, Movie, Placeholder, Job, Season, Series
+from services.postgres.models import AppConfig, Episode, Movie, Placeholder, Job, Season, Series, TmdbMovie
 from services.media_servers.player_metadata_refresh import push_placeholder_batch_player_metadata
 from services.media_servers.refresh import refresh_all_sections
 from services.source_of_truth.placeholder_job_enqueue import (
@@ -37,11 +37,12 @@ def _job_debounce_seconds() -> float:
 
 
 def _nfo_refresh_subject_summary(session, placeholders: list[Placeholder]) -> str:
-    """Short human-readable line for logs (movies / series+episode)."""
+    """Short human-readable line for logs (movies / series+episode / discover)."""
     if not placeholders:
         return ""
     mids = [int(ph.movie_id) for ph in placeholders if getattr(ph, "movie_id", None)]
     eids = [int(ph.episode_id) for ph in placeholders if getattr(ph, "episode_id", None)]
+    tids = [int(ph.tmdb_movie_id) for ph in placeholders if getattr(ph, "tmdb_movie_id", None)]
     movie_title: dict[int, str] = {}
     if mids:
         for m in session.query(Movie).filter(Movie.id.in_(mids)).all():
@@ -65,6 +66,11 @@ def _nfo_refresh_subject_summary(session, placeholders: list[Placeholder]) -> st
             if et:
                 base += f' — "{et}"'
             ep_label[int(ep.id)] = base
+    tmdb_title: dict[int, str] = {}
+    if tids:
+        for row in session.query(TmdbMovie).filter(TmdbMovie.tmdb_id.in_(tids)).all():
+            t = str(getattr(row, "title", "") or "").strip()
+            tmdb_title[int(row.tmdb_id)] = t or f"tmdb {row.tmdb_id}"
 
     per_row: list[str] = []
     for ph in placeholders:
@@ -72,6 +78,8 @@ def _nfo_refresh_subject_summary(session, placeholders: list[Placeholder]) -> st
             per_row.append(movie_title[int(ph.movie_id)])
         elif ph.episode_id and int(ph.episode_id) in ep_label:
             per_row.append(ep_label[int(ph.episode_id)])
+        elif ph.tmdb_movie_id and int(ph.tmdb_movie_id) in tmdb_title:
+            per_row.append(tmdb_title[int(ph.tmdb_movie_id)])
         else:
             per_row.append(f"placeholder id {int(ph.id)}")
 
@@ -120,6 +128,17 @@ def _refresh_movie_nfo(placeholder: Placeholder, movie: Movie) -> bool:
         return False
     setattr(movie, "placeholder_status", _placeholder_display_status(placeholder) or "REQUEST")
     return ensure_movie_nfo(target_path, movie)
+
+
+def _refresh_discover_movie_nfo(placeholder: Placeholder, tmdb_movie: TmdbMovie) -> bool:
+    """Rewrite Discover placeholder NFO using current display status (SEARCHING, etc.)."""
+    target_path = str(
+        getattr(placeholder, "path", "") or getattr(tmdb_movie, "placeholder_filepath", "") or ""
+    ).strip()
+    if not target_path:
+        return False
+    setattr(tmdb_movie, "placeholder_status", _placeholder_display_status(placeholder) or "REQUEST")
+    return ensure_movie_nfo(target_path, tmdb_movie)
 
 
 def _refresh_episode_nfo(session, placeholder: Placeholder, episode: Episode) -> bool:
@@ -308,10 +327,17 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
             loop_pos[0] += 1
             movie = session.query(Movie).get(placeholder.movie_id) if placeholder.movie_id else None
             episode = session.query(Episode).get(placeholder.episode_id) if placeholder.episode_id else None
+            tmdb_movie = (
+                session.query(TmdbMovie).get(placeholder.tmdb_movie_id)
+                if getattr(placeholder, "tmdb_movie_id", None)
+                else None
+            )
             effective_has_placeholder = bool(getattr(placeholder, "has_placeholder", False))
             if movie and bool(getattr(movie, "has_placeholder", False)):
                 effective_has_placeholder = True
             if episode and bool(getattr(episode, "has_placeholder", False)):
+                effective_has_placeholder = True
+            if tmdb_movie and bool(getattr(tmdb_movie, "has_placeholder", False)):
                 effective_has_placeholder = True
             if effective_has_placeholder and not bool(getattr(placeholder, "has_placeholder", False)):
                 # Self-heal drift so follow-up jobs do not keep skipping valid placeholders.
@@ -328,6 +354,10 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
             if episode and _refresh_episode_nfo(session, placeholder, episode):
                 refreshed += 1
                 refreshed_for_player_push.append((placeholder, ("episode", int(episode.id))))
+                continue
+            if tmdb_movie and _refresh_discover_movie_nfo(placeholder, tmdb_movie):
+                refreshed += 1
+                refreshed_for_player_push.append((placeholder, ("tmdb_movie", int(tmdb_movie.tmdb_id))))
     finally:
         stop_nfo_hb.set()
 
@@ -348,35 +378,53 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
     except Exception:
         pass
 
-    if do_player and refreshed_for_player_push:
-        # One media-server refresh sequence per underlying movie/episode row, even if several
-        # placeholder rows pointed at the same title (rare) or a batch carried duplicates.
+    if do_player:
+        # Prefer rows whose NFO was rewritten; if none were (edge cases), still project
+        # any on-disk placeholders in this job so Emby/Jellyfin get the status update.
+        push_source = refreshed_for_player_push
+        if not push_source:
+            push_source = [
+                (
+                    ph,
+                    ("tmdb_movie", int(ph.tmdb_movie_id))
+                    if getattr(ph, "tmdb_movie_id", None)
+                    else ("movie", int(ph.movie_id))
+                    if getattr(ph, "movie_id", None)
+                    else ("episode", int(ph.episode_id))
+                    if getattr(ph, "episode_id", None)
+                    else ("placeholder", int(ph.id)),
+                )
+                for ph in placeholders
+                if getattr(ph, "has_placeholder", False)
+            ]
+        # One media-server refresh sequence per underlying movie/episode/tmdb row.
         seen_entity: set[tuple[str, int]] = set()
         unique_for_projection: list[Placeholder] = []
-        for placeholder, entity_key in refreshed_for_player_push:
+        for placeholder, entity_key in push_source:
             if not getattr(placeholder, "has_placeholder", False):
                 continue
             if entity_key in seen_entity:
                 continue
             seen_entity.add(entity_key)
             unique_for_projection.append(placeholder)
-        try:
-            push_placeholder_batch_player_metadata(session, unique_for_projection)
+        if unique_for_projection:
             try:
-                session.commit()
-            except Exception:
-                pass
-            proj_subject = _nfo_refresh_subject_summary(session, unique_for_projection)
-            ps = f" · {proj_subject}" if proj_subject else ""
-            logger.info(
-                f"Direct player projection attempted · {len(unique_for_projection)} placeholder(s){ps}",
-                extra={"emoji_type": "info"},
-            )
-        except Exception as ex:
-            logger.warning(
-                f"Player metadata refresh after NFO failed for placeholder batch size={len(unique_for_projection)}: {ex}",
-                extra={"emoji_type": "warning"},
-            )
+                push_placeholder_batch_player_metadata(session, unique_for_projection)
+                try:
+                    session.commit()
+                except Exception:
+                    pass
+                proj_subject = _nfo_refresh_subject_summary(session, unique_for_projection)
+                ps = f" · {proj_subject}" if proj_subject else ""
+                logger.info(
+                    f"Direct player projection attempted · {len(unique_for_projection)} placeholder(s){ps}",
+                    extra={"emoji_type": "info"},
+                )
+            except Exception as ex:
+                logger.warning(
+                    f"Player metadata refresh after NFO failed for placeholder batch size={len(unique_for_projection)}: {ex}",
+                    extra={"emoji_type": "warning"},
+                )
     elif completion_refresh and run_id:
         def _after_request_backfill_refresh() -> None:
             payload = job.payload if isinstance(job.payload, dict) else {}

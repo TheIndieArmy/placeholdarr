@@ -440,6 +440,9 @@ def _ensure_job_notify_trigger(engine):
     Phase 6 portability: ``EXECUTE FUNCTION`` is the Postgres 11+ syntax.
     Older 9.6 / 10 servers require ``EXECUTE PROCEDURE``. We attempt the
     modern syntax first and fall back if the server rejects it.
+
+    When both statement triggers already exist, skip DROP/CREATE (saves ~0.5s+ on
+    boot against a large ``job`` table).
     """
     # Detect server major version once and pick syntax accordingly. The
     # check is cheap (one round-trip) and lets us emit a clear log line
@@ -452,12 +455,38 @@ def _ensure_job_notify_trigger(engine):
                 server_major = int(int(str(ver or '0')) // 10000)
             except Exception:
                 server_major = 0
+            try:
+                existing = {
+                    row[0]
+                    for row in conn.execute(
+                        text(
+                            "SELECT t.tgname FROM pg_trigger t "
+                            "JOIN pg_class c ON c.oid = t.tgrelid "
+                            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                            "WHERE NOT t.tgisinternal "
+                            "  AND n.nspname = 'public' AND c.relname = 'job' "
+                            "  AND t.tgname IN ('job_notify_insert', 'job_notify_update')"
+                        )
+                    ).fetchall()
+                }
+                if existing >= {"job_notify_insert", "job_notify_update"}:
+                    logger.debug(
+                        "NOTIFY triggers already present on job; skipping reinstall "
+                        f"(server_major={server_major or 'unknown'})",
+                        extra={"emoji_type": "debug"},
+                    )
+                    return
+            except Exception as ex:
+                logger.debug(
+                    f"NOTIFY trigger presence check failed; will install: {ex}",
+                    extra={"emoji_type": "debug"},
+                )
     except Exception:
         server_major = 0
 
     if 0 < server_major < 11:
         logger.warning(
-            f"Postgres {server_major}.x detected — NOTIFY triggers will use legacy "
+            f"Postgres {server_major}.x detected; NOTIFY triggers will use legacy "
             "EXECUTE PROCEDURE syntax. Postgres 11+ is recommended (see README).",
             extra={'emoji_type': 'warning'},
         )
@@ -545,9 +574,57 @@ def _migrate_instance_key_constraints(engine):
     """Drop legacy single-column unique constraints on tmdbid/tvdbid, backfill instance_key,
     and create the composite unique indexes (tmdbid, instance_key) / (tvdbid, instance_key).
 
-    Safe to call repeatedly — all operations are idempotent.
+    Safe to call repeatedly; all operations are idempotent. After the composite indexes
+    exist and no blank instance_key rows remain, subsequent boots skip the DROP / UPDATE /
+    CREATE INDEX CONCURRENTLY work (was ~0.5-1s every startup on a large catalog DB).
     """
-    
+    composite_names = (
+        "ux_movie_tmdbid_instance_key",
+        "ux_series_tvdbid_instance_key",
+    )
+    try:
+        with engine.connect() as conn:
+            present = {
+                row[0]
+                for row in conn.execute(
+                    text(
+                        "SELECT indexname FROM pg_indexes "
+                        "WHERE schemaname = 'public' "
+                        "  AND indexname IN ("
+                        "    'ux_movie_tmdbid_instance_key',"
+                        "    'ux_series_tvdbid_instance_key'"
+                        "  )"
+                    )
+                ).fetchall()
+            }
+            need_movie_backfill = conn.execute(
+                text(
+                    "SELECT 1 FROM movie "
+                    "WHERE instance_key IS NULL OR instance_key = '' LIMIT 1"
+                )
+            ).fetchone()
+            need_series_backfill = conn.execute(
+                text(
+                    "SELECT 1 FROM series "
+                    "WHERE instance_key IS NULL OR instance_key = '' LIMIT 1"
+                )
+            ).fetchone()
+        if (
+            set(composite_names).issubset(present)
+            and not need_movie_backfill
+            and not need_series_backfill
+        ):
+            logger.debug(
+                "instance_key migration: composite indexes present; skipping",
+                extra={"emoji_type": "debug"},
+            )
+            return
+    except Exception as ex:
+        logger.debug(
+            f"instance_key migration fast-path check failed; running full steps: {ex}",
+            extra={"emoji_type": "debug"},
+        )
+
     # Derive default instance keys from configured instances using role/priority.
     def get_default_key(arr_type: str, role: str) -> str:
         item = settings.resolve_arr_instance(arr_type, role=role) or settings.resolve_arr_instance(arr_type)
@@ -605,7 +682,7 @@ def _migrate_instance_key_constraints(engine):
             with engine.connect() as conn:
                 conn.execute(text(sql.strip()))
                 conn.commit()
-                logger.debug(f"instance_key migration: {desc} — OK", extra={'emoji_type': 'debug'})
+                logger.debug(f"instance_key migration: {desc}: OK", extra={'emoji_type': 'debug'})
         except Exception as ex:
             logger.warning(f"instance_key migration step '{desc}' failed (may be harmless): {ex}", extra={'emoji_type': 'warning'})
 

@@ -28,7 +28,7 @@ from services.media_servers.plex_identity import (
 )
 from services.media_servers.plex_lookup import find_episode_by_series_tvdb, find_movie_by_id
 from services.messages.context import build_projection_context
-from services.postgres.models import Episode, Movie, Placeholder, Season, Series
+from services.postgres.models import Episode, Movie, Placeholder, Season, Series, TmdbMovie
 from services.status_projection import project_summary, project_title
 
 
@@ -206,6 +206,47 @@ def _find_emby_movie_item_id(movie: Movie, placeholder: Placeholder) -> str | No
             return hit
     return None
 
+
+def _find_emby_item_id_for_tmdb(tmdb_id: int, placeholder: Placeholder) -> str | None:
+    """Resolve Emby movie item for a Discover TMDB catalog title."""
+    cached_ph = str(getattr(placeholder, "emby_placeholder_id", "") or "").strip()
+    if cached_ph:
+        return cached_ph
+    tid = int(tmdb_id or 0)
+    if not tid:
+        return None
+    for key in (
+        f"Tmdb-{tid}",
+        f"MovieDb-{tid}",
+        f"Tmdb.{tid}",
+        f"tmdb.{tid}",
+        f"MovieDb.{tid}",
+    ):
+        items = emby_search_items(
+            {
+                "Recursive": "true",
+                "IncludeItemTypes": "Movie",
+                "AnyProviderIdEquals": key,
+                "Limit": 5,
+            }
+        )
+        hit = _first_item_id(items)
+        if hit:
+            return hit
+    path = str(getattr(placeholder, "path", "") or "").strip()
+    if path:
+        items = emby_search_items(
+            {
+                "Recursive": "true",
+                "IncludeItemTypes": "Movie",
+                "Path": path,
+                "Limit": 5,
+            }
+        )
+        hit = _first_item_id(items)
+        if hit:
+            return hit
+    return None
 
 def _find_jellyfin_series_item_id(series: Series) -> str | None:
     cached = str(getattr(series, "jellyfin_id", "") or "").strip()
@@ -668,6 +709,79 @@ def _push_movie(
         summary.plex_disabled += 1
 
 
+def _push_discover_movie(
+    session,
+    tmdb_movie: TmdbMovie,
+    placeholder: Placeholder,
+    fallback: ProjectionFallbackAccumulator,
+    summary: ProjectionBatchSummary,
+) -> None:
+    """Project status onto Emby/Jellyfin for Discover TMDB placeholders (no Arr Movie row)."""
+    status = _projected_display_status(placeholder)
+    media_ctx = build_projection_context(movie=tmdb_movie, runtime_minutes=None)
+    projected_title, projected_summary = _project_text(
+        getattr(tmdb_movie, "title", None),
+        getattr(tmdb_movie, "overview", None) or getattr(tmdb_movie, "radarr_overview", None),
+        status,
+        suffix_template_key="title.suffix.movie",
+        runtime_minutes=None,
+        media_context=media_ctx,
+    )
+    tmdb_id = int(getattr(tmdb_movie, "tmdb_id", 0) or 0)
+
+    if getattr(settings, "jellyfin_enabled", False):
+        # Reuse Arr movie lookup shape via duck-typed tmdbid.
+        jf = _find_jellyfin_movie_item_id(tmdb_movie)  # type: ignore[arg-type]
+        if jf:
+            jf_ok = update_jellyfin_item_text(jf, title=projected_title, overview=projected_summary)
+            _summary_mark(summary, "jellyfin", jf_ok)
+            if not jf_ok:
+                _mark_fallback(fallback, "jellyfin", "movie")
+        else:
+            _summary_mark(summary, "jellyfin", False)
+            _mark_fallback(fallback, "jellyfin", "movie")
+    else:
+        summary.jellyfin_disabled += 1
+
+    if getattr(settings, "emby_enabled", False):
+        em = _find_emby_item_id_for_tmdb(tmdb_id, placeholder)
+        if em:
+            if str(getattr(placeholder, "emby_placeholder_id", "") or "").strip() != str(em):
+                placeholder.emby_placeholder_id = str(em)
+                session.add(placeholder)
+                session.flush()
+            em_ok = update_emby_item_text(em, title=projected_title, overview=projected_summary)
+            _summary_mark(summary, "emby", em_ok)
+            if em_ok:
+                logger.info(
+                    "Emby: updated discover movie title/summary "
+                    f"(item_id={em}, tmdb_id={tmdb_id}, status={status!r})",
+                    extra={"emoji_type": "info"},
+                )
+            else:
+                logger.warning(
+                    "Emby: could not update discover movie title/summary "
+                    f"(item_id={em}, tmdb_id={tmdb_id})",
+                    extra={"emoji_type": "warning"},
+                )
+                _mark_fallback(fallback, "emby", "movie")
+        else:
+            logger.warning(
+                f"Emby discover movie item not resolved for tmdb_id={tmdb_id}",
+                extra={"emoji_type": "warning"},
+            )
+            _summary_mark(summary, "emby", False)
+            _mark_fallback(fallback, "emby", "movie")
+    else:
+        summary.emby_disabled += 1
+
+    if getattr(settings, "plex_enabled", False):
+        # Discover status projection is Emby/Jellyfin-first; Plex Arr movie rows unused here.
+        summary.plex_disabled += 1
+    else:
+        summary.plex_disabled += 1
+
+
 def _push_episode(
     session,
     placeholder: Placeholder,
@@ -909,20 +1023,14 @@ def _run_projection_fallback_refreshes(fallback: ProjectionFallbackAccumulator) 
             include_jellyfin=True,
             include_emby=False,
         )
-    if fallback.emby_movie or fallback.emby_episode:
-        refresh_selected_sections(
-            has_movies=bool(fallback.emby_movie),
-            has_episodes=bool(fallback.emby_episode),
-            include_plex=False,
-            include_jellyfin=False,
-            include_emby=True,
-        )
+    # Emby: no section/full-library fallback. Direct POST /Items/{id} is the
+    # supported status path; Library/Refresh churns large libraries.
 
     logger.info(
         "Status projection fallback section refreshes triggered "
         f"plex(movie={fallback.plex_movie},episode={fallback.plex_episode}) "
         f"jellyfin(movie={fallback.jellyfin_movie},episode={fallback.jellyfin_episode}) "
-        f"emby(movie={fallback.emby_movie},episode={fallback.emby_episode})",
+        f"emby(movie={fallback.emby_movie},episode={fallback.emby_episode},skipped=True)",
         extra={"emoji_type": "info"},
     )
 
@@ -958,6 +1066,11 @@ def push_placeholder_player_metadata(
 
     movie = session.query(Movie).get(placeholder.movie_id) if placeholder.movie_id else None
     episode = session.query(Episode).get(placeholder.episode_id) if placeholder.episode_id else None
+    tmdb_movie = (
+        session.query(TmdbMovie).get(placeholder.tmdb_movie_id)
+        if getattr(placeholder, "tmdb_movie_id", None)
+        else None
+    )
 
     # Release DB connection back to the pool before starting media-server HTTP calls
     try:
@@ -968,7 +1081,8 @@ def push_placeholder_player_metadata(
     row_has_dummy = bool(getattr(placeholder, "has_placeholder", False))
     movie_has_dummy = bool(movie and getattr(movie, "has_placeholder", False))
     episode_has_dummy = bool(episode and getattr(episode, "has_placeholder", False))
-    if not row_has_dummy and not movie_has_dummy and not episode_has_dummy:
+    tmdb_has_dummy = bool(tmdb_movie and getattr(tmdb_movie, "has_placeholder", False))
+    if not row_has_dummy and not movie_has_dummy and not episode_has_dummy and not tmdb_has_dummy:
         logger.debug(
             "Skipping player metadata push (no dummy on disk for this title) "
             f"placeholder_id={getattr(placeholder, 'id', None)}",
@@ -980,6 +1094,8 @@ def push_placeholder_player_metadata(
         _push_movie(session, movie, placeholder, acc, run_summary)
     elif episode:
         _push_episode(session, placeholder, episode, acc, run_summary)
+    elif tmdb_movie:
+        _push_discover_movie(session, tmdb_movie, placeholder, acc, run_summary)
 
     try:
         session.commit()

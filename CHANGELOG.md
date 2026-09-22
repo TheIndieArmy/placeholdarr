@@ -7,7 +7,9 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
-### Added
+### `multilibrary`
+
+#### Added
 
 - **Library destination map**: Optional Arr instance + root folder → Placeholdarr dest folder + Plex section for Movies and TV; empty map keeps single `{LIBRARY_ROOT}/movies` and `tv`.
 - **Destination rematerialize**: Saving Library Root or the destination map offers Apply now or Next full sync to relocate existing placeholders.
@@ -25,7 +27,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **What's new more Arrs / libraries (0.9.28-beta.1)**: Startup ack for up to four Arrs, Paths destinations, and path-aware search fallback.
 - **What's new Arr names / slots (0.9.28-beta.1)**: Startup ack for name and list-order identity, renames, and four Slot seats.
 
-### Changed
+#### Changed
 
 - **Default destinations from Library Root**: Movie and TV folders under Library Root are the default Placeholdarr destinations; the optional dest map only overrides specific Arr roots.
 - **Arr identity is instance key**: Catalog, sync, playback, queue, and webhooks route by `instance_key` and list order; persisted `role` / `is_4k` on Arr rows are dropped on save.
@@ -42,7 +44,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Import grace cadence**: Accelerated 5-second ticks are off by default; the countdown uses 60-second steps unless `ENABLE_IMPORT_GRACE_ACCELERATED` is set.
 - **Full sync follow-up phases**: Art and metadata refresh cards appear on a full sync only when those refreshes were actually requested.
 
-### Fixed
+#### Fixed
 
 - **Import / queue status labels**: NFO and Plex projection use the Message Center queue lines (including customized `IMPORT_IN_PROGRESS` text) instead of the raw enum token.
 - **Multi-instance Arr routing**: Ambiguous legacy `is_4k` no longer selects an Arr endpoint; use `instance_key` (legacy `primary`/`secondary` still map to list slots 1 and 2).
@@ -63,6 +65,22 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Dynamic queue monitor instances**: Poll download queues and trigger monitored refreshes using each title's Arr `instance_key` rather than the legacy 4K/HD pair.
 - **Plex status projection lock**: Title and summary edits lock those fields so Plex agents cannot revert them; a failed reload logs before/after values.
 - **Import grace countdown labels**: Accelerated cadence still uses the configured 5/4/3/2/1-minute templates so each tick is a distinct status.
+
+### `experiment/tmdb-discover`
+
+#### Added
+
+- **TMDB Discover tables**: Same Postgres DB as Arr catalog gets `catalog_source`, `tmdb_movie`, `tmdb_movie_source`, `arr_movie_overlay`, and `placeholder.tmdb_movie_id` (Alembic `0031`).
+- **Catalog mode setting**: Settings → Library sync chooses Arr catalog or TMDB Discover; both catalogs can coexist; restart after switching so schedulers follow the mode.
+
+#### Fixed
+
+- **Library lookup indexes**: Placeholder FK columns, `episode.season_id`, and movie/series/episode `status` are indexed so Arr library/series stats avoid sequential scans after a cold cache.
+- **Startup HTTP gate**: DB summary, CLAIMED job reset, and orphaned task-run abandon run in a background thread so Uvicorn can accept UI/API connections immediately.
+- **Startup schema no-ops**: Skip instance_key DROP/CREATE INDEX and job NOTIFY trigger reinstall when already applied.
+- **Startup legacy QUEUED reset removed**: Movie/Series/Episode `QUEUED`→`PENDING` no longer runs; nothing writes that entity status anymore.
+- **Discover placeholder history titles**: Rows created from TMDB Discover materialization were tagged as episodes with empty titles; history now resolves movie names (and year) via `tmdb_movie`.
+- **Discover Library Root path**: Discover materialize writes under `DISCOVER_LIBRARY_ROOT/movies` (not Arr `LIBRARY_ROOT`); existing titles pinned to the Arr tree relocate on the next Discover materialize.
 
 ## [0.9.26] - 2026-09-10
 

@@ -220,6 +220,9 @@ def _needs_regenerate(
     meta = _read_meta(meta_path)
     if not meta:
         return True
+    # Discover title/logo stubs must always yield to real catalog art.
+    if bool(meta.get("discover_stub")):
+        return True
     if str(meta.get("mode") or "") != mode:
         return True
     if str(meta.get("logo_stamp") or "") != logo_asset_stamp():

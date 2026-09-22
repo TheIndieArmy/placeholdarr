@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import time
 from typing import Any
 
 import requests
@@ -182,25 +181,12 @@ def _post_media_updated(sess: requests.Session, paths: list[str], update_type: s
     return False
 
 
-def _post_library_refresh(sess: requests.Session, primary_path: str = "") -> bool:
-    """Trigger a plain Emby library refresh (useful when path indexing is delayed)."""
-    try:
-        url = _build_url("Library/Refresh")
-        body: dict[str, str] = {}
-        if primary_path:
-            body["Path"] = primary_path
-        r2 = sess.post(url, json=body, timeout=10)
-        if r2.status_code in (200, 204):
-            return True
-        logger.debug(f"Emby Library/Refresh returned {r2.status_code}: {r2.text}")
-    except Exception as ex:
-        logger.debug(f"Emby Library/Refresh failed: {ex}")
-
-    return False
-
-
 def refresh_emby_paths(paths: set[str], *, update_type: str = "Created") -> dict[str, int]:
-    """Notify Emby about changed paths and trigger exact item refresh when possible."""
+    """Notify Emby about changed paths and trigger exact item refresh when possible.
+
+    Uses Library/Media/Updated plus per-item Refresh only. Does not fall back to a
+    full Library/Refresh (that rescans the whole library and churns large installs).
+    """
     if not getattr(settings, "emby_enabled", False):
         return {"refreshed": 0, "failed": 0}
     if not paths:
@@ -216,56 +202,28 @@ def refresh_emby_paths(paths: set[str], *, update_type: str = "Created") -> dict
     )
 
     batch_ok = _post_media_updated(sess, abs_paths, update_type=update_type)
-    # Only attempt targeted item refresh for existing files (creates). For deletes the
-    # file is already gone so path lookup will always fail — skip straight to fallback.
+    # Targeted item refresh only for paths that still exist on disk.
     exact_paths = [path for path in abs_paths if os.path.isfile(path)]
-
-    targeted_wait_seconds = float(getattr(settings, "EMBY_TARGETED_REFRESH_WAIT_SECONDS", 1.0) or 1.0)
-    force_library_refresh_on_item_miss = bool(
-        getattr(settings, "EMBY_FORCE_LIBRARY_REFRESH_ON_ITEM_MISS", True)
-    )
 
     succeeded: dict[str, bool] = {path: bool(batch_ok) for path in abs_paths}
     item_refresh_count = 0
-    retried_item_refresh_count = 0
-    total_targeted_wait_seconds = 0.0
-    forced_library_refresh = False
+    targeted_misses = 0
     for path in exact_paths:
         refreshed_now = _refresh_emby_item_by_path(sess, path)
         if refreshed_now:
             succeeded[path] = True
             item_refresh_count += 1
         else:
-            retried_item_refresh_count += 1
-
-    # Fire fallback library refresh when:
-    #   - no exact file paths exist (delete events: files already gone, paths are dirs), OR
-    #   - targeted item refresh found nothing on existing files.
-    # Guarded by abs_paths so we always have a root hint to pass.
-    if force_library_refresh_on_item_miss and abs_paths and (not exact_paths or item_refresh_count == 0):
-        if targeted_wait_seconds > 0:
-            time.sleep(targeted_wait_seconds)
-            total_targeted_wait_seconds = targeted_wait_seconds
-        forced_library_refresh = _post_library_refresh(sess, abs_paths[0])
-        if forced_library_refresh:
-            for path in abs_paths:
-                succeeded[path] = True
-            logger.info(
-                f"Emby fallback library refresh accepted after waiting {total_targeted_wait_seconds:.1f}s "
-                f"(update_type={update_type}).",
-                extra={"emoji_type": "info"},
-            )
+            targeted_misses += 1
 
     refreshed = sum(1 for ok in succeeded.values() if ok)
     failed = len(abs_paths) - refreshed
 
     if refreshed:
-        sample_paths = ', '.join(abs_paths[:5])
+        sample_paths = ", ".join(abs_paths[:5])
         logger.info(
             f"Emby refresh accepted for {refreshed}/{len(abs_paths)} path(s); "
-            f"batch_ok={batch_ok} item_refreshes={item_refresh_count} targeted_misses={retried_item_refresh_count} "
-            f"targeted_wait_seconds={total_targeted_wait_seconds:.1f} "
-            f"forced_library_refresh={forced_library_refresh}",
+            f"batch_ok={batch_ok} item_refreshes={item_refresh_count} targeted_misses={targeted_misses}",
             extra={"emoji_type": "success"},
         )
         logger.debug(
@@ -273,16 +231,20 @@ def refresh_emby_paths(paths: set[str], *, update_type: str = "Created") -> dict
             extra={"emoji_type": "debug"},
         )
         return {"refreshed": refreshed, "failed": failed}
-    else:
-        logger.warning(
-            f"Emby refresh failed for {len(abs_paths)} path(s).",
-            extra={"emoji_type": "warning"},
-        )
-        return {"refreshed": 0, "failed": len(abs_paths)}
+
+    logger.warning(
+        f"Emby refresh failed for {len(abs_paths)} path(s) "
+        f"(batch_ok={batch_ok}; no full-library fallback).",
+        extra={"emoji_type": "warning"},
+    )
+    return {"refreshed": 0, "failed": len(abs_paths)}
 
 
 def refresh_emby_sections(has_movies: bool, has_episodes: bool) -> dict[str, int]:
-    """Trigger an Emby library scan for movie and/or TV root folders."""
+    """Notify Emby of movie/TV library roots via Library/Media/Updated only.
+
+    Does not call Library/Refresh (full-library scan).
+    """
     if not getattr(settings, "emby_enabled", False):
         return {"refreshed": 0, "failed": 0}
 
@@ -317,17 +279,17 @@ def refresh_emby_sections(has_movies: bool, has_episodes: bool) -> dict[str, int
 
     for root in dict.fromkeys(roots):
         try:
-            ok = _post_media_updated(sess, [root]) or _post_library_refresh(sess, root)
+            ok = _post_media_updated(sess, [root])
             if ok:
                 refreshed += 1
                 logger.info(
-                    f"Emby library scan triggered for root: {root}",
+                    f"Emby Media/Updated notified for root: {root}",
                     extra={"emoji_type": "refresh"},
                 )
             else:
                 failed += 1
                 logger.warning(
-                    f"Emby library scan failed for root={root}",
+                    f"Emby Media/Updated failed for root={root}",
                     extra={"emoji_type": "warning"},
                 )
         except Exception as e:
@@ -396,28 +358,51 @@ def _emby_user_id(sess: requests.Session) -> str | None:
     return None
 
 
+_EMBY_ITEM_UPDATE_FIELDS = "Overview,Name,LockedFields,LockData"
+
+
 def _emby_get_item_for_update(sess: requests.Session, item_id: str) -> tuple[dict[str, Any] | None, str | None]:
     uid = _emby_user_id(sess)
     endpoint = _build_url(f"Users/{uid}/Items/{item_id}" if uid else f"Items/{item_id}")
-    resp = sess.get(endpoint, params={"Fields": "Overview,Name"}, timeout=15)
+    resp = sess.get(endpoint, params={"Fields": _EMBY_ITEM_UPDATE_FIELDS}, timeout=15)
     if resp.status_code == 200:
         return resp.json() or {}, uid
     if uid and resp.status_code in (401, 403, 404):
         _invalidate_emby_user_id_cache()
         uid = _emby_user_id(sess)
         if uid:
-            resp_retry = sess.get(_build_url(f"Users/{uid}/Items/{item_id}"), params={"Fields": "Overview,Name"}, timeout=15)
+            resp_retry = sess.get(
+                _build_url(f"Users/{uid}/Items/{item_id}"),
+                params={"Fields": _EMBY_ITEM_UPDATE_FIELDS},
+                timeout=15,
+            )
             if resp_retry.status_code == 200:
                 return resp_retry.json() or {}, uid
     if uid:
-        resp2 = sess.get(_build_url(f"Items/{item_id}"), params={"Fields": "Overview,Name"}, timeout=15)
+        resp2 = sess.get(_build_url(f"Items/{item_id}"), params={"Fields": _EMBY_ITEM_UPDATE_FIELDS}, timeout=15)
         if resp2.status_code == 200:
             return resp2.json() or {}, None
     return None, uid
 
 
+def _with_locked_name_overview(full: dict[str, Any], *, title: str, overview: str) -> dict[str, Any]:
+    """Patch Name/Overview and lock those fields so a later refresh does not wipe status text."""
+    full["Name"] = str(title or "")
+    full["Overview"] = str(overview or "")
+    locked = [str(x) for x in (full.get("LockedFields") or []) if x]
+    for field in ("Name", "Overview"):
+        if field not in locked:
+            locked.append(field)
+    full["LockedFields"] = locked
+    return full
+
+
 def update_emby_item_text(item_id: str, *, title: str, overview: str) -> bool:
-    """Directly set Emby item Name/Overview via Items/{id} payload update."""
+    """Directly set Emby item Name/Overview via POST /Items/{id} with a full item DTO.
+
+    Locks Name and Overview so library refreshes do not overwrite projected status text.
+    Emby rejects minimal payloads, so there is no minimal-body fallback.
+    """
     if not getattr(settings, "emby_enabled", False):
         return False
     target = str(item_id or "").strip()
@@ -429,25 +414,24 @@ def update_emby_item_text(item_id: str, *, title: str, overview: str) -> bool:
         if not isinstance(full, dict):
             logger.debug(f"Emby direct update lookup failed item_id={target}", extra={"emoji_type": "debug"})
             return False
-        full["Name"] = str(title or "")
-        full["Overview"] = str(overview or "")
-        post = sess.post(_build_url(f"Items/{target}"), json=full, timeout=20)
+        payload = _with_locked_name_overview(full, title=title, overview=overview)
+        post = sess.post(_build_url(f"Items/{target}"), json=payload, timeout=20)
         if post.status_code not in (200, 204):
-            minimal = {"Id": target, "Name": full["Name"], "Overview": full["Overview"]}
-            post2 = sess.post(_build_url(f"Items/{target}"), json=minimal, timeout=20)
-            if post2.status_code not in (200, 204):
-                logger.warning(
-                    f"Emby direct update failed item_id={target} status={post.status_code}/{post2.status_code}",
-                    extra={"emoji_type": "warning"},
-                )
-                return False
+            logger.warning(
+                f"Emby direct update failed item_id={target} status={post.status_code}",
+                extra={"emoji_type": "warning"},
+            )
+            return False
         verify_endpoint = _build_url(f"Users/{uid}/Items/{target}" if uid else f"Items/{target}")
-        verify = sess.get(verify_endpoint, params={"Fields": "Overview,Name"}, timeout=15)
+        verify = sess.get(verify_endpoint, params={"Fields": _EMBY_ITEM_UPDATE_FIELDS}, timeout=15)
         if uid and verify.status_code in (401, 403, 404):
             _invalidate_emby_user_id_cache()
         if verify.status_code == 200:
             latest = verify.json() or {}
-            return str(latest.get("Name") or "") == full["Name"] and str(latest.get("Overview") or "") == full["Overview"]
+            return (
+                str(latest.get("Name") or "") == payload["Name"]
+                and str(latest.get("Overview") or "") == payload["Overview"]
+            )
         return True
     except Exception as ex:
         logger.warning(f"Emby direct update failed item_id={target}: {ex}", extra={"emoji_type": "warning"})

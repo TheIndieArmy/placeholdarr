@@ -40,6 +40,7 @@ TASK_LABELS = {
     "calendar_only": "Calendar only",
     "placeholder_refresh": "Metadata & art refresh",
     "collections_sync": "Collections sync",
+    "discover_sync": "Discover catalog sync",
 }
 
 
@@ -123,7 +124,10 @@ def _serialize_run(row: ScheduledTaskRun) -> dict[str, Any]:
 
 
 class TaskRunRequest(BaseModel):
-    task_key: str = Field(..., description="full_sync | lite_sync | calendar_only | placeholder_refresh | collections_sync")
+    task_key: str = Field(
+        ...,
+        description="full_sync | lite_sync | calendar_only | placeholder_refresh | collections_sync | discover_sync",
+    )
     metadata: bool | None = Field(None, description="When task_key=placeholder_refresh, run metadata refresh phase")
     art: bool | None = Field(None, description="When task_key=placeholder_refresh, run art refresh phase")
 
@@ -140,7 +144,15 @@ class TaskAbandonRequest(BaseModel):
 async def tasks_scheduled():
     meta = get_scheduled_task_metadata()
     rows = []
-    for task_key in ("full_sync", "lite_sync", "collections_sync"):
+    task_keys = ["full_sync", "lite_sync", "collections_sync"]
+    try:
+        from services.discover.mode import is_tmdb_discover_mode
+
+        if is_tmdb_discover_mode():
+            task_keys = ["discover_sync", "collections_sync"]
+    except Exception:
+        pass
+    for task_key in task_keys:
         sched = meta.get(task_key) or {}
         interval = int(sched.get("interval_hours") or 0)
         working = get_working_run(task_key)
@@ -152,10 +164,14 @@ async def tasks_scheduled():
         rows.append(
             {
                 "task_key": task_key,
-                "label": TASK_LABELS[task_key],
-                "enabled": bool(sched.get("enabled")),
+                "label": TASK_LABELS.get(task_key, task_key),
+                "enabled": bool(sched.get("enabled")) if task_key != "discover_sync" else True,
                 "interval_hours": interval,
-                "interval_label": _interval_label(interval),
+                "interval_label": (
+                    "Manual / on setup"
+                    if task_key == "discover_sync"
+                    else _interval_label(interval)
+                ),
                 "next_run": sched.get("next_run"),
                 "running": working is not None,
                 "last_run": _iso(last.ended_at or last.started_at) if last else None,
@@ -215,7 +231,14 @@ async def tasks_abandon(body: TaskAbandonRequest | None = None):
 @router.post("/api/tasks/run")
 async def tasks_run(body: TaskRunRequest):
     key = str(body.task_key or "").strip().lower()
-    if key not in {"full_sync", "lite_sync", "calendar_only", "placeholder_refresh", "collections_sync"}:
+    if key not in {
+        "full_sync",
+        "lite_sync",
+        "calendar_only",
+        "placeholder_refresh",
+        "collections_sync",
+        "discover_sync",
+    }:
         raise HTTPException(status_code=400, detail=f"Unknown task_key: {key}")
 
     if key == "full_sync":
@@ -236,6 +259,13 @@ async def tasks_run(body: TaskRunRequest):
     elif key == "collections_sync":
         if get_working_run("collections_sync"):
             raise HTTPException(status_code=409, detail="Task already running: collections sync in progress")
+    elif key == "discover_sync":
+        if get_working_run("discover_sync"):
+            raise HTTPException(status_code=409, detail="Task already running: discover sync in progress")
+        from services.discover.mode import is_tmdb_discover_mode
+
+        if not is_tmdb_discover_mode():
+            raise HTTPException(status_code=400, detail="Discover sync requires CATALOG_MODE=tmdb_discover")
     else:
         if get_working_run() or get_working_run("full_sync"):
             raise HTTPException(status_code=409, detail="Another maintenance task is already running")
@@ -257,6 +287,10 @@ async def tasks_run(body: TaskRunRequest):
                 from services.collections.scheduled import run_collections_sync
 
                 run_collections_sync(trigger="manual")
+            elif key == "discover_sync":
+                from services.discover.scheduled import run_discover_sync
+
+                run_discover_sync(trigger="manual")
             else:
                 run_calendar_only_maintenance(trigger="manual")
         except Exception as exc:

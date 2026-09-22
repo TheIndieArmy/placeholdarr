@@ -25,6 +25,14 @@ JOB_ID_COLLECTIONS = "collections:sync"
 
 
 def _interval_hours_for(task_key: str) -> int:
+    if task_key in {"full_sync", "lite_sync"}:
+        try:
+            from services.discover.mode import is_tmdb_discover_mode
+
+            if is_tmdb_discover_mode():
+                return 0
+        except Exception:
+            pass
     if task_key == "full_sync":
         return max(0, int(getattr(settings, "FULL_SYNC_INTERVAL_HOURS", 0) or 0))
     if task_key == "lite_sync":
@@ -183,6 +191,32 @@ def schedule_all_syncs():
     """Schedule interval-based full and lite sync jobs using persisted next-run times."""
     global _scheduler
 
+    try:
+        from services.discover.mode import is_tmdb_discover_mode
+
+        discover_mode = is_tmdb_discover_mode()
+    except Exception:
+        discover_mode = False
+
+    if discover_mode:
+        logger.info(
+            "TMDB Discover catalog mode: Arr full/lite/calendar schedulers not registered "
+            "(catalog comes from Discover sources)",
+            extra={"emoji_type": "info"},
+        )
+        collections_hours = _interval_hours_for("collections_sync")
+        _start_interval(
+            "collections_sync",
+            collections_hours,
+            _run_collections_sync_scheduled,
+            "Collections sync",
+            job_id=JOB_ID_COLLECTIONS,
+            disable_hint="COLLECTIONS_SYNC_INTERVAL_HOURS",
+        )
+        if _scheduler and not _scheduler.running:
+            _scheduler.start()
+        return
+
     full_hours = int(getattr(settings, "FULL_SYNC_INTERVAL_HOURS", 0) or 0)
     _start_interval(
         "full_sync",
@@ -254,6 +288,7 @@ def get_scheduled_task_metadata() -> dict[str, Any]:
         "full_sync": {"enabled": False, "interval_hours": 0, "next_run": None},
         "lite_sync": {"enabled": False, "interval_hours": 0, "next_run": None},
         "collections_sync": {"enabled": False, "interval_hours": 0, "next_run": None},
+        "discover_sync": {"enabled": False, "interval_hours": 0, "next_run": None},
     }
     for task_key in ("full_sync", "lite_sync", "collections_sync"):
         hours = _interval_hours_for(task_key)
@@ -286,4 +321,11 @@ def get_scheduled_task_metadata() -> dict[str, Any]:
                     persist_next_run(task_key, nrt)
             except Exception:
                 pass
+    try:
+        from services.discover.mode import is_tmdb_discover_mode
+
+        if is_tmdb_discover_mode():
+            out["discover_sync"]["enabled"] = True
+    except Exception:
+        pass
     return out

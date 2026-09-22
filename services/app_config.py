@@ -289,14 +289,91 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "section": "Optional APIs",
                 "label": "TMDB API Key",
                 "description": (
-                    "TMDB API key (v3 auth) for TMDB poster language and Collections list sources "
-                    "(trending, popular, upcoming, discover). Get a free key at themoviedb.org. "
-                    "Optional; needed for language posters and TMDB-based collection sources."
+                    "TMDB API key (v3 auth) for TMDB poster language, Collections list sources, "
+                    "and TMDB Discover catalog mode. Get a free key at themoviedb.org. "
+                    "Required when Catalog mode is TMDB Discover."
                 ),
                 "type": "string",
                 "required": False,
                 "secret": True,
                 "restart_required": False,
+            },
+        ),
+        (
+            "CATALOG_MODE",
+            {
+                "section": "Library sync",
+                "label": "Catalog mode",
+                "description": (
+                    "Arr catalog: sync titles from Radarr/Sonarr (classic Placeholdarr). "
+                    "TMDB Discover: seed movie placeholders from TMDB, use Arr only for monitored/hasFile and on-play add/search. "
+                    "Both catalogs can live in the same database; switching modes changes which one drives sync and placeholders. "
+                    "Restart after changing so schedulers pick up the new mode."
+                ),
+                "type": "choice",
+                "options": [
+                    {"value": "arr_catalog", "label": "Arr catalog"},
+                    {"value": "tmdb_discover", "label": "TMDB Discover"},
+                ],
+                "required": True,
+                "restart_required": True,
+            },
+        ),
+        (
+            "DISCOVER_SKIP_PLACEHOLDER_WHEN_MONITORED",
+            {
+                "section": "Library sync",
+                "label": "Discover: skip placeholder when monitored",
+                "description": (
+                    "When Catalog mode is TMDB Discover, do not keep a placeholder for titles that are "
+                    "already monitored in Radarr (Arr is tracking them)."
+                ),
+                "type": "choice",
+                "options": [
+                    {"value": "true", "label": "Yes"},
+                    {"value": "false", "label": "No"},
+                ],
+                "required": False,
+                "restart_required": False,
+            },
+        ),
+        (
+            "DISCOVER_SKIP_MONITORED_ANY_INSTANCE",
+            {
+                "section": "Library sync",
+                "label": "Discover: monitored on any instance skips",
+                "description": (
+                    "When skipping monitored titles, treat monitored on any Radarr instance as enough "
+                    "to skip the Discover placeholder. Only applies when more than one Radarr is connected."
+                ),
+                "type": "choice",
+                "options": [
+                    {"value": "true", "label": "Yes"},
+                    {"value": "false", "label": "No"},
+                ],
+                "required": False,
+                "restart_required": False,
+            },
+        ),
+        (
+            "DISCOVER_STARTUP_SYNC_MODE",
+            {
+                "section": "Library sync",
+                "label": "Discover startup sync",
+                "description": (
+                    "What Placeholdarr does on process start when Catalog mode is TMDB Discover. "
+                    "On: always run a full Discover catalog sync (seed sources, Arr overlay, placeholders, art). "
+                    "Auto: run only when the Discover movie catalog is empty (first boot / after wipe). "
+                    "Off: no Discover sync at startup; use Tasks → Discover catalog sync (or a schedule) instead. "
+                    "This is separate from Arr Startup ARR sync mode, which does not apply in Discover mode."
+                ),
+                "type": "choice",
+                "restart_required": True,
+                "options": [
+                    {"value": "on", "label": "On: full Discover sync every startup"},
+                    {"value": "auto", "label": "Auto: sync only when the catalog is empty"},
+                    {"value": "off", "label": "Off: no startup Discover sync"},
+                ],
             },
         ),
         (
@@ -360,12 +437,28 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "LIBRARY_ROOT",
             {
                 "section": "Paths",
-                "label": "Library Root",
+                "label": "Library Root (Arr catalog)",
                 "description": (
-                    "Sets the default Placeholdarr destinations: `movies` and `tv` under this root. "
+                    "Arr catalog mode: default Placeholdarr destinations are `movies` and `tv` under this root. "
                     "Unmapped Arr roots use those folders and the default Plex libraries below. "
                     "Use Library destinations only when an Arr root should land in a different folder or Plex library. "
-                    "Keep this path separate from Radarr/Sonarr library roots to avoid library-management conflicts."
+                    "Keep this path separate from Radarr/Sonarr library roots and from Discover Library Root."
+                ),
+                "type": "path",
+                "required": False,
+                "restart_required": False,
+            },
+        ),
+        (
+            "DISCOVER_LIBRARY_ROOT",
+            {
+                "section": "Paths",
+                "label": "Discover Library Root",
+                "description": (
+                    "TMDB Discover mode: Placeholdarr writes Discover movie placeholders under "
+                    "`movies` on this root (separate from Arr Library Root). "
+                    "Point a dedicated Plex/Jellyfin/Emby movies library at that folder. "
+                    "Required for Discover when you want isolated disks and faster materialize on a busy Arr tree."
                 ),
                 "type": "path",
                 "required": False,
@@ -378,7 +471,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "section": "Paths",
                 "label": "Default Plex Movies library",
                 "description": (
-                    "Plex section ID for the default Movies destination (Library Root / movies). Required when Plex is "
+                    "Plex section ID for the Arr Movies destination (Library Root / movies). Required when Plex is "
                     "enabled; ignored for Jellyfin/Emby (they refresh by folder path). Mapped destinations can pick a "
                     "different library."
                 ),
@@ -396,6 +489,22 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "description": (
                     "Plex section ID for the default TV destination (Library Root / tv). Required when Plex is enabled; "
                     "ignored for Jellyfin/Emby (they refresh by folder path). Mapped destinations can pick a different library."
+                ),
+                "type": "int",
+                "required": False,
+                "min": 1,
+                "restart_required": False,
+            },
+        ),
+        (
+            "DISCOVER_PLEX_MOVIE_SECTION_ID",
+            {
+                "section": "Paths",
+                "label": "Discover Plex Movies library",
+                "description": (
+                    "Plex section ID for Discover Library Root / movies. "
+                    "Use a separate Plex library from Arr Movies when the trees differ. "
+                    "Ignored for Jellyfin/Emby (path refresh)."
                 ),
                 "type": "int",
                 "required": False,
@@ -1314,7 +1423,12 @@ def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: 
 
 
 def _redact_arr_instances_json_for_payload(raw: Any) -> tuple[str, bool]:
-    """Return redacted ARR_INSTANCES_JSON string and whether any api_key was saved server-side."""
+    """Normalize ARR_INSTANCES_JSON for the authenticated settings UI.
+
+    API keys are included so the UI can mask them with an explicit Show/Hide
+    control (same as other secret settings fields). ``api_key_saved`` remains
+    for clients that still treat a blank key as "retain on save".
+    """
     text = "" if raw is None else (raw if isinstance(raw, str) else json.dumps(raw))
     text = str(text or "").strip()
     if not text:
@@ -1326,20 +1440,21 @@ def _redact_arr_instances_json_for_payload(raw: Any) -> tuple[str, bool]:
     if not isinstance(payload, list):
         return (text, False)
     any_saved = False
-    redacted: list[Any] = []
+    normalized: list[Any] = []
     for item in payload:
         if not isinstance(item, dict):
-            redacted.append(item)
+            normalized.append(item)
             continue
         row = dict(item)
-        key_present = bool(str(row.get("api_key") or row.get("apikey") or "").strip())
+        key = str(row.get("api_key") or row.get("apikey") or "").strip()
+        key_present = bool(key)
         if key_present:
             any_saved = True
-        row["api_key"] = ""
+        row["api_key"] = key
         row.pop("apikey", None)
         row["api_key_saved"] = key_present
-        redacted.append(row)
-    return (json.dumps(redacted), any_saved)
+        normalized.append(row)
+    return (json.dumps(normalized), any_saved)
 
 
 def _coerce_string_list(raw_value: Any) -> str:
@@ -1427,7 +1542,17 @@ def _validate_value(key: str, raw_value: Any) -> Any:
     elif value_type == "path":
         value = _coerce_path(raw_value)
     elif value_type == "choice":
-        value = str(raw_value or "").strip()
+        if key in {
+            "DISCOVER_SKIP_PLACEHOLDER_WHEN_MONITORED",
+            "DISCOVER_SKIP_MONITORED_ANY_INSTANCE",
+        }:
+            # Accept legacy bool / "True" strings from earlier schema.
+            try:
+                value = "true" if _coerce_bool(raw_value if raw_value not in (None, "") else True) else "false"
+            except ValueError:
+                value = "true"
+        else:
+            value = str(raw_value or "").strip()
         if key == "PLACEHOLDER_STATUS_PROJECTION_MODE" and value.lower() == "off":
             value = "both"
         if key in _INSTANCE_SEARCH_MODE_KEYS:
@@ -1558,14 +1683,16 @@ def _set_runtime_value(key: str, value: Any) -> None:
 
 
 def _apply_runtime_library_defaults() -> None:
-    """Derive default movie/TV destination folders from LIBRARY_ROOT."""
+    """Derive default movie/TV destination folders from LIBRARY_ROOT / Discover root."""
     root = str(getattr(settings, "LIBRARY_ROOT", "") or "").strip()
-    if not root:
-        return
-    movie = os.path.join(root, "movies")
-    tv = os.path.join(root, "tv")
-    _set_runtime_value("MOVIE_LIBRARY_FOLDER", movie)
-    _set_runtime_value("TV_LIBRARY_FOLDER", tv)
+    if root:
+        movie = os.path.join(root, "movies")
+        tv = os.path.join(root, "tv")
+        _set_runtime_value("MOVIE_LIBRARY_FOLDER", movie)
+        _set_runtime_value("TV_LIBRARY_FOLDER", tv)
+    discover_root = str(getattr(settings, "DISCOVER_LIBRARY_ROOT", "") or "").strip()
+    if discover_root:
+        _set_runtime_value("DISCOVER_MOVIE_LIBRARY_FOLDER", os.path.join(discover_root, "movies"))
 
 
 _LEGACY_4K_FOLDER_KEYS = ("MOVIE_LIBRARY_4K_FOLDER", "TV_LIBRARY_4K_FOLDER")
@@ -1789,7 +1916,7 @@ def get_settings_payload(session=None) -> dict[str, Any]:
                     effective_value = _parse_string_list_value(effective_value, default=defaults)
             if _is_blank(effective_value):
                 pass
-            saved_value_out = None if bool(meta.get("secret", False)) else (row.value if row else None)
+            saved_value_out = row.value if row else None
             if key == "PLACEHOLDER_STATUS_PROJECTION_MODE" and saved_value_out is not None:
                 sv = str(saved_value_out).strip().lower()
                 if sv == "off" or sv not in {"summary", "title", "both"}:
@@ -1805,7 +1932,9 @@ def get_settings_payload(session=None) -> dict[str, Any]:
                 "required": bool(meta.get("required", False)),
                 "secret": bool(meta.get("secret", False)),
                 "restart_required": bool(meta.get("restart_required", False)),
-                "value": "" if bool(meta.get("secret", False)) else effective_value,
+                # Authenticated settings UI needs the value so secret fields can show
+                # masked input with an explicit Show/Hide control.
+                "value": effective_value,
                 "saved_value": saved_value_out,
                 "has_saved_value": bool((row and row.value not in (None, ""))),
             }
@@ -1895,7 +2024,42 @@ def save_settings(
                 _set_runtime_value("MOVIE_LIBRARY_FOLDER", movie_path)
                 _set_runtime_value("TV_LIBRARY_FOLDER", tv_path)
 
-        enable_plex = bool(validated.get("ENABLE_PLEX", getattr(settings, "ENABLE_PLEX", False)))
+        if "DISCOVER_LIBRARY_ROOT" in validated:
+            discover_root = str(validated.get("DISCOVER_LIBRARY_ROOT") or "").strip()
+            if discover_root:
+                dir_mode = _parse_octal_mode(
+                    validated.get("PLACEHOLDER_DIR_MODE", getattr(settings, "PLACEHOLDER_DIR_MODE", "777")),
+                    0o777,
+                )
+                discover_created = _ensure_library_root_folders(discover_root, dir_mode)
+                for path in discover_created:
+                    if path not in created_paths:
+                        created_paths.append(path)
+                discover_movie = os.path.join(discover_root, "movies")
+                if discover_movie not in derived_library_paths:
+                    derived_library_paths.append(discover_movie)
+                _set_runtime_value("DISCOVER_MOVIE_LIBRARY_FOLDER", discover_movie)
+
+        arr_root = str(validated.get("LIBRARY_ROOT", getattr(settings, "LIBRARY_ROOT", "")) or "").strip()
+        discover_root_check = str(
+            validated.get("DISCOVER_LIBRARY_ROOT", getattr(settings, "DISCOVER_LIBRARY_ROOT", "")) or ""
+        ).strip()
+        if arr_root and discover_root_check:
+            arr_n = os.path.normpath(arr_root).lower()
+            disc_n = os.path.normpath(discover_root_check).lower()
+            if arr_n == disc_n:
+                errors["DISCOVER_LIBRARY_ROOT"] = (
+                    "must be a different path from Library Root (Arr catalog); "
+                    "Discover and Arr placeholders should not share the same tree"
+                )
+
+        # Plex completeness is for full saves or partials that touch Plex enable/credentials.
+        # Paths / TMDB / sources steps must not fail because Plex is not configured yet.
+        plex_config_keys = {"ENABLE_PLEX", "PLEX_URL", "PLEX_TOKEN"}
+        if partial and not plex_config_keys.intersection(validated.keys()):
+            enable_plex = False
+        else:
+            enable_plex = bool(validated.get("ENABLE_PLEX", getattr(settings, "ENABLE_PLEX", False)))
         if enable_plex:
             plex_required = {
                 "PLEX_URL": "is required when Plex is enabled",

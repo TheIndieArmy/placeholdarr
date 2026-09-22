@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import and_, func, or_, text
@@ -11,6 +13,7 @@ from core.logger import logger
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Job, Movie, Placeholder, Season, Series
 from services.source_of_truth.arr_api import (
+    add_missing_titles,
     set_radarr_movie_monitored,
     set_sonarr_episode_monitored,
     set_sonarr_series_monitored,
@@ -24,6 +27,7 @@ from services.library_future_semantics import (
 from services.source_of_truth.status_intent import DisplayStatus, StatusIntent, StatusSource
 from services.source_of_truth.status_orchestrator import StatusOrchestrator
 from services.media_servers.jellyfin import get_jellyfin_file_path
+from services.messages import render as render_message
 
 
 PLAYBACK_FALLBACK_JOB_TYPE = 'playback_fallback'
@@ -728,6 +732,14 @@ def _resolve_media_from_path(session, path: str | None) -> dict[str, Any]:
 
     ph_row = session.query(Placeholder).filter(Placeholder.path == file_path).first()
     if ph_row:
+        if getattr(ph_row, 'tmdb_movie_id', None):
+            return {
+                'media_type': 'movie',
+                'playback_kind': 'placeholder',
+                'tmdb_id': int(ph_row.tmdb_movie_id),
+                'tmdb_movie_id': int(ph_row.tmdb_movie_id),
+                'matched_instance': None,
+            }
         if getattr(ph_row, 'movie_id', None):
             movie = session.query(Movie).filter(Movie.id == int(ph_row.movie_id)).first()
             if movie:
@@ -1492,7 +1504,7 @@ def _placeholder_intents_for_targets(session, targets: list[Episode], movie_row:
             StatusIntent(
                 placeholder_id=int(row.id),
                 new_status=DisplayStatus.SEARCHING.value,
-                reason='Playback started; triggering ARR search',
+                reason=render_message("queue.searching", {}),
                 source=StatusSource.EVENT_PLAYBACK_STARTED,
                 trigger_nfo_refresh=True,
                 metadata={'playback': True},
@@ -1856,7 +1868,145 @@ def _enqueue_delayed_fallback(
     return int(job.id)
 
 
+def _process_discover_movie_playback(session, context: dict[str, Any]) -> dict[str, Any] | None:
+    """TMDB Discover: add to Radarr if missing, then monitor/search. Returns None to fall through."""
+    from services.discover.mode import is_tmdb_discover_mode
+    from services.postgres.models import ArrMovieOverlay, TmdbMovie
+
+    if not is_tmdb_discover_mode():
+        return None
+    tmdb_id = context.get('tmdb_id') or context.get('tmdb_movie_id')
+    if tmdb_id is None:
+        path = str(context.get('file_path') or '')
+        m = re.search(r'\{tmdb-(\d+)\}', path, flags=re.I)
+        if m:
+            tmdb_id = int(m.group(1))
+    if tmdb_id is None:
+        return None
+    tmdb_id = int(tmdb_id)
+    row = session.get(TmdbMovie, tmdb_id)
+    if row is None:
+        return None
+
+    radarr_instances = [
+        i for i in (settings.configured_arr_instances or [])
+        if str(i.get('arr_type') or '').lower() == 'radarr'
+    ]
+    if not radarr_instances:
+        return {'ok': False, 'reason': 'no_radarr_instance', 'tmdb_id': tmdb_id}
+
+    inst = radarr_instances[0]
+    url = str(inst.get('url') or '')
+    api_key = str(inst.get('api_key') or '')
+    instance_key = str(inst.get('instance_key') or 'radarr_std')
+    instance_id = str(inst.get('instance_id') or f'radarr:{instance_key}')
+
+    overlay = (
+        session.query(ArrMovieOverlay)
+        .filter(ArrMovieOverlay.tmdb_id == tmdb_id, ArrMovieOverlay.instance_id == instance_id)
+        .first()
+    )
+    monitor_only = _playback_monitor_only_no_search()
+    search = not monitor_only
+    added = False
+    radarr_id = int(overlay.radarr_id) if overlay and overlay.radarr_id else None
+
+    if radarr_id is None or not overlay:
+        from routes.collections import _fetch_instance_quality_profiles, _fetch_instance_root_folders
+
+        profiles = _fetch_instance_quality_profiles(inst) or []
+        roots = _fetch_instance_root_folders(inst) or []
+        if not profiles or not roots:
+            return {'ok': False, 'reason': 'missing_radarr_profile_or_root', 'tmdb_id': tmdb_id}
+        quality_profile_id = int(profiles[0].get('id') or profiles[0].get('value') or 0)
+        root_folder_path = str(roots[0].get('path') or roots[0].get('value') or '')
+        if not quality_profile_id or not root_folder_path:
+            return {'ok': False, 'reason': 'invalid_radarr_profile_or_root', 'tmdb_id': tmdb_id}
+
+        item = SimpleNamespace(title=row.title, year=row.year, tmdb_id=tmdb_id)
+        results = add_missing_titles(
+            media_type='movie',
+            url=url,
+            api_key=api_key,
+            items=[item],
+            quality_profile_id=quality_profile_id,
+            root_folder_path=root_folder_path,
+            monitored=True,
+            search=search,
+            instance_key=instance_key,
+        )
+        added = True
+        from services.discover.overlay import refresh_arr_overlays
+
+        refresh_arr_overlays(session=session)
+        session.expire_all()
+        overlay = (
+            session.query(ArrMovieOverlay)
+            .filter(ArrMovieOverlay.tmdb_id == tmdb_id, ArrMovieOverlay.instance_id == instance_id)
+            .first()
+        )
+        radarr_id = int(overlay.radarr_id) if overlay and overlay.radarr_id else None
+        status = (results[0].get('status') if results else None)
+        if status == 'error':
+            return {
+                'ok': False,
+                'reason': 'radarr_add_failed',
+                'tmdb_id': tmdb_id,
+                'detail': results[0].get('error'),
+                'results': results,
+            }
+
+    monitored_updated = False
+    search_triggered = False
+    if radarr_id and not (added and search):
+        if overlay and not overlay.monitored:
+            monitored_updated = set_radarr_movie_monitored(radarr_id, True, url=url, api_key=api_key)
+            if monitored_updated and overlay:
+                overlay.monitored = True
+        if search:
+            search_triggered = trigger_radarr_movie_search(radarr_id, url=url, api_key=api_key)
+    elif added and search:
+        search_triggered = True
+
+    intents: list[StatusIntent] = []
+    ph_rows = session.query(Placeholder).filter(Placeholder.tmdb_movie_id == tmdb_id).all()
+    for ph in ph_rows:
+        intents.append(
+            StatusIntent(
+                placeholder_id=int(ph.id),
+                new_status=DisplayStatus.SEARCHING.value if search_triggered else DisplayStatus.REQUEST.value,
+                reason=render_message("queue.searching", {}) if search_triggered else None,
+                source=StatusSource.EVENT_PLAYBACK_STARTED,
+                trigger_nfo_refresh=True,
+            )
+        )
+    if intents:
+        StatusOrchestrator(session=session).apply_and_project_statuses(intents)
+    search_for_monitor = bool(search_triggered) or (added and search)
+    _activate_queue_monitor_after_playback_search(
+        session, intents, search_triggered=search_for_monitor
+    )
+
+    return {
+        'ok': True,
+        'event': 'playback_start',
+        'media_type': 'movie',
+        'playback_kind': 'placeholder',
+        'discover': True,
+        'tmdb_id': tmdb_id,
+        'added': added,
+        'radarr_id': radarr_id,
+        'monitored_updated': monitored_updated,
+        'search_triggered': search_for_monitor,
+        'monitor_only': monitor_only,
+    }
+
+
 def _process_movie_playback(session, payload: dict[str, Any], context: dict[str, Any], source_instance: str | None) -> dict[str, Any]:
+    discover_result = _process_discover_movie_playback(session, context)
+    if discover_result is not None:
+        return discover_result
+
     movie_rows = _find_movie_rows(
         session,
         tmdb_id=context.get('tmdb_id'),

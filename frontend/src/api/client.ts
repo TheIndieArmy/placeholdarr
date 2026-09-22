@@ -45,11 +45,24 @@ function mergeHeaders(init?: RequestInit): Headers {
 
 async function parseErrorMessage(response: Response, fallback: string): Promise<string> {
   try {
-    const payload = (await response.json()) as { message?: unknown; detail?: unknown };
+    const payload = (await response.json()) as {
+      message?: unknown;
+      detail?: unknown;
+      errors?: Record<string, unknown>;
+      ok?: unknown;
+    };
     const fromMessage = stringifyApiErrorField(payload.message);
     if (fromMessage) return fromMessage;
     const fromDetail = stringifyApiErrorField(payload.detail);
     if (fromDetail) return fromDetail;
+    if (payload.errors && typeof payload.errors === "object") {
+      const first = Object.entries(payload.errors)[0];
+      if (first) {
+        const [key, val] = first;
+        const text = stringifyApiErrorField(val);
+        if (text) return key === "__all__" ? text : `${key}: ${text}`;
+      }
+    }
     return fallback;
   } catch {
     return fallback;
@@ -122,6 +135,41 @@ export async function postJson<T>(path: string, body?: unknown): Promise<T> {
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+}
+
+/** Like postJson, but returns parsed JSON for non-2xx responses instead of throwing (except 401). */
+export async function postJsonAllowingError<T>(path: string, body?: unknown): Promise<{ status: number; data: T }> {
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: mergeHeaders({
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        },
+      }),
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (err) {
+    throw humanizeFetchFailure(err);
+  }
+
+  if (response.status === 401) {
+    unauthorizedHandler?.();
+    const message = await parseErrorMessage(response, "authentication required");
+    throw new ApiUnauthorizedError(message);
+  }
+
+  let data: T;
+  try {
+    data = (await response.json()) as T;
+  } catch {
+    throw new Error(`Request failed: ${response.status}`);
+  }
+  return { status: response.status, data };
 }
 
 export async function postNdjson(

@@ -148,7 +148,14 @@ def refresh_all_path_batches_with_section_fallback(
     if wait_seconds > 0:
         time.sleep(wait_seconds)
 
-    section_stats = refresh_all_sections(has_movies, has_episodes)
+    # Emby is path/item scoped only; root Media/Updated / Library/Refresh churns large libraries.
+    section_stats = refresh_selected_sections(
+        has_movies,
+        has_episodes,
+        include_plex=include_plex,
+        include_jellyfin=include_jellyfin,
+        include_emby=False,
+    )
     section_refreshed = int(section_stats.get("refreshed", 0) or 0)
     section_failed = int(section_stats.get("failed", 0) or 0)
 

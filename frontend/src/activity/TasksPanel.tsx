@@ -123,6 +123,7 @@ export function TasksPanel(props: {
   activeSearches: ActiveSearchesResponse;
   onRequestRun: (kind: "full" | "lite") => void;
   onRunCollections: () => Promise<void> | void;
+  onRunDiscover?: () => Promise<void> | void;
   onRequestRefresh: (kind: "metadata" | "art" | "both") => Promise<void> | void;
 }) {
   const semantic = getBrandSemanticTokens(props.brand, props.themeMode, props.accent);
@@ -216,6 +217,11 @@ export function TasksPanel(props: {
                         Catalog diff plus calendar date refresh and Coming Soon status updates.
                       </p>
                     ) : null}
+                    {task.task_key === "discover_sync" ? (
+                      <p className="text-[12px] font-normal mt-0.5 max-w-md" style={{ color: semantic.fgSubtle }}>
+                        Seed enabled TMDB sources, refresh Arr overlay, then create or update Discover placeholders.
+                      </p>
+                    ) : null}
                   </td>
                   <td className="px-3 py-3 text-[14px]" style={{ color: semantic.fgMuted }}>
                     {task.interval_label}
@@ -249,6 +255,10 @@ export function TasksPanel(props: {
                       onClick={() => {
                         if (task.task_key === "collections_sync") {
                           void props.onRunCollections();
+                          return;
+                        }
+                        if (task.task_key === "discover_sync") {
+                          void props.onRunDiscover?.();
                           return;
                         }
                         props.onRequestRun(task.task_key === "full_sync" ? "full" : "lite");
@@ -362,8 +372,11 @@ export function TasksPanel(props: {
                                     <span className="text-[12px] font-headline uppercase tracking-wider" style={{ color: semantic.fg }}>
                                       {String(section?.name || "Step")}
                                     </span>
-                                    <span className="text-[11px] uppercase" style={{ color: semantic.fgMuted }}>
+                                    <span className="text-[11px] uppercase tabular-nums" style={{ color: semantic.fgMuted }}>
                                       {String(section?.status || "pending")}
+                                      {section?.duration_seconds != null && Number.isFinite(Number(section.duration_seconds))
+                                        ? ` · ${formatTaskDuration(Number(section.duration_seconds))}`
+                                        : ""}
                                     </span>
                                   </div>
                                   {Array.isArray(section?.metrics)

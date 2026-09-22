@@ -1,4 +1,4 @@
-import { fetchJson, postJson, ApiUnauthorizedError } from "./client";
+import { fetchJson, postJson, postJsonAllowingError, ApiUnauthorizedError } from "./client";
 import { reloadIfFrontendStale } from "../frontendBuild";
 import type {
   ActivityRow,
@@ -397,7 +397,13 @@ export async function saveSettings(
   if (applyScope) {
     body.apply_scope = applyScope;
   }
-  return postJson<SaveSettingsResponse>("/api/settings/save", body);
+  // Settings validation returns HTTP 400 with `{ ok: false, errors }`. Keep that body
+  // so onboarding/settings can show field errors instead of a generic throw.
+  const { data } = await postJsonAllowingError<SaveSettingsResponse>("/api/settings/save", body);
+  if (data && typeof data === "object" && "ok" in data) {
+    return data;
+  }
+  return { ok: false, errors: { __all__: "Unable to save settings" } };
 }
 
 export async function testIntegrationConnection(input: {

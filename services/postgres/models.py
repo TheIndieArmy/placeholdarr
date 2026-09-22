@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Date, BigInteger, DateTime, JSON, Index, text, func
+from sqlalchemy import Column, Integer, Float, String, Boolean, ForeignKey, Date, BigInteger, DateTime, JSON, Index, text, func
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.hybrid import hybrid_property
@@ -16,6 +16,7 @@ class Movie(Base):
     __table_args__ = (
         Index('ix_movie_determination', 'determination'),
         Index('ux_movie_tmdbid_instance_id', 'tmdbid', 'instance_id', unique=True),
+        Index('ix_movie_status', 'status'),
     )
     id = Column(Integer, primary_key=True, autoincrement=True)
     title = Column(String, nullable=False)
@@ -136,10 +137,104 @@ class SubFlow(Base):
     episode = relationship('Episode', back_populates='subflows')
 
 
+class CatalogSource(Base):
+    """TMDB Discover (and later other) catalog seed sources."""
+
+    __tablename__ = "catalog_source"
+    __table_args__ = (Index("ix_catalog_source_enabled", "enabled"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String, nullable=False)
+    source_type = Column(String, nullable=False)
+    media_type = Column(String, nullable=False, default="movie")
+    filters_json = Column(JSON, nullable=True)
+    enabled = Column(Boolean, nullable=False, default=True)
+    run_interval_hours = Column(Integer, nullable=True)
+    last_run_at = Column(DateTime(timezone=True), nullable=True)
+    last_run_stats = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), server_default=text("now()"), onupdate=func.now())
+
+
+class TmdbMovie(Base):
+    """TMDB-sourced movie catalog row (Discover mode). Independent of Arr ``movie`` rows."""
+
+    __tablename__ = "tmdb_movie"
+    __table_args__ = (
+        Index("ix_tmdb_movie_determination", "determination"),
+        Index("ix_tmdb_movie_title", "title"),
+    )
+
+    tmdb_id = Column(Integer, primary_key=True)
+    title = Column(String, nullable=False)
+    year = Column(Integer, nullable=True)
+    overview = Column(String, nullable=True)
+    poster_path = Column(String, nullable=True)
+    remote_poster = Column(String, nullable=True)
+    popularity = Column(Float, nullable=True)
+    vote_average = Column(Float, nullable=True)
+    vote_count = Column(Integer, nullable=True)
+    genre_ids = Column(JSON, nullable=True)
+    original_language = Column(String, nullable=True)
+    release_date = Column(String, nullable=True)
+    has_placeholder = Column(Boolean, nullable=False, default=False)
+    placeholder_folder = Column(String, nullable=True)
+    placeholder_filepath = Column(String, nullable=True)
+    determination = Column(String, nullable=True)
+    determination_updated_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), server_default=text("now()"), onupdate=func.now())
+
+    @hybrid_property
+    def tmdbid(self):
+        return self.tmdb_id
+
+    @hybrid_property
+    def radarr_overview(self):
+        return self.overview
+
+
+class TmdbMovieSource(Base):
+    __tablename__ = "tmdb_movie_source"
+
+    tmdb_id = Column(Integer, ForeignKey("tmdb_movie.tmdb_id", ondelete="CASCADE"), primary_key=True)
+    source_id = Column(Integer, ForeignKey("catalog_source.id", ondelete="CASCADE"), primary_key=True)
+    added_at = Column(DateTime(timezone=True), server_default=text("now()"))
+
+
+class ArrMovieOverlay(Base):
+    """Thin Arr state for a TMDB catalog movie (monitored / hasFile / radarr id)."""
+
+    __tablename__ = "arr_movie_overlay"
+    __table_args__ = (
+        Index("ix_arr_movie_overlay_tmdb_id", "tmdb_id"),
+        Index("ux_arr_movie_overlay_tmdb_instance", "tmdb_id", "instance_id", unique=True),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tmdb_id = Column(Integer, ForeignKey("tmdb_movie.tmdb_id", ondelete="CASCADE"), nullable=False)
+    instance_id = Column(String, nullable=False)
+    instance_key = Column(String, nullable=False)
+    radarr_id = Column(Integer, nullable=True)
+    monitored = Column(Boolean, nullable=False, default=False)
+    has_file = Column(Boolean, nullable=False, default=False)
+    radarr_filepath = Column(String, nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=text("now()"), onupdate=func.now())
+
+
 class Placeholder(Base):
     __tablename__ = 'placeholder'
+    __table_args__ = (
+        Index("ix_placeholder_movie_id", "movie_id"),
+        Index("ix_placeholder_episode_id", "episode_id"),
+        Index("ix_placeholder_series_id", "series_id"),
+        Index("ix_placeholder_season_id", "season_id"),
+        Index("ix_placeholder_tmdb_movie_id", "tmdb_movie_id"),
+        Index("ix_placeholder_path", "path"),
+    )
     id = Column(Integer, primary_key=True, autoincrement=True)
     movie_id = Column(Integer, ForeignKey('movie.id'), nullable=True)
+    tmdb_movie_id = Column(Integer, ForeignKey('tmdb_movie.tmdb_id', ondelete='SET NULL'), nullable=True)
     series_id = Column(Integer, ForeignKey('series.id'), nullable=True)
     season_id = Column(Integer, ForeignKey('season.id'), nullable=True)
     episode_id = Column(Integer, ForeignKey('episode.id'), nullable=True)
@@ -502,6 +597,7 @@ class Series(Base):
     __table_args__ = (
         Index('ix_series_plex_dummy_id', 'plex_dummy_id'),
         Index('ux_series_tvdbid_instance_id', 'tvdbid', 'instance_id', unique=True),
+        Index('ix_series_status', 'status'),
     )
     id = Column(Integer, primary_key=True, autoincrement=True)
     title = Column(String, nullable=False)
@@ -630,6 +726,8 @@ class Episode(Base):
     __tablename__ = "episode"
     __table_args__ = (
         Index('ix_episode_determination', 'determination'),
+        Index('ix_episode_season_id', 'season_id'),
+        Index('ix_episode_status', 'status'),
     )
     id = Column(Integer, primary_key=True, autoincrement=True)
     season_id = Column(Integer, ForeignKey('season.id'), nullable=False)

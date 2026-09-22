@@ -175,7 +175,10 @@ def _mark_phases_interrupted(summary: dict[str, Any], *, ended_at: datetime, rea
     progress = out.get("progress")
     if isinstance(progress, dict):
         prog = dict(progress)
+        prog["status"] = "FAILED"
         prog["overall_status"] = "FAILED"
+        if reason:
+            prog["error"] = reason
         inner = prog.get("progress")
         if isinstance(inner, dict):
             inner = dict(inner)

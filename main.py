@@ -1,6 +1,7 @@
 import sys
 import os
 import re
+import json
 import signal
 import subprocess
 import time
@@ -18,7 +19,7 @@ from core.logger import logger
 from core.config import settings
 from services.postgres.utils import check_db
 from services.postgres.db import get_engine, init_db, get_session
-from services.postgres.models import Movie, Series, Episode, Job
+from services.postgres.models import Job
 import sqlalchemy as sa
 from services.source_of_truth import schedule_all_syncs
 from services.source_of_truth.queue_monitor_producer import (
@@ -319,75 +320,57 @@ async def lifespan(app: FastAPI):
             yield
             return
 
-        # Log a DB summary after initialization so operators can see starting counts
-        try:
-            log_db_summary()
-        except Exception:
-            pass
-
-        session = get_session()
-        try:
-            # Reset queued content to PENDING so startup seeding doesn't leave items stranded
-            # Movies, Series, and Episodes may be queued from previous runs; migrate them to PENDING.
+        # Catalog housekeeping must not block Uvicorn from accepting HTTP. Movie/Series/
+        # Episode.status QUEUED is legacy (nothing writes it anymore); do not scan those
+        # tables on boot. Keep CLAIMED job reset + orphaned task-run abandon.
+        def _startup_catalog_housekeeping():
             try:
-                session.query(Movie).filter(Movie.status == 'QUEUED').update(
-                    {Movie.status: 'PENDING'},
-                    synchronize_session=False
-                )
-            except Exception as e:
-                session.rollback()
-                logger.warning(f"Skipping movie queued reset because movie table is unavailable: {e}", extra={'emoji_type': 'warning'})
-            try:
-                session.query(Series).filter(Series.status == 'QUEUED').update(
-                    {Series.status: 'PENDING'},
-                    synchronize_session=False
-                )
-            except Exception:
-                # Series table may not exist in some minimal environments; ignore failures here
-                pass
-            try:
-                session.query(Episode).filter(Episode.status == 'QUEUED').update(
-                    {Episode.status: 'PENDING'},
-                    synchronize_session=False
-                )
-            except Exception:
-                # Episode table may not exist in some minimal environments; ignore failures here
-                pass
-            session.commit()
-            logger.info("Reset QUEUED movies/series/episodes to PENDING", extra={'emoji_type': 'info'})
-
-            # Reset CLAIMED jobs back to PENDING on startup so crashed/restarted
-            # workers do not leave jobs stranded in a non-runnable state.
-            try:
-                claimed_q = session.query(Job).filter(Job.status == 'CLAIMED')
-                claimed_count = claimed_q.count()
-                if claimed_count:
-                    claimed_q.update({Job.status: 'PENDING', Job.updated_at: sa.func.now()}, synchronize_session=False)
-                    session.commit()
-                    logger.info(
-                        f"Reset {claimed_count} CLAIMED jobs -> PENDING on startup",
-                        extra={'emoji_type': 'info'},
-                    )
-                else:
-                    session.rollback()
-            except Exception as e:
-                # Do not fail startup because of requeue logic; log and continue.
                 try:
-                    logger.debug(f"Failed to reset CLAIMED jobs on startup: {e}", extra={'emoji_type': 'debug'})
+                    log_db_summary()
                 except Exception:
                     pass
+                session = get_session()
+                try:
+                    try:
+                        claimed_q = session.query(Job).filter(Job.status == 'CLAIMED')
+                        claimed_count = claimed_q.count()
+                        if claimed_count:
+                            claimed_q.update({Job.status: 'PENDING', Job.updated_at: sa.func.now()}, synchronize_session=False)
+                            session.commit()
+                            logger.info(
+                                f"Reset {claimed_count} CLAIMED jobs -> PENDING on startup",
+                                extra={'emoji_type': 'info'},
+                            )
+                        else:
+                            session.rollback()
+                    except Exception as e:
+                        try:
+                            logger.debug(f"Failed to reset CLAIMED jobs on startup: {e}", extra={'emoji_type': 'debug'})
+                        except Exception:
+                            pass
 
-            try:
-                from services.task_run_history import abandon_orphaned_working_task_runs
+                    try:
+                        from services.task_run_history import abandon_orphaned_working_task_runs
 
-                abandon_orphaned_working_task_runs(reason="interrupted_by_restart")
-            except Exception as e:
+                        abandon_orphaned_working_task_runs(reason="interrupted_by_restart")
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to abandon orphaned working task runs on startup: {e}",
+                            extra={"emoji_type": "warning"},
+                        )
+                finally:
+                    session.close()
+            except Exception as exc:
                 logger.warning(
-                    f"Failed to abandon orphaned working task runs on startup: {e}",
+                    f"Startup catalog housekeeping failed (API is up): {exc}",
                     extra={"emoji_type": "warning"},
                 )
-        finally:
-            session.close()
+
+        threading.Thread(
+            target=_startup_catalog_housekeeping,
+            name="startup-catalog-housekeeping",
+            daemon=True,
+        ).start()
 
         # Start workers / notifier / queue monitor on a background thread so this lifespan
         # can reach ``yield`` immediately. If anything in that chain blocks (locks, scheduler,
@@ -435,6 +418,30 @@ async def lifespan(app: FastAPI):
         # until this finishes, so a startup_sync_runner Job would deadlock.
         def _run_startup_sync():
             try:
+                from services.discover.mode import is_tmdb_discover_mode
+
+                if is_tmdb_discover_mode():
+                    from services.discover.mode import should_run_discover_startup_sync
+                    from services.discover.pipeline import run_discover_startup
+
+                    run_discover, discover_reason = should_run_discover_startup_sync()
+                    if not run_discover:
+                        logger.info(
+                            f"Startup TMDB Discover pipeline skipped ({discover_reason})",
+                            extra={"emoji_type": "info"},
+                        )
+                        return
+                    logger.info(
+                        f"Startup TMDB Discover pipeline starting ({discover_reason})",
+                        extra={"emoji_type": "gear"},
+                    )
+                    discover_result = run_discover_startup()
+                    logger.info(
+                        f"Startup TMDB Discover pipeline completed: {discover_result}",
+                        extra={"emoji_type": "success"},
+                    )
+                    return
+
                 from services.source_of_truth.startup import run_startup_source_of_truth
                 startup_result = run_startup_source_of_truth()
                 if startup_result.get('ran'):
@@ -591,6 +598,9 @@ app.include_router(tasks_router)
 from routes.collections import router as collections_router
 app.include_router(collections_router)
 
+from routes.discover import router as discover_router
+app.include_router(discover_router)
+
 # Customizable status message templates
 from routes.messages import router as messages_router
 app.include_router(messages_router)
@@ -629,9 +639,35 @@ async def webhook(request: Request):
                 )
                 raise HTTPException(status_code=401, detail="Invalid or missing apikey")
 
-        payload = await request.json()
         instance_raw = request.query_params.get("instance", "").strip() or None
         instance_id_raw = request.query_params.get("instance_id", "").strip() or None
+        safe_instance = re.sub(r"[^A-Za-z0-9_-]", "", instance_raw or "")[:64] or "unknown"
+        content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+        body = await request.body()
+        if not body or not body.strip():
+            logger.warning(
+                "Webhook rejected: empty body "
+                f"instance={safe_instance} content_type={content_type or 'none'} "
+                "(Emby live TV / misconfigured notification often POSTs with no JSON)",
+                extra={"emoji_type": "warning"},
+            )
+            raise HTTPException(
+                status_code=400,
+                detail="Webhook body must be non-empty JSON",
+            )
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError as e:
+            logger.warning(
+                "Webhook rejected: invalid JSON "
+                f"instance={safe_instance} content_type={content_type or 'none'} "
+                f"body_bytes={len(body)} error={e}",
+                extra={"emoji_type": "warning"},
+            )
+            raise HTTPException(
+                status_code=400,
+                detail="Webhook body must be valid JSON",
+            )
 
         # During onboarding, accept webhook calls but intentionally ignore them.
         # Post-onboarding startup full sync is the source of truth and avoids

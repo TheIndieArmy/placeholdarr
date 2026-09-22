@@ -162,7 +162,8 @@ class Settings(BaseSettings):
     # Emby
     EMBY_URL: Optional[str] = None
     EMBY_TOKEN: Optional[str] = None
-    EMBY_FORCE_LIBRARY_REFRESH_ON_ITEM_MISS: bool = os.getenv("EMBY_FORCE_LIBRARY_REFRESH_ON_ITEM_MISS", "true").split('#')[0].strip().lower() == "true"
+    # Kept for config compatibility; Emby no longer falls back to Library/Refresh.
+    EMBY_FORCE_LIBRARY_REFRESH_ON_ITEM_MISS: bool = os.getenv("EMBY_FORCE_LIBRARY_REFRESH_ON_ITEM_MISS", "false").split('#')[0].strip().lower() == "true"
     EMBY_TARGETED_REFRESH_WAIT_SECONDS: float = float(os.getenv("EMBY_TARGETED_REFRESH_WAIT_SECONDS", "5").split('#')[0].strip())
 
     JELLYFIN_FORCE_LIBRARY_REFRESH_ON_ITEM_MISS: bool = os.getenv("JELLYFIN_FORCE_LIBRARY_REFRESH_ON_ITEM_MISS", "true").split('#')[0].strip().lower() == "true"
@@ -206,6 +207,20 @@ class Settings(BaseSettings):
 
     # Collections (rule-based Plex collection builder)
     TMDB_API_KEY: Optional[str] = None
+    # Catalog source of truth: arr_catalog (legacy) or tmdb_discover (TMDB seed + thin Arr overlay).
+    CATALOG_MODE: str = "arr_catalog"
+    # Discover mode: skip placeholders when Radarr reports monitored.
+    DISCOVER_SKIP_PLACEHOLDER_WHEN_MONITORED: bool = True
+    # Discover mode: monitored on any Radarr instance skips (False = still skip when any monitored for MVP).
+    DISCOVER_SKIP_MONITORED_ANY_INSTANCE: bool = True
+    # Discover boot: run full catalog sync, only when empty, or skip.
+    DISCOVER_STARTUP_SYNC_MODE: Literal["on", "auto", "off"] = "auto"
+    # Separate filesystem root for TMDB Discover placeholders (not Arr LIBRARY_ROOT).
+    # Discover movies land under ``{DISCOVER_LIBRARY_ROOT}/movies``.
+    DISCOVER_LIBRARY_ROOT: str = ""
+    DISCOVER_MOVIE_LIBRARY_FOLDER: str = ""
+    # Optional Plex section for the Discover movies destination.
+    DISCOVER_PLEX_MOVIE_SECTION_ID: Optional[int] = None
     # Trakt API Client ID (public list access only; no OAuth/account linking).
     TRAKT_CLIENT_ID: Optional[str] = None
     # Optional outbound Tautulli API for Collections "most played" sources.

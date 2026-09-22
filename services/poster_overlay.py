@@ -351,3 +351,148 @@ def save_jpeg(img, path: str, *, quality: int = 88) -> bool:
     except Exception as exc:
         logger.warning(f"Failed to write poster JPEG {path!r}: {exc}", extra={"emoji_type": "warning"})
         return False
+
+
+# Discover stub posters (title + logo) while real TMDB art downloads.
+DISCOVER_STUB_KIND = "title_logo_minimal_a_v1"
+_STUB_BG = (11, 17, 27)
+_STUB_TITLE = (245, 245, 248)
+_STUB_YEAR = (160, 170, 185)
+
+
+def _stub_meta_path(folder: str) -> str:
+    return os.path.join(os.path.abspath(folder), OVERLAY_META_FILENAME)
+
+
+def is_discover_stub_poster(folder: str) -> bool:
+    """True when folder has a Discover title/logo stub marked in overlay meta."""
+    path = _stub_meta_path(folder)
+    try:
+        import json
+
+        with open(path, encoding="utf-8") as f:
+            meta = json.load(f)
+    except (OSError, ValueError, TypeError):
+        return False
+    if not isinstance(meta, dict):
+        return False
+    return bool(meta.get("discover_stub")) and str(meta.get("discover_stub_kind") or "") == DISCOVER_STUB_KIND
+
+
+def write_discover_stub_poster(
+    folder: str,
+    *,
+    title: str,
+    year: int | None = None,
+) -> bool:
+    """Write option-A stub ``poster.jpg`` (dark bg, centered title/year, logo).
+
+    Marks ``.poster-overlay.json`` so art backfill can replace the stub with real art.
+    """
+    if _pillow() is None:
+        _log_pillow_missing_once()
+        return False
+    Image, ImageDraw, _, _, _ = _pillow()
+    folder = os.path.abspath(folder)
+    os.makedirs(folder, exist_ok=True)
+    out_path = os.path.join(folder, "poster.jpg")
+    if os.path.isfile(out_path) and not is_discover_stub_poster(folder):
+        # Do not clobber real (or overlay) art.
+        return False
+
+    w, h = PORTRAIT_SIZE
+    im = Image.new("RGB", (w, h), _STUB_BG)
+    draw = ImageDraw.Draw(im)
+    title_text = str(title or "Untitled").strip() or "Untitled"
+    title_font = _load_font(72)
+    year_font = _load_font(36)
+    max_w = w - 140
+
+    def _wrap(text: str, font) -> list[str]:
+        words = text.split()
+        if not words:
+            return [text]
+        lines: list[str] = []
+        cur = ""
+        for word in words:
+            trial = f"{cur} {word}".strip()
+            try:
+                tw = draw.textlength(trial, font=font)
+            except Exception:
+                tw = len(trial) * 20
+            if tw > max_w and cur:
+                lines.append(cur)
+                cur = word
+            else:
+                cur = trial
+        if cur:
+            lines.append(cur)
+        return lines[:7]
+
+    lines = _wrap(title_text, title_font)
+    line_gap = 90
+    block_h = len(lines) * line_gap
+    y0 = max(h // 3 - block_h // 2, int(h * 0.22))
+    for i, line in enumerate(lines):
+        try:
+            bbox = draw.textbbox((0, 0), line, font=title_font)
+            tw = bbox[2] - bbox[0]
+        except Exception:
+            tw = len(line) * 20
+        draw.text(((w - tw) // 2, y0 + i * line_gap), line, fill=_STUB_TITLE, font=title_font)
+
+    if year is not None:
+        try:
+            year_s = str(int(year))
+        except (TypeError, ValueError):
+            year_s = str(year).strip()
+        if year_s:
+            try:
+                bbox = draw.textbbox((0, 0), year_s, font=year_font)
+                tw = bbox[2] - bbox[0]
+            except Exception:
+                tw = len(year_s) * 12
+            draw.text(
+                ((w - tw) // 2, y0 + len(lines) * line_gap + 12),
+                year_s,
+                fill=_STUB_YEAR,
+                font=year_font,
+            )
+
+    if _LOGO_PATH.is_file():
+        try:
+            logo = Image.open(_LOGO_PATH).convert("RGBA")
+            logo.thumbnail((280, 280), resample=Image.Resampling.LANCZOS)
+            lx = (w - logo.width) // 2
+            ly = h - 160 - logo.height
+            im.paste(logo, (lx, ly), logo)
+        except Exception as exc:
+            logger.debug(f"Discover stub logo failed: {exc}", extra={"emoji_type": "debug"})
+
+    if not save_jpeg(im, out_path, quality=85):
+        return False
+
+    import json
+
+    from services.placeholders import _apply_dir_chain_permissions, _ensure_open_permissions
+
+    meta_path = _stub_meta_path(folder)
+    existing: dict = {}
+    try:
+        with open(meta_path, encoding="utf-8") as f:
+            raw = json.load(f)
+            if isinstance(raw, dict):
+                existing = raw
+    except (OSError, ValueError, TypeError):
+        existing = {}
+    existing["discover_stub"] = True
+    existing["discover_stub_kind"] = DISCOVER_STUB_KIND
+    existing["discover_stub_title"] = title_text
+    try:
+        _apply_dir_chain_permissions(meta_path)
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(existing, f, separators=(",", ":"))
+        _ensure_open_permissions(meta_path)
+    except OSError as exc:
+        logger.debug(f"Discover stub meta write failed: {exc}", extra={"emoji_type": "debug"})
+    return True

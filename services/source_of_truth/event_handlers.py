@@ -542,6 +542,21 @@ def process_movie_imported_event(payload: dict[str, Any], instance: str | None =
     movie_file = payload.get("movieFile", {}) if isinstance(payload.get("movieFile"), dict) else {}
     file_path = movie_file.get("path") if movie_file else None
 
+    discover_import: dict[str, Any] | None = None
+    try:
+        from services.discover.import_hook import apply_discover_movie_import
+
+        discover_import = apply_discover_movie_import(
+            payload,
+            instance_key=resolved_instance_key,
+            instance_id=str(ctx.get("instance_id") or "") or None,
+            radarr_id=int(movie_id) if movie_id else None,
+        )
+    except Exception as exc:
+        from core.logger import logger
+
+        logger.warning(f"Discover import hook failed: {exc}", extra={"emoji_type": "warning"})
+
     session = get_session()
     try:
         # Strict match: radarrid + instance_key
@@ -570,6 +585,13 @@ def process_movie_imported_event(payload: dict[str, Any], instance: str | None =
                     session.flush()
 
         if not movie_row:
+            if discover_import and discover_import.get("ok"):
+                return {
+                    "ok": True,
+                    "event": "movie_imported",
+                    "movie_id": None,
+                    "discover": discover_import,
+                }
             raise ValueError(f"movieimport_not_found:radarrid={movie_id}")
 
         # Do not mark has_file immediately. A delayed grace job finalizes state and cleanup.
@@ -623,12 +645,15 @@ def process_movie_imported_event(payload: dict[str, Any], instance: str | None =
         )
         session.commit()
 
-        return {
+        out: dict[str, Any] = {
             "ok": True,
             "event": "movie_imported",
             "movie_id": movie_row_id,
             "grace": grace_stats,
         }
+        if discover_import is not None:
+            out["discover"] = discover_import
+        return out
     except Exception:
         session.rollback()
         raise

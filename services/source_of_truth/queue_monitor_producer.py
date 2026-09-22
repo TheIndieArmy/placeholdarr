@@ -4,7 +4,6 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
-
 import requests
 
 from core.config import settings
@@ -13,7 +12,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from services.messages import render as render_message
 from services.postgres.db import get_session
-from services.postgres.models import Episode, Movie, Placeholder
+from services.postgres.models import ArrMovieOverlay, Episode, Movie, Placeholder, TmdbMovie
 from services.activity_snapshot import clear_queue_download_snapshot, set_queue_download_snapshot
 from services.source_of_truth.arr_api import (
     ARR_HTTP_TIMEOUT_SECONDS,
@@ -22,7 +21,7 @@ from services.source_of_truth.arr_api import (
 )
 from services.source_of_truth.status_intent import DisplayStatus, StatusIntent, StatusSource
 from services.source_of_truth.status_orchestrator import StatusOrchestrator
-
+from types import SimpleNamespace
 
 ACTIVE_QUEUE_STATUSES = {
     DisplayStatus.SEARCHING.value,
@@ -129,6 +128,9 @@ def _collect_queue_monitor_poll_context(session):
 
     Only placeholders with ``queue_monitor_active`` set (playback-initiated ARR
     search) are considered; the producer sleeps idle until NOTIFY otherwise.
+
+    Discover placeholders (``tmdb_movie_id`` only) resolve Radarr via
+    ``arr_movie_overlay.radarr_id`` instead of an Arr ``movie`` catalog row.
     """
     q = session.query(Placeholder).filter(
         Placeholder.has_placeholder == True,  # noqa: E712
@@ -145,6 +147,11 @@ def _collect_queue_monitor_poll_context(session):
 
     movie_ids = [int(ph.movie_id) for ph in placeholders if getattr(ph, "movie_id", None)]
     episode_ids = [int(ph.episode_id) for ph in placeholders if getattr(ph, "episode_id", None)]
+    tmdb_ids = [
+        int(ph.tmdb_movie_id)
+        for ph in placeholders
+        if getattr(ph, "tmdb_movie_id", None) and not getattr(ph, "movie_id", None)
+    ]
 
     movie_map = {
         int(row.id): row
@@ -155,8 +162,32 @@ def _collect_queue_monitor_poll_context(session):
         for row in session.query(Episode).filter(Episode.id.in_(episode_ids)).all()
     } if episode_ids else {}
 
-    movie_targets: list[tuple[Placeholder, Movie, str]] = []
+    overlay_by_tmdb: dict[int, ArrMovieOverlay] = {}
+    tmdb_title_by_id: dict[int, str] = {}
+    tmdb_year_by_id: dict[int, int | None] = {}
+    if tmdb_ids:
+        for ov in (
+            session.query(ArrMovieOverlay)
+            .filter(ArrMovieOverlay.tmdb_id.in_(tmdb_ids))
+            .all()
+        ):
+            tid = int(ov.tmdb_id)
+            # Prefer an overlay that still needs queue monitoring (has radarr id, no file).
+            prev = overlay_by_tmdb.get(tid)
+            if prev is None:
+                overlay_by_tmdb[tid] = ov
+                continue
+            prev_score = (1 if prev.radarr_id else 0) + (0 if prev.has_file else 1) + (1 if prev.monitored else 0)
+            cur_score = (1 if ov.radarr_id else 0) + (0 if ov.has_file else 1) + (1 if ov.monitored else 0)
+            if cur_score >= prev_score:
+                overlay_by_tmdb[tid] = ov
+        for row in session.query(TmdbMovie).filter(TmdbMovie.tmdb_id.in_(tmdb_ids)).all():
+            tmdb_title_by_id[int(row.tmdb_id)] = str(row.title or "").strip()
+            tmdb_year_by_id[int(row.tmdb_id)] = row.year
+
+    movie_targets: list[tuple[Placeholder, Any, str]] = []
     episode_targets: list[tuple[Placeholder, Episode, str]] = []
+    claimed_placeholder_ids: set[int] = set()
 
     for ph in placeholders:
         movie = movie_map.get(int(ph.movie_id)) if getattr(ph, "movie_id", None) else None
@@ -174,6 +205,7 @@ def _collect_queue_monitor_poll_context(session):
             _arr_type, instance_key = target
             movie_targets.append((ph, movie, instance_key))
             radarr_instance_keys.add(instance_key)
+            claimed_placeholder_ids.add(int(ph.id))
             continue
 
         if episode is not None:
@@ -188,6 +220,37 @@ def _collect_queue_monitor_poll_context(session):
             _arr_type, instance_key = target
             episode_targets.append((ph, episode, instance_key))
             sonarr_instance_keys.add(instance_key)
+            claimed_placeholder_ids.add(int(ph.id))
+
+    for ph in placeholders:
+        if int(ph.id) in claimed_placeholder_ids:
+            continue
+        tid = int(ph.tmdb_movie_id) if getattr(ph, "tmdb_movie_id", None) else 0
+        if not tid:
+            continue
+        overlay = overlay_by_tmdb.get(tid)
+        if overlay is None or not overlay.radarr_id:
+            continue
+        if bool(overlay.has_file):
+            continue
+        instance_key = _normalize_instance_key(overlay.instance_key)
+        if not instance_key:
+            logger.warning(
+                f"Queue monitor skipped discover tmdb_id={tid}: overlay missing instance_key",
+                extra={"emoji_type": "warning"},
+            )
+            continue
+        proxy = SimpleNamespace(
+            id=None,
+            title=tmdb_title_by_id.get(tid) or f"tmdb-{tid}",
+            year=tmdb_year_by_id.get(tid),
+            radarrid=int(overlay.radarr_id),
+            instance_key=instance_key,
+            has_file=bool(overlay.has_file),
+            tmdb_id=tid,
+        )
+        movie_targets.append((ph, proxy, instance_key))
+        radarr_instance_keys.add(instance_key)
 
     if not movie_targets and not episode_targets:
         return None

@@ -131,6 +131,7 @@ _STATUSES_USING_DISPLAY_REASON: frozenset[str] = frozenset(
 _INTERNAL_DISPLAY_REASONS: frozenset[str] = frozenset(
     {
         "import_grace_countdown",
+        "discover_playback",
     }
 )
 

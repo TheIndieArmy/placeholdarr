@@ -21,9 +21,14 @@ from core.logger import logger
 
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
 TMDB_HTTP_TIMEOUT_SECONDS = 20
+# Transient network failures (timeouts, connection drops): try again before giving up.
+TMDB_TRANSIENT_ATTEMPTS = 3
+TMDB_TRANSIENT_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
 
 # Discover/list pagination guardrail: TMDB pages hold 20 items.
-MAX_PAGES_PER_SOURCE = 25
+# TMDB discover/list endpoints report at most 500 pages (20 results each → 10k).
+MAX_PAGES_PER_SOURCE = 500
+MAX_ITEMS_PER_SOURCE = MAX_PAGES_PER_SOURCE * 20
 
 _CACHE_TTL_SECONDS = 12 * 3600
 _META_CACHE_TTL_SECONDS = 24 * 3600
@@ -56,6 +61,28 @@ def _retry_after_seconds(resp: Any, default: float = 2.0, cap: float = 10.0) -> 
 
 class TmdbError(Exception):
     """Raised when TMDB is unconfigured or a request fails."""
+
+
+class TmdbPagedResult(list):
+    """Paged fetch results. ``partial`` is set when paging stopped early after a failure."""
+
+    partial: bool = False
+    failed_at_page: int | None = None
+    error: str | None = None
+
+
+def _as_paged_result(
+    items: list[dict[str, Any]],
+    *,
+    partial: bool = False,
+    failed_at_page: int | None = None,
+    error: str | None = None,
+) -> TmdbPagedResult:
+    out = TmdbPagedResult(items)
+    out.partial = bool(partial)
+    out.failed_at_page = failed_at_page
+    out.error = error
+    return out
 
 
 _TMDB_RESOURCE_RE = re.compile(
@@ -187,34 +214,60 @@ def _request(path: str, params: Optional[dict[str, Any]] = None) -> dict[str, An
         params["api_key"] = api_key
 
     url = f"{TMDB_BASE_URL}{path}"
-    try:
-        _throttle()
-        resp = requests.get(url, params=params, headers=headers, timeout=TMDB_HTTP_TIMEOUT_SECONDS)
+    last_network_error: Exception | None = None
+
+    for attempt in range(1, TMDB_TRANSIENT_ATTEMPTS + 1):
+        try:
+            _throttle()
+            resp = requests.get(url, params=params, headers=headers, timeout=TMDB_HTTP_TIMEOUT_SECONDS)
+            if resp.status_code == 429:
+                delay = _retry_after_seconds(resp)
+                logger.warning(
+                    f"TMDB rate limited (429) on {path}; waiting {delay:.1f}s "
+                    f"(attempt {attempt}/{TMDB_TRANSIENT_ATTEMPTS})",
+                    extra={"emoji_type": "warning"},
+                )
+                time.sleep(delay)
+                _throttle()
+                resp = requests.get(url, params=params, headers=headers, timeout=TMDB_HTTP_TIMEOUT_SECONDS)
+        except requests.RequestException as exc:
+            last_network_error = exc
+            if attempt >= TMDB_TRANSIENT_ATTEMPTS:
+                break
+            backoff = TMDB_TRANSIENT_BACKOFF_SECONDS[
+                min(attempt - 1, len(TMDB_TRANSIENT_BACKOFF_SECONDS) - 1)
+            ]
+            logger.warning(
+                f"TMDB request failed on {path} ({exc}); retrying in {backoff:.1f}s "
+                f"(attempt {attempt}/{TMDB_TRANSIENT_ATTEMPTS})",
+                extra={"emoji_type": "warning"},
+            )
+            time.sleep(backoff)
+            continue
+
         if resp.status_code == 429:
-            # One retry honoring Retry-After; TMDB rate limits are short-lived.
+            if attempt >= TMDB_TRANSIENT_ATTEMPTS:
+                raise TmdbError("TMDB rate limit exceeded (429) — try again shortly")
             delay = _retry_after_seconds(resp)
             logger.warning(
-                f"TMDB rate limited (429) on {path}; retrying in {delay:.1f}s",
+                f"TMDB still rate limited (429) on {path}; waiting {delay:.1f}s "
+                f"(attempt {attempt}/{TMDB_TRANSIENT_ATTEMPTS})",
                 extra={"emoji_type": "warning"},
             )
             time.sleep(delay)
-            _throttle()
-            resp = requests.get(url, params=params, headers=headers, timeout=TMDB_HTTP_TIMEOUT_SECONDS)
-    except requests.RequestException as exc:
-        raise TmdbError(f"TMDB request failed: {exc}") from exc
+            continue
+        if resp.status_code == 401:
+            raise TmdbError("TMDB rejected the API key (401). Check the TMDB API Key setting.")
+        if resp.status_code == 404:
+            raise TmdbError(f"TMDB resource not found: {path}")
+        if resp.status_code != 200:
+            raise TmdbError(f"TMDB returned HTTP {resp.status_code} for {path}")
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise TmdbError(f"TMDB returned invalid JSON for {path}") from exc
 
-    if resp.status_code == 429:
-        raise TmdbError("TMDB rate limit exceeded (429) — try again shortly")
-    if resp.status_code == 401:
-        raise TmdbError("TMDB rejected the API key (401). Check the TMDB API Key setting.")
-    if resp.status_code == 404:
-        raise TmdbError(f"TMDB resource not found: {path}")
-    if resp.status_code != 200:
-        raise TmdbError(f"TMDB returned HTTP {resp.status_code} for {path}")
-    try:
-        return resp.json()
-    except ValueError as exc:
-        raise TmdbError(f"TMDB returned invalid JSON for {path}") from exc
+    raise TmdbError(f"TMDB request failed: {last_network_error}") from last_network_error
 
 
 def _cache_key(path: str, params: dict[str, Any]) -> str:
@@ -257,12 +310,21 @@ def _normalize_item(raw: dict[str, Any], media_type: str) -> dict[str, Any] | No
         "poster_path": raw.get("poster_path"),
         "genre_ids": [int(g) for g in (raw.get("genre_ids") or []) if g is not None],
         "original_language": raw.get("original_language") or None,
+        "overview": raw.get("overview") or None,
     }
 
 
 def _fetch_paged(path: str, params: dict[str, Any], media_type: str, limit: int) -> list[dict[str, Any]]:
-    """Fetch results pages until `limit` items collected or pages are exhausted."""
-    limit = max(1, min(int(limit or 100), MAX_PAGES_PER_SOURCE * 20))
+    """Fetch results pages until `limit` items collected or pages are exhausted.
+
+    Respects the in-process request throttle and transient retries in ``_request``.
+    Page budget follows the requested limit (capped at TMDB's 500-page ceiling).
+
+    If a page fails after some items were collected, returns those items as a
+    partial result (does not cache) instead of discarding the whole fetch.
+    """
+    limit = max(1, min(int(limit or 100), MAX_ITEMS_PER_SOURCE))
+    max_pages = min(MAX_PAGES_PER_SOURCE, max(1, (limit + 19) // 20))
     cache_key = _cache_key(path, {**params, "_limit": limit})
     cached = _cache_get(cache_key, _CACHE_TTL_SECONDS)
     if cached is not None:
@@ -272,8 +334,29 @@ def _fetch_paged(path: str, params: dict[str, Any], media_type: str, limit: int)
     seen: set[int] = set()
     page = 1
     total_pages = 1
-    while page <= total_pages and page <= MAX_PAGES_PER_SOURCE and len(items) < limit:
-        data = _request(path, {**params, "page": page})
+    while page <= total_pages and page <= max_pages and len(items) < limit:
+        if page == 1 or page % 10 == 0:
+            logger.info(
+                f"TMDB fetch {path}: page {page}/{min(total_pages, max_pages)} "
+                f"({len(items)}/{limit} items so far)",
+                extra={"emoji_type": "info"},
+            )
+        try:
+            data = _request(path, {**params, "page": page})
+        except TmdbError as exc:
+            if items:
+                logger.warning(
+                    f"TMDB fetch {path} failed at page {page} after {len(items)} item(s); "
+                    f"keeping partial results ({exc})",
+                    extra={"emoji_type": "warning"},
+                )
+                return _as_paged_result(
+                    items,
+                    partial=True,
+                    failed_at_page=page,
+                    error=str(exc),
+                )
+            raise
         total_pages = int(data.get("total_pages") or 1)
         for raw in data.get("results") or []:
             normalized = _normalize_item(raw, media_type)
@@ -285,8 +368,9 @@ def _fetch_paged(path: str, params: dict[str, Any], media_type: str, limit: int)
                 break
         page += 1
 
-    _cache_set(cache_key, items)
-    return items
+    result = _as_paged_result(items)
+    _cache_set(cache_key, list(result))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +432,8 @@ def fetch_discover(
 def fetch_list(list_id: int | str, media_type: str, limit: int = 200) -> list[dict[str, Any]]:
     """Fetch a public TMDB v3 list, filtered to the requested media type."""
     list_id = parse_tmdb_resource_id(str(list_id), "list")
-    limit = max(1, min(int(limit or 200), 500))
+    limit = max(1, min(int(limit or 200), MAX_ITEMS_PER_SOURCE))
+    max_pages = min(MAX_PAGES_PER_SOURCE, max(1, (limit + 19) // 20))
     cache_key = _cache_key(f"/list/{list_id}", {"_limit": limit, "_mt": media_type})
     cached = _cache_get(cache_key, _CACHE_TTL_SECONDS)
     if cached is not None:
@@ -359,8 +444,23 @@ def fetch_list(list_id: int | str, media_type: str, limit: int = 200) -> list[di
     seen: set[int] = set()
     page = 1
     total_pages = 1
-    while page <= total_pages and page <= 25 and len(items) < limit:
-        data = _request(f"/list/{list_id}", {"page": page})
+    while page <= total_pages and page <= max_pages and len(items) < limit:
+        try:
+            data = _request(f"/list/{list_id}", {"page": page})
+        except TmdbError as exc:
+            if items:
+                logger.warning(
+                    f"TMDB list {list_id} failed at page {page} after {len(items)} item(s); "
+                    f"keeping partial results ({exc})",
+                    extra={"emoji_type": "warning"},
+                )
+                return _as_paged_result(
+                    items,
+                    partial=True,
+                    failed_at_page=page,
+                    error=str(exc),
+                )
+            raise
         total_pages = int(data.get("total_pages") or 1)
         for raw in data.get("items") or []:
             raw_type = raw.get("media_type") or ("movie" if raw.get("title") else "tv")
@@ -375,8 +475,9 @@ def fetch_list(list_id: int | str, media_type: str, limit: int = 200) -> list[di
                 break
         page += 1
 
-    _cache_set(cache_key, items)
-    return items
+    result = _as_paged_result(items)
+    _cache_set(cache_key, list(result))
+    return result
 
 
 def fetch_person_credits(person_ref: str, media_type: str, limit: int = 500) -> list[dict[str, Any]]:

@@ -25,7 +25,15 @@ import {
   testIntegrationConnection,
   type NfoBackfillApplyScope,
 } from "./api/dashboard";
+import {
+  createDiscoverSource,
+  deleteDiscoverSource,
+  listDiscoverSources,
+  verifyDiscoverTmdb,
+  type CatalogSource,
+} from "./api/discover";
 import { DestinationMapEditor } from "./settings/DestinationMapEditor";
+import { CatalogSourcesSettingsPanel } from "./settings/CatalogSourcesSettingsPanel";
 import type { IntegrationsStatusResponse } from "./types/api";
 import { postTaskRun } from "./api/tasks";
 import { fetchJson, postJson, setUnauthorizedHandler, getCsrfToken } from "./api/client";
@@ -42,6 +50,7 @@ import placeholdarrLogoYellow from "./assets/Placeholdarr_yellow.svg";
 import type { Brand, ThemeMode } from "./brandTypes";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { SettingsStringListChips } from "./SettingsStringListChips";
+import { SecretTextField } from "./SecretTextField";
 import { TmdbAttribution } from "./TmdbAttribution";
 import { getBrandSemanticTokens, semanticTokensToCssVars, type BrandSemanticTokens } from "./brandSemanticTheme";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "./brandAccentUi";
@@ -367,6 +376,39 @@ const BEHAVIOR_WIZARD_SECTIONS = [
   "Advanced",
 ] as const;
 
+/** Arr-catalog Library sync keys that do not drive TMDB Discover. */
+const DISCOVER_HIDDEN_LIBRARY_SYNC_KEYS = new Set<string>([
+  "STARTUP_SYNC_MODE",
+  "FULL_SYNC_INTERVAL_HOURS",
+  "LITE_SYNC_INTERVAL_HOURS",
+  "PLACEHOLDER_POLICY_NEVER_TAGS",
+  "PLACEHOLDER_POLICY_PINNED_TAGS",
+  "INCLUDE_SPECIALS",
+  "SKIP_PLACEHOLDERS_WHEN_MONITORED",
+  "SKIP_PLACEHOLDERS_WHEN_SERIES_MONITORED",
+]);
+
+/** TV Arr Lookahead keys; Discover movies still use PLAYBACK_MONITOR_ONLY_NO_SEARCH. */
+const DISCOVER_HIDDEN_LOOKAHEAD_KEYS = new Set<string>([
+  "TV_PLAY_MODE",
+  "EPISODES_LOOKAHEAD",
+  "PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED",
+  "PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES",
+]);
+
+function isDiscoverCatalogMode(catalogMode: unknown): boolean {
+  const mode = String(catalogMode ?? "").trim().toLowerCase();
+  return mode === "tmdb_discover" || mode === "discover" || mode === "tmdb";
+}
+
+/** True when a Behavior/Settings field should be hidden for TMDB Discover catalog mode. */
+function isDiscoverIrrelevantBehaviorField(field: SettingsField): boolean {
+  if (field.section === "Calendar") return true;
+  if (DISCOVER_HIDDEN_LIBRARY_SYNC_KEYS.has(field.key)) return true;
+  if (DISCOVER_HIDDEN_LOOKAHEAD_KEYS.has(field.key)) return true;
+  return false;
+}
+
 /** Shared onboarding section heading (behavior wizard, paths). */
 const ONBOARDING_SECTION_TITLE_CLASS =
   "mb-3 pb-2 border-b border-[#424753]/40 text-[18px] font-headline font-bold uppercase tracking-wide text-white";
@@ -404,13 +446,47 @@ function IntegrationFailureBadge(props: { title?: string; size?: "sm" | "md" }) 
 /** Wizard stacked section bodies (bottom margin between sections). */
 const WIZARD_ONBOARDING_SECTION_SURFACE_CLASS = `mb-4 ${UI_SECTION_FRAME_CLASS} px-4 py-4 sm:px-5`;
 
-const WIZARD_STEPS = [
-  { key: "paths", name: "Paths" },
+type WizardStepKey =
+  | "catalog_mode"
+  | "paths"
+  | "media"
+  | "tmdb"
+  | "arr"
+  | "catalog_sources"
+  | "behavior"
+  | "look_and_feel";
+
+type WizardStepDef = { key: WizardStepKey; name: string };
+
+const WIZARD_STEPS_ARR_CATALOG: WizardStepDef[] = [
+  { key: "catalog_mode", name: "Catalog" },
   { key: "media", name: "Media Servers" },
+  { key: "paths", name: "Paths" },
   { key: "arr", name: "ARR Services" },
   { key: "behavior", name: "Behavior" },
   { key: "look_and_feel", name: "Look and feel" },
-] as const;
+];
+
+const WIZARD_STEPS_TMDB_DISCOVER: WizardStepDef[] = [
+  { key: "catalog_mode", name: "Catalog" },
+  { key: "media", name: "Media Servers" },
+  { key: "paths", name: "Paths" },
+  { key: "tmdb", name: "TMDB" },
+  { key: "arr", name: "ARR Services" },
+  { key: "catalog_sources", name: "Sources" },
+  { key: "behavior", name: "Behavior" },
+  { key: "look_and_feel", name: "Look and feel" },
+];
+
+function wizardStepsForMode(catalogMode: unknown): WizardStepDef[] {
+  if (isDiscoverCatalogMode(catalogMode)) {
+    return WIZARD_STEPS_TMDB_DISCOVER;
+  }
+  return WIZARD_STEPS_ARR_CATALOG;
+}
+
+/** @deprecated use wizardStepsForMode — kept as Arr default for type helpers */
+const WIZARD_STEPS = WIZARD_STEPS_ARR_CATALOG;
 
 /** Onboarding Look and feel step — status messaging + poster overlay previews. */
 const LOOK_AND_FEEL_FIELD_KEYS = [
@@ -1007,10 +1083,12 @@ export function App() {
   const settingsSectionNames = useMemo(() => {
     if (!settingsPayload) return [];
     const apiSections = settingsPayload.sections ?? [];
-    return SETTINGS_SECTION_ORDER.filter(
-      (name) => VIRTUAL_SETTINGS_SECTIONS.has(name) || apiSections.some((s) => s.name === name),
-    );
-  }, [settingsPayload]);
+    const discover = isDiscoverCatalogMode(fieldValues.CATALOG_MODE);
+    return SETTINGS_SECTION_ORDER.filter((name) => {
+      if (discover && name === "Calendar") return false;
+      return VIRTUAL_SETTINGS_SECTIONS.has(name) || apiSections.some((s) => s.name === name);
+    });
+  }, [settingsPayload, fieldValues.CATALOG_MODE]);
   const firstSettingsSection = settingsSectionNames[0] ?? SETTINGS_SECTION_ORDER[0];
   const firstSettingsPath = `/settings/${SETTINGS_SECTION_SLUGS[firstSettingsSection] ?? "media-integrations"}`;
   /** Single source of truth for which Settings pane is shown (must track the URL, not a separate useState). */
@@ -1436,8 +1514,9 @@ export function App() {
 
   useEffect(() => {
     if (!onboardingVisible) return;
-    setOnboardingStepIndex((i) => Math.min(i, WIZARD_STEPS.length - 1));
-  }, [onboardingVisible]);
+    const steps = wizardStepsForMode(fieldValues.CATALOG_MODE);
+    setOnboardingStepIndex((i) => Math.min(i, steps.length - 1));
+  }, [onboardingVisible, fieldValues.CATALOG_MODE]);
 
   useEffect(() => {
     if (!authReady) return;
@@ -1849,6 +1928,14 @@ export function App() {
                 setTaskRunError(e instanceof Error ? e.message : "Failed to start collections sync");
               }
             }}
+            onRunDiscover={async () => {
+              setTaskRunError(null);
+              try {
+                await postTaskRun("discover_sync");
+              } catch (e) {
+                setTaskRunError(e instanceof Error ? e.message : "Failed to start Discover catalog sync");
+              }
+            }}
             onRequestRefresh={async (kind) => {
               setTaskRunError(null);
               setTaskRunPending(true);
@@ -2234,6 +2321,7 @@ export function App() {
         />
       );
     }
+    const wizardSteps = wizardStepsForMode(fieldValues.CATALOG_MODE);
     return (
       <OnboardingWizard
         payload={settingsPayload}
@@ -2244,7 +2332,7 @@ export function App() {
         brand={brand}
         themeMode={themeMode}
         onBack={() => setOnboardingStepIndex((i) => Math.max(0, i - 1))}
-        onNext={() => setOnboardingStepIndex((i) => Math.min(WIZARD_STEPS.length - 1, i + 1))}
+        onNext={() => setOnboardingStepIndex((i) => Math.min(wizardSteps.length - 1, i + 1))}
         onPartialSave={handlePartialSave}
         onChange={(key, value) => setFieldValues((prev) => ({ ...prev, [key]: value }))}
         onTestConnection={
@@ -6218,8 +6306,27 @@ function LookAndFeelSectionIntro(props: { embedded?: boolean }) {
     <div className={wrapClass}>
       <p className="ui-field-description text-slate-300 leading-relaxed">
         Choose how placeholders look in Plex, Jellyfin, and Emby: status text in the player and optional poster overlays on
-        library art. Changes to poster overlays apply on the next NFO refresh — use the previews below to compare styles
+        library art. Changes to poster overlays apply on the next NFO refresh. Use the previews below to compare styles
         without refreshing your whole library.
+      </p>
+    </div>
+  );
+}
+
+/** Discover Behavior / Library sync: Arr full sync is not the catalog path. */
+function DiscoverCatalogSyncIntro(props: { variant: "wizard" | "settings" }) {
+  return (
+    <div className="space-y-3">
+      <p className="ui-field-description text-slate-300 leading-relaxed">
+        Catalog mode is TMDB Discover. Finishing setup runs a Discover seed (enabled sources, Arr overlay, then
+        placeholders), not an Arr full library sync.
+      </p>
+      <p className="ui-field-description text-slate-400 leading-relaxed">
+        Refresh movie sources from Library sync Sources or a Discover run. Arr full and lite sync schedules stay off
+        while Discover owns the catalog.
+        {props.variant === "settings"
+          ? " Collections scheduling below is unchanged if you use Collections."
+          : ""}
       </p>
     </div>
   );
@@ -6676,6 +6783,35 @@ function StartupSyncModeDescription(props: { spacing: "settings" | "wizard" }) {
   );
 }
 
+/** Keep sentences in sync with `DISCOVER_STARTUP_SYNC_MODE` in `services/app_config.py`. */
+function DiscoverStartupSyncModeDescription(props: { spacing: "settings" | "wizard" }) {
+  const top = props.spacing === "settings" ? "mt-1" : "mb-2";
+  return (
+    <div className={`${top} space-y-3`}>
+      <p className="ui-field-description text-slate-300 leading-relaxed">
+        Controls whether TMDB Discover runs a catalog sync when Placeholdarr starts. Separate from Arr Startup ARR sync mode.
+      </p>
+      <ul className="list-disc space-y-2 pl-5 text-[14px] text-slate-400 leading-relaxed">
+        <li>
+          <span className="font-medium text-slate-200">On</span>
+          {" "}
+          always runs a full Discover sync (seed sources, Arr overlay, placeholders, then art).
+        </li>
+        <li>
+          <span className="font-medium text-slate-200">Auto</span>
+          {" "}
+          runs only when the Discover movie catalog is empty (first boot or after a wipe).
+        </li>
+        <li>
+          <span className="font-medium text-slate-200">Off</span>
+          {" "}
+          skips startup Discover sync. Use Tasks → Discover catalog sync when you want a run.
+        </li>
+      </ul>
+    </div>
+  );
+}
+
 function SettingsPanel(props: {
   payload: SettingsPayload | null;
   activeSection: string;
@@ -6836,6 +6972,10 @@ function SettingsPanel(props: {
   const virtualActive = isVirtualActive ? { name: props.activeSection, fields: [] as SettingsField[] } : null;
   const active =
     virtualActive ?? settingsApiSections.find((s) => s.name === props.activeSection) ?? settingsApiSections[0];
+  const isDiscoverSettings = isDiscoverCatalogMode(props.values.CATALOG_MODE);
+  const activeDisplayFields = isDiscoverSettings
+    ? active.fields.filter((f) => !isDiscoverIrrelevantBehaviorField(f))
+    : active.fields;
   const canUseAnySecondaryBehavior = canUseRadarrSecondaryBehavior || canUseSonarrSecondaryBehavior;
 
   async function runTest(field: SettingsField): Promise<{ ok: boolean; message: string } | undefined> {
@@ -6984,6 +7124,8 @@ function SettingsPanel(props: {
             {!(lookaheadRangeLocked && field.key === "EPISODES_LOOKAHEAD") &&
               (field.key === "STARTUP_SYNC_MODE" ? (
                 <StartupSyncModeDescription spacing="settings" />
+              ) : field.key === "DISCOVER_STARTUP_SYNC_MODE" ? (
+                <DiscoverStartupSyncModeDescription spacing="settings" />
               ) : field.key === "PLACEHOLDER_STATUS_UPDATES" ? (
                 <PlaceholderStatusUpdatesDescription spacing="settings" />
               ) : field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
@@ -7745,8 +7887,15 @@ function SettingsPanel(props: {
                   </div>
                 </>
               ) : active.name === "Lookahead" ? (
-                renderOnboardingStyleSectionRows(active.fields, {
-                  intro: <LookaheadSectionIntro variant="onboarding" embedded />,
+                renderOnboardingStyleSectionRows(activeDisplayFields, {
+                  intro: isDiscoverSettings ? (
+                    <p className="ui-field-description text-slate-300 leading-relaxed">
+                      On Discover movie playback, monitor-only skips Radarr search and SEARCHING status updates when a
+                      title is added or already in the library. TV Lookahead search modes apply in Arr catalog mode.
+                    </p>
+                  ) : (
+                    <LookaheadSectionIntro variant="onboarding" embedded />
+                  ),
                 })
               ) : active.name === "Status Updates" ? (
                 <>
@@ -7767,7 +7916,25 @@ function SettingsPanel(props: {
                   />
                 </>
               ) : active.name === "Library sync" ? (
-                renderOnboardingStyleSectionRows(active.fields)
+                <>
+                  {isDiscoverSettings ? (
+                    <div className="px-6 pt-5">
+                      <DiscoverCatalogSyncIntro variant="settings" />
+                    </div>
+                  ) : null}
+                  {renderOnboardingStyleSectionRows(activeDisplayFields)}
+                  <CatalogSourcesSettingsPanel
+                    enabled={isDiscoverSettings}
+                    accentHex={accent.hex}
+                  />
+                </>
+              ) : active.name === "Calendar" && isDiscoverSettings ? (
+                <div className="px-6 py-5">
+                  <p className="ui-field-description text-slate-400 leading-relaxed">
+                    Calendar sync settings apply to Arr catalog mode. TMDB Discover does not run the Arr calendar
+                    phase.
+                  </p>
+                </div>
               ) : active.name === "Optional APIs" ? (
                 (() => {
                   const fieldByKey = new Map(active.fields.map((f) => [f.key, f]));
@@ -7819,7 +7986,7 @@ function SettingsPanel(props: {
                   );
                 })()
               ) : (
-                renderOnboardingStyleSectionRows(active.fields)
+                renderOnboardingStyleSectionRows(activeDisplayFields)
               )}
             </div>
           </div>
@@ -9638,8 +9805,15 @@ function PlaybackWebhookSetupModal(props: {
     props.cardId === "plex" ? "Tautulli" : props.cardId === "jellyfin" ? "Jellyfin webhook" : "Emby webhook";
   const selectionMatchesSaved = notifier === savedNotifier;
 
-  async function handleSave() {
-    if (!cfg || selectionMatchesSaved) return;
+  async function handleDone() {
+    if (!cfg) {
+      props.onClose();
+      return;
+    }
+    if (selectionMatchesSaved) {
+      props.onClose();
+      return;
+    }
     const nextValue = useTracearr ? "tracearr" : cfg.nativeNotifier;
     setBusy(true);
     setError("");
@@ -9659,11 +9833,23 @@ function PlaybackWebhookSetupModal(props: {
   return (
     <div className="fixed inset-0 z-[85] flex items-center justify-center bg-[#0f1419]/85 backdrop-blur-sm p-6">
       <div className="flex w-full max-w-lg max-h-[min(90vh,720px)] flex-col overflow-hidden rounded-2xl border border-[#424753]/40 bg-[#171c22] shadow-2xl">
+        <div className="flex shrink-0 items-start justify-between gap-3 border-b border-[#424753]/40 px-6 py-4">
+          <div>
+            <h3 className="text-[20px] font-headline font-bold text-white">Playback setup · {cardTitle}</h3>
+            <p className="mt-1 text-[16px] text-slate-300">
+              Choose how Placeholdarr hears when someone hits play on {cardTitle}.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={props.onClose}
+            className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-[#252e3a]/80"
+            aria-label="Close"
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: 22 }}>close</span>
+          </button>
+        </div>
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-6">
-        <h3 className="text-[20px] font-headline font-bold text-white">Playback setup · {cardTitle}</h3>
-        <p className="text-[16px] text-slate-300">
-          Choose how Placeholdarr hears when someone hits play on {cardTitle}.
-        </p>
 
         <fieldset className="space-y-2">
           <legend className="text-[12px] font-headline uppercase tracking-wider text-slate-500">How we hear about playback</legend>
@@ -9771,12 +9957,13 @@ function PlaybackWebhookSetupModal(props: {
         ) : (
           <ol className="ui-field-description space-y-2 list-decimal list-inside text-[16px] text-slate-300">
             <li>In Emby, go to Settings → Notifications.</li>
-            <li>Add or edit a webhook notification.</li>
+            <li>Add or edit a webhook notification (native Emby webhooks require Premiere).</li>
             <li>
               <span className="text-slate-200">Webhook URL</span>
               <MaskedWebhookUrlField url={nativeWebhookUrl} ariaLabel={`Copy ${nativeName} webhook URL`} />
             </li>
-            <li>Enable Playback Start, then save.</li>
+            <li>Enable Playback Start. Emby must POST a JSON body; empty POSTs (common for live TV) are rejected.</li>
+            <li>Save the notification.</li>
           </ol>
         )}
 
@@ -9805,26 +9992,15 @@ function PlaybackWebhookSetupModal(props: {
         {error ? <p className="text-[14px] text-red-400">{error}</p> : null}
         </div>
 
-        <div className="flex shrink-0 items-center justify-between gap-3 border-t border-[#424753]/40 px-6 py-4">
+        <div className="flex shrink-0 items-center justify-end gap-3 border-t border-[#424753]/40 px-6 py-4">
           <button
             type="button"
-            className="text-[14px] font-headline uppercase tracking-wider text-slate-400 transition hover:text-slate-200"
-            onClick={props.onClose}
+            disabled={busy}
+            className={`px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-60 disabled:cursor-not-allowed`}
+            style={accentFilledStyle(props.accent.hex)}
+            onClick={() => void handleDone()}
           >
-            Close
-          </button>
-          <button
-            type="button"
-            disabled={busy || selectionMatchesSaved}
-            className={`px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider disabled:cursor-not-allowed ${
-              selectionMatchesSaved && !busy
-                ? "border border-[#424753]/50 bg-[#252e3a]/50 text-slate-500"
-                : `${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-60`
-            }`}
-            style={selectionMatchesSaved && !busy ? undefined : accentFilledStyle(props.accent.hex)}
-            onClick={() => void handleSave()}
-          >
-            {busy ? "Saving…" : "Save"}
+            {busy ? "Saving…" : selectionMatchesSaved ? "Done" : "Save"}
           </button>
         </div>
       </div>
@@ -10265,7 +10441,9 @@ function OnboardingWizard(props: {
   const [arrPrimaryTestStatus, setArrPrimaryTestStatus] = useState<{ radarr: boolean; sonarr: boolean }>({ radarr: false, sonarr: false });
   const [arrSecondaryTestStatus, setArrSecondaryTestStatus] = useState<{ radarr: boolean; sonarr: boolean }>({ radarr: false, sonarr: false });
   const stepContentRef = useRef<HTMLDivElement | null>(null);
-  const step = WIZARD_STEPS[props.stepIndex];
+  const wizardSteps = wizardStepsForMode(props.values.CATALOG_MODE);
+  const step = wizardSteps[Math.min(props.stepIndex, wizardSteps.length - 1)] || wizardSteps[0];
+  const isDiscoverMode = isDiscoverCatalogMode(props.values.CATALOG_MODE);
   /** Setup runs before theme toggle is exposed — keep wizard chrome and tokens on dark. */
   const wizardUiTheme: ThemeMode = "dark";
   const accent = getBrandAccent(props.brand, wizardUiTheme);
@@ -10313,7 +10491,18 @@ function OnboardingWizard(props: {
     arrPrimaryTestStatus.sonarr ||
     arrPrimaryPersistedWithCredentials(props.values, "radarr") ||
     arrPrimaryPersistedWithCredentials(props.values, "sonarr");
-  const keys = fieldsForWizardStep(step.key, props.payload.sections);
+  const hasConfirmedRadarrConnection =
+    arrPrimaryTestStatus.radarr || arrPrimaryPersistedWithCredentials(props.values, "radarr");
+  const hasTmdbKey =
+    String(props.values.TMDB_API_KEY ?? "").trim().length > 0 ||
+    Boolean(allSettingsFieldsByKey.get("TMDB_API_KEY")?.has_saved_value);
+  const [tmdbVerified, setTmdbVerified] = useState(false);
+  const [tmdbVerifyBusy, setTmdbVerifyBusy] = useState(false);
+  const [tmdbVerifyMessage, setTmdbVerifyMessage] = useState<string | null>(null);
+  const [discoverSources, setDiscoverSources] = useState<CatalogSource[]>([]);
+  const [discoverSourcesBusy, setDiscoverSourcesBusy] = useState(false);
+  const [discoverSourcesError, setDiscoverSourcesError] = useState<string | null>(null);
+  const keys = fieldsForWizardStep(step.key, props.payload.sections, props.values.CATALOG_MODE);
   const fields = props.payload.sections.flatMap((section) => section.fields).filter((f) => keys.includes(f.key));
   const [stepSaving, setStepSaving] = useState(false);
   const [stepError, setStepError] = useState<string | null>(null);
@@ -10384,9 +10573,15 @@ function OnboardingWizard(props: {
   const canProceed = previewMode
     ? true
     : (() => {
+        if (step.key === "catalog_mode") {
+          const mode = String(props.values.CATALOG_MODE ?? "").trim().toLowerCase();
+          return mode === "arr_catalog" || mode === "tmdb_discover";
+        }
         if (step.key === "paths") return hasLibraryRoot;
         if (step.key === "media") return hasConfirmedMediaConnection;
-        if (step.key === "arr") return hasConfirmedArrConnection;
+        if (step.key === "tmdb") return hasTmdbKey && tmdbVerified;
+        if (step.key === "arr") return isDiscoverMode ? hasConfirmedRadarrConnection : hasConfirmedArrConnection;
+        if (step.key === "catalog_sources") return discoverSources.length > 0;
         return true;
       })();
 
@@ -10402,6 +10597,31 @@ function OnboardingWizard(props: {
       setMediaPanelTestPassed(false);
     }
   }, [step.key]);
+
+  useEffect(() => {
+    setTmdbVerified(false);
+    setTmdbVerifyMessage(null);
+  }, [props.values.TMDB_API_KEY]);
+
+  useEffect(() => {
+    if (step.key !== "catalog_sources" || previewMode) return;
+    let cancelled = false;
+    setDiscoverSourcesBusy(true);
+    setDiscoverSourcesError(null);
+    listDiscoverSources()
+      .then((res) => {
+        if (!cancelled) setDiscoverSources(res.sources || []);
+      })
+      .catch((err) => {
+        if (!cancelled) setDiscoverSourcesError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (!cancelled) setDiscoverSourcesBusy(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [step.key, previewMode]);
 
   useEffect(() => {
     const container = stepContentRef.current;
@@ -10540,9 +10760,13 @@ function OnboardingWizard(props: {
     const tmdbKeyMissing =
       (isPosterLanguageGateKey(field.key) || (isPosterLanguageDetailKey(field.key) && posterLangFeatureOn)) &&
       !tmdbConfigured;
-    const rowMuted = projectionFieldLocked || lookaheadRangeLocked || parentDisabled || tmdbKeyMissing;
+    const discoverAnyInstanceLocked =
+      field.key === "DISCOVER_SKIP_MONITORED_ANY_INSTANCE" && radarrInstances.length < 2;
+    const rowMuted =
+      projectionFieldLocked || lookaheadRangeLocked || parentDisabled || tmdbKeyMissing || discoverAnyInstanceLocked;
     const isNested = settingsFieldIsNested(field);
-    const interactionLocked = projectionFieldLocked || lookaheadRangeLocked || parentDisabled || tmdbKeyMissing;
+    const interactionLocked =
+      projectionFieldLocked || lookaheadRangeLocked || parentDisabled || tmdbKeyMissing || discoverAnyInstanceLocked;
     return (
       <div
         key={field.key}
@@ -10567,6 +10791,8 @@ function OnboardingWizard(props: {
         {!(lookaheadRangeLocked && field.key === "EPISODES_LOOKAHEAD") &&
           (field.key === "STARTUP_SYNC_MODE" ? (
             <StartupSyncModeDescription spacing="wizard" />
+          ) : field.key === "DISCOVER_STARTUP_SYNC_MODE" ? (
+            <DiscoverStartupSyncModeDescription spacing="wizard" />
           ) : field.key === "PLACEHOLDER_STATUS_UPDATES" ? (
             <PlaceholderStatusUpdatesDescription spacing="wizard" />
           ) : field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
@@ -10609,11 +10835,24 @@ function OnboardingWizard(props: {
             className={`w-full bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${focus} ${interactionLocked ? "cursor-not-allowed" : ""}`}
             disabled={interactionLocked}
             value={(() => {
+              if (typeof displayValue === "boolean") return displayValue ? "true" : "false";
               const raw = String(displayValue ?? field.options[0]?.value ?? "");
               if (field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && raw.toLowerCase() === "off") return "summary";
+              if (
+                (field.key === "DISCOVER_SKIP_PLACEHOLDER_WHEN_MONITORED" ||
+                  field.key === "DISCOVER_SKIP_MONITORED_ANY_INSTANCE") &&
+                (raw === "True" || raw === "False")
+              ) {
+                return raw.toLowerCase();
+              }
               return raw;
             })()}
             onChange={(e) => handleWizardValueChange(field.key, e.target.value)}
+            title={
+              discoverAnyInstanceLocked
+                ? "Connect a second Radarr instance to choose whether any instance skips placeholders."
+                : undefined
+            }
           >
             {field.options.map((opt) => (
               <option key={opt.value} value={opt.value}>{opt.label}</option>
@@ -10689,7 +10928,7 @@ function OnboardingWizard(props: {
             </div>
           ) : null}
           <div className="flex items-center gap-0">
-            {WIZARD_STEPS.map((s, i) => {
+            {wizardSteps.map((s, i) => {
               const done = i < props.stepIndex;
               const active = i === props.stepIndex;
               return (
@@ -10701,7 +10940,7 @@ function OnboardingWizard(props: {
                     </div>
                     <span className="text-[12px] font-headline uppercase tracking-wider">{s.name}</span>
                   </div>
-                  {i < WIZARD_STEPS.length - 1 && (
+                  {i < wizardSteps.length - 1 && (
                     <div className={`flex-1 h-0.5 mx-3 mb-4 rounded-full transition-colors ${done ? "bg-green-500" : "bg-[#252e3a]"}`} />
                   )}
                 </div>
@@ -10712,7 +10951,52 @@ function OnboardingWizard(props: {
 
         {/* Fields */}
         <div ref={stepContentRef} className="px-6 sm:px-8 py-6 overflow-y-auto flex-1 min-h-0">
-          {step.key === "paths" ? (
+          {step.key === "catalog_mode" ? (
+            <div className="space-y-4">
+              <p className="text-[15px] text-slate-300 max-w-2xl">
+                Choose how Placeholdarr builds your placeholder catalog. This is locked for this install once setup finishes.
+              </p>
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                {[
+                  {
+                    value: "arr_catalog",
+                    title: "Arr catalog",
+                    body: "Sync titles from Radarr and Sonarr (classic Placeholdarr). Arr is the source of truth.",
+                    icon: "sync",
+                  },
+                  {
+                    value: "tmdb_discover",
+                    title: "TMDB Discover",
+                    body: "Seed movie placeholders from TMDB sources. Radarr is used for monitored/hasFile overlay and on-play add/search.",
+                    icon: "travel_explore",
+                  },
+                ].map((opt) => {
+                  const selected = String(props.values.CATALOG_MODE ?? "arr_catalog") === opt.value;
+                  return (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => props.onChange("CATALOG_MODE", opt.value)}
+                      className={`text-left rounded-xl border p-5 transition-colors ${
+                        selected
+                          ? "border-[color:var(--brand-accent)] bg-[#252e3a]"
+                          : "border-[#424753]/50 bg-[#1a222d] hover:border-[#424753]/80"
+                      }`}
+                      style={selected ? { borderColor: accent.hex } : undefined}
+                    >
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="material-symbols-outlined" style={{ color: selected ? accent.icon : undefined }}>
+                          {opt.icon}
+                        </span>
+                        <span className="font-headline uppercase tracking-wider text-[15px] text-slate-100">{opt.title}</span>
+                      </div>
+                      <p className="text-[14px] text-slate-400 leading-relaxed">{opt.body}</p>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : step.key === "paths" ? (
             <LibraryPathsForm
               fields={fields}
               values={props.values}
@@ -10722,6 +11006,150 @@ function OnboardingWizard(props: {
               layout="wizard"
               onValueChange={props.onChange}
             />
+          ) : step.key === "tmdb" ? (
+            <div className="space-y-5 max-w-xl">
+              <p className="text-[15px] text-slate-300">
+                TMDB Discover needs your own API key (v3 auth) from themoviedb.org. Placeholdarr uses it to seed movie sources.
+              </p>
+              {fields.map((field) => wizardFieldRow(field))}
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  disabled={!hasTmdbKey || tmdbVerifyBusy || previewMode}
+                  onClick={async () => {
+                    setTmdbVerifyBusy(true);
+                    setTmdbVerifyMessage(null);
+                    try {
+                      const partial = buildStepPartialValues(["TMDB_API_KEY"]);
+                      const saved = await saveSettings(partial, true, {
+                        source: "onboarding",
+                        stepKey: "tmdb",
+                        stepName: "TMDB",
+                      });
+                      if (!saved.ok) {
+                        setTmdbVerifyMessage("Save the key before verifying.");
+                        setTmdbVerified(false);
+                        return;
+                      }
+                      await props.onPartialSave?.(saved, partial);
+                      await verifyDiscoverTmdb();
+                      setTmdbVerified(true);
+                      setTmdbVerifyMessage("TMDB key accepted.");
+                    } catch (err) {
+                      setTmdbVerified(false);
+                      setTmdbVerifyMessage(err instanceof Error ? err.message : String(err));
+                    } finally {
+                      setTmdbVerifyBusy(false);
+                    }
+                  }}
+                  className={`px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-40`}
+                  style={accentFilledStyle(accent.hex)}
+                >
+                  {tmdbVerifyBusy ? "Verifying…" : "Verify TMDB key"}
+                </button>
+                {tmdbVerifyMessage ? (
+                  <span className={`text-[14px] ${tmdbVerified ? "text-green-400" : "text-red-400"}`}>{tmdbVerifyMessage}</span>
+                ) : null}
+              </div>
+            </div>
+          ) : step.key === "catalog_sources" ? (
+            <div className="space-y-5">
+              <p className="text-[15px] text-slate-300 max-w-2xl">
+                Turn on at least one TMDB movie source. Finish setup will seed titles into placeholders (rate-limited, page-bounded).
+              </p>
+              {discoverSourcesError ? <div className="text-red-400 text-[14px]">{discoverSourcesError}</div> : null}
+              <div className="space-y-3">
+                {(
+                  [
+                    {
+                      name: "Popular movies",
+                      source_type: "tmdb_popular",
+                      blurb: "TMDB popular movies list.",
+                      filters_json: { limit: 100 },
+                    },
+                    {
+                      name: "Trending movies (week)",
+                      source_type: "tmdb_trending",
+                      blurb: "What is trending on TMDB this week.",
+                      filters_json: { window: "week", limit: 100 },
+                    },
+                    {
+                      name: "Upcoming movies",
+                      source_type: "tmdb_upcoming",
+                      blurb: "Upcoming theatrical / digital releases on TMDB.",
+                      filters_json: { limit: 100 },
+                    },
+                  ] as const
+                ).map((preset) => {
+                  const matching = discoverSources.filter((s) => s.source_type === preset.source_type);
+                  const on = matching.length > 0;
+                  const stats = matching.find((s) => s.last_run_stats && typeof s.last_run_stats.fetched === "number");
+                  return (
+                    <div
+                      key={preset.source_type}
+                      className="flex items-center justify-between gap-4 rounded-lg border border-[#424753]/40 bg-[#1a222d] px-4 py-3"
+                    >
+                      <div className="min-w-0">
+                        <div className="text-[15px] text-slate-100 font-medium">{preset.name}</div>
+                        <div className="text-[13px] text-slate-500">
+                          {preset.blurb}
+                          {stats && typeof stats.last_run_stats?.fetched === "number"
+                            ? ` · last fetch ${stats.last_run_stats.fetched}`
+                            : ""}
+                        </div>
+                      </div>
+                      <label className={`flex items-center gap-3 select-none shrink-0 ${previewMode || discoverSourcesBusy ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}>
+                        <ToggleSwitch
+                          checked={on}
+                          disabled={previewMode || discoverSourcesBusy}
+                          accentHex={accent.hex}
+                          ariaLabel={`Enable ${preset.name}`}
+                          onChange={(next) => {
+                            void (async () => {
+                              if (previewMode) return;
+                              setDiscoverSourcesBusy(true);
+                              setDiscoverSourcesError(null);
+                              try {
+                                if (next) {
+                                  if (!matching.length) {
+                                    const res = await createDiscoverSource({
+                                      name: preset.name,
+                                      source_type: preset.source_type,
+                                      media_type: "movie",
+                                      filters_json: { ...preset.filters_json },
+                                      enabled: true,
+                                    });
+                                    setDiscoverSources((prev) => [...prev, res.source]);
+                                  }
+                                } else {
+                                  for (const src of matching) {
+                                    await deleteDiscoverSource(src.id);
+                                  }
+                                  setDiscoverSources((prev) =>
+                                    prev.filter((s) => s.source_type !== preset.source_type),
+                                  );
+                                }
+                              } catch (err) {
+                                setDiscoverSourcesError(err instanceof Error ? err.message : String(err));
+                              } finally {
+                                setDiscoverSourcesBusy(false);
+                              }
+                            })();
+                          }}
+                        />
+                        <span className="text-[14px] text-slate-300 w-8">{on ? "On" : "Off"}</span>
+                      </label>
+                    </div>
+                  );
+                })}
+              </div>
+              {fields.length ? (
+                <div className="space-y-5 pt-4 border-t border-[#424753]/30">
+                  <p className="text-[14px] text-slate-400">Discover policy</p>
+                  {fields.map((field) => wizardFieldRow(field))}
+                </div>
+              ) : null}
+            </div>
           ) : step.key === "media" ? (() => {
             const fieldByKey = new Map(fields.map((f) => [f.key, f]));
 
@@ -11237,6 +11665,11 @@ function OnboardingWizard(props: {
             </div>
           ) : step.key === "behavior" ? (
             <div className="space-y-6">
+              {isDiscoverMode ? (
+                <div className={WIZARD_ONBOARDING_SECTION_SURFACE_CLASS}>
+                  <DiscoverCatalogSyncIntro variant="wizard" />
+                </div>
+              ) : null}
               {BEHAVIOR_WIZARD_SECTIONS.map((sectionName) => {
                 const secFields = fields.filter((f) => f.section === sectionName);
                 if (!secFields.length) return null;
@@ -11247,7 +11680,14 @@ function OnboardingWizard(props: {
                     <h2 className={ONBOARDING_SECTION_TITLE_CLASS}>{sectionName}</h2>
                     {sectionName === "Lookahead" ? (
                       <div className={surfaceClass}>
-                        <LookaheadSectionIntro variant="onboarding" embedded />
+                        {isDiscoverMode ? (
+                          <p className="ui-field-description text-slate-300 leading-relaxed">
+                            On Discover movie playback, monitor-only skips Radarr search and SEARCHING status updates
+                            when a title is added or already in the library.
+                          </p>
+                        ) : (
+                          <LookaheadSectionIntro variant="onboarding" embedded />
+                        )}
                         <div className="mt-4 border-t border-[#424753]/25 pt-4">{fieldsBlock}</div>
                       </div>
                     ) : (
@@ -11274,7 +11714,7 @@ function OnboardingWizard(props: {
           </button>
           <div className="flex items-center gap-3">
             {props.hasUnsavedChanges && <span className="text-[14px] text-yellow-400 font-headline uppercase tracking-wider">Unsaved changes</span>}
-            {props.stepIndex < WIZARD_STEPS.length - 1 ? (
+            {props.stepIndex < wizardSteps.length - 1 ? (
               <button
                 type="button"
                 disabled={!canProceed || stepSaving}
@@ -11617,7 +12057,11 @@ function formatCalendarItemMeta(item: CalendarDay["items"][number]) {
   return bits;
 }
 
-function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sections: { name: string; fields: SettingsField[] }[]) {
+function fieldsForWizardStep(
+  stepKey: WizardStepKey,
+  sections: { name: string; fields: SettingsField[] }[],
+  catalogMode?: unknown,
+) {
   const map: Record<string, string[]> = {};
   sections.forEach((section) => {
     map[section.name] = section.fields.map((f) => f.key);
@@ -11651,11 +12095,26 @@ function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sect
   const lookahead = map.Lookahead || [];
   const statusUpdates = map["Status Updates"] || [];
   const advanced = map.Advanced || [];
+  const optionalApis = map["Optional APIs"] || [];
   const arrBehaviorFromArrIntegrations = [...arrIntegrations].filter((k) => ARR_BEHAVIOR_KEYS.has(k));
   const arrBehaviorFromLookahead = lookahead.filter((k) => ARR_BEHAVIOR_KEYS.has(k));
   const arrBehavior = arrBehaviorFromArrIntegrations.length ? arrBehaviorFromArrIntegrations : arrBehaviorFromLookahead;
   const lookaheadNonArr = lookahead.filter((k) => !ARR_BEHAVIOR_KEYS.has(k));
 
+  if (stepKey === "catalog_mode") {
+    return ["CATALOG_MODE"];
+  }
+  if (stepKey === "tmdb") {
+    return ["TMDB_API_KEY"];
+  }
+  if (stepKey === "catalog_sources") {
+    return [
+      "DISCOVER_STARTUP_SYNC_MODE",
+      "DISCOVER_SKIP_PLACEHOLDER_WHEN_MONITORED",
+      "DISCOVER_SKIP_MONITORED_ANY_INSTANCE",
+      ...librarySync.filter((k) => k.startsWith("DISCOVER_") && k !== "DISCOVER_STARTUP_SYNC_MODE"),
+    ];
+  }
   if (stepKey === "paths") {
     const pathKeys = [...paths];
     const allKeys = new Set(sections.flatMap((section) => section.fields.map((f) => f.key)));
@@ -11677,11 +12136,22 @@ function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sect
     return [...LOOK_AND_FEEL_FIELD_KEYS];
   }
   const lookAndFeelKeys = new Set<string>(LOOK_AND_FEEL_FIELD_KEYS);
-  return [
-    ...librarySync,
+  const calendarKeySet = new Set(calendar);
+  let behaviorKeys = [
+    ...librarySync.filter((k) => k !== "CATALOG_MODE" && !k.startsWith("DISCOVER_")),
     ...calendar,
     ...lookaheadNonArr,
     ...statusUpdates.filter((k) => !lookAndFeelKeys.has(k)),
     ...advanced.filter((k) => !SETTINGS_UI_HIDDEN_FIELD_KEYS.has(k) && !lookAndFeelKeys.has(k)),
+    ...optionalApis.filter((k) => k !== "TMDB_API_KEY"),
   ];
+  if (isDiscoverCatalogMode(catalogMode)) {
+    behaviorKeys = behaviorKeys.filter(
+      (k) =>
+        !DISCOVER_HIDDEN_LIBRARY_SYNC_KEYS.has(k) &&
+        !DISCOVER_HIDDEN_LOOKAHEAD_KEYS.has(k) &&
+        !calendarKeySet.has(k),
+    );
+  }
+  return behaviorKeys;
 }

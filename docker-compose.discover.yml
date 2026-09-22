@@ -1,0 +1,31 @@
+# Isolated Placeholdarr instance for TMDB-Discover experiments.
+# Uses a fresh DB and appdata; does not touch the main placeholdarr container.
+#
+#   docker compose -f docker-compose.discover.yml up -d
+#   UI: http://<host>:8004
+#
+services:
+  placeholdarr-discover:
+    image: ghcr.io/theindiearmy/placeholdarr:dev-latest
+    container_name: placeholdarr-discover
+    environment:
+      DB_HOST: placeholdarr_postgres
+      DB_PORT: "5432"
+      DB_USER: placeholdarr
+      DB_PASS: placeholdarr
+      DB_NAME: placeholdarr_discover
+      PUID: "1000"
+      PGID: "1000"
+      PLACEHOLDARR_PORT: "8000"
+    volumes:
+      - /mnt/user/appdata/placeholdarr-discover:/config
+      - /mnt/user/data/placeholdarr-discover:/placeholdarr
+    ports:
+      - "8004:8000"
+    networks:
+      - placeholdarr_db_default
+    restart: unless-stopped
+
+networks:
+  placeholdarr_db_default:
+    external: true

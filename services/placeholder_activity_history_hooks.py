@@ -12,6 +12,7 @@ from sqlalchemy.orm.attributes import get_history
 
 from core.logger import logger
 from services.postgres.models import (
+    ArrMovieOverlay,
     Episode,
     EventLog,
     Movie,
@@ -19,6 +20,7 @@ from services.postgres.models import (
     PlaceholderActivityHistory,
     Season,
     Series,
+    TmdbMovie,
 )
 from services.source_of_truth.status_intent import StatusSource
 
@@ -66,6 +68,23 @@ def _instance_and_season_for_placeholder(session, ph: Placeholder) -> tuple[str 
         if mv:
             return getattr(mv, "instance_key", None), getattr(mv, "instance_id", None), None
         return None, None, None
+    if getattr(ph, "tmdb_movie_id", None):
+        try:
+            overlay = (
+                session.query(ArrMovieOverlay)
+                .filter(ArrMovieOverlay.tmdb_id == int(ph.tmdb_movie_id))
+                .order_by(ArrMovieOverlay.id.asc())
+                .first()
+            )
+            if overlay:
+                return (
+                    getattr(overlay, "instance_key", None),
+                    getattr(overlay, "instance_id", None),
+                    None,
+                )
+        except Exception:
+            pass
+        return None, None, None
     inst_key: str | None = None
     inst_id: str | None = None
     if ph.series_id:
@@ -85,6 +104,32 @@ def _instance_and_season_for_placeholder(session, ph: Placeholder) -> tuple[str 
         if season:
             season_number = getattr(season, "season_number", None)
     return inst_key, inst_id, season_number
+
+
+def _item_type_for_placeholder(ph: Placeholder) -> str:
+    if ph.movie_id or getattr(ph, "tmdb_movie_id", None):
+        return "movie"
+    if ph.series_id and not ph.episode_id:
+        return "series"
+    return "episode"
+
+
+def _title_for_placeholder(session, ph: Placeholder) -> str:
+    """Best-effort display title at write time (Discover rows have no Arr movie_id)."""
+    if ph.movie_id:
+        mv = session.query(Movie).filter(Movie.id == ph.movie_id).first()
+        if mv and getattr(mv, "title", None):
+            return _trunc(mv.title, 512)
+    tid = getattr(ph, "tmdb_movie_id", None)
+    if tid:
+        tm = session.query(TmdbMovie).filter(TmdbMovie.tmdb_id == int(tid)).first()
+        if tm and getattr(tm, "title", None):
+            title = str(tm.title).strip()
+            year = getattr(tm, "year", None)
+            if year:
+                title = f"{title} ({int(year)})"
+            return _trunc(title, 512)
+    return ""
 
 
 def _queue_history(session, values: dict[str, Any]) -> None:
@@ -117,7 +162,7 @@ def _drain_pending_history(session: Session, _flush_context=None) -> None:
 
 def _created_history_values(session, target: Placeholder, *, occurred: datetime) -> dict[str, Any]:
     extra = target.extra if isinstance(target.extra, dict) else {}
-    item_type = "movie" if target.movie_id else "episode"
+    item_type = _item_type_for_placeholder(target)
     create_reason = extra.get("create_reason")
     reason = _trunc(str(create_reason) if create_reason is not None else "", 4000)
     lifecycle = str(target.lifecycle_status or "").strip() or "Created"
@@ -137,7 +182,7 @@ def _created_history_values(session, target: Placeholder, *, occurred: datetime)
         "instance_id": inst_id,
         "event_type": "placeholder_created",
         "path": str(target.path or ""),
-        "item_title": "",
+        "item_title": _title_for_placeholder(session, target),
         "series_title": None,
         "reason": reason,
         "status_label": status_label,
@@ -149,7 +194,7 @@ def _created_history_values(session, target: Placeholder, *, occurred: datetime)
 
 def _deleted_history_values(session, target: Placeholder, *, occurred: datetime) -> dict[str, Any]:
     extra = target.extra if isinstance(target.extra, dict) else {}
-    item_type = "movie" if target.movie_id else "episode"
+    item_type = _item_type_for_placeholder(target)
     del_reason = extra.get("delete_reason")
     reason = _trunc(str(del_reason) if del_reason is not None else "", 4000)
     lifecycle = str(target.lifecycle_status or "").strip() or "Deleted"
@@ -169,7 +214,7 @@ def _deleted_history_values(session, target: Placeholder, *, occurred: datetime)
         "instance_id": inst_id,
         "event_type": "placeholder_deleted",
         "path": str(target.path or ""),
-        "item_title": "",
+        "item_title": _title_for_placeholder(session, target),
         "series_title": None,
         "reason": reason,
         "status_label": status_label,
@@ -289,7 +334,7 @@ def _on_event_log_after_insert(_mapper, _connection, target: EventLog) -> None:
         detail = f"{detail} • {src}"
     reason = _trunc(detail, 8000)
     status_label = _trunc(new_status, 512)
-    item_type = "movie" if ph.movie_id else "episode"
+    item_type = _item_type_for_placeholder(ph)
     inst_key, inst_id, season_num = _instance_and_season_for_placeholder(session, ph)
     _queue_history(
         session,
@@ -307,7 +352,7 @@ def _on_event_log_after_insert(_mapper, _connection, target: EventLog) -> None:
             "instance_id": inst_id,
             "event_type": "placeholder_status_changed",
             "path": str(ph.path or ""),
-            "item_title": "",
+            "item_title": _title_for_placeholder(session, ph),
             "series_title": None,
             "reason": reason,
             "status_label": status_label,

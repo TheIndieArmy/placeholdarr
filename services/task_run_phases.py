@@ -75,14 +75,18 @@ def build_progress_from_phases(
     display_mode = str(mode or "full").strip().lower() or "full"
     is_lite = display_mode == "lite"
     is_placeholder_refresh = display_mode == "placeholder_refresh"
+    is_discover = display_mode in {"discover", "discover_sync", "tmdb_discover"}
     _order = {
         "arr_sync": 0,
         "fs_scan": 1,
-        "determination": 2,
-        "materialization": 3,
-        "calendar": 4,
-        "art_refresh": 5,
-        "metadata_refresh": 6,
+        "seed": 1,
+        "overlay": 2,
+        "determination": 3,
+        "materialization": 4,
+        "calendar": 5,
+        "art": 5,
+        "art_refresh": 6,
+        "metadata_refresh": 7,
     }
     sorted_phases = sorted(
         phases,
@@ -92,7 +96,19 @@ def build_progress_from_phases(
     any_working = any(str(s.get("status") or "").lower() == "working" for s in sections)
     running = overall_status.upper() == "WORKING" or any_working
     if not details:
-        if is_placeholder_refresh:
+        if is_discover:
+            mat = next((p for p in phases if p.get("key") == "materialization"), None)
+            art = next((p for p in phases if p.get("key") in {"art", "art_refresh"}), None)
+            created = 0
+            wrote = 0
+            if mat and isinstance(mat.get("metrics"), list):
+                m = next((x for x in mat["metrics"] if x.get("label") == "Placeholders created"), None)
+                created = m.get("value") if m else 0
+            if art and isinstance(art.get("metrics"), list):
+                m = next((x for x in art["metrics"] if x.get("label") == "Posters wrote"), None)
+                wrote = m.get("value") if m else 0
+            details = f"Discover · created {created} · posters {wrote}"
+        elif is_placeholder_refresh:
             meta = next((p for p in phases if p.get("key") == "metadata_refresh"), None)
             art = next((p for p in phases if p.get("key") == "art_refresh"), None)
             parts: list[str] = []
@@ -113,19 +129,23 @@ def build_progress_from_phases(
                 details = f"Mode {display_mode}"
 
     sort_anchor = completed_at if completed_at else started_at
+    if is_discover:
+        job_type = "discover_sync_progress"
+        display_name = "Discover Catalog Sync Progress"
+    elif is_placeholder_refresh:
+        job_type = "placeholder_refresh_progress"
+        display_name = "Placeholder Refresh Progress"
+    elif is_lite:
+        job_type = "lite_sync_progress"
+        display_name = "Lite Sync Progress"
+    else:
+        job_type = "full_sync_progress"
+        display_name = "Full Sync Progress"
     return {
         "id": f"task-run-{task_run_id}",
         "type": "job",
-        "job_type": (
-            "placeholder_refresh_progress"
-            if is_placeholder_refresh
-            else ("lite_sync_progress" if is_lite else "full_sync_progress")
-        ),
-        "display_name": (
-            "Placeholder Refresh Progress"
-            if is_placeholder_refresh
-            else ("Lite Sync Progress" if is_lite else "Full Sync Progress")
-        ),
+        "job_type": job_type,
+        "display_name": display_name,
         "status": overall_status.upper(),
         "details": details,
         "error": error_message,
@@ -137,12 +157,91 @@ def build_progress_from_phases(
     }
 
 
+def metrics_from_discover_seed(seed: dict[str, Any] | None) -> list[dict[str, Any]]:
+    seed = seed if isinstance(seed, dict) else {}
+    metrics = [
+        {"label": "Sources", "value": int(seed.get("sources") or 0)},
+        {"label": "Fetched", "value": int(seed.get("fetched") or 0)},
+        {"label": "Created", "value": int(seed.get("created") or 0)},
+        {"label": "Upserted", "value": int(seed.get("upserted") or 0)},
+    ]
+    partial = int(seed.get("partial_sources") or 0)
+    if partial:
+        metrics.append({"label": "Partial sources", "value": partial})
+    errors = seed.get("errors") if isinstance(seed.get("errors"), list) else []
+    if errors:
+        metrics.append({"label": "Source errors", "value": len(errors)})
+    return metrics
+
+
+def metrics_from_discover_overlay(overlay: dict[str, Any] | None) -> list[dict[str, Any]]:
+    overlay = overlay if isinstance(overlay, dict) else {}
+    metrics = [
+        {"label": "Radarr instances", "value": int(overlay.get("instances") or 0)},
+        {"label": "Arr movies scanned", "value": int(overlay.get("rows") or 0)},
+        {"label": "Catalog matches", "value": int(overlay.get("matched") or 0)},
+        {"label": "State changes", "value": int(overlay.get("changed") or 0)},
+    ]
+    if overlay.get("error"):
+        metrics.append({"label": "Error", "value": str(overlay.get("error"))[:120]})
+    errors = overlay.get("errors") if isinstance(overlay.get("errors"), list) else []
+    if errors:
+        metrics.append({"label": "Instance errors", "value": len(errors)})
+    return metrics
+
+
+def metrics_from_discover_determination(det: dict[str, Any] | None) -> list[dict[str, Any]]:
+    det = det if isinstance(det, dict) else {}
+    metrics = [
+        {"label": "Updated", "value": int(det.get("updated") or 0)},
+        {"label": "Needs placeholder", "value": int(det.get("needs") or 0)},
+        {"label": "Exists", "value": int(det.get("exists") or 0)},
+        {"label": "Not needed", "value": int(det.get("not_needed") or 0)},
+        {"label": "Obsolete", "value": int(det.get("obsolete") or 0)},
+    ]
+    if det.get("scoped"):
+        metrics.insert(0, {"label": "Scoped ids", "value": int(det.get("scoped_count") or 0)})
+    if det.get("skipped"):
+        metrics.append({"label": "Skipped", "value": str(det.get("reason") or "yes")[:80]})
+    return metrics
+
+
+def metrics_from_discover_materialization(mat: dict[str, Any] | None) -> list[dict[str, Any]]:
+    mat = mat if isinstance(mat, dict) else {}
+    return [
+        {"label": "Candidates", "value": int(mat.get("candidates") or 0)},
+        {"label": "Placeholders created", "value": int(mat.get("created") or 0)},
+        {"label": "Placeholders removed", "value": int(mat.get("removed") or 0)},
+        {"label": "No-op", "value": int(mat.get("noop") or 0)},
+        {"label": "Errors", "value": int(mat.get("errors") or 0)},
+        {"label": "Media refresh folders", "value": int(mat.get("media_refresh_folders") or 0)},
+    ]
+
+
+def metrics_from_discover_art(art: dict[str, Any] | None) -> list[dict[str, Any]]:
+    art = art if isinstance(art, dict) else {}
+    return [
+        {"label": "Posters wrote", "value": int(art.get("wrote") or 0)},
+        {"label": "Already existed", "value": int(art.get("exists") or 0)},
+        {"label": "Errors", "value": int(art.get("errors") or 0)},
+        {"label": "Skipped", "value": int(art.get("skipped") or 0)},
+        {"label": "Media refresh folders", "value": int(art.get("media_refresh_folders") or 0)},
+    ]
+
+
 class TaskRunPhaseTracker:
     """Record timed phases on a scheduled_task_run row."""
 
-    def __init__(self, task_run_id: int, *, started_at: datetime | None = None) -> None:
+    def __init__(
+        self,
+        task_run_id: int,
+        *,
+        started_at: datetime | None = None,
+        mode: str = "full",
+    ) -> None:
         self.task_run_id = int(task_run_id)
         self.started_at = started_at or _utc_now()
+        self.mode = str(mode or "full").strip().lower() or "full"
         self._phases: list[dict[str, Any]] = []
         self._open: dict[str, datetime] = {}
 
@@ -203,14 +302,17 @@ class TaskRunPhaseTracker:
         return list(self._phases)
 
     def _persist(self, *, extra_summary: dict[str, Any] | None = None) -> None:
+        overall = "WORKING" if any(p.get("status") == "working" for p in self._phases) else "DONE"
         payload: dict[str, Any] = {
+            "mode": self.mode,
+            "heartbeat_at": _iso(_utc_now()),
             "phases": self._phases,
             "progress": build_progress_from_phases(
                 task_run_id=self.task_run_id,
-                mode="full",
+                mode=self.mode,
                 started_at=self.started_at,
                 phases=self._phases,
-                overall_status="WORKING" if any(p.get("status") == "working" for p in self._phases) else "DONE",
+                overall_status=overall,
             ),
         }
         if extra_summary:
