@@ -676,6 +676,119 @@ def _dedupe_rows(rows: list[Any]) -> list[Any]:
     return list(deduped.values())
 
 
+def _movie_matches_file_path(session, movie: Movie, file_path: str | None) -> bool:
+    fp = _normalize_path(file_path)
+    if not fp:
+        return False
+    if _normalize_path(getattr(movie, 'radarr_filepath', None)) == fp:
+        return True
+    if _normalize_path(getattr(movie, 'placeholder_filepath', None)) == fp:
+        return True
+    mid = int(getattr(movie, 'id', 0) or 0)
+    if not mid:
+        return False
+    return bool(
+        session.query(Placeholder.id)
+        .filter(Placeholder.movie_id == mid, Placeholder.path == fp)
+        .first()
+    )
+
+
+def _episode_matches_file_path(session, episode: Episode, file_path: str | None) -> bool:
+    fp = _normalize_path(file_path)
+    if not fp:
+        return False
+    if _normalize_path(getattr(episode, 'sonarr_filepath', None)) == fp:
+        return True
+    if _normalize_path(getattr(episode, 'placeholder_filepath', None)) == fp:
+        return True
+    eid = int(getattr(episode, 'id', 0) or 0)
+    if not eid:
+        return False
+    return bool(
+        session.query(Placeholder.id)
+        .filter(Placeholder.episode_id == eid, Placeholder.path == fp)
+        .first()
+    )
+
+
+def _movies_for_media_id_stamp(session, movie_rows: list[Movie], context: dict[str, Any]) -> list[Movie]:
+    """Restrict plex/jellyfin ID seeding to the path-matched Arr row when possible."""
+    path_info = context.get('path_info') if isinstance(context.get('path_info'), dict) else {}
+    movie_id = path_info.get('movie_id')
+    if movie_id is not None:
+        try:
+            want = int(movie_id)
+        except (TypeError, ValueError):
+            want = None
+        if want is not None:
+            matched = [row for row in movie_rows if int(getattr(row, 'id', 0) or 0) == want]
+            if matched:
+                return matched
+    file_path = context.get('file_path')
+    if not _normalize_path(file_path):
+        return []
+    return [row for row in movie_rows if _movie_matches_file_path(session, row, file_path)]
+
+
+def _episodes_for_media_id_stamp(
+    session,
+    episodes: list[Episode],
+    *,
+    file_path: str | None,
+    season_number: int | None = None,
+    episode_number: int | None = None,
+) -> list[Episode]:
+    """Prefer path-matched episodes; otherwise keep S/E (or single-target) fallback."""
+    if _normalize_path(file_path):
+        path_matched = [ep for ep in episodes if _episode_matches_file_path(session, ep, file_path)]
+        if path_matched:
+            return path_matched
+        return []
+    out: list[Episode] = []
+    for ep in episodes:
+        if season_number is not None and episode_number is not None:
+            if ep.season_number == season_number and ep.episode_number == episode_number:
+                out.append(ep)
+        elif len(episodes) == 1:
+            out.append(ep)
+    return out
+
+
+def _stamp_movie_media_ids(session, rows: list[Movie], *, plex_key: str, jelly_key: str) -> None:
+    if not plex_key and not jelly_key:
+        return
+    for row in rows:
+        changed = False
+        if plex_key and (row.plex_id != plex_key or row.plex_dummy_id != plex_key):
+            row.plex_id = plex_key
+            row.plex_dummy_id = plex_key
+            changed = True
+        if jelly_key and getattr(row, 'jellyfin_id', None) != jelly_key:
+            row.jellyfin_id = jelly_key
+            changed = True
+        if changed:
+            row.updated_at = func.now()
+            session.add(row)
+
+
+def _stamp_episode_media_ids(session, episodes: list[Episode], *, plex_key: str, jelly_key: str) -> None:
+    if not plex_key and not jelly_key:
+        return
+    for ep in episodes:
+        changed = False
+        if plex_key and (ep.plex_id != plex_key or ep.plex_dummy_id != plex_key):
+            ep.plex_id = plex_key
+            ep.plex_dummy_id = plex_key
+            changed = True
+        if jelly_key and getattr(ep, 'jellyfin_id', None) != jelly_key:
+            ep.jellyfin_id = jelly_key
+            changed = True
+        if changed:
+            ep.updated_at = func.now()
+            session.add(ep)
+
+
 def _resolve_media_from_path(session, path: str | None) -> dict[str, Any]:
     file_path = _normalize_path(path)
     if not file_path:
@@ -1701,24 +1814,14 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
     plex_key = _extract_plex_rating_key(payload)
     jelly_key = _extract_jellyfin_item_id(payload)
     if plex_key or jelly_key:
-        for t in targets:
-            match = False
-            if season_number is not None and episode_number is not None:
-                match = (t.season_number == season_number and t.episode_number == episode_number)
-            elif len(targets) == 1:
-                match = True
-            if match:
-                changed = False
-                if plex_key and (t.plex_id != plex_key or t.plex_dummy_id != plex_key):
-                    t.plex_id = plex_key
-                    t.plex_dummy_id = plex_key
-                    changed = True
-                if jelly_key and getattr(t, 'jellyfin_id', None) != jelly_key:
-                    t.jellyfin_id = jelly_key
-                    changed = True
-                if changed:
-                    t.updated_at = func.now()
-                    session.add(t)
+        stamp_targets = _episodes_for_media_id_stamp(
+            session,
+            targets,
+            file_path=_extract_file_path(payload),
+            season_number=season_number,
+            episode_number=episode_number,
+        )
+        _stamp_episode_media_ids(session, stamp_targets, plex_key=plex_key or '', jelly_key=jelly_key or '')
 
     base_url, api_key = _resolve_endpoint('series', instance_key=instance_key or None)
     if not base_url or not api_key:
@@ -1867,18 +1970,8 @@ def _process_movie_playback(session, payload: dict[str, Any], context: dict[str,
     plex_key = str(context.get('plex_id') or '').strip()
     jelly_key = str(context.get('jellyfin_id') or '').strip()
     if plex_key or jelly_key:
-        for mrow in movie_rows:
-            changed = False
-            if plex_key and (mrow.plex_id != plex_key or mrow.plex_dummy_id != plex_key):
-                mrow.plex_id = plex_key
-                mrow.plex_dummy_id = plex_key
-                changed = True
-            if jelly_key and getattr(mrow, 'jellyfin_id', None) != jelly_key:
-                mrow.jellyfin_id = jelly_key
-                changed = True
-            if changed:
-                mrow.updated_at = func.now()
-                session.add(mrow)
+        stamp_rows = _movies_for_media_id_stamp(session, movie_rows, context)
+        _stamp_movie_media_ids(session, stamp_rows, plex_key=plex_key, jelly_key=jelly_key)
 
     active_rows = _active_rows_by_instance(movie_rows)
     playback_kind = str(context.get('playback_kind') or 'unknown')
@@ -2239,18 +2332,8 @@ def apply_search_queued_for_playback(session, payload: dict[str, Any]) -> int:
         plex_key = str(context.get('plex_id') or '').strip()
         jelly_key = str(context.get('jellyfin_id') or '').strip()
         if plex_key or jelly_key:
-            for row in active_rows.values():
-                changed = False
-                if plex_key and (row.plex_id != plex_key or row.plex_dummy_id != plex_key):
-                    row.plex_id = plex_key
-                    row.plex_dummy_id = plex_key
-                    changed = True
-                if jelly_key and getattr(row, 'jellyfin_id', None) != jelly_key:
-                    row.jellyfin_id = jelly_key
-                    changed = True
-                if changed:
-                    row.updated_at = func.now()
-                    session.add(row)
+            stamp_rows = _movies_for_media_id_stamp(session, list(active_rows.values()), context)
+            _stamp_movie_media_ids(session, stamp_rows, plex_key=plex_key, jelly_key=jelly_key)
         for row in active_rows.values():
             ph_rows = (
                 session.query(Placeholder)
@@ -2281,7 +2364,15 @@ def apply_search_queued_for_playback(session, payload: dict[str, Any]) -> int:
             file_path=context.get('file_path'),
         )
         active_rows = _active_rows_by_instance(series_rows)
+        path_info = context.get('path_info') if isinstance(context.get('path_info'), dict) else {}
+        path_series_id = path_info.get('series_id')
+        try:
+            path_series_id_int = int(path_series_id) if path_series_id is not None else None
+        except (TypeError, ValueError):
+            path_series_id_int = None
         for series_row in active_rows.values():
+            season_number = None
+            episode_number = None
             try:
                 season_number, episode_number = _extract_season_episode(payload)
                 targets, _meta = _collect_episode_targets(session, series_row, season_number, episode_number)
@@ -2290,24 +2381,35 @@ def apply_search_queued_for_playback(session, payload: dict[str, Any]) -> int:
             plex_key = str(context.get('plex_id') or '').strip()
             jelly_key = str(context.get('jellyfin_id') or '').strip()
             if plex_key or jelly_key:
-                for t in targets:
-                    match = False
-                    if season_number is not None and episode_number is not None:
-                        match = (t.season_number == season_number and t.episode_number == episode_number)
-                    elif len(targets) == 1:
-                        match = True
-                    if match:
-                        changed = False
-                        if plex_key and (t.plex_id != plex_key or t.plex_dummy_id != plex_key):
-                            t.plex_id = plex_key
-                            t.plex_dummy_id = plex_key
-                            changed = True
-                        if jelly_key and getattr(t, 'jellyfin_id', None) != jelly_key:
-                            t.jellyfin_id = jelly_key
-                            changed = True
-                        if changed:
-                            t.updated_at = func.now()
-                            session.add(t)
+                # Only stamp the path-matched series (or path-matched episodes) so sibling
+                # Arr rows do not inherit the played Plex/Jellyfin item id.
+                if path_series_id_int is not None:
+                    if int(getattr(series_row, 'id', 0) or 0) != path_series_id_int:
+                        stamp_targets = []
+                    else:
+                        stamp_targets = _episodes_for_media_id_stamp(
+                            session,
+                            targets,
+                            file_path=context.get('file_path'),
+                            season_number=season_number,
+                            episode_number=episode_number,
+                        )
+                elif _normalize_path(context.get('file_path')):
+                    stamp_targets = _episodes_for_media_id_stamp(
+                        session,
+                        targets,
+                        file_path=context.get('file_path'),
+                        season_number=None,
+                        episode_number=None,
+                    )
+                else:
+                    stamp_targets = []
+                _stamp_episode_media_ids(
+                    session,
+                    stamp_targets,
+                    plex_key=plex_key,
+                    jelly_key=jelly_key,
+                )
             episode_ids = [int(ep.id) for ep in targets if getattr(ep, 'id', None)]
             if not episode_ids:
                 continue

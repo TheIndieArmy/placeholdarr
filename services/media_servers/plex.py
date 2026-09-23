@@ -630,11 +630,8 @@ def refresh_plex_sections(
 
     from services.library_destinations import (
         all_plex_section_ids,
-        default_movie_4k_plex_section_id,
-        default_movie_plex_section_id,
-        default_tv_4k_plex_section_id,
-        default_tv_plex_section_id,
         parse_library_destination_map,
+        plex_section_ids_for_arr_type,
     )
 
     section_ids: list[int] = []
@@ -643,33 +640,9 @@ def refresh_plex_sections(
     else:
         map_rows = parse_library_destination_map()
         if has_movies:
-            for sid in (default_movie_plex_section_id(), default_movie_4k_plex_section_id()):
-                if sid is not None:
-                    section_ids.append(int(sid))
-            for row in map_rows:
-                if str(row.get("arr_type") or "").lower() != "radarr":
-                    continue
-                sid = row.get("plex_section_id")
-                if sid is None:
-                    continue
-                try:
-                    section_ids.append(int(sid))
-                except (TypeError, ValueError):
-                    continue
+            section_ids.extend(plex_section_ids_for_arr_type("radarr", map_rows=map_rows))
         if has_episodes:
-            for sid in (default_tv_plex_section_id(), default_tv_4k_plex_section_id()):
-                if sid is not None:
-                    section_ids.append(int(sid))
-            for row in map_rows:
-                if str(row.get("arr_type") or "").lower() != "sonarr":
-                    continue
-                sid = row.get("plex_section_id")
-                if sid is None:
-                    continue
-                try:
-                    section_ids.append(int(sid))
-                except (TypeError, ValueError):
-                    continue
+            section_ids.extend(plex_section_ids_for_arr_type("sonarr", map_rows=map_rows))
 
     deduped: list[int] = []
     seen: set[int] = set()

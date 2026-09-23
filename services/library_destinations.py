@@ -465,6 +465,45 @@ def all_plex_section_ids(*, map_rows: list[dict[str, Any]] | None = None) -> lis
     return out
 
 
+def plex_section_ids_for_arr_type(
+    arr_type: str,
+    *,
+    map_rows: list[dict[str, Any]] | None = None,
+) -> list[int]:
+    """Plex section IDs for Radarr (movies) or Sonarr (TV) defaults and map rows."""
+    want = str(arr_type or "").strip().lower()
+    rows = map_rows if map_rows is not None else parse_library_destination_map()
+    ids: list[int] = []
+    if want == "radarr":
+        for sid in (default_movie_plex_section_id(), default_movie_4k_plex_section_id()):
+            if sid is not None:
+                ids.append(int(sid))
+    elif want == "sonarr":
+        for sid in (default_tv_plex_section_id(), default_tv_4k_plex_section_id()):
+            if sid is not None:
+                ids.append(int(sid))
+    else:
+        return []
+    for row in rows:
+        if str(row.get("arr_type") or "").strip().lower() != want:
+            continue
+        sid = row.get("plex_section_id")
+        if sid is None:
+            continue
+        try:
+            ids.append(int(sid))
+        except (TypeError, ValueError):
+            continue
+    out: list[int] = []
+    seen: set[int] = set()
+    for sid in ids:
+        if sid in seen or sid < 1:
+            continue
+        seen.add(sid)
+        out.append(sid)
+    return out
+
+
 def section_ids_for_paths(
     paths: list[str] | None,
     *,

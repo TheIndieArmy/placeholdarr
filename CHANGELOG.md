@@ -7,6 +7,22 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-09-23
+
+### Summary
+
+- **Arr save validation order**: Catalog transplants/renames wait until Arr settings validation succeeds.
+- **Shared destination rematerialize**: Sibling-owned placeholder files are no longer unlinked on dest moves.
+- **Playback media ID seeding**: Plex/Jellyfin ids stamp only the path-matched Arr row.
+- **Plex lookup sections**: Movie and show lookups scan only matching Plex library types.
+
+### Fixed
+
+- **Arr save validation order**: URL transplants and instance-key renames run only after Arr settings validation succeeds, so a rejected save cannot leave the catalog rewritten.
+- **Shared destination rematerialize**: Destination moves no longer unlink placeholder files still referenced by a sibling Arr instance.
+- **Playback media ID seeding**: Plex/Jellyfin item ids from playback stamp only the path-matched Arr row, not every TMDB/IMDb sibling.
+- **Plex lookup sections**: Movie and show fallback lookups scan only matching movie or TV Plex sections.
+
 ## [0.10.0] - 2026-09-23
 
 ### Summary

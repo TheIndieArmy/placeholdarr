@@ -11,6 +11,10 @@ from services.library_destinations import (
     resolve_movie_dest,
     resolve_series_dest,
 )
+from services.source_of_truth.arr_share_guard import (
+    filter_episode_disk_cleanup_paths,
+    filter_movie_disk_cleanup_paths,
+)
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Movie, Season, Series
 
@@ -69,7 +73,9 @@ def recompute_catalog_placeholder_folders(session) -> dict[str, Any]:
         movie.placeholder_folder = new_folder
         stats["movies_updated"] += 1
         if old_filepath:
-            _safe_unlink(str(old_filepath))
+            safe = filter_movie_disk_cleanup_paths(session, movie, [str(old_filepath)])
+            if safe:
+                _safe_unlink(safe[0])
             movie.placeholder_filepath = None
             stats["movies_cleared_filepath"] += 1
         rid = getattr(movie, "id", None)
@@ -129,7 +135,13 @@ def recompute_catalog_placeholder_folders(session) -> dict[str, Any]:
                         stats["episodes_updated"] += 1
                     old_filepath = getattr(episode, "placeholder_filepath", None)
                     if old_filepath:
-                        _safe_unlink(str(old_filepath))
+                        safe = filter_episode_disk_cleanup_paths(
+                            session,
+                            series=series,
+                            paths=[str(old_filepath)],
+                        )
+                        if safe:
+                            _safe_unlink(safe[0])
                         episode.placeholder_filepath = None
                         stats["episodes_cleared_filepath"] += 1
                     eid = getattr(episode, "id", None)

@@ -197,9 +197,9 @@ def find_show_by_id(tvdb_id, title=None, preferred_section_id: int | None = None
         return None
 
     try:
-        from services.library_destinations import all_plex_section_ids, parse_library_destination_map
+        from services.library_destinations import parse_library_destination_map, plex_section_ids_for_arr_type
 
-        section_ids = list(all_plex_section_ids(map_rows=parse_library_destination_map()))
+        section_ids = list(plex_section_ids_for_arr_type("sonarr", map_rows=parse_library_destination_map()))
         tv_default = getattr(settings, "PLEX_TV_SECTION_ID", None)
         if tv_default is not None:
             tid = int(tv_default)
@@ -221,6 +221,10 @@ def find_show_by_id(tvdb_id, title=None, preferred_section_id: int | None = None
             try:
                 tv_section = plex.library.sectionByID(int(section_id))
             except Exception:
+                continue
+            # Skip non-show libraries (for example a preferred movie section id).
+            section_type = str(getattr(tv_section, "type", None) or getattr(tv_section, "TYPE", None) or "").lower()
+            if section_type and section_type not in {"show", "tv", "tvshows", "tv show"}:
                 continue
             all_shows = _cached_section_all(tv_section, "TV show")
 
@@ -257,9 +261,9 @@ def find_movie_by_id(tmdb_id, title=None, year=None, preferred_section_id: int |
         return None
 
     try:
-        from services.library_destinations import all_plex_section_ids, parse_library_destination_map
+        from services.library_destinations import parse_library_destination_map, plex_section_ids_for_arr_type
 
-        section_ids = list(all_plex_section_ids(map_rows=parse_library_destination_map()))
+        section_ids = list(plex_section_ids_for_arr_type("radarr", map_rows=parse_library_destination_map()))
         movie_default = getattr(settings, "PLEX_MOVIE_SECTION_ID", None)
         if movie_default is not None:
             mid = int(movie_default)
@@ -281,6 +285,12 @@ def find_movie_by_id(tmdb_id, title=None, year=None, preferred_section_id: int |
             try:
                 movie_section = plex.library.sectionByID(int(section_id))
             except Exception:
+                continue
+            # Skip non-movie libraries (for example a preferred TV section id).
+            section_type = str(
+                getattr(movie_section, "type", None) or getattr(movie_section, "TYPE", None) or ""
+            ).lower()
+            if section_type and section_type not in {"movie", "movies"}:
                 continue
             all_movies = _cached_section_all(movie_section, "movie")
 

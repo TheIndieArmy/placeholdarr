@@ -1858,6 +1858,9 @@ def save_settings(
     arr_transplant_movie_ids: list[int] = []
     arr_transplant_episode_ids: list[int] = []
     arr_instances_previous_json: str | None = None
+    arr_rewrite_prev: str | None = None
+    arr_rewrite_incoming: str | None = None
+    arr_rewrite_merged: str | None = None
     try:
         for key, raw_value in values.items():
             if key not in SETTINGS_SCHEMA:
@@ -2009,49 +2012,12 @@ def save_settings(
                 validated["ARR_INSTANCES_JSON"] = prev_raw
             else:
                 validated["ARR_INSTANCES_JSON"] = merged
-                try:
-                    from services.source_of_truth.arr_instance_key_rewrite import (
-                        apply_instance_key_renames,
-                        prepare_url_transplants,
-                    )
-
-                    dest_for_rewrite = None
-                    if "LIBRARY_DESTINATION_MAP_JSON" in validated:
-                        dest_for_rewrite = str(validated.get("LIBRARY_DESTINATION_MAP_JSON") or "")
-                    transplant_prep = prepare_url_transplants(
-                        prev_raw,
-                        incoming_raw,
-                        destination_map_json=dest_for_rewrite,
-                    )
-                    arr_transplant_movie_ids = list(transplant_prep.get("movie_ids") or [])
-                    arr_transplant_episode_ids = list(transplant_prep.get("episode_ids") or [])
-                    rewritten_dest = transplant_prep.get("destination_map_json")
-                    if (
-                        transplant_prep.get("ok")
-                        and rewritten_dest is not None
-                        and "LIBRARY_DESTINATION_MAP_JSON" in validated
-                        and str(rewritten_dest) != str(validated.get("LIBRARY_DESTINATION_MAP_JSON") or "")
-                    ):
-                        validated["LIBRARY_DESTINATION_MAP_JSON"] = rewritten_dest
-                        dest_for_rewrite = str(rewritten_dest)
-                    rewrite = apply_instance_key_renames(
-                        prev_raw,
-                        merged,
-                        destination_map_json=dest_for_rewrite,
-                    )
-                    rewritten_dest = rewrite.get("destination_map_json")
-                    if (
-                        rewrite.get("ok")
-                        and rewritten_dest is not None
-                        and "LIBRARY_DESTINATION_MAP_JSON" in validated
-                        and str(rewritten_dest) != str(validated.get("LIBRARY_DESTINATION_MAP_JSON") or "")
-                    ):
-                        validated["LIBRARY_DESTINATION_MAP_JSON"] = rewritten_dest
-                except Exception as rewrite_exc:
-                    logger.error(
-                        f"ARR instance_key rename rewrite after settings save failed: {rewrite_exc}",
-                        extra={"emoji_type": "error"},
-                    )
+                # Defer catalog transplants/renames until after validation succeeds so a
+                # rejected save (for example over the instance limit) cannot leave the
+                # catalog rewritten while ARR_INSTANCES_JSON stays unchanged.
+                arr_rewrite_prev = prev_raw
+                arr_rewrite_incoming = incoming_raw
+                arr_rewrite_merged = merged
 
         arr_instances_json = str(validated.get("ARR_INSTANCES_JSON", getattr(settings, "ARR_INSTANCES_JSON", "")) or "").strip()
         arr_limit = max(1, int(getattr(settings, "ARR_MAX_INSTANCES_PER_TYPE", 4) or 4))
@@ -2146,6 +2112,51 @@ def save_settings(
                 extra={"emoji_type": "warning"},
             )
             return {"ok": False, "errors": errors}
+
+        if arr_rewrite_merged is not None:
+            try:
+                from services.source_of_truth.arr_instance_key_rewrite import (
+                    apply_instance_key_renames,
+                    prepare_url_transplants,
+                )
+
+                dest_for_rewrite = None
+                if "LIBRARY_DESTINATION_MAP_JSON" in validated:
+                    dest_for_rewrite = str(validated.get("LIBRARY_DESTINATION_MAP_JSON") or "")
+                transplant_prep = prepare_url_transplants(
+                    arr_rewrite_prev or "",
+                    arr_rewrite_incoming or "",
+                    destination_map_json=dest_for_rewrite,
+                )
+                arr_transplant_movie_ids = list(transplant_prep.get("movie_ids") or [])
+                arr_transplant_episode_ids = list(transplant_prep.get("episode_ids") or [])
+                rewritten_dest = transplant_prep.get("destination_map_json")
+                if (
+                    transplant_prep.get("ok")
+                    and rewritten_dest is not None
+                    and "LIBRARY_DESTINATION_MAP_JSON" in validated
+                    and str(rewritten_dest) != str(validated.get("LIBRARY_DESTINATION_MAP_JSON") or "")
+                ):
+                    validated["LIBRARY_DESTINATION_MAP_JSON"] = rewritten_dest
+                    dest_for_rewrite = str(rewritten_dest)
+                rewrite = apply_instance_key_renames(
+                    arr_rewrite_prev or "",
+                    arr_rewrite_merged,
+                    destination_map_json=dest_for_rewrite,
+                )
+                rewritten_dest = rewrite.get("destination_map_json")
+                if (
+                    rewrite.get("ok")
+                    and rewritten_dest is not None
+                    and "LIBRARY_DESTINATION_MAP_JSON" in validated
+                    and str(rewritten_dest) != str(validated.get("LIBRARY_DESTINATION_MAP_JSON") or "")
+                ):
+                    validated["LIBRARY_DESTINATION_MAP_JSON"] = rewritten_dest
+            except Exception as rewrite_exc:
+                logger.error(
+                    f"ARR instance_key rename rewrite after settings save failed: {rewrite_exc}",
+                    extra={"emoji_type": "error"},
+                )
 
         restart_required_keys: list[str] = []
         saved_keys: list[str] = []
