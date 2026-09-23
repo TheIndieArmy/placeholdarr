@@ -165,13 +165,9 @@ async def tasks_scheduled():
             {
                 "task_key": task_key,
                 "label": TASK_LABELS.get(task_key, task_key),
-                "enabled": bool(sched.get("enabled")) if task_key != "discover_sync" else True,
+                "enabled": bool(sched.get("enabled")),
                 "interval_hours": interval,
-                "interval_label": (
-                    "Manual / on setup"
-                    if task_key == "discover_sync"
-                    else _interval_label(interval)
-                ),
+                "interval_label": _interval_label(interval),
                 "next_run": sched.get("next_run"),
                 "running": working is not None,
                 "last_run": _iso(last.ended_at or last.started_at) if last else None,

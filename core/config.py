@@ -215,6 +215,8 @@ class Settings(BaseSettings):
     DISCOVER_SKIP_MONITORED_ANY_INSTANCE: bool = True
     # Discover boot: run full catalog sync, only when empty, or skip.
     DISCOVER_STARTUP_SYNC_MODE: Literal["on", "auto", "off"] = "auto"
+    # How often to run Discover catalog sync (seed, overlay, placeholders). 0 disables.
+    DISCOVER_SYNC_INTERVAL_HOURS: int = 24
     # Separate filesystem root for TMDB Discover placeholders (not Arr LIBRARY_ROOT).
     # Discover movies land under ``{DISCOVER_LIBRARY_ROOT}/movies``.
     DISCOVER_LIBRARY_ROOT: str = ""

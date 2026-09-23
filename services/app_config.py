@@ -377,6 +377,21 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "DISCOVER_SYNC_INTERVAL_HOURS",
+            {
+                "section": "Library sync",
+                "label": "Scheduled Discover catalog sync interval (hours)",
+                "description": (
+                    "How often to seed enabled TMDB sources, refresh the Arr overlay, and create or update "
+                    "Discover placeholders (including art). Default 24 hours. Set to 0 to disable the "
+                    "scheduled job (Tasks → Run and Catalog Sources still work)."
+                ),
+                "type": "int",
+                "min": 0,
+                "restart_required": True,
+            },
+        ),
+        (
             "TRAKT_CLIENT_ID",
             {
                 "section": "Optional APIs",

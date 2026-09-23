@@ -72,6 +72,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 - **TMDB Discover tables**: Same Postgres DB as Arr catalog gets `catalog_source`, `tmdb_movie`, `tmdb_movie_source`, `arr_movie_overlay`, and `placeholder.tmdb_movie_id` (Alembic `0031`).
 - **Catalog mode setting**: Settings → Library sync chooses Arr catalog or TMDB Discover; both catalogs can coexist; restart after switching so schedulers follow the mode.
+- **Discover catalog sync schedule**: `DISCOVER_SYNC_INTERVAL_HOURS` (default 24; 0 disables) registers the Tasks Discover job like Collections; restart required after change.
 
 #### Fixed
 

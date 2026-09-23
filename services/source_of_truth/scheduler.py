@@ -22,6 +22,7 @@ JOB_ID_FULL = "source_of_truth:all_arrs"
 JOB_ID_LITE = "source_of_truth:lite_sync"
 JOB_ID_CALENDAR = "source_of_truth:calendar_date_refresh"
 JOB_ID_COLLECTIONS = "collections:sync"
+JOB_ID_DISCOVER = "discover:catalog_sync"
 
 
 def _interval_hours_for(task_key: str) -> int:
@@ -53,6 +54,15 @@ def _interval_hours_for(task_key: str) -> int:
         if smallest and smallest > 0:
             return min(global_hours, smallest)
         return global_hours
+    if task_key == "discover_sync":
+        try:
+            from services.discover.mode import is_tmdb_discover_mode
+
+            if not is_tmdb_discover_mode():
+                return 0
+        except Exception:
+            return 0
+        return max(0, int(getattr(settings, "DISCOVER_SYNC_INTERVAL_HOURS", 0) or 0))
     return 0
 
 
@@ -106,6 +116,8 @@ def _job_id_for(task_key: str) -> str | None:
         return JOB_ID_LITE
     if task_key == "collections_sync":
         return JOB_ID_COLLECTIONS
+    if task_key == "discover_sync":
+        return JOB_ID_DISCOVER
     return None
 
 
@@ -175,6 +187,12 @@ def _run_collections_sync_scheduled():
     run_collections_sync(trigger="scheduled")
 
 
+def _run_discover_sync_scheduled():
+    from services.discover.scheduled import run_discover_sync
+
+    run_discover_sync(trigger="scheduled")
+
+
 def refresh_collections_schedule() -> None:
     """Re-apply the collections job interval after recipe schedule overrides change."""
     _start_interval(
@@ -203,6 +221,15 @@ def schedule_all_syncs():
             "TMDB Discover catalog mode: Arr full/lite/calendar schedulers not registered "
             "(catalog comes from Discover sources)",
             extra={"emoji_type": "info"},
+        )
+        discover_hours = _interval_hours_for("discover_sync")
+        _start_interval(
+            "discover_sync",
+            discover_hours,
+            _run_discover_sync_scheduled,
+            "Discover catalog sync",
+            job_id=JOB_ID_DISCOVER,
+            disable_hint="DISCOVER_SYNC_INTERVAL_HOURS",
         )
         collections_hours = _interval_hours_for("collections_sync")
         _start_interval(
@@ -290,7 +317,7 @@ def get_scheduled_task_metadata() -> dict[str, Any]:
         "collections_sync": {"enabled": False, "interval_hours": 0, "next_run": None},
         "discover_sync": {"enabled": False, "interval_hours": 0, "next_run": None},
     }
-    for task_key in ("full_sync", "lite_sync", "collections_sync"):
+    for task_key in ("full_sync", "lite_sync", "collections_sync", "discover_sync"):
         hours = _interval_hours_for(task_key)
         out[task_key]["interval_hours"] = hours
         out[task_key]["enabled"] = hours > 0
@@ -303,13 +330,9 @@ def get_scheduled_task_metadata() -> dict[str, Any]:
             out[task_key]["next_run"] = nrt.astimezone(timezone.utc).isoformat()
 
         if _scheduler is not None:
-            job_id = (
-                JOB_ID_FULL
-                if task_key == "full_sync"
-                else JOB_ID_LITE
-                if task_key == "lite_sync"
-                else JOB_ID_COLLECTIONS
-            )
+            job_id = _job_id_for(task_key)
+            if not job_id:
+                continue
             try:
                 job = _scheduler.get_job(job_id)
                 if job and job.next_run_time:
@@ -321,11 +344,4 @@ def get_scheduled_task_metadata() -> dict[str, Any]:
                     persist_next_run(task_key, nrt)
             except Exception:
                 pass
-    try:
-        from services.discover.mode import is_tmdb_discover_mode
-
-        if is_tmdb_discover_mode():
-            out["discover_sync"]["enabled"] = True
-    except Exception:
-        pass
     return out

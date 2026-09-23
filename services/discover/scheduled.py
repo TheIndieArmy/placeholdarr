@@ -60,6 +60,9 @@ def run_discover_sync(*, trigger: str = "manual") -> dict:
             },
         )
         finish_task_run(run_id, status="done", summary={"mode": "discover", "discover": result})
+        from services.source_of_truth.scheduler import reschedule_task_after_completion
+
+        reschedule_task_after_completion("discover_sync")
         return result
     except Exception as exc:
         logger.error(f"Discover sync run failed: {exc}", extra={"emoji_type": "error"})
