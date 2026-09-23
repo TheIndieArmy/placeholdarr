@@ -1869,9 +1869,15 @@ def _enqueue_delayed_fallback(
 
 
 def _process_discover_movie_playback(session, context: dict[str, Any]) -> dict[str, Any] | None:
-    """TMDB Discover: add to Radarr if missing, then monitor/search. Returns None to fall through."""
+    """TMDB Discover: resolve Radarr first, add only if missing, then monitor/search.
+
+    Already-in-Radarr (including unmonitored) titles must still be monitored and
+    searched; we never treat ``added=True`` as implying search already happened.
+    """
     from services.discover.mode import is_tmdb_discover_mode
+    from services.discover.overlay import refresh_arr_overlays
     from services.postgres.models import ArrMovieOverlay, TmdbMovie
+    from services.source_of_truth.arr_api import lookup_movie
 
     if not is_tmdb_discover_mode():
         return None
@@ -1896,22 +1902,81 @@ def _process_discover_movie_playback(session, context: dict[str, Any]) -> dict[s
         return {'ok': False, 'reason': 'no_radarr_instance', 'tmdb_id': tmdb_id}
 
     inst = radarr_instances[0]
-    url = str(inst.get('url') or '')
-    api_key = str(inst.get('api_key') or '')
-    instance_key = str(inst.get('instance_key') or 'radarr_std')
+    instance_key = str(inst.get('instance_key') or inst.get('key') or 'radarr_std')
     instance_id = str(inst.get('instance_id') or f'radarr:{instance_key}')
+    url = str(inst.get('url') or inst.get('base_url') or '')
+    api_key = str(inst.get('api_key') or inst.get('apikey') or '')
 
     overlay = (
         session.query(ArrMovieOverlay)
         .filter(ArrMovieOverlay.tmdb_id == tmdb_id, ArrMovieOverlay.instance_id == instance_id)
         .first()
     )
+    if overlay is None:
+        overlay = (
+            session.query(ArrMovieOverlay)
+            .filter(ArrMovieOverlay.tmdb_id == tmdb_id, ArrMovieOverlay.instance_key == instance_key)
+            .first()
+        )
     monitor_only = _playback_monitor_only_no_search()
     search = not monitor_only
     added = False
+    skipped_existing = False
     radarr_id = int(overlay.radarr_id) if overlay and overlay.radarr_id else None
 
-    if radarr_id is None or not overlay:
+    def _upsert_overlay(rid: int, *, monitored: bool | None = None, has_file: bool | None = None) -> ArrMovieOverlay:
+        nonlocal overlay
+        ov = overlay
+        if ov is None:
+            ov = ArrMovieOverlay(tmdb_id=tmdb_id, instance_id=instance_id, instance_key=instance_key)
+            session.add(ov)
+            overlay = ov
+        ov.instance_id = instance_id
+        ov.instance_key = instance_key
+        ov.radarr_id = int(rid)
+        if monitored is not None:
+            ov.monitored = bool(monitored)
+        if has_file is not None:
+            ov.has_file = bool(has_file)
+        ov.updated_at = datetime.now(timezone.utc)
+        session.add(ov)
+        return ov
+
+    # Prefer a live Radarr lookup before POST /movie/import so unmonitored
+    # library titles are monitored+searched instead of treated as a new add.
+    if radarr_id is None and url and api_key:
+        try:
+            hit = lookup_movie(
+                url=url,
+                api_key=api_key,
+                tmdb_id=tmdb_id,
+                title=getattr(row, 'title', None),
+                year=getattr(row, 'year', None),
+            )
+        except Exception as exc:
+            logger.warning(
+                f"Discover playback Radarr lookup failed tmdb={tmdb_id}: {exc}",
+                extra={'emoji_type': 'warning'},
+            )
+            hit = None
+        if isinstance(hit, dict):
+            try:
+                existing_id = int(hit.get('id') or 0)
+            except (TypeError, ValueError):
+                existing_id = 0
+            if existing_id > 0:
+                radarr_id = existing_id
+                skipped_existing = True
+                _upsert_overlay(
+                    existing_id,
+                    monitored=bool(hit.get('monitored')) if 'monitored' in hit else None,
+                    has_file=bool(hit.get('hasFile') or (hit.get('movieFile') or {}).get('path'))
+                    if ('hasFile' in hit or hit.get('movieFile'))
+                    else None,
+                )
+                session.flush()
+
+    if radarr_id is None:
         from routes.collections import _fetch_instance_quality_profiles, _fetch_instance_root_folders
 
         profiles = _fetch_instance_quality_profiles(inst) or []
@@ -1935,17 +2000,6 @@ def _process_discover_movie_playback(session, context: dict[str, Any]) -> dict[s
             search=search,
             instance_key=instance_key,
         )
-        added = True
-        from services.discover.overlay import refresh_arr_overlays
-
-        refresh_arr_overlays(session=session)
-        session.expire_all()
-        overlay = (
-            session.query(ArrMovieOverlay)
-            .filter(ArrMovieOverlay.tmdb_id == tmdb_id, ArrMovieOverlay.instance_id == instance_id)
-            .first()
-        )
-        radarr_id = int(overlay.radarr_id) if overlay and overlay.radarr_id else None
         status = (results[0].get('status') if results else None)
         if status == 'error':
             return {
@@ -1955,37 +2009,85 @@ def _process_discover_movie_playback(session, context: dict[str, Any]) -> dict[s
                 'detail': results[0].get('error'),
                 'results': results,
             }
+        if status == 'skipped':
+            skipped_existing = True
+        elif status == 'ok':
+            added = True
+        try:
+            arr_id = int((results[0] or {}).get('arr_id') or 0) or None
+        except (TypeError, ValueError, IndexError):
+            arr_id = None
+        refresh_arr_overlays()
+        session.expire_all()
+        overlay = (
+            session.query(ArrMovieOverlay)
+            .filter(ArrMovieOverlay.tmdb_id == tmdb_id, ArrMovieOverlay.instance_id == instance_id)
+            .first()
+        )
+        if overlay is None:
+            overlay = (
+                session.query(ArrMovieOverlay)
+                .filter(ArrMovieOverlay.tmdb_id == tmdb_id, ArrMovieOverlay.instance_key == instance_key)
+                .first()
+            )
+        radarr_id = int(overlay.radarr_id) if overlay and overlay.radarr_id else arr_id
 
     monitored_updated = False
     search_triggered = False
-    if radarr_id and not (added and search):
-        if overlay and not overlay.monitored:
-            monitored_updated = set_radarr_movie_monitored(radarr_id, True, url=url, api_key=api_key)
-            if monitored_updated and overlay:
-                overlay.monitored = True
+    # Always monitor+search when we have a Radarr id, except a brand-new add that
+    # already requested search via addOptions (Radarr searches on add).
+    need_explicit_monitor_search = bool(radarr_id) and not (added and search)
+    if need_explicit_monitor_search:
+        if overlay is None or not overlay.monitored:
+            monitored_updated = set_radarr_movie_monitored(int(radarr_id), True, url=url, api_key=api_key)
+            if monitored_updated:
+                _upsert_overlay(int(radarr_id), monitored=True)
         if search:
-            search_triggered = trigger_radarr_movie_search(radarr_id, url=url, api_key=api_key)
+            search_triggered = trigger_radarr_movie_search(int(radarr_id), url=url, api_key=api_key)
     elif added and search:
+        # New add with searchForMovie in the import payload.
         search_triggered = True
+        if overlay is not None:
+            overlay.monitored = True
+            session.add(overlay)
 
+    search_for_monitor = bool(search_triggered) or (added and search)
     intents: list[StatusIntent] = []
     ph_rows = session.query(Placeholder).filter(Placeholder.tmdb_movie_id == tmdb_id).all()
     for ph in ph_rows:
         intents.append(
             StatusIntent(
                 placeholder_id=int(ph.id),
-                new_status=DisplayStatus.SEARCHING.value if search_triggered else DisplayStatus.REQUEST.value,
-                reason=render_message("queue.searching", {}) if search_triggered else None,
+                new_status=DisplayStatus.SEARCHING.value if search_for_monitor else DisplayStatus.REQUEST.value,
+                reason=render_message("queue.searching", {}) if search_for_monitor else None,
                 source=StatusSource.EVENT_PLAYBACK_STARTED,
                 trigger_nfo_refresh=True,
             )
         )
     if intents:
         StatusOrchestrator(session=session).apply_and_project_statuses(intents)
-    search_for_monitor = bool(search_triggered) or (added and search)
     _activate_queue_monitor_after_playback_search(
         session, intents, search_triggered=search_for_monitor
     )
+
+    # Persist overlay / status before Discover determination so skip-when-monitored
+    # can clear the Discover placeholder without waiting for the next catalog sync.
+    try:
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    try:
+        from services.discover.determine import run_discover_determination
+        from services.discover.materialize import apply_tmdb_movie_materialization
+
+        run_discover_determination(tmdb_ids=[tmdb_id])
+        apply_tmdb_movie_materialization(tmdb_id)
+    except Exception as exc:
+        logger.warning(
+            f"Discover playback follow-up determine/materialize failed tmdb={tmdb_id}: {exc}",
+            extra={'emoji_type': 'warning'},
+        )
 
     return {
         'ok': True,
@@ -1995,6 +2097,7 @@ def _process_discover_movie_playback(session, context: dict[str, Any]) -> dict[s
         'discover': True,
         'tmdb_id': tmdb_id,
         'added': added,
+        'skipped_existing': skipped_existing,
         'radarr_id': radarr_id,
         'monitored_updated': monitored_updated,
         'search_triggered': search_for_monitor,

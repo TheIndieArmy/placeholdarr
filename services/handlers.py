@@ -1,12 +1,29 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict
+
+from sqlalchemy import text
 
 from core.config import settings
 from core.logger import logger
 from services.event_normalization import infer_raw_event_type, normalize_event_type
 from services.postgres.db import get_session
 from services.postgres.models import EventLog, Job
+
+# Collapse Radarr/Sonarr "MovieAdded"/"SeriesAdd" with Collections synthetic
+# ``{"movie":{"id":N}}`` ingest into one EventLog + job within this window.
+_ARR_ADD_DEDUPE_WINDOW = timedelta(seconds=15)
+_ARR_ADD_EVENT_TYPES = frozenset({
+    "movie_added",
+    "movieadd",
+    "movieadded",
+    "series_added",
+    "seriesadd",
+})
+_ARR_ADD_MOVIE_TYPES = frozenset({"movie_added", "movieadd", "movieadded"})
+_ARR_ADD_SERIES_TYPES = frozenset({"series_added", "seriesadd"})
+_PLAYBACK_DEDUPE_WINDOW = timedelta(seconds=15)
+_PLAYBACK_EVENT_TYPES = frozenset({"playback_start", "playback.start", "playbackstart"})
 
 
 def _payload_preview(payload: Dict[str, Any], max_chars: int = 2000) -> str:
@@ -19,6 +36,160 @@ def _payload_preview(payload: Dict[str, Any], max_chars: int = 2000) -> str:
     if len(text) <= max_chars:
         return text
     return f"{text[:max_chars]}...<truncated:{len(text) - max_chars} chars>"
+
+
+def _arr_add_entity_from_payload(
+    payload: Dict[str, Any] | Any,
+    event_type: str,
+) -> tuple[str, int] | None:
+    """Return ``('movie'|'series', arr_id)`` for MovieAdded / SeriesAdd payloads."""
+    if not isinstance(payload, dict):
+        return None
+    et = str(event_type or "").strip().lower()
+    if et in _ARR_ADD_MOVIE_TYPES:
+        movie = payload.get("movie") if isinstance(payload.get("movie"), dict) else {}
+        raw = (
+            movie.get("id")
+            or payload.get("movieId")
+            or payload.get("movie_id")
+            or payload.get("id")
+        )
+        kind = "movie"
+    elif et in _ARR_ADD_SERIES_TYPES:
+        series = payload.get("series") if isinstance(payload.get("series"), dict) else {}
+        raw = (
+            series.get("id")
+            or payload.get("seriesId")
+            or payload.get("series_id")
+            or payload.get("id")
+        )
+        kind = "series"
+    else:
+        return None
+    try:
+        arr_id = int(raw) if raw is not None else 0
+    except (TypeError, ValueError):
+        return None
+    if arr_id <= 0:
+        return None
+    return kind, arr_id
+
+
+def _arr_add_payload_richness(payload: Dict[str, Any] | Any, kind: str) -> int:
+    """Prefer full *arr webhook bodies over synthetic ``{id}``-only ingest payloads."""
+    if not isinstance(payload, dict):
+        return 0
+    entity = payload.get("movie" if kind == "movie" else "series")
+    if not isinstance(entity, dict):
+        return 0
+    score = 0
+    if entity.get("title"):
+        score += 3
+    if entity.get("tmdbId") or entity.get("tmdbid") or entity.get("tvdbId") or entity.get("tvdbid"):
+        score += 2
+    if entity.get("path") or entity.get("folderName"):
+        score += 1
+    # More keys than bare ``id`` means a real webhook body.
+    if len(entity.keys()) > 1:
+        score += 1
+    return score
+
+
+def _event_payload_dict(event: EventLog) -> Dict[str, Any]:
+    raw = event.payload
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _find_recent_arr_add_event(
+    session,
+    *,
+    source: str,
+    kind: str,
+    arr_id: int,
+    event_types: frozenset[str],
+) -> EventLog | None:
+    cutoff = datetime.now(timezone.utc) - _ARR_ADD_DEDUPE_WINDOW
+    candidates = (
+        session.query(EventLog)
+        .filter(
+            EventLog.source == source,
+            EventLog.event_type.in_(tuple(event_types)),
+            EventLog.created_at >= cutoff,
+            EventLog.status.in_(("PENDING", "PROCESSING", "CLAIMED", "DONE")),
+        )
+        .order_by(EventLog.id.desc())
+        .limit(40)
+        .all()
+    )
+    for event in candidates:
+        payload = _event_payload_dict(event)
+        # Strip internal meta for id extraction.
+        clean = {k: v for k, v in payload.items() if k != "_event_meta"}
+        entity = _arr_add_entity_from_payload(clean, str(event.event_type or ""))
+        if entity == (kind, arr_id):
+            return event
+    return None
+
+
+def _advisory_lock_key(source: str, kind: str, arr_id: int) -> int:
+    # Stable positive int32 for pg_advisory_xact_lock (must not use randomized hash()).
+    import zlib
+
+    raw = f"{str(source).lower()}|{str(kind)}|{int(arr_id)}".encode("utf-8")
+    return int(zlib.crc32(raw) & 0x7FFFFFFF)
+
+
+def _playback_dedupe_token(payload: Dict[str, Any] | Any) -> str | None:
+    """Stable token for collapsing duplicate media-server playback.start posts."""
+    if not isinstance(payload, dict):
+        return None
+    item = payload.get("Item") if isinstance(payload.get("Item"), dict) else None
+    if item is None and isinstance(payload.get("item"), dict):
+        item = payload.get("item")
+    if isinstance(item, dict):
+        for key in ("PresentationUniqueKey", "Path", "path", "Id", "id"):
+            val = str(item.get(key) or "").strip()
+            if val:
+                return f"item:{key}:{val}"
+    for key in ("file_path", "filePath", "path", "Path", "rating_key", "ratingKey"):
+        val = str(payload.get(key) or "").strip()
+        if val:
+            return f"top:{key}:{val}"
+    media = payload.get("media") if isinstance(payload.get("media"), dict) else {}
+    ids = media.get("ids") if isinstance(media.get("ids"), dict) else {}
+    for key in ("tmdb", "tmdbId", "imdb", "imdbId"):
+        val = str(ids.get(key) or "").strip()
+        if val:
+            return f"media:{key}:{val}"
+    return None
+
+
+def _find_recent_playback_event(
+    session,
+    *,
+    source: str,
+    token: str,
+) -> EventLog | None:
+    cutoff = datetime.now(timezone.utc) - _PLAYBACK_DEDUPE_WINDOW
+    candidates = (
+        session.query(EventLog)
+        .filter(
+            EventLog.source == source,
+            EventLog.event_type.in_(tuple(_PLAYBACK_EVENT_TYPES)),
+            EventLog.created_at >= cutoff,
+            EventLog.status.in_(("PENDING", "PROCESSING", "CLAIMED", "DONE")),
+        )
+        .order_by(EventLog.id.desc())
+        .limit(30)
+        .all()
+    )
+    for event in candidates:
+        payload = _event_payload_dict(event)
+        clean = {k: v for k, v in payload.items() if k != "_event_meta"}
+        existing = _playback_dedupe_token(clean)
+        if existing and existing == token:
+            return event
+    return None
 
 
 def _allowed_webhook_instances() -> tuple[str, ...]:
@@ -281,6 +452,85 @@ def handle_webhook(
         else:
             payload_to_store = {'raw': payload, '_event_meta': event_meta}
 
+        # Deduplicate MovieAdded / SeriesAdd: Collections synthetic ingest and the
+        # real *arr webhook often arrive within milliseconds for the same title.
+        et_l = str(event_type or "").strip().lower()
+        if et_l in _ARR_ADD_EVENT_TYPES and isinstance(payload, dict):
+            entity = _arr_add_entity_from_payload(payload, et_l)
+            if entity is not None:
+                kind, arr_id = entity
+                type_set = _ARR_ADD_MOVIE_TYPES if kind == "movie" else _ARR_ADD_SERIES_TYPES
+                session.execute(
+                    text("SELECT pg_advisory_xact_lock(:k)"),
+                    {"k": _advisory_lock_key(source, kind, arr_id)},
+                )
+                existing = _find_recent_arr_add_event(
+                    session,
+                    source=source,
+                    kind=kind,
+                    arr_id=arr_id,
+                    event_types=type_set,
+                )
+                if existing is not None:
+                    existing_payload = _event_payload_dict(existing)
+                    existing_clean = {
+                        k: v for k, v in existing_payload.items() if k != "_event_meta"
+                    }
+                    new_score = _arr_add_payload_richness(payload, kind)
+                    old_score = _arr_add_payload_richness(existing_clean, kind)
+                    if new_score > old_score and str(existing.status or "").upper() == "PENDING":
+                        merged = dict(payload_to_store)
+                        existing.payload = merged
+                        existing.updated_at = datetime.now(timezone.utc)
+                        session.add(existing)
+                        session.commit()
+                        logger.info(
+                            f"Deduped webhook event {event_type} into pending "
+                            f"event_log_id={existing.id} instance={instance} "
+                            f"{kind}_id={arr_id} (enriched payload)",
+                            extra={"emoji_type": "info"},
+                        )
+                    else:
+                        session.commit()
+                        logger.info(
+                            f"Deduped webhook event {event_type} as duplicate of "
+                            f"event_log_id={existing.id} instance={instance} "
+                            f"{kind}_id={arr_id} existing_status={existing.status}",
+                            extra={"emoji_type": "info"},
+                        )
+                    return {
+                        "status": "accepted",
+                        "event_log_id": int(existing.id),
+                        "event_type": event_type,
+                        "deduped": True,
+                        "deduped_of": int(existing.id),
+                        "gated_search_queued_intents": 0,
+                    }
+
+        if et_l in _PLAYBACK_EVENT_TYPES and isinstance(payload, dict):
+            token = _playback_dedupe_token(payload)
+            if token:
+                import zlib
+
+                lock = int(zlib.crc32(f"{source}|playback|{token}".encode("utf-8")) & 0x7FFFFFFF)
+                session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": lock})
+                existing = _find_recent_playback_event(session, source=source, token=token)
+                if existing is not None:
+                    session.commit()
+                    logger.info(
+                        f"Deduped webhook event {event_type} as duplicate of "
+                        f"event_log_id={existing.id} instance={instance} token={token}",
+                        extra={"emoji_type": "info"},
+                    )
+                    return {
+                        "status": "accepted",
+                        "event_log_id": int(existing.id),
+                        "event_type": event_type,
+                        "deduped": True,
+                        "deduped_of": int(existing.id),
+                        "gated_search_queued_intents": 0,
+                    }
+
         event = EventLog(
             event_type=event_type,
             source=source,
@@ -331,8 +581,10 @@ def enqueue_synthetic_arr_adds(
 ) -> int:
     """Enqueue MovieAdded/SeriesAdd-equivalent jobs for titles already in *arr.
 
-    Used after Collections add (including skipped / timeout-reconciled titles)
-    so placeholders are created even when *arr does not fire a webhook.
+    Used after Collections add when lookup reports the title is already present
+    (``skipped``). Those cases do not emit a new *arr add webhook, so Placeholdarr
+    still needs an ingest kick to create/update placeholders. Fresh successful
+    adds rely on the real *arr webhook instead.
     """
     queued = 0
     key = str(instance_key or "").strip().lower()

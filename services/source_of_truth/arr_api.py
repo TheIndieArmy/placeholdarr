@@ -1563,7 +1563,10 @@ def add_missing_titles(
             "arr_id": arr_id,
         })
         if status in {"ok", "skipped"} and arr_id:
-            ingest_lookups.append(lookup)
+            # Fresh adds: trust *arr MovieAdded/SeriesAdd webhooks for ingest.
+            # Already-in-*arr skips do not emit a new add webhook, so synthesize.
+            if status == "skipped":
+                ingest_lookups.append(lookup)
     if ingest_lookups and instance_key:
         try:
             from services.handlers import enqueue_synthetic_arr_adds

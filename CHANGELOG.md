@@ -84,6 +84,10 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Discover folder permissions**: Discover title folders use `PLACEHOLDER_DIR_MODE` (default 777) like Arr placeholders so Emby/Jellyfin (non-root) can scan into them.
 - **Discover NFO genre and premiered**: Movie NFOs get `<genre>` (TMDB genre ids mapped to names) and `<premiered>` (release date); art backfill rewrites existing sidecars that are still missing those tags.
 - **Discover Plex section save**: Empty Discover Plex Movies library no longer fails settings save with `int(None)`; optional section id clears to unset.
+- **MovieAdded webhook dedupe**: Real Radarr/Sonarr add webhooks and Collections synthetic `{movie|series: {id}}` ingest collapse to one event within 15s (prefer the richer payload); concurrent upserts no longer fail on `ux_movie_tmdbid_instance_id`.
+- **Collections synthetic ingest**: Only already-in-*arr skips enqueue synthetic MovieAdded/SeriesAdd; fresh successful adds rely on the real *arr webhook.
+- **Discover playback already-in-Radarr**: Lookup before import; unmonitored library titles are monitored and searched instead of a fake “added” path that skipped search.
+- **playback_start dedupe**: Duplicate Emby/Jellyfin/Plex playback webhooks for the same item/path within 15s collapse to one event.
 
 ## [0.9.26] - 2026-09-10
 

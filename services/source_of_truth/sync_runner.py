@@ -5,6 +5,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Dict, Iterable, List, Tuple
 
 from sqlalchemy import and_, or_
+from sqlalchemy.exc import IntegrityError
 
 from core.config import settings
 from core.logger import logger
@@ -561,8 +562,37 @@ def _upsert_movie(session, fields: Dict) -> Tuple[Any, bool, bool]:
                 changed = True
         return existing, False, changed
     created = Movie(**fields)
-    session.add(created)
-    session.flush()
+    try:
+        with session.begin_nested():
+            session.add(created)
+            session.flush()
+    except IntegrityError:
+        # Concurrent movieadd webhooks (real + synthetic) can race the unique
+        # (tmdbid, instance) index; recover by loading the winner row.
+        with session.no_autoflush:
+            existing = (
+                session.query(Movie)
+                .filter(
+                    and_(
+                        Movie.tmdbid == fields['tmdbid'],
+                        or_(
+                            Movie.instance_key.in_(legacy_keys),
+                            Movie.instance_id == instance_id,
+                        ),
+                    )
+                )
+                .first()
+            )
+        if existing is None:
+            raise
+        changed = False
+        for key, value in fields.items():
+            if not hasattr(existing, key):
+                continue
+            if _field_values_differ(getattr(existing, key), value):
+                setattr(existing, key, value)
+                changed = True
+        return existing, False, changed
     return created, True, True
 
 
@@ -600,8 +630,35 @@ def _upsert_series(session, fields: Dict) -> Tuple[Any, bool, bool]:
                 changed = True
         return existing, False, changed
     created = Series(**fields)
-    session.add(created)
-    session.flush()
+    try:
+        with session.begin_nested():
+            session.add(created)
+            session.flush()
+    except IntegrityError:
+        with session.no_autoflush:
+            existing = (
+                session.query(Series)
+                .filter(
+                    and_(
+                        Series.tvdbid == fields['tvdbid'],
+                        or_(
+                            Series.instance_key.in_(legacy_keys),
+                            Series.instance_id == instance_id,
+                        ),
+                    )
+                )
+                .first()
+            )
+        if existing is None:
+            raise
+        changed = False
+        for key, value in fields.items():
+            if not hasattr(existing, key):
+                continue
+            if _field_values_differ(getattr(existing, key), value):
+                setattr(existing, key, value)
+                changed = True
+        return existing, False, changed
     return created, True, True
 
 
