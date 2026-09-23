@@ -33,7 +33,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Named instance search options**: Placeholder and real-file search preference can target any configured Arr instance using the name you gave it.
 - **Prefer matched library path**: Toggle to override the search preference when the played path maps to exactly one library destination.
 - **Full sync completion log**: Closing a full sync task run writes an INFO line with duration and placeholder create/remove counts.
-- **What's new multilibrary (0.10.0)**: Startup ack for up to four Arrs, Paths destinations, path-aware search fallback, changelog pointer, and GitHub issue invite.
+- **What's new multilibrary (0.10.0)**: Startup ack for up to four Arrs, Paths destinations, path-aware search fallback, changelog pointer, GitHub issue invite, and webhook recopy if errors.
 
 ### Changed
 
