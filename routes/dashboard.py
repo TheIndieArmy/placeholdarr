@@ -5405,28 +5405,31 @@ async def integrations_test(request: Request):
 
         ok = bool(result.get("ok"))
         message = str(result.get("message") or "")
-        if service in {"plex", "jellyfin", "emby"}:
-            record_media_status(service, ok=ok, message=message, source="test")
-        elif service in {"radarr", "sonarr"}:
-            iid = str(instance_id or "").strip().lower()
-            label = ""
-            instance_key = ""
-            if iid:
-                for item in getattr(settings, "configured_arr_instances", []) or []:
-                    if str(item.get("instance_id") or "").strip().lower() == iid:
-                        label = str(item.get("label") or "")
-                        instance_key = str(item.get("instance_key") or "")
-                        break
-            if iid:
-                record_arr_status(
-                    instance_id=iid,
-                    arr_type=service,
-                    instance_key=instance_key,
-                    label=label,
-                    ok=ok,
-                    message=message,
-                    source="test",
-                )
+        # Successful Test clears a sticky !. Failed Test does not sticky: the modal
+        # shows the error, and Cancel must not leave Settings with a warning !.
+        if ok:
+            if service in {"plex", "jellyfin", "emby"}:
+                record_media_status(service, ok=True, message=message, source="test")
+            elif service in {"radarr", "sonarr"}:
+                iid = str(instance_id or "").strip().lower()
+                label = ""
+                instance_key = ""
+                if iid:
+                    for item in getattr(settings, "configured_arr_instances", []) or []:
+                        if str(item.get("instance_id") or "").strip().lower() == iid:
+                            label = str(item.get("label") or "")
+                            instance_key = str(item.get("instance_key") or "")
+                            break
+                if iid:
+                    record_arr_status(
+                        instance_id=iid,
+                        arr_type=service,
+                        instance_key=instance_key,
+                        label=label,
+                        ok=True,
+                        message=message,
+                        source="test",
+                    )
     except Exception:
         pass
     status_code = 200 if result.get("ok") else 400

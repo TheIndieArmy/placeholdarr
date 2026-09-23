@@ -179,27 +179,28 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         requires_ack=True,
     ),
     WhatsNewNotice(
-        id="multilibrary-arr-setup-0-9-28-beta-1",
-        since_version="0.9.28-beta.1",
+        id="jellyfin-12-support-0-9-27",
+        since_version="0.9.27",
+        title="Jellyfin 12 support",
+        body="Added support for Jellyfin 12's new API authorization method. No action required.",
+        cta_label="Open Media Integrations",
+        cta_path="/settings/media-integrations",
+    ),
+    WhatsNewNotice(
+        id="multilibrary-0-10-0",
+        since_version="0.10.0",
         title="More Arrs, more libraries",
         body=(
-            "Up to four Radarr/Sonarr instances, optional Paths destinations into separate Plex libraries, "
-            "and playback search that can follow the matched path or fall back in list order."
+            "You can now connect up to four Radarr and four Sonarr instances. "
+            "Path mapping lets you control where placeholders and library output land based on each Arr "
+            "instance and root folder. Playback search settings cover the extra instances, including "
+            "preferring the matched library path or falling back in the order you set.\n\n"
+            "This feature changes how a lot of the app functions. You can view everything in the changelog. "
+            "Please do not hesitate to report issues on GitHub.\n\n"
+            "⚠️ If you encounter webhook errors, you may need to recopy them."
         ),
         cta_label="Open Paths",
         cta_path="/settings/paths",
-        requires_ack=True,
-    ),
-    WhatsNewNotice(
-        id="arr-names-slots-renames-0-9-28-beta-1",
-        since_version="0.9.28-beta.1",
-        title="Arr names, slots, and renames",
-        body=(
-            "Instances are identified by name and list order (not primary/4K). Renames keep a stable id and "
-            "update the catalog; four Slot seats; recopy webhooks only if something looks wrong after upgrade."
-        ),
-        cta_label="Open ARR Integrations",
-        cta_path="/settings/arr-integrations",
         requires_ack=True,
     ),
 )

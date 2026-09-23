@@ -7,6 +7,17 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-23
+
+### Summary
+
+- **More Arrs**: Up to four Radarr and four Sonarr instances; Slot seats with your names; list order sets search priority.
+- **Paths destinations**: Optional Arr root → Placeholdarr dest folder + Plex section for separate libraries.
+- **Arr identity**: `instance_key` and stable UUID ids; renames and URL transplants keep catalog continuity.
+- **Playback search**: Prefer matched library path or fall back through configured instances in list order.
+- **Docker PLACEHOLDARR_PORT**: Container listen port honors the env var (#89).
+- **What's new**: Startup ack for multilibrary; points to the changelog, invites GitHub issue reports, and notes webhook recopy if errors.
+
 ### Added
 
 - **Library destination map**: Optional Arr instance + root folder → Placeholdarr dest folder + Plex section for Movies and TV; empty map keeps single `{LIBRARY_ROOT}/movies` and `tv`.
@@ -22,8 +33,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Named instance search options**: Placeholder and real-file search preference can target any configured Arr instance using the name you gave it.
 - **Prefer matched library path**: Toggle to override the search preference when the played path maps to exactly one library destination.
 - **Full sync completion log**: Closing a full sync task run writes an INFO line with duration and placeholder create/remove counts.
-- **What's new more Arrs / libraries (0.9.28-beta.1)**: Startup ack for up to four Arrs, Paths destinations, and path-aware search fallback.
-- **What's new Arr names / slots (0.9.28-beta.1)**: Startup ack for name and list-order identity, renames, and four Slot seats.
+- **What's new multilibrary (0.10.0)**: Startup ack for up to four Arrs, Paths destinations, path-aware search fallback, changelog pointer, and GitHub issue invite.
 
 ### Changed
 
@@ -44,6 +54,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ### Fixed
 
+- **Docker PLACEHOLDARR_PORT**: Container listen port honors `PLACEHOLDARR_PORT` / `PLACEHOLDARR_HOST` instead of ignoring them for the hardcoded uvicorn `--port 8000` (#89).
 - **Import / queue status labels**: NFO and Plex projection use the Message Center queue lines (including customized `IMPORT_IN_PROGRESS` text) instead of the raw enum token.
 - **Multi-instance Arr routing**: Ambiguous legacy `is_4k` no longer selects an Arr endpoint; use `instance_key` (legacy `primary`/`secondary` still map to list slots 1 and 2).
 - **Instance-aware dest folders**: Unmapped Arr instances use the default movie/TV destinations from Library Root; extra trees require the dest map.
@@ -53,7 +64,6 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Legacy 4K Plex section IDs removed**: `PLEX_MOVIE_4K_SECTION_ID` / `PLEX_TV_4K_SECTION_ID` are ignored; sections come from default Paths fields and the dest map.
 - **Plex section refresh**: Bulk metadata refresh includes dest-map section IDs and default movie/TV libraries.
 - **Bare full sync coverage**: `run_full_sync` without `instance_key` syncs every configured Arr instance and passes per-instance role into folder fields.
-- **Arr catalog timeout**: Full movie/series pulls use the 120s bulk timeout (not 30s); a failed catalog fetch returns None and skips removed-from-Arr diffs so startup lite cannot treat a timeout as an empty library.
 - **Arr API key retention**: Saving Arr instances keeps stored API keys when the UI omits them; an empty instance list no longer wipes a non-empty saved config.
 - **Plex cache stampede**: Concurrent section list lookups share an in-flight request per section key instead of issuing parallel full scans.
 - **Plex ratingKey cache seeding**: Playback webhooks seed Plex and Jellyfin item IDs directly into movie and episode records so player metadata updates bypass library scans.
@@ -63,6 +73,33 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Dynamic queue monitor instances**: Poll download queues and trigger monitored refreshes using each title's Arr `instance_key` rather than the legacy 4K/HD pair.
 - **Plex status projection lock**: Title and summary edits lock those fields so Plex agents cannot revert them; a failed reload logs before/after values.
 - **Import grace countdown labels**: Accelerated cadence still uses the configured 5/4/3/2/1-minute templates so each tick is a distinct status.
+
+## [0.9.27] - 2026-09-15
+
+### Summary
+
+- **Jellyfin 12 auth**: Modern ``Authorization: MediaBrowser Token=...`` for connection tests and all Jellyfin API calls.
+- **Integration warning !**: Client timeouts no longer sticky the Media/ARR Settings badge.
+- **Integration warning ! (cancelled setup)**: A failed Test no longer leaves the badge after Cancel.
+- **Playback setup modal**: Intro explains why a playback webhook is needed; unchanged selection shows Done.
+- **Playback setup footer**: Stable primary button so Cancel does not flash accent yellow when switching sources.
+- **Arr catalog timeout**: Full movie/series pulls use the 120s bulk timeout; failed fetches skip removed-from-Arr diffs.
+
+### Changed
+
+- **Playback setup modal**: Intro explains why a playback webhook is needed; unchanged selection shows Done instead of a disabled Save.
+- **Playback setup footer**: Keep one stable primary button so Cancel does not flash accent yellow when switching sources.
+
+### Fixed
+
+- **Jellyfin 12 auth**: Send ``Authorization: MediaBrowser Token=...`` instead of legacy ``X-Emby-Token`` (connection test and all Jellyfin API calls).
+- **Integration warning !**: Client request timeouts no longer sticky the Media/ARR Settings warning; only connection errors and auth/gateway HTTP failures do.
+- **Integration warning ! (cancelled setup)**: A failed connection Test no longer sticky the Settings warning, so Cancel after a bad Test leaves no !.
+- **Arr catalog timeout**: Full movie/series pulls use the 120s bulk timeout (not 30s); a failed catalog fetch returns None and skips removed-from-Arr diffs so startup lite cannot treat a timeout as an empty library.
+
+### Added
+
+- **What's new (0.9.27)**: Non-ack catalog notice for Jellyfin 12 auth, quieter connection warnings, and clearer playback setup.
 
 ## [0.9.26] - 2026-09-10
 

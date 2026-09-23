@@ -142,11 +142,7 @@ def _get_json(url: str, params: dict, timeout: int = ARR_HTTP_TIMEOUT_SECONDS):
             f'ARR request timed out url={safe_url} timeout={timeout}s error_type={type(e).__name__}',
             extra={'emoji_type': 'error'},
         )
-        _mark_arr_request_connectivity_failure(
-            url=url,
-            params=params,
-            message=f"Timed out after {timeout}s",
-        )
+        # Do not sticky Settings ! for client timeouts (slow *arr / large catalogs).
         return None
     except RequestException as e:
         logger.error(
@@ -236,12 +232,7 @@ def _request_json(
                 "message": f"did not respond within {timeout}s; it may still add the title(s)",
             }
         )
-        _mark_arr_request_connectivity_failure(
-            url=url,
-            params=params,
-            api_key=api_key,
-            message=f"Timed out after {timeout}s",
-        )
+        # Do not sticky Settings ! for client timeouts (import may still complete).
         return None
     except RequestException as e:
         logger.error(
