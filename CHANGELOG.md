@@ -82,6 +82,8 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Discover placeholder history titles**: Rows created from TMDB Discover materialization were tagged as episodes with empty titles; history now resolves movie names (and year) via `tmdb_movie`.
 - **Discover Library Root path**: Discover materialize writes under `DISCOVER_LIBRARY_ROOT/movies` (not Arr `LIBRARY_ROOT`); existing titles pinned to the Arr tree relocate on the next Discover materialize.
 - **Discover folder permissions**: Discover title folders use `PLACEHOLDER_DIR_MODE` (default 777) like Arr placeholders so Emby/Jellyfin (non-root) can scan into them.
+- **Discover NFO genre and premiered**: Movie NFOs get `<genre>` (TMDB genre ids mapped to names) and `<premiered>` (release date); art backfill rewrites existing sidecars that are still missing those tags.
+- **Discover Plex section save**: Empty Discover Plex Movies library no longer fails settings save with `int(None)`; optional section id clears to unset.
 
 ## [0.9.26] - 2026-09-10
 

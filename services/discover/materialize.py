@@ -84,7 +84,38 @@ def tmdb_movie_placeholder_path(row: TmdbMovie) -> str:
     return os.path.join(folder, filename)
 
 
+def _movie_genre_names(genre_ids: Any) -> list[str] | None:
+    """Resolve TMDB genre ids to display names for NFO ``<genre>`` tags."""
+    if not isinstance(genre_ids, list) or not genre_ids:
+        return None
+    try:
+        from services.tmdb_client import fetch_genres
+
+        by_id = {
+            int(g["id"]): str(g.get("name") or "").strip()
+            for g in fetch_genres("movie")
+            if g.get("id") is not None
+        }
+    except Exception as exc:
+        logger.debug(f"Discover genre map unavailable: {exc}", extra={"emoji_type": "debug"})
+        return None
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw in genre_ids:
+        try:
+            gid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        name = by_id.get(gid) or ""
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names or None
+
+
 def _nfo_proxy(row: TmdbMovie) -> SimpleNamespace:
+    release = str(getattr(row, "release_date", None) or "").strip() or None
     return SimpleNamespace(
         title=row.title,
         year=row.year or 0,
@@ -95,7 +126,7 @@ def _nfo_proxy(row: TmdbMovie) -> SimpleNamespace:
         localized_poster=None,
         radarr_runtime=None,
         radarr_certification=None,
-        radarr_genres=None,
+        radarr_genres=_movie_genre_names(getattr(row, "genre_ids", None)),
         radarr_studio=None,
         radarr_ratings=None,
         radarr_collection=None,
@@ -103,8 +134,29 @@ def _nfo_proxy(row: TmdbMovie) -> SimpleNamespace:
         radarr_directors=None,
         radarr_credits=None,
         radarr_trailer=None,
-        radarr_premiered=None,
+        radarr_premiered=release,
     )
+
+
+def _should_rewrite_movie_nfo(media_path: str, proxy: Any) -> bool:
+    """True when the sidecar is missing or lacks genre / premiered we can fill."""
+    from services.placeholders import nfo_sidecar_path
+
+    path = nfo_sidecar_path(media_path)
+    if not os.path.isfile(path):
+        return True
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+            text = fh.read(131072)
+    except Exception:
+        return True
+    genres = getattr(proxy, "radarr_genres", None) or []
+    premiered = getattr(proxy, "radarr_premiered", None)
+    if genres and "<genre>" not in text:
+        return True
+    if premiered and "<premiered>" not in text:
+        return True
+    return False
 
 
 def apply_tmdb_movie_materialization(
@@ -269,13 +321,10 @@ def apply_tmdb_movie_materialization(
                         logger.debug(f"Discover media refresh skipped: {exc}", extra={"emoji_type": "debug"})
                 return result
 
-            nfo_name = f"{sanitize_filename(row.title)}.nfo"
-            nfo_path = os.path.join(folder, nfo_name)
-            if not os.path.isfile(nfo_path):
-                try:
-                    ensure_movie_nfo(target, _nfo_proxy(row))
-                except Exception as exc:
-                    logger.warning(f"Discover NFO refresh failed tmdb={tmdb_id}: {exc}", extra={"emoji_type": "warning"})
+            try:
+                ensure_movie_nfo(target, _nfo_proxy(row))
+            except Exception as exc:
+                logger.warning(f"Discover NFO refresh failed tmdb={tmdb_id}: {exc}", extra={"emoji_type": "warning"})
             poster_path = os.path.join(folder, "poster.jpg")
             if not os.path.isfile(poster_path) or is_discover_stub_poster(folder):
                 try:
@@ -317,6 +366,10 @@ def apply_tmdb_movie_art(
             return result
         target = row.placeholder_filepath or tmdb_movie_placeholder_path(row)
         folder = row.placeholder_folder or os.path.dirname(target)
+        try:
+            ensure_movie_nfo(target, _nfo_proxy(row))
+        except Exception as exc:
+            logger.warning(f"Discover NFO refresh during art failed tmdb={tmdb_id}: {exc}", extra={"emoji_type": "warning"})
         poster_path = os.path.join(folder, "poster.jpg")
         stub = is_discover_stub_poster(folder)
         if not force and os.path.isfile(poster_path) and not stub:
@@ -494,12 +547,14 @@ def run_discover_art_backfill(
         if limit is not None:
             rows = rows[: int(limit)]
         work: list[tuple[int, str]] = []
+        nfo_ids: list[int] = []
         for r in rows:
             folder = r.placeholder_folder or (
                 os.path.dirname(r.placeholder_filepath) if r.placeholder_filepath else None
             )
             if not folder:
                 folder = os.path.dirname(tmdb_movie_placeholder_path(r))
+            nfo_ids.append(int(r.tmdb_id))
             poster = os.path.join(folder, "poster.jpg")
             if (not os.path.isfile(poster)) or is_discover_stub_poster(folder):
                 work.append((int(r.tmdb_id), folder))
@@ -507,16 +562,78 @@ def run_discover_art_backfill(
         if own:
             session.close()
 
+    # Fill genre / premiered on existing NFOs (skip files that already have them).
+    nfo_rewrote = 0
+    nfo_errors = 0
+    nfo_skipped = 0
+    refresh_folders: set[str] = set()
+    session = get_session()
+    try:
+        for tid in nfo_ids:
+            try:
+                row = session.get(TmdbMovie, int(tid))
+                if row is None or not row.has_placeholder:
+                    continue
+                target = row.placeholder_filepath or tmdb_movie_placeholder_path(row)
+                proxy = _nfo_proxy(row)
+                if not _should_rewrite_movie_nfo(target, proxy):
+                    nfo_skipped += 1
+                    continue
+                ensure_movie_nfo(target, proxy)
+                nfo_rewrote += 1
+                folder = row.placeholder_folder or os.path.dirname(target)
+                if folder:
+                    refresh_folders.add(str(folder))
+            except Exception as exc:
+                nfo_errors += 1
+                logger.warning(f"Discover NFO rewrite tmdb={tid} failed: {exc}", extra={"emoji_type": "warning"})
+    finally:
+        session.close()
+
     total = len(work)
-    stats = {"wrote": 0, "exists": 0, "errors": 0, "skipped": 0, "media_refresh_folders": 0}
+    stats = {
+        "wrote": 0,
+        "exists": 0,
+        "errors": 0,
+        "skipped": 0,
+        "media_refresh_folders": 0,
+        "nfo_rewrote": nfo_rewrote,
+        "nfo_errors": nfo_errors,
+        "nfo_skipped": nfo_skipped,
+    }
     logger.info(
-        f"Discover art backfill: {total} title(s) missing or stub poster.jpg",
+        f"Discover art backfill: NFO rewrite {nfo_rewrote} "
+        f"(skipped={nfo_skipped} errors={nfo_errors}); "
+        f"{total} title(s) missing or stub poster.jpg",
         extra={"emoji_type": "info"},
     )
+
+    def _flush_nfo_media_refresh() -> None:
+        nonlocal refresh_folders
+        if not refresh_folders:
+            return
+        try:
+            from services.media_servers.refresh import refresh_all_paths, refresh_all_sections
+
+            # Path refresh for a full-library NFO backfill is too chatty; prefer
+            # one movie-library section scan when many sidecars changed.
+            if len(refresh_folders) > 100:
+                refresh_all_sections(has_movies=True, has_episodes=False)
+                stats["media_refresh_folders"] = len(refresh_folders)
+                stats["media_refresh_mode"] = "sections"
+            else:
+                refresh_all_paths(refresh_folders, update_type="Modified")
+                stats["media_refresh_folders"] = len(refresh_folders)
+                stats["media_refresh_mode"] = "paths"
+            refresh_folders = set()
+        except Exception as exc:
+            logger.warning(f"Discover NFO media refresh failed: {exc}", extra={"emoji_type": "warning"})
+
     if not total:
+        _flush_nfo_media_refresh()
         return stats
 
-    refresh_folders: set[str] = set()
+    art_refresh_folders: set[str] = set()
     for i, (tid, folder) in enumerate(work, start=1):
         try:
             out = apply_tmdb_movie_art(tid)
@@ -524,7 +641,7 @@ def run_discover_art_backfill(
             if act == "wrote":
                 stats["wrote"] += 1
                 if out.get("refresh_folder"):
-                    refresh_folders.add(str(out["refresh_folder"]))
+                    art_refresh_folders.add(str(out["refresh_folder"]))
             elif act == "exists":
                 stats["exists"] += 1
             elif act == "error":
@@ -550,16 +667,20 @@ def run_discover_art_backfill(
                     ],
                 )
 
-    if refresh_folders:
+    # NFO bulk updates first (section or path), then art path refreshes.
+    _flush_nfo_media_refresh()
+    if art_refresh_folders:
         logger.info(
-            f"Discover art backfill: batch media refresh for {len(refresh_folders)} folder(s)...",
+            f"Discover art backfill: batch media refresh for {len(art_refresh_folders)} folder(s)...",
             extra={"emoji_type": "gear"},
         )
         try:
             from services.media_servers.refresh import refresh_all_paths
 
-            refresh_all_paths(refresh_folders, update_type="Modified")
-            stats["media_refresh_folders"] = len(refresh_folders)
+            refresh_all_paths(art_refresh_folders, update_type="Modified")
+            stats["media_refresh_folders"] = int(stats.get("media_refresh_folders") or 0) + len(
+                art_refresh_folders
+            )
         except Exception as exc:
             logger.warning(f"Discover art media refresh failed: {exc}", extra={"emoji_type": "warning"})
     return stats

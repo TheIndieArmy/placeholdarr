@@ -1130,6 +1130,8 @@ def _coerce_bool(value: Any) -> bool:
 def _coerce_int(value: Any) -> int:
     if isinstance(value, bool):
         raise ValueError("must be an integer")
+    if value is None:
+        raise ValueError("must be an integer")
     return int(value)
 
 
@@ -1534,9 +1536,15 @@ def _validate_value(key: str, raw_value: Any) -> Any:
     if value_type == "bool":
         value = _coerce_bool(raw_value)
     elif value_type == "int":
-        value = _coerce_int(raw_value)
-        if "min" in meta and value < int(meta["min"]):
-            raise ValueError(f"must be >= {meta['min']}")
+        # Optional ints (e.g. Discover Plex section) may arrive as null/"" from the UI.
+        if _is_blank(raw_value):
+            if bool(meta.get("required", False)):
+                raise ValueError("is required")
+            value = None
+        else:
+            value = _coerce_int(raw_value)
+            if "min" in meta and value < int(meta["min"]):
+                raise ValueError(f"must be >= {meta['min']}")
     elif value_type == "url":
         value = _coerce_url(raw_value)
     elif value_type == "path":
@@ -2005,7 +2013,11 @@ def save_settings(
                         validated[key] = runtime_value
                     else:
                         validated[key] = _validate_value(key, raw_value)
-                elif key in {"PLEX_MOVIE_SECTION_ID", "PLEX_TV_SECTION_ID"} and _is_blank(raw_value):
+                elif key in {
+                    "PLEX_MOVIE_SECTION_ID",
+                    "PLEX_TV_SECTION_ID",
+                    "DISCOVER_PLEX_MOVIE_SECTION_ID",
+                } and _is_blank(raw_value):
                     validated[key] = None
                 else:
                     validated[key] = _validate_value(key, raw_value)
@@ -2369,7 +2381,9 @@ def save_settings(
             "PLEX_TOKEN",
             "PLEX_MOVIE_SECTION_ID",
             "PLEX_TV_SECTION_ID",
+            "DISCOVER_PLEX_MOVIE_SECTION_ID",
             "LIBRARY_ROOT",
+            "DISCOVER_LIBRARY_ROOT",
         }
         if plex_location_cache_keys.intersection(saved_keys):
             try:
