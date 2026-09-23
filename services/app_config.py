@@ -719,7 +719,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "PLACEHOLDER_POSTER_OVERLAY_MODE",
             {
-                "section": "Status Updates",
+                "section": "Poster Overlay",
                 "label": "Placeholder poster overlay",
                 "description": (
                     "How placeholder posters appear in Plex, Jellyfin, and Emby. Always writes local poster.jpg, "
@@ -741,7 +741,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "ENABLE_PREFERRED_POSTER_LANGUAGE",
             {
-                "section": "Status Updates",
+                "section": "Poster Overlay",
                 "label": "Fetch from TMDB",
                 "description": "",
                 "type": "bool",
@@ -752,7 +752,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "PREFER_ORIGINAL_POSTER_LANGUAGE",
             {
-                "section": "Status Updates",
+                "section": "Poster Overlay",
                 "label": "Original language first",
                 "description": "",
                 "type": "bool",
@@ -765,7 +765,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "PREFERRED_POSTER_LANGUAGE",
             {
-                "section": "Status Updates",
+                "section": "Poster Overlay",
                 "label": "Language",
                 "description": "",
                 "type": "choice",

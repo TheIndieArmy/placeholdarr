@@ -174,8 +174,8 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
             "selected Language, then the Arr poster if neither is available. Episode stills are unchanged.\n\n"
             "This needs a TMDB API key under Optional APIs."
         ),
-        cta_label="Open Status Updates",
-        cta_path="/settings/status-updates",
+        cta_label="Open Poster Overlay",
+        cta_path="/settings/poster-overlay",
         requires_ack=True,
     ),
     WhatsNewNotice(
@@ -201,6 +201,20 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         ),
         cta_label="Open Paths",
         cta_path="/settings/paths",
+        requires_ack=True,
+    ),
+    WhatsNewNotice(
+        id="placeholder-look-0-10-2",
+        since_version="0.10.2",
+        title="Placeholder look settings",
+        body=(
+            "Status text, poster overlays, and placeholder videos are now separate Settings pages: "
+            "Status Updates, Poster Overlay, and Dummy Video.\n\n"
+            "On Dummy Video you can upload your own standard and Coming Soon placeholder videos, or reset to the defaults. "
+            "If a settings save requires a restart, use Restart Placeholdarr in the Settings header (Docker with a restart policy)."
+        ),
+        cta_label="Open Dummy Video",
+        cta_path="/settings/dummy-video",
         requires_ack=True,
     ),
 )

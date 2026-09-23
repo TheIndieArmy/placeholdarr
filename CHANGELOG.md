@@ -7,6 +7,29 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+### Fixed
+
+- **What's New CTA**: Open… links dismiss the notice (same as Got it) then navigate.
+
+## [0.10.2] - 2026-09-23
+
+### Summary
+
+- **Status Updates / Poster Overlay / Dummy Video**: Placeholder look settings split into three Settings sections.
+- **Dummy Video upload**: Upload or reset standard and Coming Soon placeholder videos from Settings.
+- **Settings restart**: Restart Placeholdarr from Settings when a save requires it (Docker restart policy).
+- **What's new placeholder look (0.10.2)**: Startup ack for the Settings split and Dummy Video upload.
+
+### Added
+
+- **Dummy Video**: Upload or reset standard and Coming Soon placeholder videos under Settings → Dummy Video.
+- **Settings restart**: After a save that requires restart, restart Placeholdarr from the Settings header (needs a container restart policy).
+- **What's new placeholder look (0.10.2)**: Startup ack for Status Updates / Poster Overlay / Dummy Video.
+
+### Changed
+
+- **Status Updates / Poster Overlay / Dummy Video**: Split status text, poster look, and placeholder videos into three Settings sections.
+
 ## [0.10.1] - 2026-09-23
 
 ### Summary

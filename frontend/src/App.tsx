@@ -198,8 +198,11 @@ const SETTINGS_SECTION_ORDER = [
   "Calendar",
   "Lookahead",
   "Status Updates",
+  "Poster Overlay",
+  "Dummy Video",
   "Advanced",
 ];
+
 const SETTINGS_SECTION_ICONS: Record<string, string> = {
   Security: "shield_lock",
   "Media Integrations": "hub",
@@ -210,6 +213,8 @@ const SETTINGS_SECTION_ICONS: Record<string, string> = {
   Calendar: "calendar_month",
   Lookahead: "fast_forward",
   "Status Updates": "edit_notifications",
+  "Poster Overlay": "image",
+  "Dummy Video": "movie",
   Advanced: "tune",
 };
 const SETTINGS_SECTION_SLUGS: Record<string, string> = {
@@ -222,6 +227,8 @@ const SETTINGS_SECTION_SLUGS: Record<string, string> = {
   Calendar: "calendar",
   Lookahead: "lookahead",
   "Status Updates": "status-updates",
+  "Poster Overlay": "poster-overlay",
+  "Dummy Video": "dummy-video",
   Advanced: "advanced",
 };
 
@@ -353,7 +360,7 @@ function settingsFieldIsNested(field: SettingsField): boolean {
 }
 
 /** Virtual settings sections backed by their own API endpoint, not `/api/settings/current`. */
-const VIRTUAL_SETTINGS_SECTIONS = new Set<string>();
+const VIRTUAL_SETTINGS_SECTIONS = new Set<string>(["Dummy Video"]);
 
 function resolveSettingsSectionFromSlug(slug: string): string | undefined {
   if (!slug.trim()) return undefined;
@@ -1691,6 +1698,27 @@ export function App() {
     }
   }
 
+  /** Dismiss all visible notices (Got it). Optional path runs after dismiss so CTAs close the modal too. */
+  async function acknowledgeWhatsNew(ctaPath?: string) {
+    const ids = whatsNewNotices.map((n) => n.id);
+    if (!ids.length) {
+      if (ctaPath) tryNavigate(ctaPath);
+      return;
+    }
+    setWhatsNewBusy(true);
+    try {
+      const next = await dismissWhatsNew(ids);
+      whatsNewDismissedRef.current = (next.notices || []).length === 0;
+      whatsNewCatalogOpenRef.current = false;
+      setWhatsNewNotices(next.notices || []);
+      if (ctaPath) tryNavigate(ctaPath);
+    } catch {
+      /* Keep the dialog so they can retry. */
+    } finally {
+      setWhatsNewBusy(false);
+    }
+  }
+
   function getActiveScrollTop() {
     const container = contentScrollRef.current;
     if (container) return container.scrollTop;
@@ -2958,20 +2986,7 @@ export function App() {
                   className={`px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
                   style={accentFilledStyle(brandAccent.hex)}
                   onClick={() => {
-                    const ids = whatsNewNotices.map((n) => n.id);
-                    void (async () => {
-                      setWhatsNewBusy(true);
-                      try {
-                        const next = await dismissWhatsNew(ids);
-                        whatsNewDismissedRef.current = (next.notices || []).length === 0;
-                        whatsNewCatalogOpenRef.current = false;
-                        setWhatsNewNotices(next.notices || []);
-                      } catch {
-                        /* Keep the dialog so they can retry. */
-                      } finally {
-                        setWhatsNewBusy(false);
-                      }
-                    })();
+                    void acknowledgeWhatsNew();
                   }}
                 >
                   Got it
@@ -2991,8 +3006,11 @@ export function App() {
                           {notice.cta_path && notice.cta_label ? (
                             <button
                               type="button"
-                              className="text-[14px] font-headline uppercase tracking-wider text-slate-200 underline decoration-slate-500 underline-offset-4 hover:text-white"
-                              onClick={() => tryNavigate(notice.cta_path as string)}
+                              disabled={whatsNewBusy}
+                              className="text-[14px] font-headline uppercase tracking-wider text-slate-200 underline decoration-slate-500 underline-offset-4 hover:text-white disabled:opacity-50"
+                              onClick={() => {
+                                void acknowledgeWhatsNew(notice.cta_path as string);
+                              }}
                             >
                               {notice.cta_label}
                             </button>
@@ -7235,26 +7253,23 @@ function SettingsPanel(props: {
                 />
               ) : null}
               {active.name === "Paths" ? (
-                <>
-                  <LibraryPathsForm
-                    fields={[
-                      ...active.fields,
-                      ...PATH_PLEX_DEFAULT_SECTION_KEYS.map((key) => allSettingsFieldsByKey.get(key)).filter(
-                        (field): field is SettingsField =>
-                          Boolean(field) && !active.fields.some((existing) => existing.key === field!.key),
-                      ),
-                    ]}
-                    values={props.values}
-                    brand={props.brand}
-                    themeMode={props.themeMode}
-                    accent={accent}
-                    layout="settings"
-                    onValueChange={props.onValueChange}
-                    runTest={runTest}
-                    testResults={testResults}
-                  />
-                  <DummyMediaSettings accentHex={accent.hex} />
-                </>
+                <LibraryPathsForm
+                  fields={[
+                    ...active.fields,
+                    ...PATH_PLEX_DEFAULT_SECTION_KEYS.map((key) => allSettingsFieldsByKey.get(key)).filter(
+                      (field): field is SettingsField =>
+                        Boolean(field) && !active.fields.some((existing) => existing.key === field!.key),
+                    ),
+                  ]}
+                  values={props.values}
+                  brand={props.brand}
+                  themeMode={props.themeMode}
+                  accent={accent}
+                  layout="settings"
+                  onValueChange={props.onValueChange}
+                  runTest={runTest}
+                  testResults={testResults}
+                />
               ) : active.name === "Media Integrations" ? (
                 (() => {
                   const fieldByKey = new Map(active.fields.map((f) => [f.key, f]));
@@ -7833,6 +7848,21 @@ function SettingsPanel(props: {
                     embedded
                   />
                 </>
+              ) : active.name === "Poster Overlay" ? (
+                renderOnboardingStyleSectionRows(active.fields, {
+                  intro: (
+                    <div className="space-y-3">
+                      <p className="ui-field-description text-slate-300 leading-relaxed">
+                        Choose how placeholder posters look on the shelf, including optional overlays and TMDB language
+                        lookup.
+                      </p>
+                    </div>
+                  ),
+                })
+              ) : active.name === "Dummy Video" ? (
+                <div className="px-6 py-5">
+                  <DummyMediaSettings accentHex={accent.hex} />
+                </div>
               ) : active.name === "Library sync" ? (
                 renderOnboardingStyleSectionRows(active.fields)
               ) : active.name === "Optional APIs" ? (

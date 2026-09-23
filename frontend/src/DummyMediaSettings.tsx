@@ -187,17 +187,14 @@ export default function DummyMediaSettings(props: { accentHex: string }) {
   }
 
   return (
-    <div className="mt-6 bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden">
-      <div className="px-6 py-4 border-b border-[#424753]/30">
-        <h2 className="text-[18px] font-bold text-white font-headline">Placeholder Videos</h2>
-        <p className="mt-1 text-[13px] text-white/50">
-          Replace the video files placeholders link to when a title is browsed/scrubbed before it is downloaded.
-        </p>
-      </div>
+    <div className="space-y-4">
+      <p className="ui-field-description text-slate-300 leading-relaxed">
+        Replace the video files placeholders link to when a title is browsed or scrubbed before it is downloaded.
+      </p>
       {loadError ? (
-        <div className="px-6 py-4 text-[13px] text-red-400">{loadError}</div>
+        <div className="text-[13px] text-red-400">{loadError}</div>
       ) : (
-        <div className="divide-y divide-[#424753]/20">
+        <div className="overflow-hidden divide-y divide-[#424753]/20 rounded-lg border border-[#424753]/40 bg-[#0b111b]/40">
           <DummyMediaRow kind="primary" info={status.primary} accentHex={props.accentHex} onChanged={handleChanged} />
           <DummyMediaRow kind="coming_soon" info={status.coming_soon} accentHex={props.accentHex} onChanged={handleChanged} />
         </div>
