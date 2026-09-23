@@ -171,7 +171,11 @@ def _release_sync_gate(*, owner: str) -> None:
 
 
 def _heartbeat_sync_gate(*, owner: str) -> None:
-    """Bump the gate row's updated_at so concurrent acquirers see a fresh owner."""
+    """Bump the gate row's updated_at so concurrent acquirers see a fresh owner.
+
+    Also touches the CLAIMED ``job`` row when ``owner`` is ``job:<id>`` so the
+    stale-CLAIMED reaper does not requeue a long ARR full sync mid-run.
+    """
     session = get_session()
     try:
         row = (
@@ -186,8 +190,27 @@ def _heartbeat_sync_gate(*, owner: str) -> None:
         if existing.get("owner") != owner or not existing.get("active"):
             session.rollback()
             return
-        row.updated_at = _now_utc()
+        now = _now_utc()
+        row.updated_at = now
         session.add(row)
+        owner_text = str(owner or "")
+        if owner_text.startswith("job:"):
+            try:
+                job_id = int(owner_text.split(":", 1)[1])
+            except Exception:
+                job_id = 0
+            if job_id > 0:
+                session.execute(
+                    text(
+                        """
+                        UPDATE job
+                           SET updated_at = :now
+                         WHERE id = :job_id
+                           AND status = 'CLAIMED'
+                        """
+                    ),
+                    {"now": now, "job_id": job_id},
+                )
         session.commit()
     except Exception:
         try:
@@ -240,10 +263,18 @@ def process_startup_sync_runner_job(session, job: Job) -> dict[str, Any]:
 
     if not _try_acquire_sync_gate(owner=owner):
         logger.info(
-            f"startup_sync_runner job_id={job_id_repr} skipped — sync gate busy (reason={reason})",
+            f"startup_sync_runner job_id={job_id_repr} deferred — sync gate busy (reason={reason})",
             extra={"emoji_type": "info"},
         )
-        return {"ok": True, "skipped": "sync_gate_busy", "reason": reason}
+        # Do not mark the job DONE: another runner still holds the gate (often the
+        # original long full sync after a stale-CLAIMED reclaim). Defer so we retry.
+        return {
+            "ok": True,
+            "skipped": "sync_gate_busy",
+            "defer": True,
+            "defer_seconds": 120,
+            "reason": reason,
+        }
 
     from services.startup_gate import startup_sync_complete
 

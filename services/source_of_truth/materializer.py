@@ -274,7 +274,40 @@ def _should_trigger_overlap_checkpoint(
 
 
 def _target_refresh_section_ids(*, has_movies: bool, has_episodes: bool) -> list[int]:
-    section_ids: list[int] = []
+    try:
+        from services.library_destinations import all_plex_section_ids, parse_library_destination_map
+
+        rows = parse_library_destination_map()
+        section_ids: list[int] = []
+        for sid in all_plex_section_ids(map_rows=rows):
+            # Filter by media type when map rows encode arr_type via defaults.
+            section_ids.append(int(sid))
+        if section_ids:
+            # When both flags false, still return empty; when either true, include matching.
+            if has_movies or has_episodes:
+                # Include mapped sections for the requested media kinds.
+                filtered: list[int] = []
+                defaults: list[int] = []
+                movie_default = getattr(settings, "PLEX_MOVIE_SECTION_ID", None)
+                tv_default = getattr(settings, "PLEX_TV_SECTION_ID", None)
+                if has_movies and movie_default is not None:
+                    defaults.append(int(movie_default))
+                if has_episodes and tv_default is not None:
+                    defaults.append(int(tv_default))
+                for row in rows:
+                    arr_type = str(row.get("arr_type") or "").lower()
+                    sid = row.get("plex_section_id")
+                    if sid is None:
+                        continue
+                    if has_movies and arr_type == "radarr":
+                        filtered.append(int(sid))
+                    if has_episodes and arr_type == "sonarr":
+                        filtered.append(int(sid))
+                return sorted(set(defaults + filtered))
+            return []
+    except Exception:
+        pass
+    section_ids = []
     if has_movies:
         movie_section = getattr(settings, "PLEX_MOVIE_SECTION_ID", None)
         if movie_section is not None:
@@ -496,6 +529,8 @@ def _mark_placeholder_rows_deleted(
         row.display_status_projected = None
         row.display_reason = None
         row.display_progress = None
+        row.queue_monitor_active = False
+        row.queue_monitor_active_set_at = None
         row.last_observed_at = func.now()
         row.plex_placeholder_id = None
         row.jellyfin_placeholder_id = None
@@ -539,6 +574,8 @@ def _mark_placeholder_rows_deleted_for_episodes(
         row.display_status_projected = None
         row.display_reason = None
         row.display_progress = None
+        row.queue_monitor_active = False
+        row.queue_monitor_active_set_at = None
         row.last_observed_at = func.now()
         row.plex_placeholder_id = None
         row.jellyfin_placeholder_id = None

@@ -1618,3 +1618,89 @@ a.movie-file-state-dark-tile:focus-visible {
   animation-delay: 0.24s;
 }
 
+
+/* Arr slot disconnect (vertical rails): fade Slot 1; lower seats step up one row. */
+@keyframes arr-slot-exit-fade {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+
+@keyframes arr-slot-shift-up {
+  0% {
+    transform: translateY(0);
+  }
+  100% {
+    /* One reserved seat: fixed card height 8.25rem + gap-3 (0.75rem) + slot label row (~1.5rem) */
+    transform: translateY(calc(-8.25rem - 0.75rem - 1.5rem));
+  }
+}
+
+@keyframes arr-slot-promote-settle {
+  0% {
+    transform: translateY(8px);
+    opacity: 0.75;
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand-accent-3) 0%, transparent);
+  }
+  45% {
+    transform: translateY(0);
+    opacity: 1;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand-accent-3) 55%, transparent);
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand-accent-3) 0%, transparent);
+  }
+}
+
+@keyframes arr-slot-promote-chip {
+  0% {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  20% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  75% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.arr-slot-exit-fade {
+  animation: arr-slot-exit-fade 380ms cubic-bezier(0.22, 0.8, 0.24, 1) forwards;
+  pointer-events: none;
+}
+
+.arr-slot-shift-up {
+  animation: arr-slot-shift-up 380ms cubic-bezier(0.22, 0.8, 0.24, 1) forwards;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.arr-slot-promote-settle {
+  animation: arr-slot-promote-settle 560ms cubic-bezier(0.22, 0.8, 0.24, 1);
+}
+
+.arr-slot-promote-chip {
+  animation: arr-slot-promote-chip 900ms ease forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .arr-slot-exit-fade,
+  .arr-slot-shift-up,
+  .arr-slot-promote-settle,
+  .arr-slot-promote-chip {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

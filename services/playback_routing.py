@@ -26,20 +26,18 @@ def get_candidate_instances_for_tv() -> list[str]:
 
 def resolve_playback_instance_for_movie(
     tmdb_id: Optional[int] = None,
-    is_4k: Optional[bool] = None,
 ) -> str:
     """
     Resolve which Radarr instance to use for movie playback.
-    
-    Uses ranked instance preference from settings. Falls back to legacy 4k flag if no ranking configured.
-    
+
+    Uses ranked instance preference from settings.
+
     Args:
         tmdb_id: Optional TMDB ID (for potential future profile matching)
-        is_4k: Optional flag indicating if 4K content (legacy, kept for backward compat)
-    
+
     Returns:
         Instance key to use for playback
-        
+
     Raises:
         ValueError: If no Radarr instances are configured
     """
@@ -54,20 +52,18 @@ def resolve_playback_instance_for_movie(
 
 def resolve_playback_instance_for_tv(
     tvdb_id: Optional[int] = None,
-    is_4k: Optional[bool] = None,
 ) -> str:
     """
     Resolve which Sonarr instance to use for TV playback.
-    
-    Uses ranked instance preference from settings. Falls back to legacy 4k flag if no ranking configured.
-    
+
+    Uses ranked instance preference from settings.
+
     Args:
         tvdb_id: Optional TVDB ID (for potential future profile matching)
-        is_4k: Optional flag indicating if 4K content (legacy, kept for backward compat)
-    
+
     Returns:
         Instance key to use for playback
-        
+
     Raises:
         ValueError: If no Sonarr instances are configured
     """

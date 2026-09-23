@@ -11,8 +11,11 @@ _PLEX = None
 
 # LibrarySection.all() pulls the full movie/show list from Plex. Doing that once per title
 # during a batch (when rating_key is missing) can stall for many minutes. Cache per section
-# for a short TTL so one batch reuses a single listing.
+# for a short TTL so one batch reuses a single listing. Single-flight lock prevents cache stampedes
+# when multiple workers query the same section concurrently.
 _plex_section_all_cache: dict[tuple[str, str], tuple[float, list[Any]]] = {}
+_plex_section_locks: dict[tuple[str, str], threading.Lock] = {}
+_plex_section_locks_guard = threading.Lock()
 
 
 def _plex_section_list_cache_ttl() -> float:
@@ -23,7 +26,7 @@ def _plex_section_list_cache_ttl() -> float:
 
 
 def _cached_section_all(section, kind: str) -> list[Any]:
-    """Return section.all() with a short process-local TTL cache to avoid repeated full scans."""
+    """Return section.all() with single-flight request coalescing and short TTL cache."""
     try:
         sk = str(int(section.key))
     except Exception:
@@ -31,6 +34,8 @@ def _cached_section_all(section, kind: str) -> list[Any]:
     cache_key = (kind, sk)
     now = time.monotonic()
     ttl = _plex_section_list_cache_ttl()
+
+    # Fast path: already cached and fresh
     hit = _plex_section_all_cache.get(cache_key)
     if hit and (now - hit[0]) <= ttl:
         logger.debug(
@@ -39,62 +44,78 @@ def _cached_section_all(section, kind: str) -> list[Any]:
         )
         return hit[1]
 
-    try:
-        sec_title = str(getattr(section, "title", None) or getattr(section, "libtype", "") or "?")
-    except Exception:
-        sec_title = "?"
-    caller_thread = threading.current_thread().name
+    # Single-flight: ensure only one worker thread per section loads section.all() concurrently
+    with _plex_section_locks_guard:
+        if cache_key not in _plex_section_locks:
+            _plex_section_locks[cache_key] = threading.Lock()
+        section_lock = _plex_section_locks[cache_key]
 
-    logger.info(
-        f"Plex: loading full {kind} list from server "
-        f"(section_key={sk}, section_title={sec_title!r}, caller_thread={caller_thread}) — "
-        f"only used when a title has no cached Plex id; "
-        f"direct ratingKey updates do NOT hit this path. "
-        f"Heartbeats every 15s while this PlexAPI call runs; "
-        f"lookups within {int(ttl)}s reuse this list…",
-        extra={"emoji_type": "info"},
-    )
-
-    stop_heartbeat = threading.Event()
-    _hb_interval = 15.0
-
-    def _slow_load_heartbeat():
-        # While section.all() blocks, log periodically. Short loads may finish before first tick.
-        while not stop_heartbeat.wait(_hb_interval):
-            logger.info(
-                f"Plex: section.all() still in progress kind={kind!r} section_key={sk} "
-                f"section_title={sec_title!r} caller_thread={caller_thread}",
-                extra={"emoji_type": "info"},
+    with section_lock:
+        now = time.monotonic()
+        hit = _plex_section_all_cache.get(cache_key)
+        if hit and (now - hit[0]) <= ttl:
+            logger.debug(
+                f"Plex: using cached {kind} list section_key={sk} age_s={now - hit[0]:.1f} (reused in-flight load)",
+                extra={"emoji_type": "debug"},
             )
+            return hit[1]
 
-    hb = threading.Thread(
-        target=_slow_load_heartbeat,
-        name=f"plex-hb-{sk}",
-        daemon=True,
-    )
-    hb.start()
-    t0 = time.monotonic()
-    try:
-        items = section.all()
-    except Exception as exc:
-        logger.error(
-            f"Plex: section.all() failed kind={kind!r} section_key={sk} "
-            f"section_title={sec_title!r} caller_thread={caller_thread} "
-            f"elapsed_s={time.monotonic() - t0:.1f} error={type(exc).__name__}: {exc}",
-            extra={"emoji_type": "error"},
+        try:
+            sec_title = str(getattr(section, "title", None) or getattr(section, "libtype", "") or "?")
+        except Exception:
+            sec_title = "?"
+        caller_thread = threading.current_thread().name
+
+        logger.info(
+            f"Plex: loading full {kind} list from server "
+            f"(section_key={sk}, section_title={sec_title!r}, caller_thread={caller_thread}): "
+            f"only used when a title has no cached Plex id; "
+            f"direct ratingKey updates do NOT hit this path. "
+            f"Heartbeats every 15s while this PlexAPI call runs; "
+            f"lookups within {int(ttl)}s reuse this list...",
+            extra={"emoji_type": "info"},
         )
-        raise
-    finally:
-        stop_heartbeat.set()
 
-    elapsed = time.monotonic() - t0
-    logger.info(
-        f"Plex: loaded {kind} list section_key={sk} count={len(items)} "
-        f"elapsed_s={elapsed:.1f} caller_thread={caller_thread}",
-        extra={"emoji_type": "info"},
-    )
-    _plex_section_all_cache[cache_key] = (now, items)
-    return items
+        stop_heartbeat = threading.Event()
+        _hb_interval = 15.0
+
+        def _slow_load_heartbeat():
+            # While section.all() blocks, log periodically. Short loads may finish before first tick.
+            while not stop_heartbeat.wait(_hb_interval):
+                logger.info(
+                    f"Plex: section.all() still in progress kind={kind!r} section_key={sk} "
+                    f"section_title={sec_title!r} caller_thread={caller_thread}",
+                    extra={"emoji_type": "info"},
+                )
+
+        hb = threading.Thread(
+            target=_slow_load_heartbeat,
+            name=f"plex-hb-{sk}",
+            daemon=True,
+        )
+        hb.start()
+        t0 = time.monotonic()
+        try:
+            items = section.all()
+        except Exception as exc:
+            logger.error(
+                f"Plex: section.all() failed kind={kind!r} section_key={sk} "
+                f"section_title={sec_title!r} caller_thread={caller_thread} "
+                f"elapsed_s={time.monotonic() - t0:.1f} error={type(exc).__name__}: {exc}",
+                extra={"emoji_type": "error"},
+            )
+            raise
+        finally:
+            stop_heartbeat.set()
+
+        elapsed = time.monotonic() - t0
+        logger.info(
+            f"Plex: loaded {kind} list section_key={sk} count={len(items)} "
+            f"elapsed_s={elapsed:.1f} caller_thread={caller_thread}",
+            extra={"emoji_type": "info"},
+        )
+        _plex_section_all_cache[cache_key] = (now, items)
+        return items
 
 
 def get_plex_server(refresh: bool = False):
@@ -169,36 +190,59 @@ def _extract_path_numeric(item: Any, provider: str) -> str | None:
     return None
 
 
-def find_show_by_id(tvdb_id, title=None):
+def find_show_by_id(tvdb_id, title=None, preferred_section_id: int | None = None):
     """Find a TV show in Plex by TVDB ID with title fallback."""
     plex = get_plex_server()
     if not plex:
         return None
 
     try:
-        tv_section = plex.library.sectionByID(settings.PLEX_TV_SECTION_ID)
-        all_shows = _cached_section_all(tv_section, "TV show")
+        from services.library_destinations import all_plex_section_ids, parse_library_destination_map
+
+        section_ids = list(all_plex_section_ids(map_rows=parse_library_destination_map()))
+        tv_default = getattr(settings, "PLEX_TV_SECTION_ID", None)
+        if tv_default is not None:
+            tid = int(tv_default)
+            if tid not in section_ids:
+                section_ids.insert(0, tid)
+        if preferred_section_id is not None:
+            try:
+                pid = int(preferred_section_id)
+                if pid in section_ids:
+                    section_ids.remove(pid)
+                section_ids.insert(0, pid)
+            except Exception:
+                pass
+        if not section_ids:
+            return None
 
         target_tvdb = str(tvdb_id)
-        for show in all_shows:
-            guid_id = _extract_guid_numeric(show, "tvdb")
-            if guid_id and guid_id == target_tvdb:
-                return show
-
-        for show in all_shows:
-            path_id = _extract_path_numeric(show, "tvdb")
-            if path_id and path_id == target_tvdb:
-                return show
-
-        if title:
-            clean_title = _normalize_title(title)
-            for show in all_shows:
-                if _normalize_title(getattr(show, "title", None)) == clean_title:
-                    return show
+        for section_id in section_ids:
             try:
-                return tv_section.get(title)
+                tv_section = plex.library.sectionByID(int(section_id))
             except Exception:
-                return None
+                continue
+            all_shows = _cached_section_all(tv_section, "TV show")
+
+            for show in all_shows:
+                guid_id = _extract_guid_numeric(show, "tvdb")
+                if guid_id and guid_id == target_tvdb:
+                    return show
+
+            for show in all_shows:
+                path_id = _extract_path_numeric(show, "tvdb")
+                if path_id and path_id == target_tvdb:
+                    return show
+
+            if title:
+                clean_title = _normalize_title(title)
+                for show in all_shows:
+                    if _normalize_title(getattr(show, "title", None)) == clean_title:
+                        return show
+                try:
+                    return tv_section.get(title)
+                except Exception:
+                    pass
 
         return None
     except Exception as ex:
@@ -206,49 +250,72 @@ def find_show_by_id(tvdb_id, title=None):
         return None
 
 
-def find_movie_by_id(tmdb_id, title=None, year=None):
+def find_movie_by_id(tmdb_id, title=None, year=None, preferred_section_id: int | None = None):
     """Find a movie in Plex by TMDB ID with title/year fallback."""
     plex = get_plex_server()
     if not plex:
         return None
 
     try:
-        movie_section = plex.library.sectionByID(settings.PLEX_MOVIE_SECTION_ID)
-        all_movies = _cached_section_all(movie_section, "movie")
+        from services.library_destinations import all_plex_section_ids, parse_library_destination_map
+
+        section_ids = list(all_plex_section_ids(map_rows=parse_library_destination_map()))
+        movie_default = getattr(settings, "PLEX_MOVIE_SECTION_ID", None)
+        if movie_default is not None:
+            mid = int(movie_default)
+            if mid not in section_ids:
+                section_ids.insert(0, mid)
+        if preferred_section_id is not None:
+            try:
+                pid = int(preferred_section_id)
+                if pid in section_ids:
+                    section_ids.remove(pid)
+                section_ids.insert(0, pid)
+            except Exception:
+                pass
+        if not section_ids:
+            return None
 
         target_tmdb = str(tmdb_id)
-        for movie in all_movies:
-            guid_id = _extract_guid_numeric(movie, "tmdb")
-            if guid_id and guid_id == target_tmdb:
-                return movie
-
-        for movie in all_movies:
-            path_id = _extract_path_numeric(movie, "tmdb")
-            if path_id and path_id == target_tmdb:
-                return movie
-
-        if title:
-            clean_title = _normalize_title(title)
-            if year is not None:
-                try:
-                    target_year = int(year)
-                except Exception:
-                    target_year = None
-                if target_year is not None:
-                    for movie in all_movies:
-                        if (
-                            _normalize_title(getattr(movie, "title", None)) == clean_title
-                            and int(getattr(movie, "year", 0) or 0) == target_year
-                        ):
-                            return movie
+        for section_id in section_ids:
+            try:
+                movie_section = plex.library.sectionByID(int(section_id))
+            except Exception:
+                continue
+            all_movies = _cached_section_all(movie_section, "movie")
 
             for movie in all_movies:
-                if _normalize_title(getattr(movie, "title", None)) == clean_title:
+                guid_id = _extract_guid_numeric(movie, "tmdb")
+                if guid_id and guid_id == target_tmdb:
                     return movie
-            try:
-                return movie_section.get(title)
-            except Exception:
-                return None
+
+            for movie in all_movies:
+                path_id = _extract_path_numeric(movie, "tmdb")
+                if path_id and path_id == target_tmdb:
+                    return movie
+
+            if title:
+                clean_title = _normalize_title(title)
+                if year is not None:
+                    try:
+                        target_year = int(year)
+                    except Exception:
+                        target_year = None
+                    if target_year is not None:
+                        for movie in all_movies:
+                            if (
+                                _normalize_title(getattr(movie, "title", None)) == clean_title
+                                and int(getattr(movie, "year", 0) or 0) == target_year
+                            ):
+                                return movie
+
+                for movie in all_movies:
+                    if _normalize_title(getattr(movie, "title", None)) == clean_title:
+                        return movie
+                try:
+                    return movie_section.get(title)
+                except Exception:
+                    pass
 
         return None
     except Exception as ex:
@@ -262,9 +329,10 @@ def find_episode_by_series_tvdb(
     episode_number: int,
     *,
     series_title: str | None = None,
+    preferred_section_id: int | None = None,
 ):
     """Resolve a Plex episode from the series TVDB id and SxxEyy indices."""
-    show = find_show_by_id(tvdb_id, title=series_title)
+    show = find_show_by_id(tvdb_id, title=series_title, preferred_section_id=preferred_section_id)
     if not show:
         return None
     try:

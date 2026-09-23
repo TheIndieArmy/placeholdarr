@@ -374,8 +374,21 @@ def refresh_plex_item_metadata(rating_key: str | int) -> PlexMetadataRefreshResu
         return "failed"
 
 
+def _plex_text_preview(value: str, *, limit: int = 80) -> str:
+    text = str(value or "").replace("\n", " ").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
+
+
 def update_plex_item_text(rating_key: str | int, *, title: str, summary: str) -> PlexMetadataRefreshResult:
-    """Directly update Plex item title/summary via PlexAPI edit methods."""
+    """Directly update Plex item title/summary via PlexAPI edit methods.
+
+    Title and summary are locked after the edit so Plex agents (TMDB / local NFO)
+    cannot immediately revert the projected status. Placeholder items live in the
+    dummy library and are removed on import finalize, so locking does not stick
+    on the real-file item.
+    """
     if not getattr(settings, "plex_enabled", False):
         return "skipped"
     key = str(rating_key or "").strip()
@@ -388,20 +401,44 @@ def update_plex_item_text(rating_key: str | int, *, title: str, summary: str) ->
         if plex is None:
             return "failed"
         item = plex.fetchItem(f"/library/metadata/{key}")
-        # Avoid locking title/summary fields so later NFO/library refreshes can still
-        # overwrite metadata if direct projection fails or drifts.
+        wanted_title = str(title or "")
+        wanted_summary = str(summary or "")
+        before_title = str(getattr(item, "title", "") or "")
+        before_summary = str(getattr(item, "summary", "") or "")
         try:
-            item.editTitle(str(title or ""), locked=False)
+            item.editTitle(wanted_title, locked=True)
         except TypeError:
-            item.editTitle(str(title or ""))
+            item.editTitle(wanted_title)
         try:
-            item.editSummary(str(summary or ""), locked=False)
+            item.editSummary(wanted_summary, locked=True)
         except TypeError:
-            item.editSummary(str(summary or ""))
+            item.editSummary(wanted_summary)
         item.reload()
-        title_ok = str(getattr(item, "title", "") or "") == str(title or "")
-        summary_ok = str(getattr(item, "summary", "") or "") == str(summary or "")
-        return "ok" if (title_ok and summary_ok) else "failed"
+        after_title = str(getattr(item, "title", "") or "")
+        after_summary = str(getattr(item, "summary", "") or "")
+        title_ok = after_title == wanted_title
+        summary_ok = after_summary == wanted_summary
+        if title_ok and summary_ok:
+            logger.debug(
+                "Plex: title/summary edit confirmed "
+                f"(rating_key={key} title {_plex_text_preview(before_title)!r} -> "
+                f"{_plex_text_preview(after_title)!r} summary_changed="
+                f"{before_summary != after_summary})",
+                extra={"emoji_type": "debug"},
+            )
+            return "ok"
+        logger.warning(
+            "Plex: title/summary edit did not stick "
+            f"(rating_key={key} title_ok={title_ok} summary_ok={summary_ok} "
+            f"before_title={_plex_text_preview(before_title)!r} "
+            f"after_title={_plex_text_preview(after_title)!r} "
+            f"expected_title={_plex_text_preview(wanted_title)!r} "
+            f"before_summary={_plex_text_preview(before_summary)!r} "
+            f"after_summary={_plex_text_preview(after_summary)!r} "
+            f"expected_summary={_plex_text_preview(wanted_summary)!r})",
+            extra={"emoji_type": "warning"},
+        )
+        return "failed"
     except Exception as ex:
         text = str(ex).lower()
         if "404" in text or "not found" in text:
@@ -462,37 +499,49 @@ def refresh_plex_section_ids(
 
 
 def _library_roots_and_section(abs_folder: str) -> tuple[list[str], int | None]:
-    movie_roots = [
-        str(r).strip()
-        for r in (
-            getattr(settings, "MOVIE_LIBRARY_FOLDER", None),
-            getattr(settings, "MOVIE_LIBRARY_4K_FOLDER", None),
+    try:
+        from services.library_destinations import (
+            all_movie_dest_roots,
+            all_tv_dest_roots,
+            plex_section_for_folder,
         )
-        if r
-    ]
-    tv_roots = [
-        str(r).strip()
-        for r in (
-            getattr(settings, "TV_LIBRARY_FOLDER", None),
-            getattr(settings, "TV_LIBRARY_4K_FOLDER", None),
-        )
-        if r
-    ]
-    movie_section = getattr(settings, "PLEX_MOVIE_SECTION_ID", None)
-    tv_section = getattr(settings, "PLEX_TV_SECTION_ID", None)
-    for root in movie_roots:
-        if _relpath_under_root(abs_folder, root) is not None:
-            try:
-                return movie_roots, int(movie_section) if movie_section is not None else None
-            except (TypeError, ValueError):
-                return movie_roots, None
-    for root in tv_roots:
-        if _relpath_under_root(abs_folder, root) is not None:
-            try:
-                return tv_roots, int(tv_section) if tv_section is not None else None
-            except (TypeError, ValueError):
-                return tv_roots, None
-    return [], None
+
+        movie_roots = [str(r).strip() for r in all_movie_dest_roots() if r]
+        tv_roots = [str(r).strip() for r in all_tv_dest_roots() if r]
+        section_id = plex_section_for_folder(abs_folder)
+        for root in movie_roots:
+            if _relpath_under_root(abs_folder, root) is not None:
+                return movie_roots, section_id
+        for root in tv_roots:
+            if _relpath_under_root(abs_folder, root) is not None:
+                return tv_roots, section_id
+        return [], None
+    except Exception:
+        movie_roots = [
+            str(r).strip()
+            for r in (getattr(settings, "MOVIE_LIBRARY_FOLDER", None),)
+            if r
+        ]
+        tv_roots = [
+            str(r).strip()
+            for r in (getattr(settings, "TV_LIBRARY_FOLDER", None),)
+            if r
+        ]
+        movie_section = getattr(settings, "PLEX_MOVIE_SECTION_ID", None)
+        tv_section = getattr(settings, "PLEX_TV_SECTION_ID", None)
+        for root in movie_roots:
+            if _relpath_under_root(abs_folder, root) is not None:
+                try:
+                    return movie_roots, int(movie_section) if movie_section is not None else None
+                except (TypeError, ValueError):
+                    return movie_roots, None
+        for root in tv_roots:
+            if _relpath_under_root(abs_folder, root) is not None:
+                try:
+                    return tv_roots, int(tv_section) if tv_section is not None else None
+                except (TypeError, ValueError):
+                    return tv_roots, None
+        return [], None
 
 
 def refresh_plex_paths(paths: set[str], *, update_type: str = "Created") -> dict[str, int]:
@@ -568,7 +617,10 @@ def refresh_plex_sections(
     *,
     force_refresh_metadata: bool = False,
 ) -> dict[str, int]:
-    """Send a single full-section refresh per affected Plex library."""
+    """Send a single full-section refresh per affected Plex library.
+
+    Includes primary defaults, legacy 4K section IDs, and dest-map section IDs.
+    """
     if not getattr(settings, "plex_enabled", False):
         return {"refreshed": 0, "failed": 0}
 
@@ -576,14 +628,55 @@ def refresh_plex_sections(
     if not plex_url or not plex_token:
         return {"refreshed": 0, "failed": 0}
 
-    section_ids: list[int] = []
-    if has_movies:
-        sid = getattr(settings, "PLEX_MOVIE_SECTION_ID", None)
-        if sid:
-            section_ids.append(int(sid))
-    if has_episodes:
-        sid = getattr(settings, "PLEX_TV_SECTION_ID", None)
-        if sid:
-            section_ids.append(int(sid))
+    from services.library_destinations import (
+        all_plex_section_ids,
+        default_movie_4k_plex_section_id,
+        default_movie_plex_section_id,
+        default_tv_4k_plex_section_id,
+        default_tv_plex_section_id,
+        parse_library_destination_map,
+    )
 
-    return refresh_plex_section_ids(section_ids, force_refresh_metadata=force_refresh_metadata)
+    section_ids: list[int] = []
+    if has_movies and has_episodes:
+        section_ids = list(all_plex_section_ids())
+    else:
+        map_rows = parse_library_destination_map()
+        if has_movies:
+            for sid in (default_movie_plex_section_id(), default_movie_4k_plex_section_id()):
+                if sid is not None:
+                    section_ids.append(int(sid))
+            for row in map_rows:
+                if str(row.get("arr_type") or "").lower() != "radarr":
+                    continue
+                sid = row.get("plex_section_id")
+                if sid is None:
+                    continue
+                try:
+                    section_ids.append(int(sid))
+                except (TypeError, ValueError):
+                    continue
+        if has_episodes:
+            for sid in (default_tv_plex_section_id(), default_tv_4k_plex_section_id()):
+                if sid is not None:
+                    section_ids.append(int(sid))
+            for row in map_rows:
+                if str(row.get("arr_type") or "").lower() != "sonarr":
+                    continue
+                sid = row.get("plex_section_id")
+                if sid is None:
+                    continue
+                try:
+                    section_ids.append(int(sid))
+                except (TypeError, ValueError):
+                    continue
+
+    deduped: list[int] = []
+    seen: set[int] = set()
+    for sid in section_ids:
+        if sid in seen or sid < 1:
+            continue
+        seen.add(sid)
+        deduped.append(sid)
+
+    return refresh_plex_section_ids(deduped, force_refresh_metadata=force_refresh_metadata)

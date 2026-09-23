@@ -96,11 +96,11 @@ class SeriesRepository:
                 item = settings.resolve_arr_instance('sonarr', instance_key=key) or {}
                 mapped['instance_id'] = str(item.get('instance_id') or f"sonarr:{key}").strip().lower()
             else:
-                item = settings.resolve_arr_instance('sonarr', role='primary') or {}
+                item = settings.resolve_arr_instance('sonarr') or {}
                 mapped['instance_id'] = str(item.get('instance_id') or 'sonarr:primary').strip().lower()
 
         if 'instance_key' not in mapped:
-            item = settings.resolve_arr_instance('sonarr', instance_id=mapped.get('instance_id')) or settings.resolve_arr_instance('sonarr', role='primary') or {}
+            item = settings.resolve_arr_instance('sonarr', instance_id=mapped.get('instance_id')) or settings.resolve_arr_instance('sonarr') or {}
             mapped['instance_key'] = str(item.get('instance_key') or 'sonarr_std').strip().lower()
 
         series = Series(**mapped)

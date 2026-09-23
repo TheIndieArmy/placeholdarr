@@ -426,3 +426,40 @@ export async function testIntegrationConnection(input: {
 export async function getIntegrationsStatus(): Promise<IntegrationsStatusResponse> {
   return fetchJson<IntegrationsStatusResponse>("/api/integrations/status");
 }
+
+export async function getArrRootFolders(): Promise<{
+  ok: boolean;
+  instances: Array<{
+    instance_key: string;
+    instance_id?: string;
+    label: string;
+    arr_type: "radarr" | "sonarr";
+    root_folders: Array<{ id?: number | null; path: string }>;
+  }>;
+}> {
+  return fetchJson("/api/settings/arr-root-folders");
+}
+
+export type EnsureDestFolderResponse = {
+  ok: boolean;
+  path: string;
+  created: boolean;
+  existed: boolean;
+  message: string;
+};
+
+export async function ensureDestFolder(path: string): Promise<EnsureDestFolderResponse> {
+  try {
+    return await postJson<EnsureDestFolderResponse>("/api/settings/ensure-dest-folder", { path });
+  } catch (err) {
+    if (err instanceof ApiUnauthorizedError) throw err;
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      path: String(path || "").trim(),
+      created: false,
+      existed: false,
+      message: message || "Could not create folder",
+    };
+  }
+}

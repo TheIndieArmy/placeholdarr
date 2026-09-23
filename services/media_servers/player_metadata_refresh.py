@@ -368,18 +368,12 @@ def _find_emby_episode_item_id(series: Series, season: Season, episode: Episode,
 
 
 def _projected_display_status(placeholder: Placeholder) -> str:
-    status = str(getattr(placeholder, "display_status", "") or "").strip().upper()
-    reason = str(getattr(placeholder, "display_reason", "") or "").strip()
-    if status in {"COMING_SOON", "COMING_SOON_30", "COMING_SOON_14", "COMING_SOON_7", "COMING_SOON_1", "COMING_SOON_TODAY"} and reason:
-        return reason
-    if status == "DOWNLOADING" and reason:
-        return reason
-    if status == "SEARCHING" and reason and reason.lower() == "queued":
-        return reason
-    if status == "NOT_FOUND":
-        # User-facing projection should read as outcome text, not enum token.
-        return reason or "NO QUALIFYING RELEASE FOUND"
-    return status or "REQUEST"
+    from services.status_projection import resolve_display_status
+
+    status = str(getattr(placeholder, "display_status", "") or "").strip()
+    reason = str(getattr(placeholder, "display_reason", "") or "").strip() or None
+    # Pass enum-or-reason into project_title/project_summary (same as NFO refresh).
+    return resolve_display_status(status, reason) or "REQUEST"
 
 
 def _runtime_minutes_movie(movie: Movie) -> int | None:
@@ -586,7 +580,8 @@ def _push_movie(
             if outcome == "ok":
                 logger.debug(
                     "Plex: updated movie title/summary "
-                    f"(rating_key={plex_key}, movie_id={int(getattr(movie, 'id', 0) or 0)})",
+                    f"(rating_key={plex_key}, movie_id={int(getattr(movie, 'id', 0) or 0)}, "
+                    f"status={status!r}, title={projected_title!r})",
                     extra={"emoji_type": "debug"},
                 )
             else:
@@ -621,10 +616,20 @@ def _push_movie(
                 )
                 plex_movie = None
             else:
+                preferred_section_id = None
+                try:
+                    from services.library_destinations import plex_section_for_folder
+
+                    m_folder = str(getattr(movie, "placeholder_folder", "") or "").strip()
+                    if m_folder:
+                        preferred_section_id = plex_section_for_folder(m_folder)
+                except Exception:
+                    pass
                 plex_movie = find_movie_by_id(
                     getattr(movie, "tmdbid", None),
                     title=getattr(movie, "title", None),
                     year=getattr(movie, "year", None),
+                    preferred_section_id=preferred_section_id,
                 )
             if plex_movie is not None and getattr(plex_movie, "ratingKey", None) is not None:
                 persist_movie_plex_identity(session, movie, plex_movie)
@@ -638,7 +643,8 @@ def _push_movie(
                     logger.debug(
                         "Plex: updated movie title/summary after lookup "
                         f"(rating_key={plex_movie.ratingKey}, "
-                        f"movie_id={int(getattr(movie, 'id', 0) or 0)})",
+                        f"movie_id={int(getattr(movie, 'id', 0) or 0)}, "
+                        f"status={status!r}, title={projected_title!r})",
                         extra={"emoji_type": "debug"},
                     )
                 else:
@@ -814,11 +820,25 @@ def _push_episode(
                     _summary_mark(summary, "plex", False)
                     _mark_fallback(fallback, "plex", "episode")
         if not _plex_coalesce_cached_rating_key(episode):
+            preferred_section_id = None
+            try:
+                from services.library_destinations import plex_section_for_folder
+
+                ep_folder = str(
+                    getattr(season, "placeholder_folder", "")
+                    or getattr(series, "placeholder_folder", "")
+                    or ""
+                ).strip()
+                if ep_folder:
+                    preferred_section_id = plex_section_for_folder(ep_folder)
+            except Exception:
+                pass
             plex_ep = find_episode_by_series_tvdb(
                 getattr(series, "tvdbid", None),
                 int(season.season_number),
                 int(episode.episode_number),
                 series_title=getattr(series, "title", None),
+                preferred_section_id=preferred_section_id,
             )
             if plex_ep is not None and getattr(plex_ep, "ratingKey", None) is not None:
                 persist_episode_hierarchy_plex_identity(session, series, season, episode, plex_ep)
@@ -939,6 +959,12 @@ def push_placeholder_player_metadata(
     movie = session.query(Movie).get(placeholder.movie_id) if placeholder.movie_id else None
     episode = session.query(Episode).get(placeholder.episode_id) if placeholder.episode_id else None
 
+    # Release DB connection back to the pool before starting media-server HTTP calls
+    try:
+        session.commit()
+    except Exception:
+        pass
+
     row_has_dummy = bool(getattr(placeholder, "has_placeholder", False))
     movie_has_dummy = bool(movie and getattr(movie, "has_placeholder", False))
     episode_has_dummy = bool(episode and getattr(episode, "has_placeholder", False))
@@ -954,6 +980,11 @@ def push_placeholder_player_metadata(
         _push_movie(session, movie, placeholder, acc, run_summary)
     elif episode:
         _push_episode(session, placeholder, episode, acc, run_summary)
+
+    try:
+        session.commit()
+    except Exception:
+        pass
     return acc
 
 
@@ -990,6 +1021,10 @@ def push_placeholder_batch_player_metadata(session, placeholders: list[Placehold
     try:
         for i, placeholder in enumerate(placeholders, start=1):
             push_placeholder_player_metadata(session, placeholder, fallback=fallback, summary=summary)
+            try:
+                session.commit()
+            except Exception:
+                pass
             if total and (i % 25 == 0 or i == total):
                 logger.info(
                     f"Player metadata batch: processed {i}/{total} "
@@ -998,6 +1033,10 @@ def push_placeholder_batch_player_metadata(session, placeholders: list[Placehold
                 )
     finally:
         stop_batch_hb.set()
+        try:
+            session.commit()
+        except Exception:
+            pass
     logger.info(
         "Player libraries synced for this batch — "
         f"Plex: {summary.plex_ok} ok / {summary.plex_failed} failed / {summary.plex_disabled} off; "

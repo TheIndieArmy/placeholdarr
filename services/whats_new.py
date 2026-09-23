@@ -186,6 +186,23 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         cta_label="Open Media Integrations",
         cta_path="/settings/media-integrations",
     ),
+    WhatsNewNotice(
+        id="multilibrary-0-10-0",
+        since_version="0.10.0",
+        title="More Arrs, more libraries",
+        body=(
+            "You can now connect up to four Radarr and four Sonarr instances. "
+            "Path mapping lets you control where placeholders and library output land based on each Arr "
+            "instance and root folder. Playback search settings cover the extra instances, including "
+            "preferring the matched library path or falling back in the order you set.\n\n"
+            "This feature changes how a lot of the app functions. You can view everything in the changelog. "
+            "Please do not hesitate to report issues on GitHub.\n\n"
+            "⚠️ If you encounter webhook errors, you may need to recopy them."
+        ),
+        cta_label="Open Paths",
+        cta_path="/settings/paths",
+        requires_ack=True,
+    ),
 )
 
 

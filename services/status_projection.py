@@ -99,9 +99,40 @@ def format_duration_label(minutes: int) -> str:
 
 # User-facing labels for status enum values that should not be shown in their
 # raw SCREAMING_SNAKE form. Anything not listed here renders as the raw value.
+# Prefer resolve_display_status() when a rendered display_reason is available.
 _FRIENDLY_STATUS_LABELS: dict[str, str] = {
     "SEARCH_QUEUED": "Search queued",
+    "SEARCHING": "Searching",
+    "IMPORT_IN_PROGRESS": "Importing",
+    "RETRYING": "Retrying",
+    "NOT_FOUND": "No qualifying release found",
+    "DOWNLOADING": "Downloading",
 }
+
+# Enum tokens whose display_reason holds the rendered Message Center line
+# (queue monitor, calendar windows). Import-grace stores the countdown text in
+# display_status and uses an internal marker in display_reason; do not promote those.
+_STATUSES_USING_DISPLAY_REASON: frozenset[str] = frozenset(
+    {
+        "COMING_SOON",
+        "COMING_SOON_30",
+        "COMING_SOON_14",
+        "COMING_SOON_7",
+        "COMING_SOON_1",
+        "COMING_SOON_TODAY",
+        "DOWNLOADING",
+        "SEARCHING",
+        "IMPORT_IN_PROGRESS",
+        "RETRYING",
+        "NOT_FOUND",
+    }
+)
+
+_INTERNAL_DISPLAY_REASONS: frozenset[str] = frozenset(
+    {
+        "import_grace_countdown",
+    }
+)
 
 
 def _friendly_status_label(status: str | None) -> str:
@@ -111,6 +142,28 @@ def _friendly_status_label(status: str | None) -> str:
         return ""
     upper = raw.upper()
     return _FRIENDLY_STATUS_LABELS.get(upper, raw)
+
+
+def resolve_display_status(status: str | None, reason: str | None = None) -> str | None:
+    """Pick the user-facing status string for NFO / Plex / stored projection.
+
+    Queue monitor and similar producers keep a stable enum in ``display_status``
+    and put the Message Center render in ``display_reason``. Prefer that reason
+    for enum tokens listed in ``_STATUSES_USING_DISPLAY_REASON``. Internal
+    markers (import grace) stay out of the projected text.
+    """
+    raw_status = str(status or "").strip()
+    if not raw_status:
+        return None
+    raw_reason = str(reason or "").strip()
+    upper = raw_status.upper()
+    if (
+        raw_reason
+        and upper in _STATUSES_USING_DISPLAY_REASON
+        and raw_reason.lower() not in _INTERNAL_DISPLAY_REASONS
+    ):
+        return raw_reason
+    return raw_status
 
 
 def _summary_status_bracket(
@@ -152,25 +205,9 @@ def projected_status_display(
     media_context: dict[str, Any] | None = None,
 ) -> str | None:
     """Return persisted user-facing status label for display surfaces."""
-    raw_status = str(status or "").strip()
-    if not raw_status:
+    effective = resolve_display_status(status, reason)
+    if not effective:
         return None
-    raw_reason = str(reason or "").strip()
-    upper = raw_status.upper()
-    effective = raw_status
-    if upper in {
-        "COMING_SOON",
-        "COMING_SOON_30",
-        "COMING_SOON_14",
-        "COMING_SOON_7",
-        "COMING_SOON_1",
-        "COMING_SOON_TODAY",
-    } and raw_reason:
-        effective = raw_reason
-    elif upper == "DOWNLOADING" and raw_reason:
-        effective = raw_reason
-    elif upper == "SEARCHING" and raw_reason.lower() == "queued":
-        effective = raw_reason
 
     eff_upper = str(effective).strip().upper()
     if eff_upper == "REQUEST":

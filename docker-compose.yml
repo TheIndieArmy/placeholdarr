@@ -13,13 +13,17 @@ services:
       DB_NAME: placeholdarr
       PUID: 1000
       PGID: 1000
+      # Optional: change the container listen port (default 8000). The right side of
+      # ports: below must match. Host-only remaps keep the right side at 8000.
+      # PLACEHOLDARR_PORT: "8000"
     volumes:
       # Map host appdata to /config inside the container (default app state + logs path).
       - ${PLACEHOLDARR_APPDATA:-./.appdata}:/config
       # Placeholder/media root mapping used by onboarding/settings path fields.
       - /path/on/host:/path/on/container
     ports:
-      # Dashboard listens on 8000. Auth is enabled by default (create admin on first open).
+      # Left = host port; right = container listen port (PLACEHOLDARR_PORT, default 8000).
+      # Auth is enabled by default (create admin on first open).
       # Do not publish this port to the internet without builtin auth or an authenticating reverse proxy (forward_auth).
       - "8000:8000"
     restart: unless-stopped

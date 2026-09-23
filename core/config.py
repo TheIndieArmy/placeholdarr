@@ -19,7 +19,11 @@ logger = logging.getLogger(__name__)
 
 
 def parse_configured_arr_instances_json(raw: str) -> list[dict[str, Any]]:
-    """Parse ``ARR_INSTANCES_JSON`` into the same normalized list as ``Settings.configured_arr_instances``."""
+    """Parse ``ARR_INSTANCES_JSON`` into the same normalized list as ``Settings.configured_arr_instances``.
+
+    Identity is ``instance_key`` (+ ``instance_id`` for webhooks). List order / ``priority``
+    is rank. Legacy ``role`` / ``is_4k`` fields in saved JSON are ignored.
+    """
     parsed_instances: list[dict[str, Any]] = []
     raw_str = str(raw or "").strip()
 
@@ -41,7 +45,7 @@ def parse_configured_arr_instances_json(raw: str) -> list[dict[str, Any]]:
                         continue
                     instance_id = str(item.get("instance_id") or item.get("id") or "").strip().lower()
                     if not instance_id:
-                        instance_id = f"{arr_type}:{instance_key}"
+                        instance_id = f"{arr_type}_{instance_key}"
                     aliases_raw = item.get("instance_key_aliases") if isinstance(item.get("instance_key_aliases"), list) else []
                     instance_key_aliases: list[str] = []
                     for a in aliases_raw:
@@ -51,8 +55,6 @@ def parse_configured_arr_instances_json(raw: str) -> list[dict[str, Any]]:
                         ).strip("_-")
                         if akey and akey != instance_key and akey not in instance_key_aliases:
                             instance_key_aliases.append(akey)
-                    role_raw = str(item.get("role") or "").strip().lower()
-                    role = role_raw if role_raw in {"primary", "secondary", "additional"} else ""
                     try:
                         priority = int(item.get("priority"))
                     except Exception:
@@ -66,7 +68,6 @@ def parse_configured_arr_instances_json(raw: str) -> list[dict[str, Any]]:
                             "url": url,
                             "api_key": api_key,
                             "label": str(item.get("label") or instance_key).strip() or instance_key,
-                            "role": role,
                             "priority": priority,
                         }
                     )
@@ -83,21 +84,26 @@ def parse_configured_arr_instances_json(raw: str) -> list[dict[str, Any]]:
             deduped.append(item)
             seen_ids.add(instance_id)
         if deduped:
-            rank_by_type: dict[str, int] = {"radarr": 0, "sonarr": 0}
-            normalized: list[dict[str, Any]] = []
+            # Rank by explicit priority when set; otherwise keep first-seen order within type.
+            by_type: dict[str, list[dict[str, Any]]] = {"radarr": [], "sonarr": []}
             for item in deduped:
                 arr_type = str(item.get("arr_type") or "").strip().lower()
-                rank = int(rank_by_type.get(arr_type, 0))
-                rank_by_type[arr_type] = rank + 1
-                row = dict(item)
-                role = str(row.get("role") or "").strip().lower()
-                if role not in {"primary", "secondary", "additional"}:
-                    role = "primary" if rank == 0 else ("secondary" if rank == 1 else "additional")
-                row["role"] = role
-                if int(row.get("priority", -1)) < 0:
+                if arr_type in by_type:
+                    by_type[arr_type].append(item)
+            normalized: list[dict[str, Any]] = []
+            for arr_type in ("radarr", "sonarr"):
+                rows = list(by_type[arr_type])
+                if any(int(r.get("priority", -1)) >= 0 for r in rows):
+                    rows.sort(
+                        key=lambda row: (
+                            int(row.get("priority", 10**9)) if int(row.get("priority", -1)) >= 0 else 10**9,
+                        )
+                    )
+                for rank, item in enumerate(rows):
+                    row = dict(item)
                     row["priority"] = rank
-                row["is_4k"] = role != "primary"
-                normalized.append(row)
+                    row["slot"] = rank + 1
+                    normalized.append(row)
             return sorted(
                 normalized,
                 key=lambda item: (
@@ -148,8 +154,6 @@ class Settings(BaseSettings):
     PLEX_TOKEN: Optional[str] = None
     PLEX_MOVIE_SECTION_ID: Optional[int] = None
     PLEX_TV_SECTION_ID: Optional[int] = None
-    PLEX_MOVIE_4K_SECTION_ID: Optional[int] = None
-    PLEX_TV_4K_SECTION_ID: Optional[int] = None
     
     # Jellyfin
     JELLYFIN_URL: Optional[str] = None
@@ -166,7 +170,7 @@ class Settings(BaseSettings):
 
     # ARR instance configuration: fully dynamic from user-configured ARR server names in onboarding.
     ARR_INSTANCES_JSON: str = ""
-    ARR_MAX_INSTANCES_PER_TYPE: int = int(os.getenv("ARR_MAX_INSTANCES_PER_TYPE", "2").split('#')[0].strip())
+    ARR_MAX_INSTANCES_PER_TYPE: int = int(os.getenv("ARR_MAX_INSTANCES_PER_TYPE", "4").split('#')[0].strip())
     # Playback webhook source instance keys (retain defaults for backward compat)
     TAUTULLI_INSTANCE_KEY: str = os.getenv("TAUTULLI_INSTANCE_KEY", "tautulli").split('#')[0].strip().lower()
     JELLYFIN_INSTANCE_KEY: str = os.getenv("JELLYFIN_INSTANCE_KEY", "jellyfin").split('#')[0].strip().lower()
@@ -224,8 +228,11 @@ class Settings(BaseSettings):
     LIBRARY_ROOT: str = ""
     MOVIE_LIBRARY_FOLDER: str = ""
     TV_LIBRARY_FOLDER: str = ""
-    MOVIE_LIBRARY_4K_FOLDER: str = ""
-    TV_LIBRARY_4K_FOLDER: str = ""
+    # Default Placeholdarr destinations (derived from LIBRARY_ROOT when unset).
+    # Legacy MOVIE/TV_LIBRARY_4K_FOLDER aliases were removed; use Library destinations for extra trees.
+    # Optional JSON array: Arr instance + root folder → Placeholdarr dest + Plex section.
+    # Empty = all titles use LIBRARY_ROOT-derived movies/tv and primary Plex section IDs.
+    LIBRARY_DESTINATION_MAP_JSON: str = ""
 
     # Queue monitor /queue poll cadence (seconds between Radarr/Sonarr queue API polls).
     #
@@ -344,7 +351,7 @@ class Settings(BaseSettings):
     QUEUE_MONITOR_SEARCH_TIMEOUT_SECONDS: int = int(
         os.getenv("QUEUE_MONITOR_SEARCH_TIMEOUT_SECONDS", "120").split("#")[0].strip()
     )
-    ENABLE_IMPORT_GRACE_ACCELERATED: bool = os.getenv("ENABLE_IMPORT_GRACE_ACCELERATED", "true").split('#')[0].strip().lower() == "true"
+    ENABLE_IMPORT_GRACE_ACCELERATED: bool = os.getenv("ENABLE_IMPORT_GRACE_ACCELERATED", "false").split('#')[0].strip().lower() == "true"
     IMPORT_GRACE_STEP_SECONDS: int = int(os.getenv("IMPORT_GRACE_STEP_SECONDS", "60").split('#')[0].strip())
     IMPORT_GRACE_ACCELERATED_STEP_SECONDS: int = int(os.getenv("IMPORT_GRACE_ACCELERATED_STEP_SECONDS", "5").split('#')[0].strip())
     STATUS_JOB_BATCH_SIZE: int = int(os.getenv("STATUS_JOB_BATCH_SIZE", "250").split('#')[0].strip())
@@ -567,9 +574,8 @@ class Settings(BaseSettings):
     @root_validator(skip_on_failure=True)
     def configure_library_paths(cls, values):
         library_root = str(values.get('LIBRARY_ROOT') or '').strip()
-        # Simplified path model:
-        # - one base library root
-        # - internal folders derive to `<root>/movies` and `<root>/tv`
+        # Default destinations: `<root>/movies` and `<root>/tv`.
+        # Extra trees use LIBRARY_DESTINATION_MAP_JSON, not separate 4K folder settings.
         movie_folder = str(values.get('MOVIE_LIBRARY_FOLDER') or '').strip()
         tv_folder = str(values.get('TV_LIBRARY_FOLDER') or '').strip()
         if library_root:
@@ -578,16 +584,10 @@ class Settings(BaseSettings):
             if not tv_folder:
                 tv_folder = os.path.join(library_root, 'tv')
 
-        # Keep legacy 4K/anime attributes aligned for compatibility, but do not
-        # create separate path branches in the simplified model.
-        movie_4k_folder = movie_folder
-        tv_4k_folder = tv_folder
         dir_mode = _parse_octal_mode(values.get('PLACEHOLDER_DIR_MODE', '777'), 0o777)
         folder_values = {
             'MOVIE_LIBRARY_FOLDER': movie_folder,
             'TV_LIBRARY_FOLDER': tv_folder,
-            'MOVIE_LIBRARY_4K_FOLDER': movie_4k_folder,
-            'TV_LIBRARY_4K_FOLDER': tv_4k_folder,
         }
 
         for key, raw in folder_values.items():
@@ -627,18 +627,14 @@ class Settings(BaseSettings):
         return self.ENABLE_EMBY and bool(self.EMBY_URL and self.EMBY_TOKEN)
 
     @property
+    def has_multi_arr_instance(self) -> bool:
+        """True when more than one Arr instance is configured (any type)."""
+        return len(self.configured_arr_instances) > 1
+
+    @property
     def has_4k_support(self) -> bool:
-        has_4k_radarr = any(item.get('is_4k') and item.get('arr_type') == 'radarr' for item in self.configured_arr_instances)
-        has_4k_sonarr = any(item.get('is_4k') and item.get('arr_type') == 'sonarr' for item in self.configured_arr_instances)
-        return (has_4k_radarr and bool(self.MOVIE_LIBRARY_4K_FOLDER)) or (has_4k_sonarr and bool(self.TV_LIBRARY_4K_FOLDER))
-
-    @property
-    def plex_4k_movie_section_id(self) -> int:
-        return self.PLEX_MOVIE_4K_SECTION_ID if hasattr(self, 'PLEX_MOVIE_4K_SECTION_ID') else self.PLEX_MOVIE_SECTION_ID
-
-    @property
-    def plex_4k_tv_section_id(self) -> int:
-        return self.PLEX_TV_4K_SECTION_ID if hasattr(self, 'PLEX_TV_4K_SECTION_ID') else self.PLEX_TV_SECTION_ID
+        """Deprecated alias for multi-instance installs (legacy name)."""
+        return self.has_multi_arr_instance
 
     @property
     def host(self) -> str:
@@ -728,23 +724,32 @@ class Settings(BaseSettings):
 
     @property
     def instance_is_4k(self) -> dict[str, bool]:
+        """Deprecated: True when the instance is not first in ranked order for its type."""
         mapping: dict[str, bool] = {}
-        for item in self.configured_arr_instances:
-            key = str(item.get("instance_key") or "").strip().lower()
-            if not key:
-                continue
-            mapping[key] = bool(item.get("is_4k", False))
+        for arr_type in ("radarr", "sonarr"):
+            instances = self.arr_instances_for_type(arr_type)
+            for index, item in enumerate(instances):
+                key = str(item.get("instance_key") or "").strip().lower()
+                if key:
+                    mapping[key] = index > 0
         return mapping
 
     @property
     def instance_roles(self) -> dict[str, str]:
+        """Deprecated slot labels derived from list order (primary/secondary/additional)."""
         mapping: dict[str, str] = {}
-        for item in self.configured_arr_instances:
-            key = str(item.get("instance_key") or "").strip().lower()
-            if not key:
-                continue
-            role = str(item.get("role") or "").strip().lower()
-            mapping[key] = role if role in {"primary", "secondary", "additional"} else "primary"
+        for arr_type in ("radarr", "sonarr"):
+            instances = self.arr_instances_for_type(arr_type)
+            for index, item in enumerate(instances):
+                key = str(item.get("instance_key") or "").strip().lower()
+                if not key:
+                    continue
+                if index == 0:
+                    mapping[key] = "primary"
+                elif index == 1:
+                    mapping[key] = "secondary"
+                else:
+                    mapping[key] = "additional"
         return mapping
 
     @property
@@ -773,6 +778,13 @@ class Settings(BaseSettings):
             if str(item.get("arr_type", "")).strip().lower() == normalized
         ]
 
+    def ranked_arr_instance(self, arr_type: str, index: int = 0) -> dict[str, Any] | None:
+        """Return the Arr instance at ranked list index (0 = first / default)."""
+        instances = self.arr_instances_for_type(arr_type)
+        if index < 0 or index >= len(instances):
+            return None
+        return instances[index]
+
     def resolve_arr_instance(
         self,
         arr_type: str,
@@ -782,15 +794,27 @@ class Settings(BaseSettings):
         role: str | None = None,
         is_4k: bool | None = None,
     ) -> dict[str, Any] | None:
+        """Resolve a configured Arr instance by id or key.
+
+        Prefer ``instance_id`` / ``instance_key``. Legacy ``role`` maps to ranked
+        index (primary=0, secondary=1). Legacy ``is_4k`` is rejected when ambiguous
+        (always prefer ``instance_key``).
+        """
         instances = self.arr_instances_for_type(arr_type)
         if not instances:
             return None
+        normalized_type = str(arr_type or "").strip().lower()
 
         if instance_id:
             target_id = str(instance_id).strip().lower()
             for item in instances:
                 if str(item.get("instance_id") or "").strip().lower() == target_id:
                     return item
+            # Legacy webhook ids from the dual-slot era.
+            if target_id == f"{normalized_type}_primary":
+                return instances[0]
+            if target_id == f"{normalized_type}_secondary" and len(instances) > 1:
+                return instances[1]
 
         if instance_key:
             target = str(instance_key).strip().lower()
@@ -801,18 +825,31 @@ class Settings(BaseSettings):
                 for a in aliases:
                     if str(a or "").strip().lower() == target:
                         return item
+            # Legacy role-shaped keys still seen in older webhook docs.
+            if target in {f"{normalized_type}_primary", "primary", "standard"}:
+                return instances[0]
+            if target in {f"{normalized_type}_secondary", "secondary", "4k"} and len(instances) > 1:
+                return instances[1]
 
         if role:
             target_role = str(role).strip().lower()
-            if target_role in {"primary", "secondary", "additional"}:
-                for item in instances:
-                    if str(item.get("role") or "").strip().lower() == target_role:
-                        return item
+            if target_role == "primary":
+                return instances[0]
+            if target_role == "secondary":
+                return instances[1] if len(instances) > 1 else None
+            if target_role == "additional":
+                logger.warning(
+                    f"Ambiguous Arr role=additional resolve for {arr_type}; require instance_key",
+                    extra={"emoji_type": "warning"},
+                )
+                return None
 
         if is_4k is not None:
-            for item in instances:
-                if bool(item.get("is_4k", False)) == bool(is_4k):
-                    return item
+            logger.warning(
+                f"Legacy Arr is_4k={bool(is_4k)} resolve for {arr_type} is disabled; require instance_key",
+                extra={"emoji_type": "warning"},
+            )
+            return None
 
         return instances[0]
 

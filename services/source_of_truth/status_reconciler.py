@@ -103,30 +103,15 @@ def _job_player_metadata_refresh(job: Job) -> bool:
 
 
 def _placeholder_display_status(placeholder: Placeholder) -> str | None:
+    from services.status_projection import resolve_display_status
+
     status = getattr(placeholder, "display_status", None)
     if isinstance(status, str):
         status = status.strip() or None
     reason = getattr(placeholder, "display_reason", None)
     if isinstance(reason, str):
         reason = reason.strip() or None
-
-    if status in {
-        "COMING_SOON",
-        "COMING_SOON_30",
-        "COMING_SOON_14",
-        "COMING_SOON_7",
-        "COMING_SOON_1",
-        "COMING_SOON_TODAY",
-    } and reason:
-        return reason
-
-    if status == "DOWNLOADING" and reason:
-        return reason
-
-    if status == "SEARCHING" and reason and reason.lower() == "queued":
-        return reason
-
-    return status
+    return resolve_display_status(status, reason)
 
 
 def _refresh_movie_nfo(placeholder: Placeholder, movie: Movie) -> bool:
@@ -358,6 +343,11 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
         extra={"emoji_type": "info"},
     )
 
+    try:
+        session.commit()
+    except Exception:
+        pass
+
     if do_player and refreshed_for_player_push:
         # One media-server refresh sequence per underlying movie/episode row, even if several
         # placeholder rows pointed at the same title (rare) or a batch carried duplicates.
@@ -372,6 +362,10 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
             unique_for_projection.append(placeholder)
         try:
             push_placeholder_batch_player_metadata(session, unique_for_projection)
+            try:
+                session.commit()
+            except Exception:
+                pass
             proj_subject = _nfo_refresh_subject_summary(session, unique_for_projection)
             ps = f" · {proj_subject}" if proj_subject else ""
             logger.info(

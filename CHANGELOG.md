@@ -7,6 +7,73 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-23
+
+### Summary
+
+- **More Arrs**: Up to four Radarr and four Sonarr instances; Slot seats with your names; list order sets search priority.
+- **Paths destinations**: Optional Arr root → Placeholdarr dest folder + Plex section for separate libraries.
+- **Arr identity**: `instance_key` and stable UUID ids; renames and URL transplants keep catalog continuity.
+- **Playback search**: Prefer matched library path or fall back through configured instances in list order.
+- **Docker PLACEHOLDARR_PORT**: Container listen port honors the env var (#89).
+- **What's new**: Startup ack for multilibrary; points to the changelog, invites GitHub issue reports, and notes webhook recopy if errors.
+
+### Added
+
+- **Library destination map**: Optional Arr instance + root folder → Placeholdarr dest folder + Plex section for Movies and TV; empty map keeps single `{LIBRARY_ROOT}/movies` and `tv`.
+- **Destination rematerialize**: Saving Library Root or the destination map offers Apply now or Next full sync to relocate existing placeholders.
+- **Additional Arr instances**: Default cap raised to 4 per type; webhook stable ids for additional instances use `{type}_{instance_key}`.
+- **Destination uniqueness**: Each Arr instance + root folder maps to at most one Placeholdarr destination.
+- **Create dest folders**: Saving Paths can create missing Placeholdarr destination folders.
+- **Plex section defaults**: Paths can store default Plex library section IDs per destination.
+- **Match-by-path search defaults**: Placeholder and real-file search preference defaults to All instances, with an optional Prefer matched library path override.
+- **Collections dest tip**: Collections editor notes that Settings → Paths destinations each need their Plex libraries selected explicitly.
+- **Instance-key playback search**: Placeholder and TV real-file search/fallback select Arr instances by `instance_key` and walk remaining active keys in config priority order.
+- **Arr instance reorder**: Up/down controls on ARR Integrations set search and fallback priority (slot order).
+- **Named instance search options**: Placeholder and real-file search preference can target any configured Arr instance using the name you gave it.
+- **Prefer matched library path**: Toggle to override the search preference when the played path maps to exactly one library destination.
+- **Full sync completion log**: Closing a full sync task run writes an INFO line with duration and placeholder create/remove counts.
+- **What's new multilibrary (0.10.0)**: Startup ack for up to four Arrs, Paths destinations, path-aware search fallback, changelog pointer, GitHub issue invite, and webhook recopy if errors.
+
+### Changed
+
+- **Default destinations from Library Root**: Movie and TV folders under Library Root are the default Placeholdarr destinations; the optional dest map only overrides specific Arr roots.
+- **Arr identity is instance key**: Catalog, sync, playback, queue, and webhooks route by `instance_key` and list order; persisted `role` / `is_4k` on Arr rows are dropped on save.
+- **Stable Arr instance ids**: New Arr slots get a UUID `instance_id` that does not change on rename; existing ids are preserved.
+- **Arr rename rewrite**: Saving a renamed Arr instance updates catalog keys (swap-safe), dest map rows, and matching search prefs immediately.
+- **Arr URL transplant**: Removing one Arr slot and painting another with that server's URL adopts the removed instance identity (catalog kept); the displaced slot is tombstoned instead of rewritten onto the surviving key.
+- **Arr remove by stable id**: Settings save tombstones catalog rows for ``instance_id`` values that left the config, even when an old key alias would have kept them.
+- **Long ARR-change sync**: Gate-busy reclaim defers instead of marking the job done; sync heartbeats keep the job claim fresh so a mid-run reclaim is less likely.
+- **Arr detach save**: After removing or transplanting an Arr slot, Settings save tombstones catalog rows then enqueues determination and placeholder cleanup so the UI is not stuck on Saving while tens of thousands of episodes are processed.
+- **Arr slot name uniqueness**: Distinct server names (and derived keys/aliases) are required per Arr type, with the same inline block pattern as duplicate URLs.
+- **Webhook instance ids**: Existing `*_primary` / `*_secondary` (and other saved) ids stay stable; brand-new slots use a UUID `instance_id`.
+- **Shared cleanup gating**: Shared cleanup options apply only when two or more instances share a Placeholdarr destination folder.
+- **ARR instance copy**: Settings and webhook helpers say up to 4 instances per type; Arr cards use Slot N with your server names; fallback copy describes remaining configured instances in priority order.
+- **Import grace cadence**: Accelerated 5-second ticks are off by default; the countdown uses 60-second steps unless `ENABLE_IMPORT_GRACE_ACCELERATED` is set.
+- **Full sync follow-up phases**: Art and metadata refresh cards appear on a full sync only when those refreshes were actually requested.
+
+### Fixed
+
+- **Docker PLACEHOLDARR_PORT**: Container listen port honors `PLACEHOLDARR_PORT` / `PLACEHOLDARR_HOST` instead of ignoring them for the hardcoded uvicorn `--port 8000` (#89).
+- **Import / queue status labels**: NFO and Plex projection use the Message Center queue lines (including customized `IMPORT_IN_PROGRESS` text) instead of the raw enum token.
+- **Multi-instance Arr routing**: Ambiguous legacy `is_4k` no longer selects an Arr endpoint; use `instance_key` (legacy `primary`/`secondary` still map to list slots 1 and 2).
+- **Instance-aware dest folders**: Unmapped Arr instances use the default movie/TV destinations from Library Root; extra trees require the dest map.
+- **Legacy 4K library folders removed**: `MOVIE_LIBRARY_4K_FOLDER` / `TV_LIBRARY_4K_FOLDER` are dropped on upgrade; use Library destinations for separate trees.
+- **Arr instances JSON cleanup**: On boot, strip retired `role` / `is_4k` fields from saved `ARR_INSTANCES_JSON` while keeping keys, ids, and credentials.
+- **Reserved Arr instance keys**: Bare names like `primary`, `secondary`, `4k`, and `standard` are rejected so they cannot collide with legacy routing tokens.
+- **Legacy 4K Plex section IDs removed**: `PLEX_MOVIE_4K_SECTION_ID` / `PLEX_TV_4K_SECTION_ID` are ignored; sections come from default Paths fields and the dest map.
+- **Plex section refresh**: Bulk metadata refresh includes dest-map section IDs and default movie/TV libraries.
+- **Bare full sync coverage**: `run_full_sync` without `instance_key` syncs every configured Arr instance and passes per-instance role into folder fields.
+- **Arr API key retention**: Saving Arr instances keeps stored API keys when the UI omits them; an empty instance list no longer wipes a non-empty saved config.
+- **Plex cache stampede**: Concurrent section list lookups share an in-flight request per section key instead of issuing parallel full scans.
+- **Plex ratingKey cache seeding**: Playback webhooks seed Plex and Jellyfin item IDs directly into movie and episode records so player metadata updates bypass library scans.
+- **Batched placeholder job deduplication**: Coalesce duplicate `nfo_refresh` requests for the same placeholder within the debounce window.
+- **DB pool connection release**: Release database pool connections before Plex, Jellyfin, and Arr network calls during status and art refresh.
+- **Instance key self-healing**: Auto-resolve legacy `4k` and `standard` labels to canonical configured instance keys during sync and playback routing.
+- **Dynamic queue monitor instances**: Poll download queues and trigger monitored refreshes using each title's Arr `instance_key` rather than the legacy 4K/HD pair.
+- **Plex status projection lock**: Title and summary edits lock those fields so Plex agents cannot revert them; a failed reload logs before/after values.
+- **Import grace countdown labels**: Accelerated cadence still uses the configured 5/4/3/2/1-minute templates so each tick is a distinct status.
+
 ## [0.9.27] - 2026-09-15
 
 ### Summary

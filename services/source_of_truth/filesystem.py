@@ -49,13 +49,16 @@ def _norm_scan_path(path: str) -> str:
 
 
 def configured_roots() -> list[str]:
-    roots = [
-        getattr(settings, 'MOVIE_LIBRARY_FOLDER', None),
-        getattr(settings, 'TV_LIBRARY_FOLDER', None),
-        getattr(settings, 'MOVIE_LIBRARY_4K_FOLDER', None),
-        getattr(settings, 'TV_LIBRARY_4K_FOLDER', None),
-    ]
-    return [root for root in dict.fromkeys(roots) if root]
+    try:
+        from services.library_destinations import all_configured_dest_roots
+
+        return all_configured_dest_roots()
+    except Exception:
+        roots = [
+            getattr(settings, 'MOVIE_LIBRARY_FOLDER', None),
+            getattr(settings, 'TV_LIBRARY_FOLDER', None),
+        ]
+        return [root for root in dict.fromkeys(roots) if root]
 
 
 def _is_path_under_roots(path: str, roots: list[str]) -> bool:
@@ -88,12 +91,17 @@ def is_path_under_tv_library_roots(path: str | None) -> bool:
     """True when ``path`` lies under configured TV library folder(s)."""
     if not path:
         return False
-    roots: list[str] = []
-    for key in ("TV_LIBRARY_FOLDER", "TV_LIBRARY_4K_FOLDER"):
-        raw = getattr(settings, key, None)
-        if raw:
-            roots.append(os.path.abspath(str(raw)))
-    roots = list(dict.fromkeys(roots))
+    try:
+        from services.library_destinations import all_tv_dest_roots
+
+        roots = [os.path.abspath(r) for r in all_tv_dest_roots() if r]
+    except Exception:
+        roots = []
+        for key in ("TV_LIBRARY_FOLDER",):
+            raw = getattr(settings, key, None)
+            if raw:
+                roots.append(os.path.abspath(str(raw)))
+        roots = list(dict.fromkeys(roots))
     return _is_path_under_roots(path, roots)
 
 
@@ -101,12 +109,17 @@ def is_path_under_movie_library_roots(path: str | None) -> bool:
     """True when ``path`` lies under configured movie library folder(s)."""
     if not path:
         return False
-    roots: list[str] = []
-    for key in ("MOVIE_LIBRARY_FOLDER", "MOVIE_LIBRARY_4K_FOLDER"):
-        raw = getattr(settings, key, None)
-        if raw:
-            roots.append(os.path.abspath(str(raw)))
-    roots = list(dict.fromkeys(roots))
+    try:
+        from services.library_destinations import all_movie_dest_roots
+
+        roots = [os.path.abspath(r) for r in all_movie_dest_roots() if r]
+    except Exception:
+        roots = []
+        for key in ("MOVIE_LIBRARY_FOLDER",):
+            raw = getattr(settings, key, None)
+            if raw:
+                roots.append(os.path.abspath(str(raw)))
+        roots = list(dict.fromkeys(roots))
     return _is_path_under_roots(path, roots)
 
 

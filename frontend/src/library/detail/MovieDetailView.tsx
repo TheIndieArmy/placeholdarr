@@ -50,7 +50,6 @@ export function MovieDetailView(props: {
           certification={payload.certification}
           ratings={payload.ratings_display}
           monitored={payload.radarr_monitored}
-          is4k={payload.is_4k}
           studio={payload.studio}
           trailerUrl={payload.trailer_url}
           imdbid={payload.imdbid}
@@ -181,6 +180,7 @@ export function MovieDetailView(props: {
               </DetailFactCard>
               <DetailFactCard title="Paths" themeMode={props.themeMode}>
                 <DetailFactRow label="Library path" value={payload.library_path} themeMode={props.themeMode} />
+                <DetailFactRow label="Placeholdarr folder" value={payload.placeholder_folder} themeMode={props.themeMode} />
                 <DetailFactRow label="File path" value={payload.file_path} themeMode={props.themeMode} />
                 <DetailFactRow label="File size" value={formatFileSize(payload.file_size_bytes)} themeMode={props.themeMode} />
               </DetailFactCard>

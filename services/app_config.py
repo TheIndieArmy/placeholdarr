@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import os
 from pathlib import Path
 import re
+import uuid
 from urllib.parse import urlparse
 from typing import Any
 
@@ -18,6 +19,18 @@ from services.postgres.models import AppConfig
 
 
 SETUP_COMPLETED_KEY = "APP_SETUP_COMPLETED_AT"
+
+# Choice fields that also accept a concrete Arr instance_key (from the instance name).
+_INSTANCE_SEARCH_MODE_KEYS = frozenset(
+    {
+        "MOVIE_PLACEHOLDER_SEARCH_MODE",
+        "TV_PLACEHOLDER_SEARCH_MODE",
+        "MOVIE_PLAYBACK_INSTANCE_MODE",
+        "TV_PLAYBACK_INSTANCE_MODE",
+    }
+)
+_INSTANCE_SEARCH_MODE_RESERVED = frozenset({"match", "both", "primary", "secondary"})
+_INSTANCE_KEY_MODE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 # Settings that rewrite existing placeholder NFO text when changed.
 NFO_BACKFILL_SETTING_KEYS = frozenset(
@@ -34,6 +47,14 @@ ART_BACKFILL_SETTING_KEYS = frozenset(
         "ENABLE_PREFERRED_POSTER_LANGUAGE",
         "PREFERRED_POSTER_LANGUAGE",
         "PREFER_ORIGINAL_POSTER_LANGUAGE",
+    }
+)
+
+# Settings that relocate placeholder folders on disk (destination map / library root).
+DESTINATION_REMATERIALIZE_SETTING_KEYS = frozenset(
+    {
+        "LIBRARY_ROOT",
+        "LIBRARY_DESTINATION_MAP_JSON",
     }
 )
 
@@ -71,6 +92,10 @@ REMOVED_SETTINGS_KEYS_IGNORED_ON_SAVE = frozenset(
         "QUEUE_MONITOR_REFRESH_STAGGER_SECONDS",
         "LOG_LEVEL",
         "MULTI_INSTANCE_SHARED_PLACEHOLDER_CLEANUP",
+        "MOVIE_LIBRARY_4K_FOLDER",
+        "TV_LIBRARY_4K_FOLDER",
+        "PLEX_MOVIE_4K_SECTION_ID",
+        "PLEX_TV_4K_SECTION_ID",
     }
 )
 
@@ -144,30 +169,6 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "type": "string",
                 "required": False,
                 "secret": True,
-                "restart_required": False,
-            },
-        ),
-        (
-            "PLEX_MOVIE_SECTION_ID",
-            {
-                "section": "Media Integrations",
-                "label": "Plex Movie Section ID",
-                "description": "Numeric Plex library section ID for movie refresh calls. Required when Plex is enabled.",
-                "type": "int",
-                "required": False,
-                "min": 1,
-                "restart_required": False,
-            },
-        ),
-        (
-            "PLEX_TV_SECTION_ID",
-            {
-                "section": "Media Integrations",
-                "label": "Plex TV Section ID",
-                "description": "Numeric Plex library section ID for TV refresh calls. Required when Plex is enabled.",
-                "type": "int",
-                "required": False,
-                "min": 1,
                 "restart_required": False,
             },
         ),
@@ -349,7 +350,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "ARR Integrations",
                 "label": "ARR Instances JSON (Advanced)",
-                "description": "Optional JSON array for named ARR instances. By default, Placeholdarr supports up to 2 Radarr and 2 Sonarr instances per deployment. Changing an instance URL or API key triggers a full resync; label-only changes do not.",
+                "description": "Optional JSON array for named ARR instances. By default, Placeholdarr supports up to 4 Radarr and 4 Sonarr instances per deployment (override with ARR_MAX_INSTANCES_PER_TYPE). Changing an instance URL or API key triggers a full resync; label-only changes do not.",
                 "type": "string",
                 "required": False,
                 "restart_required": False,
@@ -361,12 +362,62 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "section": "Paths",
                 "label": "Library Root",
                 "description": (
-                    "Base path where Placeholdarr writes placeholders. Placeholdarr derives `movies` and `tv` folders under this root. "
-                    "Use a path separate from Radarr/Sonarr library roots to avoid potential issues with library management."
+                    "Sets the default Placeholdarr destinations: `movies` and `tv` under this root. "
+                    "Unmapped Arr roots use those folders and the default Plex libraries below. "
+                    "Use Library destinations only when an Arr root should land in a different folder or Plex library. "
+                    "Keep this path separate from Radarr/Sonarr library roots to avoid library-management conflicts."
                 ),
                 "type": "path",
                 "required": False,
                 "restart_required": False,
+            },
+        ),
+        (
+            "PLEX_MOVIE_SECTION_ID",
+            {
+                "section": "Paths",
+                "label": "Default Plex Movies library",
+                "description": (
+                    "Plex section ID for the default Movies destination (Library Root / movies). Required when Plex is "
+                    "enabled; ignored for Jellyfin/Emby (they refresh by folder path). Mapped destinations can pick a "
+                    "different library."
+                ),
+                "type": "int",
+                "required": False,
+                "min": 1,
+                "restart_required": False,
+            },
+        ),
+        (
+            "PLEX_TV_SECTION_ID",
+            {
+                "section": "Paths",
+                "label": "Default Plex TV library",
+                "description": (
+                    "Plex section ID for the default TV destination (Library Root / tv). Required when Plex is enabled; "
+                    "ignored for Jellyfin/Emby (they refresh by folder path). Mapped destinations can pick a different library."
+                ),
+                "type": "int",
+                "required": False,
+                "min": 1,
+                "restart_required": False,
+            },
+        ),
+        (
+            "LIBRARY_DESTINATION_MAP_JSON",
+            {
+                "section": "Paths",
+                "label": "Library destinations",
+                "description": (
+                    "Optional map of Arr root folders to Placeholdarr destination folders and Plex libraries. "
+                    "Unmapped roots keep the default destinations from Library Root (movies/tv) and the Plex libraries "
+                    "above. Jellyfin and Emby do not need library IDs; they refresh by path. "
+                    "Changing destinations rematerializes placeholders (Apply now or next full sync)."
+                ),
+                "type": "string",
+                "required": False,
+                "restart_required": False,
+                "default": "",
             },
         ),
         (
@@ -729,62 +780,112 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "MOVIE_PLACEHOLDER_SEARCH_MODE",
             {
                 "section": "ARR Integrations",
-                "label": "Movie placeholder search instance",
-                "description": "When a movie placeholder plays, which Radarr instance should be searched. Primary = first configured instance. Secondary = second configured instance. Both = search all configured instances.",
+                "label": "Movie placeholder search preference",
+                "description": "When a movie placeholder plays, which instance(s) to search. All searches every configured Radarr. You can also force a specific instance by its key (the name you gave it).",
                 "type": "choice",
                 "restart_required": False,
+                "default": "both",
                 "options": [
-                    {"value": "primary", "label": "Primary instance only"},
-                    {"value": "secondary", "label": "Secondary instance only"},
-                    {"value": "both", "label": "Both instances"},
+                    {"value": "both", "label": "All instances"},
+                    {"value": "match", "label": "Matched by library path (legacy)"},
+                    {"value": "primary", "label": "First instance only (legacy)"},
+                    {"value": "secondary", "label": "Second instance only (legacy)"},
                 ],
+            },
+        ),
+        (
+            "MOVIE_PLACEHOLDER_PREFER_PATH_MATCH",
+            {
+                "section": "ARR Integrations",
+                "label": "Movie placeholder prefer path match",
+                "description": "When enabled, a unique library destination match overrides the movie placeholder search preference. Shared or unmatched paths still use the preference.",
+                "type": "bool",
+                "restart_required": False,
+                "default": True,
             },
         ),
         (
             "TV_PLACEHOLDER_SEARCH_MODE",
             {
                 "section": "ARR Integrations",
-                "label": "TV placeholder search instance",
-                "description": "When a TV placeholder plays, which Sonarr instance should be searched. Primary = first configured instance. Secondary = second configured instance. Both = search all configured instances.",
+                "label": "TV placeholder search preference",
+                "description": "When a TV placeholder plays, which instance(s) to search. All searches every configured Sonarr. You can also force a specific instance by its key (the name you gave it).",
                 "type": "choice",
                 "restart_required": False,
+                "default": "both",
                 "options": [
-                    {"value": "primary", "label": "Primary instance only"},
-                    {"value": "secondary", "label": "Secondary instance only"},
-                    {"value": "both", "label": "Both instances"},
+                    {"value": "both", "label": "All instances"},
+                    {"value": "match", "label": "Matched by library path (legacy)"},
+                    {"value": "primary", "label": "First instance only (legacy)"},
+                    {"value": "secondary", "label": "Second instance only (legacy)"},
                 ],
+            },
+        ),
+        (
+            "TV_PLACEHOLDER_PREFER_PATH_MATCH",
+            {
+                "section": "ARR Integrations",
+                "label": "TV placeholder prefer path match",
+                "description": "When enabled, a unique library destination match overrides the TV placeholder search preference. Shared or unmatched paths still use the preference.",
+                "type": "bool",
+                "restart_required": False,
+                "default": True,
             },
         ),
         (
             "MOVIE_PLAYBACK_INSTANCE_MODE",
             {
                 "section": "ARR Integrations",
-                "label": "Movie real-file playback mode",
-                "description": "Applies when a real movie file is played. Match routes to the instance whose library path contains the file. Primary always searches the first configured instance. Secondary always searches the second configured instance. Both searches all configured instances.",
+                "label": "Movie real-file search preference",
+                "description": "When a real movie file is played, which instance(s) to search. All searches every configured Radarr. You can also force a specific instance by its key (the name you gave it).",
                 "type": "choice",
                 "restart_required": False,
+                "default": "both",
                 "options": [
-                    {"value": "match", "label": "Match by library path (recommended)"},
-                    {"value": "primary", "label": "Primary instance only"},
-                    {"value": "secondary", "label": "Secondary instance only"},
-                    {"value": "both", "label": "Both instances"},
+                    {"value": "both", "label": "All instances"},
+                    {"value": "match", "label": "Matched by library path (legacy)"},
+                    {"value": "primary", "label": "First instance only (legacy)"},
+                    {"value": "secondary", "label": "Second instance only (legacy)"},
                 ],
+            },
+        ),
+        (
+            "MOVIE_PLAYBACK_PREFER_PATH_MATCH",
+            {
+                "section": "ARR Integrations",
+                "label": "Movie real-file prefer path match",
+                "description": "When enabled, a unique library destination match overrides the movie real-file search preference. Shared or unmatched paths still use the preference.",
+                "type": "bool",
+                "restart_required": False,
+                "default": True,
             },
         ),
         (
             "TV_PLAYBACK_INSTANCE_MODE",
             {
                 "section": "ARR Integrations",
-                "label": "TV real-file playback mode",
-                "description": "Applies when a real TV file is played. Match routes to the instance whose library path contains the file. Primary always searches the first configured instance. Secondary always searches the second configured instance. Both searches all configured instances.",
+                "label": "TV real-file search preference",
+                "description": "When a real TV file is played, which instance(s) to search. All searches every configured Sonarr. You can also force a specific instance by its key (the name you gave it).",
                 "type": "choice",
                 "restart_required": False,
+                "default": "both",
                 "options": [
-                    {"value": "match", "label": "Match by library path (recommended)"},
-                    {"value": "primary", "label": "Primary instance only"},
-                    {"value": "secondary", "label": "Secondary instance only"},
-                    {"value": "both", "label": "Both instances"},
+                    {"value": "both", "label": "All instances"},
+                    {"value": "match", "label": "Matched by library path (legacy)"},
+                    {"value": "primary", "label": "First instance only (legacy)"},
+                    {"value": "secondary", "label": "Second instance only (legacy)"},
                 ],
+            },
+        ),
+        (
+            "TV_PLAYBACK_PREFER_PATH_MATCH",
+            {
+                "section": "ARR Integrations",
+                "label": "TV real-file prefer path match",
+                "description": "When enabled, a unique library destination match overrides the TV real-file search preference. Shared or unmatched paths still use the preference.",
+                "type": "bool",
+                "restart_required": False,
+                "default": True,
             },
         ),
         (
@@ -792,7 +893,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "ARR Integrations",
                 "label": "Enable playback fallback search",
-                "description": "When instance mode is set to Primary or Secondary, content that is not present in the selected ARR instance falls back immediately, including missing rows and rows marked deleted. This setting controls delayed fallback only after a search was actually attempted first but did not resolve, such as no found releases or a failed download path.",
+                "description": "When search is forced to a specific Arr instance, content that is not present there falls back immediately, including missing rows and rows marked deleted. This setting controls delayed fallback only after a search was actually attempted first but did not resolve, such as no found releases or a failed download path.",
                 "type": "bool",
                 "restart_required": False,
             },
@@ -813,22 +914,13 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "ARR Integrations",
                 "label": "Radarr shared placeholder cleanup",
-                "description": (
-                    "When two Radarr instances track the same movie (same TMDB id), controls shared placeholder "
-                    "behavior: keep placeholders until no instance still needs them, or stop creating/recreating "
-                    "placeholders on other instances once any instance has a real file (and remove stale on-disk files)."
-                ),
+                "description": "When two Radarr instances share the same Placeholdarr folder, choose when placeholder files are removed from disk. Not used when each instance maps to its own destination.",
                 "type": "choice",
                 "restart_required": False,
+                "default": "protect_siblings",
                 "options": [
-                    {
-                        "value": "protect_siblings",
-                        "label": "Protect until no instance needs placeholder (recommended)",
-                    },
-                    {
-                        "value": "any_instance_has_file",
-                        "label": "Remove when any instance has a real file",
-                    },
+                    {"value": "protect_siblings", "label": "Remove when all instances have a real file"},
+                    {"value": "any_instance_has_file", "label": "Remove when any instance has a real file"},
                 ],
             },
         ),
@@ -837,22 +929,13 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "ARR Integrations",
                 "label": "Sonarr shared placeholder cleanup",
-                "description": (
-                    "When two Sonarr instances track the same episode (same TVDB id and season/episode), controls "
-                    "shared placeholder behavior: keep placeholders until no instance still needs them, or stop "
-                    "creating/recreating placeholders on other instances once any instance has a real file."
-                ),
+                "description": "When two Sonarr instances share the same Placeholdarr folder, choose when placeholder files are removed from disk. Not used when each instance maps to its own destination.",
                 "type": "choice",
                 "restart_required": False,
+                "default": "protect_siblings",
                 "options": [
-                    {
-                        "value": "protect_siblings",
-                        "label": "Protect until no instance needs placeholder (recommended)",
-                    },
-                    {
-                        "value": "any_instance_has_file",
-                        "label": "Remove when any instance has a real file",
-                    },
+                    {"value": "protect_siblings", "label": "Remove when all instances have a real file"},
+                    {"value": "any_instance_has_file", "label": "Remove when any instance has a real file"},
                 ],
             },
         ),
@@ -987,36 +1070,54 @@ def _normalize_instance_key(value: Any) -> str:
 
 
 def _arr_instance_id_has_uuid(instance_id: str) -> bool:
-    """True when instance_id embeds a UUID (stable webhook id), not the legacy ``radarr:slug`` fallback."""
-    text = str(instance_id or "")
-    return text.count("-") >= 4
+    """True when instance_id is a UUID (stable webhook identity)."""
+    text = str(instance_id or "").strip()
+    if not text:
+        return False
+    try:
+        uuid.UUID(text)
+        return True
+    except Exception:
+        return False
+
+
+def _new_arr_instance_id() -> str:
+    return str(uuid.uuid4())
 
 
 def _stable_default_instance_id(arr_type: str, item: dict[str, Any]) -> str:
-    """Default webhook row id: ``radarr_primary``, ``sonarr_secondary``, etc.
-
-    One Placeholdarr deployment uses a single origin; two deployments never share a URL, so these
-    predictable ids are safe for local / single-tenant installs. Existing UUID ids are preserved
-    by merge logic when already saved.
-    """
-    r = str(item.get("role") or "").strip().lower()
-    if r not in ("primary", "secondary"):
-        try:
-            r = "primary" if int(item.get("priority", 0) or 0) == 0 else "secondary"
-        except Exception:
-            r = "primary"
-    return f"{arr_type}_{r}"
+    """Assign a new stable webhook id for a brand-new Arr slot (UUID)."""
+    return _new_arr_instance_id()
 
 
 def _normalize_arr_instance_url(value: Any) -> str:
     return str(value or "").strip().rstrip("/")
 
 
-def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: str) -> str:
-    """Normalize instance_id values and carry forward prior instance_key values as webhook aliases.
+_RESERVED_ARR_INSTANCE_KEYS = frozenset(
+    {
+        "primary",
+        "secondary",
+        "additional",
+        "standard",
+        "4k",
+        "match",
+        "both",
+    }
+)
 
-    New rows get deterministic ids (``radarr_primary``, …). Rows that already use UUID-based ids keep them.
-    Blank ``api_key`` values on matched rows are retained from the previous JSON (secret redaction UX).
+
+def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: str) -> str:
+    """Preserve stable instance_id values and carry renamed keys as aliases.
+
+    Matched slots always keep their prior ``instance_id`` (UUID or legacy slug).
+    Brand-new slots receive a UUID. Blank ``api_key`` values are retained from the
+    previous row when the client sent a redacted value.
+
+    URL transplant: when a surviving drawer still sends identity A but its URL
+    matches removed peer B, adopt B's ``instance_id`` (and B's key aliases). Do
+    not keep A's id on B's server, and do not alias A's key onto B (A must
+    tombstone).
     """
     try:
         incoming = json.loads(incoming_json)
@@ -1030,6 +1131,18 @@ def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: 
             previous = []
     except Exception:
         previous = []
+
+    from services.source_of_truth.arr_instance_key_rewrite import detect_url_transplants
+
+    transplants = detect_url_transplants(previous_json, incoming_json)
+    transplant_by_displaced_id = {
+        str(row.get("displaced_instance_id") or "").strip().lower(): row for row in transplants
+    }
+    displaced_keys = {
+        str(row.get("displaced_key") or "").strip().lower()
+        for row in transplants
+        if str(row.get("displaced_key") or "").strip()
+    }
 
     def fp(item: dict[str, Any]) -> tuple[str, str, str]:
         return (
@@ -1075,20 +1188,24 @@ def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: 
         new_key = _normalize_instance_key(item.get("instance_key") or item.get("key") or item.get("name") or "")
         nid = str(item.get("instance_id") or "").strip().lower()
         matched: dict[str, Any] | None = None
-        if nid and nid in old_by_id:
+        transplant = transplant_by_displaced_id.get(nid) if nid else None
+        if transplant:
+            adopted_id = str(transplant.get("adopted_instance_id") or "").strip().lower()
+            matched = old_by_id.get(adopted_id) if adopted_id else None
+        elif nid and nid in old_by_id:
             matched = old_by_id[nid]
         else:
             try:
                 matched = old_by_fp.get(fp(item))
             except Exception:
                 matched = None
-        if matched is None and new_key:
-            matched = old_by_key.get((arr_type, new_key))
-        if matched is None:
-            try:
-                matched = old_by_url.get(fp_url(item))
-            except Exception:
-                matched = None
+            if matched is None and new_key:
+                matched = old_by_key.get((arr_type, new_key))
+            if matched is None:
+                try:
+                    matched = old_by_url.get(fp_url(item))
+                except Exception:
+                    matched = None
 
         # Retain previous API key when the client sends a blank (redacted) value.
         incoming_key = str(item.get("api_key") or item.get("apikey") or "").strip()
@@ -1107,12 +1224,14 @@ def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: 
         if matched:
             old_key = _normalize_instance_key(matched.get("instance_key") or matched.get("key") or matched.get("name") or "")
             mid = str(matched.get("instance_id") or "").strip().lower()
-            if _arr_instance_id_has_uuid(mid):
+            # Identity is immutable once assigned: never rewrite id on rename.
+            # URL transplant rebinds to the adopted (URL owner) id above.
+            if mid:
                 item["instance_id"] = mid
             elif _arr_instance_id_has_uuid(nid):
                 item["instance_id"] = nid
             else:
-                item["instance_id"] = _stable_default_instance_id(arr_type, item)
+                item["instance_id"] = _new_arr_instance_id()
             old_aliases = matched.get("instance_key_aliases") if isinstance(matched.get("instance_key_aliases"), list) else []
             for a in old_aliases:
                 k = _normalize_instance_key(a)
@@ -1123,12 +1242,13 @@ def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: 
         else:
             if _arr_instance_id_has_uuid(nid):
                 item["instance_id"] = nid
-            elif str(nid or "").strip():
-                item["instance_id"] = str(nid).strip().lower()
+            elif nid:
+                # Keep legacy non-UUID ids the UI already shows (webhook continuity).
+                item["instance_id"] = nid
             else:
-                item["instance_id"] = _stable_default_instance_id(arr_type, item)
+                item["instance_id"] = _new_arr_instance_id()
 
-        aliases = [a for a in aliases if a and a != new_key]
+        aliases = [a for a in aliases if a and a != new_key and a not in displaced_keys]
         seen: set[str] = set()
         deduped: list[str] = []
         for a in aliases:
@@ -1136,8 +1256,59 @@ def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: 
                 deduped.append(a)
                 seen.add(a)
         item["instance_key_aliases"] = deduped[:alias_cap]
-        # Never persist client-only redaction flags.
+        # Never persist client-only redaction flags or retired routing fields.
         item.pop("api_key_saved", None)
+        item.pop("role", None)
+        item.pop("is_4k", None)
+
+    # Safety net: never emit two slots with the same instance_id (e.g. UI restored a
+    # cached draft whose id was later adopted by the surviving slot after transplant).
+    seen_out_ids: set[str] = set()
+    for item in incoming:
+        if not isinstance(item, dict):
+            continue
+        arr_type = str(item.get("arr_type") or item.get("type") or "").strip().lower()
+        if arr_type not in {"radarr", "sonarr"}:
+            continue
+        oid = str(item.get("instance_id") or "").strip().lower()
+        if not oid:
+            item["instance_id"] = _new_arr_instance_id()
+            oid = str(item.get("instance_id") or "").strip().lower()
+        if oid in seen_out_ids:
+            item["instance_id"] = _new_arr_instance_id()
+            item["instance_key_aliases"] = []
+            oid = str(item.get("instance_id") or "").strip().lower()
+        seen_out_ids.add(oid)
+
+    # Safety net: primary keys and aliases must be unique across rows. Prefer keeping
+    # earlier rows' tokens; remint later keys and drop colliding aliases.
+    taken_tokens: set[str] = set()
+    for item in incoming:
+        if not isinstance(item, dict):
+            continue
+        arr_type = str(item.get("arr_type") or item.get("type") or "").strip().lower()
+        if arr_type not in {"radarr", "sonarr"}:
+            continue
+        key = _normalize_instance_key(item.get("instance_key") or item.get("key") or item.get("name") or "")
+        if not key or key in taken_tokens or key in _RESERVED_ARR_INSTANCE_KEYS:
+            base = arr_type or "arr"
+            n = 1
+            candidate = f"{base}{n}"
+            while candidate in taken_tokens or candidate in _RESERVED_ARR_INSTANCE_KEYS:
+                n += 1
+                candidate = f"{base}{n}"
+            item["instance_key"] = candidate
+            item["instance_key_aliases"] = []
+            key = candidate
+        taken_tokens.add(key)
+        cleaned_aliases: list[str] = []
+        for a in item.get("instance_key_aliases") or []:
+            ak = _normalize_instance_key(a)
+            if not ak or ak == key or ak in taken_tokens or ak in _RESERVED_ARR_INSTANCE_KEYS:
+                continue
+            cleaned_aliases.append(ak)
+            taken_tokens.add(ak)
+        item["instance_key_aliases"] = cleaned_aliases
 
     return json.dumps(incoming)
 
@@ -1259,11 +1430,22 @@ def _validate_value(key: str, raw_value: Any) -> Any:
         value = str(raw_value or "").strip()
         if key == "PLACEHOLDER_STATUS_PROJECTION_MODE" and value.lower() == "off":
             value = "both"
-        allowed = [str(o["value"]) for o in meta.get("options", [])]
-        if not allowed:
-            raise ValueError("choice field missing options")
-        if value not in allowed:
-            raise ValueError(f"must be one of: {', '.join(allowed)}")
+        if key in _INSTANCE_SEARCH_MODE_KEYS:
+            value = value.lower() or "match"
+            if value in _INSTANCE_SEARCH_MODE_RESERVED:
+                pass
+            elif _INSTANCE_KEY_MODE_RE.fullmatch(value):
+                pass
+            else:
+                raise ValueError(
+                    "must be match, both, primary, secondary, or a configured instance key"
+                )
+        else:
+            allowed = [str(o["value"]) for o in meta.get("options", [])]
+            if not allowed:
+                raise ValueError("choice field missing options")
+            if value not in allowed:
+                raise ValueError(f"must be one of: {', '.join(allowed)}")
     elif value_type == "string_list":
         value = _coerce_string_list(raw_value)
     else:
@@ -1376,7 +1558,7 @@ def _set_runtime_value(key: str, value: Any) -> None:
 
 
 def _apply_runtime_library_defaults() -> None:
-    """Derive internal runtime folders from LIBRARY_ROOT in simplified mode."""
+    """Derive default movie/TV destination folders from LIBRARY_ROOT."""
     root = str(getattr(settings, "LIBRARY_ROOT", "") or "").strip()
     if not root:
         return
@@ -1384,9 +1566,115 @@ def _apply_runtime_library_defaults() -> None:
     tv = os.path.join(root, "tv")
     _set_runtime_value("MOVIE_LIBRARY_FOLDER", movie)
     _set_runtime_value("TV_LIBRARY_FOLDER", tv)
-    # Keep 4K folders aligned to simplified layout so legacy call sites keep working.
-    _set_runtime_value("MOVIE_LIBRARY_4K_FOLDER", movie)
-    _set_runtime_value("TV_LIBRARY_4K_FOLDER", tv)
+
+
+_LEGACY_4K_FOLDER_KEYS = ("MOVIE_LIBRARY_4K_FOLDER", "TV_LIBRARY_4K_FOLDER")
+_LEGACY_4K_PLEX_SECTION_KEYS = ("PLEX_MOVIE_4K_SECTION_ID", "PLEX_TV_4K_SECTION_ID")
+_RETIRED_ARR_INSTANCE_FIELDS = ("role", "is_4k")
+
+
+def migrate_legacy_library_4k_folders(session=None) -> dict[str, Any]:
+    """Drop removed 4K folder and 4K Plex section settings.
+
+    Idempotent. Default destinations come from LIBRARY_ROOT; extra trees use the
+    dest map. Mapped destinations carry their own Plex section IDs.
+    """
+    owns_session = session is None
+    session = session or get_session()
+    deleted_keys: list[str] = []
+    try:
+        target_keys = _LEGACY_4K_FOLDER_KEYS + _LEGACY_4K_PLEX_SECTION_KEYS
+        rows = (
+            session.query(AppConfig)
+            .filter(AppConfig.key.in_(target_keys))
+            .all()
+        )
+        for row in rows:
+            deleted_keys.append(str(row.key))
+            session.delete(row)
+        if deleted_keys:
+            session.commit()
+            logger.info(
+                f"Removed legacy 4K path/section settings: {', '.join(deleted_keys)}",
+                extra={"emoji_type": "update"},
+            )
+        _apply_runtime_library_defaults()
+        return {"ok": True, "deleted_keys": deleted_keys}
+    except Exception as exc:
+        session.rollback()
+        logger.warning(
+            f"Legacy library 4K settings migration failed: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+        return {"ok": False, "deleted_keys": [], "error": str(exc)}
+    finally:
+        if owns_session:
+            session.close()
+
+
+def migrate_arr_instances_drop_role_is_4k(session=None) -> dict[str, Any]:
+    """Rewrite saved ARR_INSTANCES_JSON without retired role/is_4k routing fields.
+
+    Idempotent. Identity stays instance_key + instance_id; list order / priority
+    remains rank. Does not change URLs or API keys.
+    """
+    owns_session = session is None
+    session = session or get_session()
+    try:
+        row = _get_row(session, "ARR_INSTANCES_JSON")
+        if row is None or _is_blank(row.value):
+            return {"ok": True, "rewritten": False, "stripped_fields": 0}
+        raw = str(row.value or "").strip()
+        try:
+            payload = json.loads(raw)
+        except Exception as exc:
+            logger.warning(
+                f"ARR instance role/is_4k cleanup skipped (invalid JSON): {exc}",
+                extra={"emoji_type": "warning"},
+            )
+            return {"ok": False, "rewritten": False, "stripped_fields": 0, "error": str(exc)}
+        if not isinstance(payload, list):
+            return {"ok": True, "rewritten": False, "stripped_fields": 0}
+
+        stripped = 0
+        cleaned: list[Any] = []
+        changed = False
+        for item in payload:
+            if not isinstance(item, dict):
+                cleaned.append(item)
+                continue
+            row_out = dict(item)
+            for field in _RETIRED_ARR_INSTANCE_FIELDS:
+                if field in row_out:
+                    row_out.pop(field, None)
+                    stripped += 1
+                    changed = True
+            cleaned.append(row_out)
+
+        if not changed:
+            return {"ok": True, "rewritten": False, "stripped_fields": 0}
+
+        new_raw = json.dumps(cleaned)
+        row.value = new_raw
+        if hasattr(row, "value_type") and not row.value_type:
+            row.value_type = "string"
+        session.commit()
+        _set_runtime_value("ARR_INSTANCES_JSON", new_raw)
+        logger.info(
+            f"Cleaned ARR_INSTANCES_JSON: removed {stripped} retired role/is_4k field(s)",
+            extra={"emoji_type": "update"},
+        )
+        return {"ok": True, "rewritten": True, "stripped_fields": stripped}
+    except Exception as exc:
+        session.rollback()
+        logger.warning(
+            f"ARR instance role/is_4k cleanup failed: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+        return {"ok": False, "rewritten": False, "stripped_fields": 0, "error": str(exc)}
+    finally:
+        if owns_session:
+            session.close()
 
 
 def _parse_octal_mode(raw: Any, default: int = 0o777) -> int:
@@ -1431,6 +1719,9 @@ def apply_persisted_settings(session=None) -> dict[str, Any]:
     session = session or get_session()
     applied: list[str] = []
     try:
+        # Own sessions so delete/rewrite commits do not share the read session below.
+        migrate_legacy_library_4k_folders()
+        migrate_arr_instances_drop_role_is_4k()
         rows = session.query(AppConfig).filter(AppConfig.key.in_(tuple(SETTINGS_SCHEMA.keys()))).all()
         for row in rows:
             if row.key not in SETTINGS_SCHEMA:
@@ -1564,6 +1855,9 @@ def save_settings(
     derived_library_paths: list[str] = []
     specials_before: bool | None = None
     specials_after: bool | None = None
+    arr_transplant_movie_ids: list[int] = []
+    arr_transplant_episode_ids: list[int] = []
+    arr_instances_previous_json: str | None = None
     try:
         for key, raw_value in values.items():
             if key not in SETTINGS_SCHEMA:
@@ -1589,7 +1883,7 @@ def save_settings(
             except Exception as exc:
                 errors[key] = str(exc)
 
-        # Simplified path model: derive runtime folders from LIBRARY_ROOT.
+        # Default destinations: derive movie/tv folders from LIBRARY_ROOT.
         if "LIBRARY_ROOT" in validated:
             root = str(validated.get("LIBRARY_ROOT") or "").strip()
             if root:
@@ -1600,8 +1894,6 @@ def save_settings(
                 derived_library_paths = [movie_path, tv_path]
                 _set_runtime_value("MOVIE_LIBRARY_FOLDER", movie_path)
                 _set_runtime_value("TV_LIBRARY_FOLDER", tv_path)
-                _set_runtime_value("MOVIE_LIBRARY_4K_FOLDER", movie_path)
-                _set_runtime_value("TV_LIBRARY_4K_FOLDER", tv_path)
 
         enable_plex = bool(validated.get("ENABLE_PLEX", getattr(settings, "ENABLE_PLEX", False)))
         if enable_plex:
@@ -1646,14 +1938,123 @@ def save_settings(
             if prev_val != new_val:
                 art_backfill_keys_changed.append(key)
 
+        destination_rematerialize_keys_changed: list[str] = []
+        for key in DESTINATION_REMATERIALIZE_SETTING_KEYS:
+            if key not in validated:
+                continue
+            prev_row = _get_row(session, key)
+            prev_val = "" if not prev_row or prev_row.value is None else str(prev_row.value).strip()
+            new_val = str(validated.get(key) or "").strip()
+            if prev_val != new_val:
+                destination_rematerialize_keys_changed.append(key)
+
+        if "LIBRARY_DESTINATION_MAP_JSON" in validated:
+            raw_map = str(validated.get("LIBRARY_DESTINATION_MAP_JSON") or "").strip()
+            if raw_map:
+                try:
+                    from services.library_destinations import (
+                        parse_library_destination_map,
+                        validate_library_destination_map_unique,
+                    )
+
+                    # Round-trip normalize so invalid JSON fails loudly at save.
+                    import json as _json
+
+                    payload = _json.loads(raw_map)
+                    if not isinstance(payload, list):
+                        errors["LIBRARY_DESTINATION_MAP_JSON"] = "must be a JSON array"
+                    else:
+                        normalized_rows = parse_library_destination_map(raw_map)
+                        dup_err = validate_library_destination_map_unique(normalized_rows)
+                        if dup_err:
+                            errors["LIBRARY_DESTINATION_MAP_JSON"] = dup_err
+                        else:
+                            validated["LIBRARY_DESTINATION_MAP_JSON"] = _json.dumps(
+                                normalized_rows,
+                                separators=(",", ":"),
+                            )
+                except Exception as exc:
+                    errors["LIBRARY_DESTINATION_MAP_JSON"] = f"invalid JSON: {exc}"
+
         if "ARR_INSTANCES_JSON" in validated:
             prev_row = _get_row(session, "ARR_INSTANCES_JSON")
             prev_raw = str(prev_row.value if prev_row and prev_row.value is not None else "") or ""
-            merged = _merge_arr_instances_for_stable_webhooks(prev_raw, str(validated.get("ARR_INSTANCES_JSON") or ""))
-            validated["ARR_INSTANCES_JSON"] = merged
+            arr_instances_previous_json = prev_raw
+            incoming_raw = str(validated.get("ARR_INSTANCES_JSON") or "")
+            merged = _merge_arr_instances_for_stable_webhooks(prev_raw, incoming_raw)
+            # Soft guard: empty overwrite of a populated config is almost always a
+            # client bug (redacted keys filtered out of form state). Keep the
+            # previous value and log loudly. Intentional full clear is rare; users
+            # can still clear by disconnecting slots then saving once this path is
+            # revisited with an explicit clear flag if needed.
+            try:
+                prev_list = json.loads(prev_raw) if str(prev_raw or "").strip() else []
+            except Exception:
+                prev_list = []
+            try:
+                merged_list = json.loads(merged) if str(merged or "").strip() else []
+            except Exception:
+                merged_list = []
+            if (
+                isinstance(prev_list, list)
+                and isinstance(merged_list, list)
+                and len(prev_list) > 0
+                and len(merged_list) == 0
+            ):
+                logger.error(
+                    "Refusing accidental ARR_INSTANCES_JSON wipe (client sent empty list; "
+                    f"keeping {len(prev_list)} previous instance(s))",
+                    extra={"emoji_type": "error"},
+                )
+                validated["ARR_INSTANCES_JSON"] = prev_raw
+            else:
+                validated["ARR_INSTANCES_JSON"] = merged
+                try:
+                    from services.source_of_truth.arr_instance_key_rewrite import (
+                        apply_instance_key_renames,
+                        prepare_url_transplants,
+                    )
+
+                    dest_for_rewrite = None
+                    if "LIBRARY_DESTINATION_MAP_JSON" in validated:
+                        dest_for_rewrite = str(validated.get("LIBRARY_DESTINATION_MAP_JSON") or "")
+                    transplant_prep = prepare_url_transplants(
+                        prev_raw,
+                        incoming_raw,
+                        destination_map_json=dest_for_rewrite,
+                    )
+                    arr_transplant_movie_ids = list(transplant_prep.get("movie_ids") or [])
+                    arr_transplant_episode_ids = list(transplant_prep.get("episode_ids") or [])
+                    rewritten_dest = transplant_prep.get("destination_map_json")
+                    if (
+                        transplant_prep.get("ok")
+                        and rewritten_dest is not None
+                        and "LIBRARY_DESTINATION_MAP_JSON" in validated
+                        and str(rewritten_dest) != str(validated.get("LIBRARY_DESTINATION_MAP_JSON") or "")
+                    ):
+                        validated["LIBRARY_DESTINATION_MAP_JSON"] = rewritten_dest
+                        dest_for_rewrite = str(rewritten_dest)
+                    rewrite = apply_instance_key_renames(
+                        prev_raw,
+                        merged,
+                        destination_map_json=dest_for_rewrite,
+                    )
+                    rewritten_dest = rewrite.get("destination_map_json")
+                    if (
+                        rewrite.get("ok")
+                        and rewritten_dest is not None
+                        and "LIBRARY_DESTINATION_MAP_JSON" in validated
+                        and str(rewritten_dest) != str(validated.get("LIBRARY_DESTINATION_MAP_JSON") or "")
+                    ):
+                        validated["LIBRARY_DESTINATION_MAP_JSON"] = rewritten_dest
+                except Exception as rewrite_exc:
+                    logger.error(
+                        f"ARR instance_key rename rewrite after settings save failed: {rewrite_exc}",
+                        extra={"emoji_type": "error"},
+                    )
 
         arr_instances_json = str(validated.get("ARR_INSTANCES_JSON", getattr(settings, "ARR_INSTANCES_JSON", "")) or "").strip()
-        arr_limit = max(1, int(getattr(settings, "ARR_MAX_INSTANCES_PER_TYPE", 2) or 2))
+        arr_limit = max(1, int(getattr(settings, "ARR_MAX_INSTANCES_PER_TYPE", 4) or 4))
         allowed_instance_keys: dict[str, set[str]] = {"radarr": set(), "sonarr": set()}
 
         if arr_instances_json:
@@ -1674,6 +2075,11 @@ def save_settings(
                     instance_key = _normalize_instance_key(item.get("instance_key") or item.get("key") or item.get("name") or "")
                     if not instance_key:
                         raise ValueError(f"item {index + 1} requires instance_key (or key/name)")
+                    if instance_key in _RESERVED_ARR_INSTANCE_KEYS:
+                        raise ValueError(
+                            f"item {index + 1} instance_key '{instance_key}' is reserved; "
+                            "choose a different name (for example sonarr_4k or sonarr2)"
+                        )
                     if instance_key in seen_keys:
                         raise ValueError(f"item {index + 1} has duplicate instance_key '{instance_key}'")
                     seen_keys.add(instance_key)
@@ -1687,6 +2093,10 @@ def save_settings(
                     for a in item.get("instance_key_aliases") or []:
                         ak = _normalize_instance_key(a)
                         if ak:
+                            if ak in _RESERVED_ARR_INSTANCE_KEYS:
+                                raise ValueError(
+                                    f"item {index + 1} alias '{ak}' is reserved; remove or rename the alias"
+                                )
                             tokens.append(ak)
                     for t in tokens:
                         if t in reserved_tokens:
@@ -1696,8 +2106,18 @@ def save_settings(
                         reserved_tokens.add(t)
                     url = str(item.get("url") or "").strip()
                     api_key = str(item.get("api_key") or item.get("apikey") or "").strip()
-                    if not url or not api_key:
-                        raise ValueError(f"item {index + 1} requires url and api_key")
+                    label = str(item.get("label") or instance_key or f"item {index + 1}").strip()
+                    if not url:
+                        raise ValueError(f"{label}: url is required")
+                    # Blank api_key is allowed after merge when the client sent a redacted
+                    # value and no prior secret exists (URL-only shell), or while the user is
+                    # still pasting keys. Runtime configured_arr_instances skips unkeyed rows.
+                    if not api_key:
+                        logger.warning(
+                            f"ARR_INSTANCES_JSON: '{label}' has no api_key after merge; "
+                            "saving as inactive until a key is provided",
+                            extra={"emoji_type": "warning"},
+                        )
                     counts[arr_type] += 1
                     if counts[arr_type] > arr_limit:
                         raise ValueError(f"{arr_type} supports up to {arr_limit} instances per deployment")
@@ -1815,7 +2235,10 @@ def save_settings(
                 from services.source_of_truth.arr_instance_reconcile import reconcile_after_arr_settings_save
 
                 arr_instance_reconcile = reconcile_after_arr_settings_save(
-                    str(validated.get("ARR_INSTANCES_JSON") or "")
+                    str(validated.get("ARR_INSTANCES_JSON") or ""),
+                    extra_movie_ids=arr_transplant_movie_ids,
+                    extra_episode_ids=arr_transplant_episode_ids,
+                    previous_arr_instances_json=arr_instances_previous_json,
                 )
             except Exception as exc:
                 logger.error(
@@ -1905,6 +2328,30 @@ def save_settings(
                 extra={"emoji_type": "processing"},
             )
 
+        destination_rematerialize_summary: dict[str, Any] | None = None
+        if destination_rematerialize_keys_changed and apply_scope:
+            effective_dest_scope = str(apply_scope)
+            if effective_dest_scope == "future":
+                effective_dest_scope = "next_full_sync"
+            try:
+                from services.library_destination_rematerialize import enqueue_destination_rematerialize
+
+                destination_rematerialize_summary = enqueue_destination_rematerialize(
+                    source="settings_save:destination_map",
+                    apply_now=(effective_dest_scope == "now"),
+                )
+                logger.info(
+                    f"Destination rematerialize after settings save scope={effective_dest_scope} "
+                    f"keys={destination_rematerialize_keys_changed}",
+                    extra={"emoji_type": "processing"},
+                )
+            except Exception as dest_exc:
+                logger.warning(
+                    f"Destination rematerialize after settings save failed: {dest_exc}",
+                    extra={"emoji_type": "warning"},
+                )
+                destination_rematerialize_summary = {"ok": False, "error": str(dest_exc)}
+
         logger.info(
             "Settings saved"
             f" partial={partial}"
@@ -1924,6 +2371,8 @@ def save_settings(
             "nfo_backfill": backfill_summary,
             "art_backfill_keys_changed": art_backfill_keys_changed,
             "art_backfill": art_backfill_summary,
+            "destination_rematerialize_keys_changed": destination_rematerialize_keys_changed,
+            "destination_rematerialize": destination_rematerialize_summary,
         }
     except Exception as exc:
         session.rollback()

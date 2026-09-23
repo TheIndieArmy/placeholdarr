@@ -165,7 +165,8 @@ export interface LibraryItem {
   network?: string | null;
   poster_url?: string | null;
   backdrop_url?: string | null;
-  is_4k: boolean;
+  /** @deprecated Prefer instance_key / instance_label; backend may omit. */
+  is_4k?: boolean;
   instance_key?: string | null;
   instance_id?: string | null;
   instance_label?: string | null;
@@ -281,7 +282,8 @@ export interface MovieDetailResponse {
   actors?: DetailActorDisplay[];
   directors?: DetailActorDisplay[];
   trailer_url?: string | null;
-  is_4k: boolean;
+  /** @deprecated Prefer instance_key / instance_label; backend may omit. */
+  is_4k?: boolean;
   instance_key?: string | null;
   instance_id?: string | null;
   instance_label?: string | null;
@@ -306,6 +308,7 @@ export interface MovieDetailResponse {
   file_path?: string | null;
   file_size_bytes?: number | null;
   library_path?: string | null;
+  placeholder_folder?: string | null;
   radarr_id?: number | null;
   last_found_in_arr?: string | null;
   radarr_quality?: string | null;
@@ -383,7 +386,8 @@ export interface SeriesDetailResponse {
   ratings?: Record<string, unknown> | null;
   ratings_display?: DetailRatingDisplay[];
   actors?: DetailActorDisplay[];
-  is_4k: boolean;
+  /** @deprecated Prefer instance_key / instance_label; backend may omit. */
+  is_4k?: boolean;
   instance_key?: string | null;
   instance_id?: string | null;
   instance_label?: string | null;
@@ -460,7 +464,8 @@ export interface CalendarItem {
   reason?: string | null;
   has_file: boolean;
   has_placeholder: boolean;
-  is_4k: boolean;
+  /** @deprecated Prefer instance_key; backend may omit. */
+  is_4k?: boolean;
   instance_key?: string | null;
   arr_link?: string | null;
   release_type?: "inCinemas" | "digitalRelease" | "physicalRelease";
