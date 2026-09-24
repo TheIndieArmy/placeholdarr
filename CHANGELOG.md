@@ -73,9 +73,15 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **TMDB Discover tables**: Same Postgres DB as Arr catalog gets `catalog_source`, `tmdb_movie`, `tmdb_movie_source`, `arr_movie_overlay`, and `placeholder.tmdb_movie_id` (Alembic `0031`).
 - **Catalog mode setting**: Settings → Library sync chooses Arr catalog or TMDB Discover; both catalogs can coexist; restart after switching so schedulers follow the mode.
 - **Discover catalog sync schedule**: `DISCOVER_SYNC_INTERVAL_HOURS` (default 24; 0 disables) registers the Tasks Discover job like Collections; restart required after change.
+- **Show-level Discover TV**: TMDB TV sources, `tmdb_series` catalog, Sonarr overlay, series folder + dummy S01E01 stub, and playback add/monitor/search in Sonarr.
+
+#### Changed
+
+- **Discover Placeholder Search Behavior**: Discover playback targets `MOVIE`/`TV_PLACEHOLDER_SEARCH_MODE` (All / primary / secondary / named instance) with per-instance lookup, add, monitor, and search; prefer matched library path is not applied.
 
 #### Fixed
 
+- **Discover playback overlay deadlock**: After add, upsert only that title's Arr overlay instead of a full library overlay refresh (which could hang the playback job against its own DB locks).
 - **Library lookup indexes**: Placeholder FK columns, `episode.season_id`, and movie/series/episode `status` are indexed so Arr library/series stats avoid sequential scans after a cold cache.
 - **Startup HTTP gate**: DB summary, CLAIMED job reset, and orphaned task-run abandon run in a background thread so Uvicorn can accept UI/API connections immediately.
 - **Startup schema no-ops**: Skip instance_key DROP/CREATE INDEX and job NOTIFY trigger reinstall when already applied.
@@ -89,6 +95,8 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Collections synthetic ingest**: Only already-in-*arr skips enqueue synthetic MovieAdded/SeriesAdd; fresh successful adds rely on the real *arr webhook.
 - **Discover playback already-in-Radarr**: Lookup before import; unmonitored library titles are monitored and searched instead of a fake “added” path that skipped search.
 - **playback_start dedupe**: Duplicate Emby/Jellyfin/Plex playback webhooks for the same item/path within 15s collapse to one event.
+- **Discover series stub folder.jpg**: Show-level TV stubs also write ``folder.jpg`` (copy of the stub poster) so Emby/Plex/Jellyfin show series art before real art backfill.
+- **Emby webhook Test**: Accept Emby's ``system.webhooktest`` as a connectivity test (same as Radarr/Sonarr Test) so the Test button returns 200.
 
 ## [0.9.26] - 2026-09-10
 

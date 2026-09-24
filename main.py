@@ -691,6 +691,11 @@ async def webhook(request: Request):
 
         canonical_instance, route_err = resolve_canonical_webhook_instance(instance_raw, instance_id_raw)
         if route_err:
+            logger.warning(
+                f"Webhook rejected: {route_err} "
+                f"instance={safe_instance} instance_id={instance_id_raw or 'none'}",
+                extra={"emoji_type": "warning"},
+            )
             raise HTTPException(status_code=400, detail=route_err)
 
         from core.config import settings as _settings

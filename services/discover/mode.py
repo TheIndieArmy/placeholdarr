@@ -1,4 +1,4 @@
-"""TMDB Discover catalog mode (movies-first)."""
+"""TMDB Discover catalog mode (movies + show-level TV)."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from typing import Literal
 from core.config import settings
 
 CatalogMode = Literal["arr_catalog", "tmdb_discover"]
+
 DiscoverStartupSyncMode = Literal["on", "auto", "off"]
 
 

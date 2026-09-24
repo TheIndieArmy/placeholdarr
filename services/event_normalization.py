@@ -88,8 +88,9 @@ def _normalize_download_event(instance: str | None) -> NormalizedEventType:
 def normalize_event_type(raw_event_type: str | None, instance: str | None = None) -> NormalizedEventType:
     raw = str(raw_event_type or "unknown").strip().lower()
 
-    # Sonarr/Radarr "Test" webhook from Settings → Webhooks → Test; not a content lifecycle event.
-    if raw in ("test", "ping", "webhooktest"):
+    # Sonarr/Radarr "Test" webhook; Emby sends ``system.webhooktest``.
+    # Not a content lifecycle event — connectivity check only.
+    if raw in ("test", "ping", "webhooktest", "system.webhooktest"):
         return NormalizedEventType(
             raw_event_type=raw,
             canonical_event_type="webhook_test",

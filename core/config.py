@@ -221,8 +221,10 @@ class Settings(BaseSettings):
     # Discover movies land under ``{DISCOVER_LIBRARY_ROOT}/movies``.
     DISCOVER_LIBRARY_ROOT: str = ""
     DISCOVER_MOVIE_LIBRARY_FOLDER: str = ""
+    DISCOVER_TV_LIBRARY_FOLDER: str = ""
     # Optional Plex section for the Discover movies destination.
     DISCOVER_PLEX_MOVIE_SECTION_ID: Optional[int] = None
+    DISCOVER_PLEX_TV_SECTION_ID: Optional[int] = None
     # Trakt API Client ID (public list access only; no OAuth/account linking).
     TRAKT_CLIENT_ID: Optional[str] = None
     # Optional outbound Tautulli API for Collections "most played" sources.

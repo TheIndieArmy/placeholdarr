@@ -222,6 +222,74 @@ class ArrMovieOverlay(Base):
     updated_at = Column(DateTime(timezone=True), server_default=text("now()"), onupdate=func.now())
 
 
+class TmdbSeries(Base):
+    """TMDB-sourced TV catalog row (Discover mode). Show-level only; no episode catalog."""
+
+    __tablename__ = "tmdb_series"
+    __table_args__ = (
+        Index("ix_tmdb_series_determination", "determination"),
+        Index("ix_tmdb_series_title", "title"),
+        Index("ix_tmdb_series_tvdb_id", "tvdb_id"),
+    )
+
+    tmdb_id = Column(Integer, primary_key=True)
+    tvdb_id = Column(Integer, nullable=True)
+    title = Column(String, nullable=False)
+    year = Column(Integer, nullable=True)
+    overview = Column(String, nullable=True)
+    poster_path = Column(String, nullable=True)
+    remote_poster = Column(String, nullable=True)
+    popularity = Column(Float, nullable=True)
+    vote_average = Column(Float, nullable=True)
+    vote_count = Column(Integer, nullable=True)
+    genre_ids = Column(JSON, nullable=True)
+    original_language = Column(String, nullable=True)
+    first_air_date = Column(String, nullable=True)
+    has_placeholder = Column(Boolean, nullable=False, default=False)
+    placeholder_folder = Column(String, nullable=True)
+    placeholder_filepath = Column(String, nullable=True)
+    determination = Column(String, nullable=True)
+    determination_updated_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), server_default=text("now()"), onupdate=func.now())
+
+    @hybrid_property
+    def tmdbid(self):
+        return self.tmdb_id
+
+    @hybrid_property
+    def tvdbid(self):
+        return self.tvdb_id
+
+
+class TmdbSeriesSource(Base):
+    __tablename__ = "tmdb_series_source"
+
+    tmdb_id = Column(Integer, ForeignKey("tmdb_series.tmdb_id", ondelete="CASCADE"), primary_key=True)
+    source_id = Column(Integer, ForeignKey("catalog_source.id", ondelete="CASCADE"), primary_key=True)
+    added_at = Column(DateTime(timezone=True), server_default=text("now()"))
+
+
+class ArrSeriesOverlay(Base):
+    """Thin Sonarr state for a TMDB catalog series (monitored / hasFile / sonarr id)."""
+
+    __tablename__ = "arr_series_overlay"
+    __table_args__ = (
+        Index("ix_arr_series_overlay_tmdb_id", "tmdb_id"),
+        Index("ux_arr_series_overlay_tmdb_instance", "tmdb_id", "instance_id", unique=True),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tmdb_id = Column(Integer, ForeignKey("tmdb_series.tmdb_id", ondelete="CASCADE"), nullable=False)
+    instance_id = Column(String, nullable=False)
+    instance_key = Column(String, nullable=False)
+    sonarr_id = Column(Integer, nullable=True)
+    monitored = Column(Boolean, nullable=False, default=False)
+    has_file = Column(Boolean, nullable=False, default=False)
+    sonarr_filepath = Column(String, nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=text("now()"), onupdate=func.now())
+
+
 class Placeholder(Base):
     __tablename__ = 'placeholder'
     __table_args__ = (
@@ -230,11 +298,13 @@ class Placeholder(Base):
         Index("ix_placeholder_series_id", "series_id"),
         Index("ix_placeholder_season_id", "season_id"),
         Index("ix_placeholder_tmdb_movie_id", "tmdb_movie_id"),
+        Index("ix_placeholder_tmdb_series_id", "tmdb_series_id"),
         Index("ix_placeholder_path", "path"),
     )
     id = Column(Integer, primary_key=True, autoincrement=True)
     movie_id = Column(Integer, ForeignKey('movie.id'), nullable=True)
     tmdb_movie_id = Column(Integer, ForeignKey('tmdb_movie.tmdb_id', ondelete='SET NULL'), nullable=True)
+    tmdb_series_id = Column(Integer, ForeignKey('tmdb_series.tmdb_id', ondelete='SET NULL'), nullable=True)
     series_id = Column(Integer, ForeignKey('series.id'), nullable=True)
     season_id = Column(Integer, ForeignKey('season.id'), nullable=True)
     episode_id = Column(Integer, ForeignKey('episode.id'), nullable=True)

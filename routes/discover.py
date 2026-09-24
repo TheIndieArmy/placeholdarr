@@ -12,7 +12,13 @@ from services.discover.changes import run_movie_changes_sync
 from services.discover.mode import is_tmdb_discover_mode
 from services.discover.seed import ensure_default_popular_source, run_source
 from services.postgres.db import get_session
-from services.postgres.models import CatalogSource, TmdbMovie, ArrMovieOverlay
+from services.postgres.models import (
+    CatalogSource,
+    TmdbMovie,
+    TmdbSeries,
+    ArrMovieOverlay,
+    ArrSeriesOverlay,
+)
 from services.tmdb_client import tmdb_configured, verify_api_key
 
 router = APIRouter(prefix="/api/discover", tags=["discover"])
@@ -54,14 +60,19 @@ def discover_status():
     session = get_session()
     try:
         movie_count = session.query(TmdbMovie).count()
-        source_count = session.query(CatalogSource).filter(CatalogSource.media_type == "movie").count()
+        series_count = session.query(TmdbSeries).count()
+        source_count = session.query(CatalogSource).count()
         needs = session.query(TmdbMovie).filter(TmdbMovie.determination == "needs_placeholder").count()
+        needs_series = session.query(TmdbSeries).filter(TmdbSeries.determination == "needs_placeholder").count()
         return {
             "catalog_mode_discover": is_tmdb_discover_mode(),
             "tmdb_configured": tmdb_configured(),
             "movie_count": movie_count,
+            "series_count": series_count,
             "source_count": source_count,
-            "needs_placeholder": needs,
+            "needs_placeholder": needs + needs_series,
+            "needs_placeholder_movies": needs,
+            "needs_placeholder_series": needs_series,
         }
     finally:
         session.close()
@@ -89,14 +100,17 @@ def list_sources():
 
 @router.post("/sources")
 def create_source(body: CatalogSourceIn):
-    if str(body.media_type or "movie").lower() != "movie":
-        raise HTTPException(status_code=400, detail="Phase 1 supports movie sources only")
+    media = str(body.media_type or "movie").strip().lower() or "movie"
+    if media in {"series", "show"}:
+        media = "tv"
+    if media not in {"movie", "tv"}:
+        raise HTTPException(status_code=400, detail="media_type must be movie or tv")
     session = get_session()
     try:
         row = CatalogSource(
             name=body.name.strip(),
             source_type=body.source_type.strip().lower(),
-            media_type="movie",
+            media_type=media,
             filters_json=body.filters_json or {},
             enabled=bool(body.enabled),
             run_interval_hours=body.run_interval_hours,
@@ -243,6 +257,46 @@ def list_movies(limit: int = 100, offset: int = 0):
             items.append(
                 {
                     "tmdb_id": r.tmdb_id,
+                    "title": r.title,
+                    "year": r.year,
+                    "poster_path": r.poster_path,
+                    "remote_poster": r.remote_poster,
+                    "popularity": r.popularity,
+                    "determination": r.determination,
+                    "has_placeholder": bool(r.has_placeholder),
+                    "placeholder_filepath": r.placeholder_filepath,
+                    "monitored": mon,
+                    "has_file": has_file,
+                }
+            )
+        return {"total": total, "items": items}
+    finally:
+        session.close()
+
+
+@router.get("/series")
+def list_series(limit: int = 100, offset: int = 0):
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
+    session = get_session()
+    try:
+        q = session.query(TmdbSeries).order_by(TmdbSeries.popularity.desc().nullslast(), TmdbSeries.tmdb_id.asc())
+        total = q.count()
+        rows = q.offset(offset).limit(limit).all()
+        overlays = {
+            (o.tmdb_id, o.instance_key): o
+            for o in session.query(ArrSeriesOverlay)
+            .filter(ArrSeriesOverlay.tmdb_id.in_([r.tmdb_id for r in rows] or [-1]))
+            .all()
+        }
+        items = []
+        for r in rows:
+            mon = any(o.monitored for (tid, _), o in overlays.items() if tid == r.tmdb_id)
+            has_file = any(o.has_file for (tid, _), o in overlays.items() if tid == r.tmdb_id)
+            items.append(
+                {
+                    "tmdb_id": r.tmdb_id,
+                    "tvdb_id": r.tvdb_id,
                     "title": r.title,
                     "year": r.year,
                     "poster_path": r.poster_path,

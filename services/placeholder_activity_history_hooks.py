@@ -13,6 +13,7 @@ from sqlalchemy.orm.attributes import get_history
 from core.logger import logger
 from services.postgres.models import (
     ArrMovieOverlay,
+    ArrSeriesOverlay,
     Episode,
     EventLog,
     Movie,
@@ -21,6 +22,7 @@ from services.postgres.models import (
     Season,
     Series,
     TmdbMovie,
+    TmdbSeries,
 )
 from services.source_of_truth.status_intent import StatusSource
 
@@ -85,6 +87,23 @@ def _instance_and_season_for_placeholder(session, ph: Placeholder) -> tuple[str 
         except Exception:
             pass
         return None, None, None
+    if getattr(ph, "tmdb_series_id", None):
+        try:
+            overlay = (
+                session.query(ArrSeriesOverlay)
+                .filter(ArrSeriesOverlay.tmdb_id == int(ph.tmdb_series_id))
+                .order_by(ArrSeriesOverlay.id.asc())
+                .first()
+            )
+            if overlay:
+                return (
+                    getattr(overlay, "instance_key", None),
+                    getattr(overlay, "instance_id", None),
+                    1,
+                )
+        except Exception:
+            pass
+        return None, None, 1
     inst_key: str | None = None
     inst_id: str | None = None
     if ph.series_id:
@@ -109,6 +128,8 @@ def _instance_and_season_for_placeholder(session, ph: Placeholder) -> tuple[str 
 def _item_type_for_placeholder(ph: Placeholder) -> str:
     if ph.movie_id or getattr(ph, "tmdb_movie_id", None):
         return "movie"
+    if getattr(ph, "tmdb_series_id", None):
+        return "episode"
     if ph.series_id and not ph.episode_id:
         return "series"
     return "episode"
@@ -129,6 +150,15 @@ def _title_for_placeholder(session, ph: Placeholder) -> str:
             if year:
                 title = f"{title} ({int(year)})"
             return _trunc(title, 512)
+    sid = getattr(ph, "tmdb_series_id", None)
+    if sid:
+        ts = session.query(TmdbSeries).filter(TmdbSeries.tmdb_id == int(sid)).first()
+        if ts and getattr(ts, "title", None):
+            title = str(ts.title).strip()
+            year = getattr(ts, "year", None)
+            if year:
+                title = f"{title} ({int(year)})"
+            return _trunc(f"{title} S01E01", 512)
     return ""
 
 

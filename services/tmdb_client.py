@@ -762,6 +762,20 @@ def fetch_tv_original_language(tmdb_id: int) -> str | None:
     return lang
 
 
+def fetch_tv_external_ids(tmdb_id: int) -> dict[str, Any]:
+    """Return TMDB ``/tv/{id}/external_ids`` (tvdb_id, imdb_id, …)."""
+    tid = int(tmdb_id)
+    cache_key = f"/tv/{tid}/external_ids"
+    cached = _cache_get(cache_key, _CACHE_TTL_SECONDS)
+    if isinstance(cached, dict):
+        return cached
+    data = _request(f"/tv/{tid}/external_ids") or {}
+    if isinstance(data, dict):
+        _cache_set(cache_key, data)
+        return data
+    return {}
+
+
 def fetch_movie_images(tmdb_id: int, *, sought_languages: list[str] | None = None, preferred_language: str = "en") -> dict[str, Any]:
     tid = int(tmdb_id)
     langs = list(sought_languages) if sought_languages is not None else [preferred_language]

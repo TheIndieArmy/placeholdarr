@@ -34,6 +34,7 @@ const SORT_OPTIONS = [
 type Draft = {
   name: string;
   source_type: string;
+  media_type: "movie" | "tv";
   limit: number;
   window: "day" | "week";
   list_id: string;
@@ -50,6 +51,7 @@ function emptyDraft(): Draft {
   return {
     name: "",
     source_type: "tmdb_popular",
+    media_type: "movie",
     limit: 200,
     window: "week",
     list_id: "",
@@ -65,9 +67,11 @@ function emptyDraft(): Draft {
 
 function draftFromSource(src: CatalogSource): Draft {
   const f = src.filters_json || {};
+  const media = src.media_type === "tv" || src.media_type === "series" ? "tv" : "movie";
   return {
     name: src.name,
     source_type: src.source_type,
+    media_type: media,
     limit: Math.max(1, Math.min(10000, Number(f.limit) || 200)),
     window: f.window === "day" ? "day" : "week",
     list_id: String(f.list_id || f.id || ""),
@@ -132,7 +136,7 @@ export function CatalogSourcesSettingsPanel({ enabled, accentHex = "#FBBF24" }: 
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
-    void getCollectionTmdbMeta("movie", draft.watch_region || "US")
+    void getCollectionTmdbMeta(draft.media_type, draft.watch_region || "US")
       .then((meta) => {
         if (!cancelled) setGenres(meta.genres || []);
       })
@@ -142,7 +146,7 @@ export function CatalogSourcesSettingsPanel({ enabled, accentHex = "#FBBF24" }: 
     return () => {
       cancelled = true;
     };
-  }, [enabled, draft.watch_region]);
+  }, [enabled, draft.watch_region, draft.media_type]);
 
   const editingSource = useMemo(
     () => (typeof editingId === "number" ? sources.find((s) => s.id === editingId) : null),
@@ -165,7 +169,7 @@ export function CatalogSourcesSettingsPanel({ enabled, accentHex = "#FBBF24" }: 
         await createDiscoverSource({
           name,
           source_type: draft.source_type,
-          media_type: "movie",
+          media_type: draft.media_type,
           filters_json,
           enabled: draft.enabled,
         });
@@ -193,8 +197,9 @@ export function CatalogSourcesSettingsPanel({ enabled, accentHex = "#FBBF24" }: 
         <div>
           <h3 className="text-[15px] font-headline font-bold uppercase tracking-wide text-white">Catalog sources</h3>
           <p className="ui-field-description mt-1">
-            Configure TMDB movie sources (limit up to 10,000; fetches paginate with rate limiting). Run a source or use
-            Activity → Tasks → Discover catalog sync for placeholders, NFOs, and posters.
+            Configure TMDB movie and TV sources (limit up to 10,000; fetches paginate with rate limiting). TV uses
+            show-level stubs (one dummy episode). Run a source or use Activity → Tasks → Discover catalog sync for
+            placeholders, NFOs, and posters.
           </p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -242,7 +247,7 @@ export function CatalogSourcesSettingsPanel({ enabled, accentHex = "#FBBF24" }: 
                 <div className="min-w-0">
                   <div className="text-[14px] text-slate-100 font-medium truncate">{src.name}</div>
                   <div className="text-[12px] text-slate-500">
-                    {src.source_type} · limit {limit}
+                    {src.media_type === "tv" ? "TV" : "Movies"} · {src.source_type} · limit {limit}
                     {src.last_run_at ? ` · last run fetched ${String(stats.fetched ?? "—")}` : ""}
                   </div>
                 </div>
@@ -346,6 +351,24 @@ export function CatalogSourcesSettingsPanel({ enabled, accentHex = "#FBBF24" }: 
               />
             </label>
             <div className="flex flex-wrap gap-3">
+              <label className="block text-[13px] text-slate-400">
+                Media
+                <select
+                  className="mt-1 block rounded-lg border border-[#424753]/40 bg-[#0f1419] px-3 py-2 text-[14px] text-slate-200"
+                  value={draft.media_type}
+                  disabled={editingId !== "new"}
+                  onChange={(e) =>
+                    setDraft((d) => ({
+                      ...d,
+                      media_type: e.target.value === "tv" ? "tv" : "movie",
+                      genre_ids: [],
+                    }))
+                  }
+                >
+                  <option value="movie">Movies</option>
+                  <option value="tv">TV (show-level)</option>
+                </select>
+              </label>
               <label className="block text-[13px] text-slate-400">
                 Type
                 <select

@@ -140,6 +140,61 @@ def _placeholder_search_mode(media_type: str) -> str:
     return _normalize_instance_search_mode(getattr(settings, 'TV_PLACEHOLDER_SEARCH_MODE', 'match'))
 
 
+def _discover_instances_for_placeholder_mode(
+    media_type: str,
+) -> tuple[list[dict[str, Any]], str]:
+    """Arr instances for Discover playback from PLACEHOLDER_SEARCH_MODE.
+
+    Prefer-path / library destination matching is not applied: Discover stubs are
+    not Arr-rooted library paths. Legacy ``match`` behaves like All instances.
+    """
+    arr_type = _arr_type_for_media(media_type)
+    instances = list(settings.arr_instances_for_type(arr_type) or [])
+    mode = _placeholder_search_mode(media_type)
+    preference = _preference_from_mode(mode)
+    by_key: dict[str, dict[str, Any]] = {}
+    for inst in instances:
+        key = str(inst.get('instance_key') or inst.get('key') or '').strip().lower()
+        if key and key not in by_key:
+            by_key[key] = inst
+    if not by_key:
+        return [], preference
+
+    ordered_keys: list[str] = []
+    ranking = (
+        list(settings.movie_instance_ranking)
+        if media_type == 'movie'
+        else list(settings.tv_instance_ranking)
+    )
+    for key in ranking:
+        k = str(key or '').strip().lower()
+        if k in by_key and k not in ordered_keys:
+            ordered_keys.append(k)
+    for key in by_key:
+        if key not in ordered_keys:
+            ordered_keys.append(key)
+
+    if preference == 'both':
+        return [by_key[k] for k in ordered_keys], preference
+
+    if preference == 'primary':
+        key = _instance_key_at_rank(arr_type, 0)
+        if key and key in by_key:
+            return [by_key[key]], preference
+        return [], preference
+
+    if preference == 'secondary':
+        key = _instance_key_at_rank(arr_type, 1)
+        if key and key in by_key:
+            return [by_key[key]], preference
+        return [], preference
+
+    coerced = _coerce_instance_key(arr_type, preference)
+    if coerced and coerced in by_key:
+        return [by_key[coerced]], preference
+    return [], preference
+
+
 def _select_forced_instance_rows(
     rows_by_instance: dict[str, Any],
     *,
@@ -738,6 +793,15 @@ def _resolve_media_from_path(session, path: str | None) -> dict[str, Any]:
                 'playback_kind': 'placeholder',
                 'tmdb_id': int(ph_row.tmdb_movie_id),
                 'tmdb_movie_id': int(ph_row.tmdb_movie_id),
+                'matched_instance': None,
+            }
+        if getattr(ph_row, 'tmdb_series_id', None):
+            return {
+                'media_type': 'episode',
+                'playback_kind': 'placeholder',
+                'tmdb_id': int(ph_row.tmdb_series_id),
+                'tmdb_series_id': int(ph_row.tmdb_series_id),
+                'discover_series': True,
                 'matched_instance': None,
             }
         if getattr(ph_row, 'movie_id', None):
@@ -1868,40 +1932,19 @@ def _enqueue_delayed_fallback(
     return int(job.id)
 
 
-def _process_discover_movie_playback(session, context: dict[str, Any]) -> dict[str, Any] | None:
-    """TMDB Discover: resolve Radarr first, add only if missing, then monitor/search.
-
-    Already-in-Radarr (including unmonitored) titles must still be monitored and
-    searched; we never treat ``added=True`` as implying search already happened.
-    """
-    from services.discover.mode import is_tmdb_discover_mode
-    from services.discover.overlay import refresh_arr_overlays
-    from services.postgres.models import ArrMovieOverlay, TmdbMovie
+def _process_discover_movie_on_instance(
+    session,
+    *,
+    row: Any,
+    tmdb_id: int,
+    inst: dict[str, Any],
+    search: bool,
+) -> dict[str, Any]:
+    """Lookup / add / monitor / search one Radarr instance for a Discover movie play."""
+    from routes.collections import _fetch_instance_quality_profiles, _fetch_instance_root_folders
+    from services.postgres.models import ArrMovieOverlay
     from services.source_of_truth.arr_api import lookup_movie
 
-    if not is_tmdb_discover_mode():
-        return None
-    tmdb_id = context.get('tmdb_id') or context.get('tmdb_movie_id')
-    if tmdb_id is None:
-        path = str(context.get('file_path') or '')
-        m = re.search(r'\{tmdb-(\d+)\}', path, flags=re.I)
-        if m:
-            tmdb_id = int(m.group(1))
-    if tmdb_id is None:
-        return None
-    tmdb_id = int(tmdb_id)
-    row = session.get(TmdbMovie, tmdb_id)
-    if row is None:
-        return None
-
-    radarr_instances = [
-        i for i in (settings.configured_arr_instances or [])
-        if str(i.get('arr_type') or '').lower() == 'radarr'
-    ]
-    if not radarr_instances:
-        return {'ok': False, 'reason': 'no_radarr_instance', 'tmdb_id': tmdb_id}
-
-    inst = radarr_instances[0]
     instance_key = str(inst.get('instance_key') or inst.get('key') or 'radarr_std')
     instance_id = str(inst.get('instance_id') or f'radarr:{instance_key}')
     url = str(inst.get('url') or inst.get('base_url') or '')
@@ -1918,8 +1961,6 @@ def _process_discover_movie_playback(session, context: dict[str, Any]) -> dict[s
             .filter(ArrMovieOverlay.tmdb_id == tmdb_id, ArrMovieOverlay.instance_key == instance_key)
             .first()
         )
-    monitor_only = _playback_monitor_only_no_search()
-    search = not monitor_only
     added = False
     skipped_existing = False
     radarr_id = int(overlay.radarr_id) if overlay and overlay.radarr_id else None
@@ -1955,7 +1996,8 @@ def _process_discover_movie_playback(session, context: dict[str, Any]) -> dict[s
             )
         except Exception as exc:
             logger.warning(
-                f"Discover playback Radarr lookup failed tmdb={tmdb_id}: {exc}",
+                f"Discover playback Radarr lookup failed tmdb={tmdb_id} "
+                f"instance={instance_key}: {exc}",
                 extra={'emoji_type': 'warning'},
             )
             hit = None
@@ -1977,16 +2019,24 @@ def _process_discover_movie_playback(session, context: dict[str, Any]) -> dict[s
                 session.flush()
 
     if radarr_id is None:
-        from routes.collections import _fetch_instance_quality_profiles, _fetch_instance_root_folders
-
         profiles = _fetch_instance_quality_profiles(inst) or []
         roots = _fetch_instance_root_folders(inst) or []
         if not profiles or not roots:
-            return {'ok': False, 'reason': 'missing_radarr_profile_or_root', 'tmdb_id': tmdb_id}
+            return {
+                'ok': False,
+                'reason': 'missing_radarr_profile_or_root',
+                'instance_key': instance_key,
+                'tmdb_id': tmdb_id,
+            }
         quality_profile_id = int(profiles[0].get('id') or profiles[0].get('value') or 0)
         root_folder_path = str(roots[0].get('path') or roots[0].get('value') or '')
         if not quality_profile_id or not root_folder_path:
-            return {'ok': False, 'reason': 'invalid_radarr_profile_or_root', 'tmdb_id': tmdb_id}
+            return {
+                'ok': False,
+                'reason': 'invalid_radarr_profile_or_root',
+                'instance_key': instance_key,
+                'tmdb_id': tmdb_id,
+            }
 
         item = SimpleNamespace(title=row.title, year=row.year, tmdb_id=tmdb_id)
         results = add_missing_titles(
@@ -2005,6 +2055,7 @@ def _process_discover_movie_playback(session, context: dict[str, Any]) -> dict[s
             return {
                 'ok': False,
                 'reason': 'radarr_add_failed',
+                'instance_key': instance_key,
                 'tmdb_id': tmdb_id,
                 'detail': results[0].get('error'),
                 'results': results,
@@ -2017,20 +2068,34 @@ def _process_discover_movie_playback(session, context: dict[str, Any]) -> dict[s
             arr_id = int((results[0] or {}).get('arr_id') or 0) or None
         except (TypeError, ValueError, IndexError):
             arr_id = None
-        refresh_arr_overlays()
-        session.expire_all()
-        overlay = (
-            session.query(ArrMovieOverlay)
-            .filter(ArrMovieOverlay.tmdb_id == tmdb_id, ArrMovieOverlay.instance_id == instance_id)
-            .first()
-        )
-        if overlay is None:
-            overlay = (
-                session.query(ArrMovieOverlay)
-                .filter(ArrMovieOverlay.tmdb_id == tmdb_id, ArrMovieOverlay.instance_key == instance_key)
-                .first()
-            )
-        radarr_id = int(overlay.radarr_id) if overlay and overlay.radarr_id else arr_id
+        # Never call refresh_arr_overlays() here: a second session writing
+        # arr_movie_overlay deadlocks against this playback transaction.
+        if arr_id is None and url and api_key:
+            try:
+                hit = lookup_movie(
+                    url=url,
+                    api_key=api_key,
+                    tmdb_id=tmdb_id,
+                    title=getattr(row, 'title', None),
+                    year=getattr(row, 'year', None),
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"Discover playback Radarr post-add lookup failed tmdb={tmdb_id} "
+                    f"instance={instance_key}: {exc}",
+                    extra={'emoji_type': 'warning'},
+                )
+                hit = None
+            if isinstance(hit, dict):
+                try:
+                    arr_id = int(hit.get('id') or 0) or None
+                except (TypeError, ValueError):
+                    arr_id = None
+        if arr_id:
+            _upsert_overlay(int(arr_id), monitored=True, has_file=False)
+            radarr_id = int(arr_id)
+        else:
+            radarr_id = None
 
     monitored_updated = False
     search_triggered = False
@@ -2045,13 +2110,100 @@ def _process_discover_movie_playback(session, context: dict[str, Any]) -> dict[s
         if search:
             search_triggered = trigger_radarr_movie_search(int(radarr_id), url=url, api_key=api_key)
     elif added and search:
-        # New add with searchForMovie in the import payload.
         search_triggered = True
         if overlay is not None:
             overlay.monitored = True
             session.add(overlay)
 
     search_for_monitor = bool(search_triggered) or (added and search)
+    return {
+        'ok': True,
+        'instance_key': instance_key,
+        'instance_id': instance_id,
+        'added': added,
+        'skipped_existing': skipped_existing,
+        'radarr_id': radarr_id,
+        'monitored_updated': monitored_updated,
+        'search_triggered': search_for_monitor,
+    }
+
+
+def _process_discover_movie_playback(session, context: dict[str, Any]) -> dict[str, Any] | None:
+    """TMDB Discover: resolve Radarr per Placeholder Search Mode, then add/monitor/search.
+
+    Targets MOVIE_PLACEHOLDER_SEARCH_MODE instances (All / primary / secondary /
+    named). Prefer matched library path is ignored. Already-in-Radarr titles
+    (including unmonitored) are still monitored and searched on each target.
+    """
+    from services.discover.mode import is_tmdb_discover_mode
+    from services.postgres.models import TmdbMovie
+
+    if not is_tmdb_discover_mode():
+        return None
+    tmdb_id = context.get('tmdb_id') or context.get('tmdb_movie_id')
+    if tmdb_id is None:
+        path = str(context.get('file_path') or '')
+        m = re.search(r'\{tmdb-(\d+)\}', path, flags=re.I)
+        if m:
+            tmdb_id = int(m.group(1))
+    if tmdb_id is None:
+        return None
+    tmdb_id = int(tmdb_id)
+    row = session.get(TmdbMovie, tmdb_id)
+    if row is None:
+        return None
+
+    targets, preference = _discover_instances_for_placeholder_mode('movie')
+    if not targets:
+        has_any = bool(settings.arr_instances_for_type('radarr'))
+        return {
+            'ok': False,
+            'reason': 'no_matching_radarr_instance' if has_any else 'no_radarr_instance',
+            'tmdb_id': tmdb_id,
+            'preference': preference,
+        }
+
+    monitor_only = _playback_monitor_only_no_search()
+    search = not monitor_only
+    instance_results: list[dict[str, Any]] = []
+    for inst in targets:
+        try:
+            result = _process_discover_movie_on_instance(
+                session, row=row, tmdb_id=tmdb_id, inst=inst, search=search
+            )
+        except Exception as exc:
+            key = str(inst.get('instance_key') or inst.get('key') or '')
+            logger.warning(
+                f"Discover movie playback failed tmdb={tmdb_id} instance={key}: {exc}",
+                extra={'emoji_type': 'warning'},
+            )
+            result = {
+                'ok': False,
+                'reason': 'instance_error',
+                'instance_key': key,
+                'tmdb_id': tmdb_id,
+                'detail': str(exc),
+            }
+        instance_results.append(result)
+
+    any_ok = any(bool(r.get('ok')) for r in instance_results)
+    search_for_monitor = any(bool(r.get('search_triggered')) for r in instance_results if r.get('ok'))
+    added = any(bool(r.get('added')) for r in instance_results if r.get('ok'))
+    skipped_existing = any(bool(r.get('skipped_existing')) for r in instance_results if r.get('ok'))
+    monitored_updated = any(bool(r.get('monitored_updated')) for r in instance_results if r.get('ok'))
+    radarr_ids = [r.get('radarr_id') for r in instance_results if r.get('ok') and r.get('radarr_id')]
+
+    if not any_ok:
+        first_fail = next((r for r in instance_results if not r.get('ok')), {})
+        return {
+            'ok': False,
+            'reason': first_fail.get('reason') or 'radarr_all_failed',
+            'tmdb_id': tmdb_id,
+            'preference': preference,
+            'instances': instance_results,
+            'detail': first_fail.get('detail'),
+        }
+
     intents: list[StatusIntent] = []
     ph_rows = session.query(Placeholder).filter(Placeholder.tmdb_movie_id == tmdb_id).all()
     for ph in ph_rows:
@@ -2098,10 +2250,374 @@ def _process_discover_movie_playback(session, context: dict[str, Any]) -> dict[s
         'tmdb_id': tmdb_id,
         'added': added,
         'skipped_existing': skipped_existing,
-        'radarr_id': radarr_id,
+        'radarr_id': radarr_ids[0] if len(radarr_ids) == 1 else None,
+        'radarr_ids': radarr_ids,
         'monitored_updated': monitored_updated,
         'search_triggered': search_for_monitor,
         'monitor_only': monitor_only,
+        'preference': preference,
+        'chosen_instances': [
+            str(r.get('instance_key') or '') for r in instance_results if r.get('ok')
+        ],
+        'instances': instance_results,
+    }
+
+
+def _process_discover_series_on_instance(
+    session,
+    *,
+    row: Any,
+    tmdb_id: int,
+    inst: dict[str, Any],
+    search: bool,
+) -> dict[str, Any]:
+    """Lookup / add / monitor / search one Sonarr instance for a Discover series play."""
+    from routes.collections import _fetch_instance_quality_profiles, _fetch_instance_root_folders
+    from services.postgres.models import ArrSeriesOverlay
+    from services.source_of_truth.arr_api import lookup_series
+
+    instance_key = str(inst.get('instance_key') or inst.get('key') or 'sonarr_std')
+    instance_id = str(inst.get('instance_id') or f'sonarr:{instance_key}')
+    url = str(inst.get('url') or inst.get('base_url') or '')
+    api_key = str(inst.get('api_key') or inst.get('apikey') or '')
+
+    overlay = (
+        session.query(ArrSeriesOverlay)
+        .filter(ArrSeriesOverlay.tmdb_id == tmdb_id, ArrSeriesOverlay.instance_id == instance_id)
+        .first()
+    )
+    if overlay is None:
+        overlay = (
+            session.query(ArrSeriesOverlay)
+            .filter(ArrSeriesOverlay.tmdb_id == tmdb_id, ArrSeriesOverlay.instance_key == instance_key)
+            .first()
+        )
+    added = False
+    skipped_existing = False
+    sonarr_id = int(overlay.sonarr_id) if overlay and overlay.sonarr_id else None
+    tvdb_id = int(row.tvdb_id) if getattr(row, 'tvdb_id', None) else None
+
+    def _upsert_overlay(sid: int, *, monitored: bool | None = None, has_file: bool | None = None) -> ArrSeriesOverlay:
+        nonlocal overlay
+        ov = overlay
+        if ov is None:
+            ov = ArrSeriesOverlay(tmdb_id=tmdb_id, instance_id=instance_id, instance_key=instance_key)
+            session.add(ov)
+            overlay = ov
+        ov.instance_id = instance_id
+        ov.instance_key = instance_key
+        ov.sonarr_id = int(sid)
+        if monitored is not None:
+            ov.monitored = bool(monitored)
+        if has_file is not None:
+            ov.has_file = bool(has_file)
+        ov.updated_at = datetime.now(timezone.utc)
+        session.add(ov)
+        return ov
+
+    if sonarr_id is None and url and api_key:
+        try:
+            hit = lookup_series(
+                url=url,
+                api_key=api_key,
+                tvdb_id=tvdb_id,
+                tmdb_id=tmdb_id,
+                title=getattr(row, 'title', None),
+                year=getattr(row, 'year', None),
+            )
+        except Exception as exc:
+            logger.warning(
+                f"Discover playback Sonarr lookup failed tmdb={tmdb_id} "
+                f"instance={instance_key}: {exc}",
+                extra={'emoji_type': 'warning'},
+            )
+            hit = None
+        if isinstance(hit, dict):
+            try:
+                existing_id = int(hit.get('id') or 0)
+            except (TypeError, ValueError):
+                existing_id = 0
+            if existing_id > 0:
+                sonarr_id = existing_id
+                skipped_existing = True
+                stats = hit.get('statistics') if isinstance(hit.get('statistics'), dict) else {}
+                try:
+                    has_file = int(stats.get('episodeFileCount') or 0) > 0
+                except (TypeError, ValueError):
+                    has_file = bool(hit.get('hasFile'))
+                _upsert_overlay(
+                    existing_id,
+                    monitored=bool(hit.get('monitored')) if 'monitored' in hit else None,
+                    has_file=has_file if ('statistics' in hit or 'hasFile' in hit) else None,
+                )
+                session.flush()
+                if not tvdb_id:
+                    try:
+                        tvdb_id = int(hit.get('tvdbId') or 0) or None
+                    except (TypeError, ValueError):
+                        tvdb_id = None
+                    if tvdb_id:
+                        row.tvdb_id = tvdb_id
+                        session.add(row)
+
+    if sonarr_id is None:
+        profiles = _fetch_instance_quality_profiles(inst) or []
+        roots = _fetch_instance_root_folders(inst) or []
+        if not profiles or not roots:
+            return {
+                'ok': False,
+                'reason': 'missing_sonarr_profile_or_root',
+                'instance_key': instance_key,
+                'tmdb_id': tmdb_id,
+            }
+        quality_profile_id = int(profiles[0].get('id') or profiles[0].get('value') or 0)
+        root_folder_path = str(roots[0].get('path') or roots[0].get('value') or '')
+        if not quality_profile_id or not root_folder_path:
+            return {
+                'ok': False,
+                'reason': 'invalid_sonarr_profile_or_root',
+                'instance_key': instance_key,
+                'tmdb_id': tmdb_id,
+            }
+
+        item = SimpleNamespace(
+            title=row.title,
+            year=row.year,
+            tmdb_id=tmdb_id,
+            tvdb_id=tvdb_id,
+        )
+        results = add_missing_titles(
+            media_type='series',
+            url=url,
+            api_key=api_key,
+            items=[item],
+            quality_profile_id=quality_profile_id,
+            root_folder_path=root_folder_path,
+            monitored=True,
+            search=search,
+            instance_key=instance_key,
+        )
+        status = (results[0].get('status') if results else None)
+        if status == 'error':
+            return {
+                'ok': False,
+                'reason': 'sonarr_add_failed',
+                'instance_key': instance_key,
+                'tmdb_id': tmdb_id,
+                'detail': results[0].get('error'),
+                'results': results,
+            }
+        if status == 'skipped':
+            skipped_existing = True
+        elif status == 'ok':
+            added = True
+        try:
+            arr_id = int((results[0] or {}).get('arr_id') or 0) or None
+        except (TypeError, ValueError, IndexError):
+            arr_id = None
+        # Never call refresh_arr_series_overlays() here: a second session writing
+        # arr_series_overlay deadlocks against this playback transaction.
+        if arr_id is None and url and api_key:
+            try:
+                hit = lookup_series(
+                    url=url,
+                    api_key=api_key,
+                    tvdb_id=tvdb_id,
+                    tmdb_id=tmdb_id,
+                    title=getattr(row, 'title', None),
+                    year=getattr(row, 'year', None),
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"Discover playback Sonarr post-add lookup failed tmdb={tmdb_id} "
+                    f"instance={instance_key}: {exc}",
+                    extra={'emoji_type': 'warning'},
+                )
+                hit = None
+            if isinstance(hit, dict):
+                try:
+                    arr_id = int(hit.get('id') or 0) or None
+                except (TypeError, ValueError):
+                    arr_id = None
+                if not tvdb_id and isinstance(hit, dict):
+                    try:
+                        tvdb_id = int(hit.get('tvdbId') or 0) or None
+                    except (TypeError, ValueError):
+                        tvdb_id = None
+                    if tvdb_id:
+                        row.tvdb_id = tvdb_id
+                        session.add(row)
+        if arr_id:
+            _upsert_overlay(int(arr_id), monitored=True, has_file=False)
+            sonarr_id = int(arr_id)
+        else:
+            sonarr_id = None
+
+    monitored_updated = False
+    search_triggered = False
+    need_explicit_monitor_search = bool(sonarr_id) and not (added and search)
+    if need_explicit_monitor_search:
+        if overlay is None or not overlay.monitored:
+            monitored_updated = set_sonarr_series_monitored(
+                int(sonarr_id), True, url=url, api_key=api_key
+            )
+            if monitored_updated:
+                _upsert_overlay(int(sonarr_id), monitored=True)
+        if search:
+            search_triggered = trigger_sonarr_search(
+                series_id=int(sonarr_id), url=url, api_key=api_key
+            )
+    elif added and search:
+        search_triggered = True
+        if overlay is not None:
+            overlay.monitored = True
+            session.add(overlay)
+
+    search_for_monitor = bool(search_triggered) or (added and search)
+    return {
+        'ok': True,
+        'instance_key': instance_key,
+        'instance_id': instance_id,
+        'added': added,
+        'skipped_existing': skipped_existing,
+        'sonarr_id': sonarr_id,
+        'monitored_updated': monitored_updated,
+        'search_triggered': search_for_monitor,
+    }
+
+
+def _process_discover_series_playback(session, context: dict[str, Any]) -> dict[str, Any] | None:
+    """TMDB Discover show stub: Sonarr add/monitor/search per Placeholder Search Mode.
+
+    Targets TV_PLACEHOLDER_SEARCH_MODE instances. Prefer matched library path is
+    ignored for Discover paths.
+    """
+    from services.discover.mode import is_tmdb_discover_mode
+    from services.postgres.models import TmdbSeries
+
+    if not is_tmdb_discover_mode():
+        return None
+    tmdb_id = context.get('tmdb_series_id') or (
+        context.get('tmdb_id') if context.get('discover_series') else None
+    )
+    if tmdb_id is None:
+        path = str(context.get('file_path') or '')
+        m = re.search(r'\{tmdb-(\d+)\}', path, flags=re.I)
+        if m and '/Season ' in path.replace('\\', '/'):
+            tmdb_id = int(m.group(1))
+    if tmdb_id is None:
+        return None
+    tmdb_id = int(tmdb_id)
+    row = session.get(TmdbSeries, tmdb_id)
+    if row is None:
+        return None
+
+    targets, preference = _discover_instances_for_placeholder_mode('tv')
+    if not targets:
+        has_any = bool(settings.arr_instances_for_type('sonarr'))
+        return {
+            'ok': False,
+            'reason': 'no_matching_sonarr_instance' if has_any else 'no_sonarr_instance',
+            'tmdb_id': tmdb_id,
+            'preference': preference,
+        }
+
+    monitor_only = _playback_monitor_only_no_search()
+    search = not monitor_only
+    instance_results: list[dict[str, Any]] = []
+    for inst in targets:
+        try:
+            result = _process_discover_series_on_instance(
+                session, row=row, tmdb_id=tmdb_id, inst=inst, search=search
+            )
+        except Exception as exc:
+            key = str(inst.get('instance_key') or inst.get('key') or '')
+            logger.warning(
+                f"Discover series playback failed tmdb={tmdb_id} instance={key}: {exc}",
+                extra={'emoji_type': 'warning'},
+            )
+            result = {
+                'ok': False,
+                'reason': 'instance_error',
+                'instance_key': key,
+                'tmdb_id': tmdb_id,
+                'detail': str(exc),
+            }
+        instance_results.append(result)
+
+    any_ok = any(bool(r.get('ok')) for r in instance_results)
+    search_for_monitor = any(bool(r.get('search_triggered')) for r in instance_results if r.get('ok'))
+    added = any(bool(r.get('added')) for r in instance_results if r.get('ok'))
+    skipped_existing = any(bool(r.get('skipped_existing')) for r in instance_results if r.get('ok'))
+    monitored_updated = any(bool(r.get('monitored_updated')) for r in instance_results if r.get('ok'))
+    sonarr_ids = [r.get('sonarr_id') for r in instance_results if r.get('ok') and r.get('sonarr_id')]
+
+    if not any_ok:
+        first_fail = next((r for r in instance_results if not r.get('ok')), {})
+        return {
+            'ok': False,
+            'reason': first_fail.get('reason') or 'sonarr_all_failed',
+            'tmdb_id': tmdb_id,
+            'preference': preference,
+            'instances': instance_results,
+            'detail': first_fail.get('detail'),
+        }
+
+    intents: list[StatusIntent] = []
+    ph_rows = session.query(Placeholder).filter(Placeholder.tmdb_series_id == tmdb_id).all()
+    for ph in ph_rows:
+        intents.append(
+            StatusIntent(
+                placeholder_id=int(ph.id),
+                new_status=DisplayStatus.SEARCHING.value if search_for_monitor else DisplayStatus.REQUEST.value,
+                reason=render_message("queue.searching", {}) if search_for_monitor else None,
+                source=StatusSource.EVENT_PLAYBACK_STARTED,
+                trigger_nfo_refresh=True,
+            )
+        )
+    if intents:
+        StatusOrchestrator(session=session).apply_and_project_statuses(intents)
+    _activate_queue_monitor_after_playback_search(
+        session, intents, search_triggered=search_for_monitor
+    )
+
+    try:
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    try:
+        from services.discover.determine import run_discover_series_determination
+        from services.discover.materialize_series import apply_tmdb_series_materialization
+
+        run_discover_series_determination(tmdb_ids=[tmdb_id])
+        apply_tmdb_series_materialization(tmdb_id)
+    except Exception as exc:
+        logger.warning(
+            f"Discover series post-playback rematerialize failed tmdb={tmdb_id}: {exc}",
+            extra={'emoji_type': 'warning'},
+        )
+
+    return {
+        'ok': True,
+        'event': 'playback_start',
+        'media_type': 'episode',
+        'playback_kind': 'placeholder',
+        'discover': True,
+        'discover_series': True,
+        'tmdb_id': tmdb_id,
+        'added': added,
+        'skipped_existing': skipped_existing,
+        'sonarr_id': sonarr_ids[0] if len(sonarr_ids) == 1 else None,
+        'sonarr_ids': sonarr_ids,
+        'monitored_updated': monitored_updated,
+        'search_triggered': search_for_monitor,
+        'monitor_only': monitor_only,
+        'preference': preference,
+        'chosen_instances': [
+            str(r.get('instance_key') or '') for r in instance_results if r.get('ok')
+        ],
+        'instances': instance_results,
     }
 
 
@@ -2198,6 +2714,10 @@ def _process_movie_playback(session, payload: dict[str, Any], context: dict[str,
 
 
 def _process_episode_playback(session, payload: dict[str, Any], context: dict[str, Any], source_instance: str | None) -> dict[str, Any]:
+    discover_result = _process_discover_series_playback(session, context)
+    if discover_result is not None:
+        return discover_result
+
     sonarr_id, _ = _extract_series_ids(payload)
     series_rows = _find_series_rows(
         session,

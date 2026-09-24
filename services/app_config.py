@@ -471,8 +471,8 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "label": "Discover Library Root",
                 "description": (
                     "TMDB Discover mode: Placeholdarr writes Discover movie placeholders under "
-                    "`movies` on this root (separate from Arr Library Root). "
-                    "Point a dedicated Plex/Jellyfin/Emby movies library at that folder. "
+                    "`movies` and show-level TV stubs under `tv` on this root (separate from Arr Library Root). "
+                    "Point dedicated Plex/Jellyfin/Emby libraries at those folders. "
                     "Required for Discover when you want isolated disks and faster materialize on a busy Arr tree."
                 ),
                 "type": "path",
@@ -519,6 +519,22 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "description": (
                     "Plex section ID for Discover Library Root / movies. "
                     "Use a separate Plex library from Arr Movies when the trees differ. "
+                    "Ignored for Jellyfin/Emby (path refresh)."
+                ),
+                "type": "int",
+                "required": False,
+                "min": 1,
+                "restart_required": False,
+            },
+        ),
+        (
+            "DISCOVER_PLEX_TV_SECTION_ID",
+            {
+                "section": "Paths",
+                "label": "Discover Plex TV library",
+                "description": (
+                    "Plex section ID for Discover Library Root / tv (show-level Discover stubs). "
+                    "Use a separate Plex library from Arr TV when the trees differ. "
                     "Ignored for Jellyfin/Emby (path refresh)."
                 ),
                 "type": "int",
@@ -1716,6 +1732,7 @@ def _apply_runtime_library_defaults() -> None:
     discover_root = str(getattr(settings, "DISCOVER_LIBRARY_ROOT", "") or "").strip()
     if discover_root:
         _set_runtime_value("DISCOVER_MOVIE_LIBRARY_FOLDER", os.path.join(discover_root, "movies"))
+        _set_runtime_value("DISCOVER_TV_LIBRARY_FOLDER", os.path.join(discover_root, "tv"))
 
 
 _LEGACY_4K_FOLDER_KEYS = ("MOVIE_LIBRARY_4K_FOLDER", "TV_LIBRARY_4K_FOLDER")
@@ -2032,6 +2049,7 @@ def save_settings(
                     "PLEX_MOVIE_SECTION_ID",
                     "PLEX_TV_SECTION_ID",
                     "DISCOVER_PLEX_MOVIE_SECTION_ID",
+                    "DISCOVER_PLEX_TV_SECTION_ID",
                 } and _is_blank(raw_value):
                     validated[key] = None
                 else:
@@ -2063,9 +2081,13 @@ def save_settings(
                     if path not in created_paths:
                         created_paths.append(path)
                 discover_movie = os.path.join(discover_root, "movies")
+                discover_tv = os.path.join(discover_root, "tv")
                 if discover_movie not in derived_library_paths:
                     derived_library_paths.append(discover_movie)
+                if discover_tv not in derived_library_paths:
+                    derived_library_paths.append(discover_tv)
                 _set_runtime_value("DISCOVER_MOVIE_LIBRARY_FOLDER", discover_movie)
+                _set_runtime_value("DISCOVER_TV_LIBRARY_FOLDER", discover_tv)
 
         arr_root = str(validated.get("LIBRARY_ROOT", getattr(settings, "LIBRARY_ROOT", "")) or "").strip()
         discover_root_check = str(
@@ -2397,6 +2419,7 @@ def save_settings(
             "PLEX_MOVIE_SECTION_ID",
             "PLEX_TV_SECTION_ID",
             "DISCOVER_PLEX_MOVIE_SECTION_ID",
+            "DISCOVER_PLEX_TV_SECTION_ID",
             "LIBRARY_ROOT",
             "DISCOVER_LIBRARY_ROOT",
         }

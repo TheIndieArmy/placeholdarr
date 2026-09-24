@@ -384,10 +384,13 @@ def write_discover_stub_poster(
     *,
     title: str,
     year: int | None = None,
+    also_folder_jpg: bool = False,
 ) -> bool:
     """Write option-A stub ``poster.jpg`` (dark bg, centered title/year, logo).
 
     Marks ``.poster-overlay.json`` so art backfill can replace the stub with real art.
+    When ``also_folder_jpg`` is True (Discover TV series stubs), also copy to
+    ``folder.jpg`` so Emby/Plex/Jellyfin pick up series-root art before backfill.
     """
     if _pillow() is None:
         _log_pillow_missing_once()
@@ -480,6 +483,7 @@ def write_discover_stub_poster(
         return False
 
     import json
+    import shutil
 
     from services.placeholders import _apply_dir_chain_permissions, _ensure_open_permissions
 
@@ -502,4 +506,14 @@ def write_discover_stub_poster(
         _ensure_open_permissions(meta_path)
     except OSError as exc:
         logger.debug(f"Discover stub meta write failed: {exc}", extra={"emoji_type": "debug"})
+
+    if also_folder_jpg:
+        folder_jpg = os.path.join(folder, "folder.jpg")
+        try:
+            shutil.copy2(out_path, folder_jpg)
+            _ensure_open_permissions(folder_jpg)
+            _apply_dir_chain_permissions(folder_jpg)
+        except OSError as exc:
+            logger.debug(f"Discover stub folder.jpg copy failed: {exc}", extra={"emoji_type": "debug"})
+
     return True
