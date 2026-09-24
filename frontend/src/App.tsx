@@ -2034,6 +2034,12 @@ export function App() {
             setAuthStatus(status);
           }}
           onValueChange={(key, value) => setFieldValues((prev) => ({ ...prev, [key]: value }))}
+          onCoerceFieldValues={(partial) => {
+            // Keep draft and baseline in sync for automatic UI corrections so opening
+            // Settings (including Dummy Video) does not trip the leave-without-saving prompt.
+            setFieldValues((prev) => ({ ...prev, ...partial }));
+            setBaselineValues((prev) => ({ ...prev, ...partial }));
+          }}
           onPartialPersist={async (partial) => {
             const result = await saveSettings(partial, true);
             if (!result.ok) {
@@ -6753,6 +6759,8 @@ function SettingsPanel(props: {
   onIntegrationsStatusRefresh?: () => Promise<void> | void;
   onLogout: () => Promise<void>;
   onValueChange: (key: string, value: unknown) => void;
+  /** Apply values to draft + baseline together (auto-heal; does not mark unsaved). */
+  onCoerceFieldValues?: (partial: Record<string, unknown>) => void;
   onSave: () => Promise<void>;
   onStatusMessagesMetaChange: (meta: { dirty: boolean; hasValidationErrors: boolean }) => void;
   registerStatusMessagesSaveFlow: (fn: ((preselectedScope?: ApplyScope) => Promise<void>) | null) => void;
@@ -6850,10 +6858,24 @@ function SettingsPanel(props: {
 
   useEffect(() => {
     if (!props.payload) return;
+    // Only heal on the section that owns this toggle. Running on Dummy Video (and other
+    // tabs) was marking Settings dirty and prompting leave-without-saving after upload.
+    if (props.activeSection !== "ARR Integrations") return;
     if (fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH)) {
-      props.onValueChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", false);
+      if (props.onCoerceFieldValues) {
+        props.onCoerceFieldValues({ ENABLE_PLAYBACK_FALLBACK_SEARCH: false });
+      } else {
+        props.onValueChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", false);
+      }
     }
-  }, [fallbackUnnecessaryBecauseAllBoth, props.payload, props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH, props.onValueChange]);
+  }, [
+    fallbackUnnecessaryBecauseAllBoth,
+    props.payload,
+    props.activeSection,
+    props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH,
+    props.onValueChange,
+    props.onCoerceFieldValues,
+  ]);
 
   /** Must run before any conditional return — hook order must match when payload transitions null → loaded. */
   const allSettingsFieldsByKey = useMemo(() => {

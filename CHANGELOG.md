@@ -11,6 +11,8 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 - **What's New CTA**: Open… links dismiss the notice (same as Got it) then navigate.
 - **Placeholder Sync errors**: Failed metadata/art batches surface their job reason instead of opaque `linked_refresh_job_failed`.
+- **Dummy Video leave prompt**: Uploading a video no longer trips leave-without-saving from an unrelated playback-fallback auto-clear.
+- **Art refresh last batch**: Capture job id before closing the worker session so completion no longer fails with DetachedInstanceError.
 
 ## [0.10.2] - 2026-09-23
 

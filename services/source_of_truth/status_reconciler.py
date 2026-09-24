@@ -378,15 +378,17 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
                 extra={"emoji_type": "warning"},
             )
     elif completion_refresh and run_id:
+        job_id = int(job.id)
+        nfo_payload = dict(payload) if isinstance(payload, dict) else {}
+
         def _after_request_backfill_refresh() -> None:
-            payload = job.payload if isinstance(job.payload, dict) else {}
-            raw_pr = payload.get("placeholder_refresh_task_run_id")
+            raw_pr = nfo_payload.get("placeholder_refresh_task_run_id")
             if raw_pr is None:
                 return
             from services.task_run_phases import finalize_nfo_backfill_phase, try_complete_linked_task_run
 
             finalize_nfo_backfill_phase(int(raw_pr), str(run_id))
-            try_complete_linked_task_run(int(raw_pr), exclude_job_id=int(job.id))
+            try_complete_linked_task_run(int(raw_pr), exclude_job_id=job_id)
 
         _nfo_refresh_completion_scan_if_last_batch(
             session,
@@ -399,19 +401,21 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
     elif template_completion_refresh and template_run_id:
         from services.source_of_truth import template_backfill as template_backfill_mod
 
+        job_id = int(job.id)
+        nfo_payload = dict(payload) if isinstance(payload, dict) else {}
+
         def _after_template_backfill_refresh() -> None:
             _clear_active_template_backfill_run_standalone(template_run_id)
-            payload = job.payload if isinstance(job.payload, dict) else {}
             from services.task_run_phases import finalize_nfo_backfill_phase, try_complete_linked_task_run
 
-            raw_tid = payload.get("full_sync_task_run_id")
-            raw_pr = payload.get("placeholder_refresh_task_run_id")
+            raw_tid = nfo_payload.get("full_sync_task_run_id")
+            raw_pr = nfo_payload.get("placeholder_refresh_task_run_id")
             if raw_tid is not None:
                 finalize_nfo_backfill_phase(int(raw_tid), template_run_id)
-                try_complete_linked_task_run(int(raw_tid), exclude_job_id=int(job.id))
+                try_complete_linked_task_run(int(raw_tid), exclude_job_id=job_id)
             elif raw_pr is not None:
                 finalize_nfo_backfill_phase(int(raw_pr), template_run_id)
-                try_complete_linked_task_run(int(raw_pr), exclude_job_id=int(job.id))
+                try_complete_linked_task_run(int(raw_pr), exclude_job_id=job_id)
 
         _nfo_refresh_completion_scan_if_last_batch(
             session,
