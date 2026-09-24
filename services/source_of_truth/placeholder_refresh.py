@@ -721,6 +721,46 @@ def _mark_phase_failed(summary: dict[str, Any], phase_key: str, *, reason: str |
     return summary
 
 
+def _linked_refresh_fail_details(
+    session,
+    *,
+    task_run_id: int,
+    exclude_job_id: int | None = None,
+) -> tuple[str, set[str]]:
+    """Collect FAILED linked job reasons and which job types failed.
+
+    Placeholder Sync finishes only after all nfo_refresh / placeholder_art_refresh
+    batches drain. If an earlier batch failed and a later one succeeded, the finish
+    path used to drop the child error and show opaque ``linked_refresh_job_failed``.
+    """
+    from sqlalchemy import String, cast
+    from services.postgres.models import Job
+
+    tid = str(int(task_run_id))
+    q = session.query(Job.id, Job.job_type, Job.error_message).filter(
+        Job.job_type.in_(("placeholder_art_refresh", "nfo_refresh")),
+        Job.status == "FAILED",
+        cast(Job.payload[PLACEHOLDER_REFRESH_TASK_RUN_ID_KEY], String) == tid,
+    )
+    if exclude_job_id is not None:
+        q = q.filter(Job.id != int(exclude_job_id))
+    failed_types: set[str] = set()
+    parts: list[str] = []
+    seen: set[str] = set()
+    for job_id, job_type, err in q.all():
+        jt = str(job_type or "").strip() or "unknown"
+        failed_types.add(jt)
+        msg = str(err or "").strip() or f"job_{job_id}_failed"
+        label = f"{jt}:{msg}"
+        if label in seen:
+            continue
+        seen.add(label)
+        parts.append(label)
+    if parts:
+        return "; ".join(parts[:3]), failed_types
+    return "linked_refresh_job_failed", failed_types
+
+
 def try_complete_placeholder_refresh_task_run(
     task_run_id: int,
     *,
@@ -750,9 +790,26 @@ def try_complete_placeholder_refresh_task_run(
         summary = row.summary if isinstance(row.summary, dict) else {}
         has_failed_job = any(s == "FAILED" for s in statuses)
         if failed or has_failed_job:
-            fail_reason = str(error_message or "linked_refresh_job_failed")
-            summary = _mark_phase_failed(summary, "metadata_refresh", reason=fail_reason)
-            summary = _mark_phase_failed(summary, "art_refresh", reason=fail_reason)
+            linked_reason, failed_types = _linked_refresh_fail_details(
+                session,
+                task_run_id=int(task_run_id),
+                exclude_job_id=exclude_job_id,
+            )
+            # When the finishing job succeeded but a sibling failed, error_message is empty;
+            # pull the real reason from FAILED linked jobs instead of a generic label.
+            fail_reason = str(error_message or "").strip() or linked_reason
+            logger.warning(
+                f"placeholder_refresh task_run_id={task_run_id} failed: {fail_reason}",
+                extra={"emoji_type": "warning"},
+            )
+            if "nfo_refresh" in failed_types or (failed and not failed_types):
+                summary = _mark_phase_failed(summary, "metadata_refresh", reason=fail_reason)
+            else:
+                summary = _mark_phase_done(summary, "metadata_refresh")
+            if "placeholder_art_refresh" in failed_types or (failed and not failed_types):
+                summary = _mark_phase_failed(summary, "art_refresh", reason=fail_reason)
+            else:
+                summary = _mark_phase_done(summary, "art_refresh")
             summary = _persist_placeholder_refresh_progress(task_run_id, summary, overall_status="FAILED")
             finish_task_run(task_run_id, status="failed", summary=summary, error_message=fail_reason)
             return True

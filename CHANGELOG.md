@@ -10,6 +10,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 ### Fixed
 
 - **What's New CTA**: Open… links dismiss the notice (same as Got it) then navigate.
+- **Placeholder Sync errors**: Failed metadata/art batches surface their job reason instead of opaque `linked_refresh_job_failed`.
 
 ## [0.10.2] - 2026-09-23
 
