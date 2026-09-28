@@ -128,6 +128,29 @@ def _parse_octal_mode(value: str, default: int) -> int:
     except Exception:
         return default
 
+
+def env_or_file(name: str, default: str = "") -> str:
+    """Resolve ``NAME`` from the environment, or from the file at ``NAME_FILE``.
+
+    Non-empty ``NAME`` wins. Otherwise, if ``NAME_FILE`` is set, read that path
+    (trailing newlines stripped). Used for Docker/GitOps secrets (e.g. ``DB_PASS_FILE``).
+    """
+    raw = os.getenv(name)
+    if raw is not None:
+        literal = str(raw).split("#")[0].strip()
+        if literal:
+            return literal
+    file_raw = os.getenv(f"{name}_FILE", "")
+    file_path = str(file_raw or "").split("#")[0].strip()
+    if not file_path:
+        return default
+    path = Path(file_path)
+    try:
+        return path.read_text(encoding="utf-8").rstrip("\r\n")
+    except OSError as exc:
+        raise ValueError(f"{name}_FILE could not be read ({path}): {exc}") from exc
+
+
 # Get the project root directory (where main.py is)
 ROOT_DIR = Path(__file__).parent.parent
 
@@ -335,7 +358,8 @@ class Settings(BaseSettings):
     DB_HOST: str = os.getenv("DB_HOST", "localhost").split('#')[0].strip()
     DB_PORT: int = int(os.getenv("DB_PORT", "5432").split('#')[0].strip())
     DB_USER: str = os.getenv("DB_USER", "").split('#')[0].strip()
-    DB_PASS: str = os.getenv("DB_PASS", "").split('#')[0].strip()
+    # Prefer DB_PASS; else read password from the path in DB_PASS_FILE (Docker secrets).
+    DB_PASS: str = env_or_file("DB_PASS", "")
     DB_NAME: str = os.getenv("DB_NAME", "").split('#')[0].strip()
 
     PLACEHOLDARR_HOST: str = os.getenv("PLACEHOLDARR_HOST", "0.0.0.0")

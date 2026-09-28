@@ -9,7 +9,12 @@ services:
       DB_HOST: placeholdarr_postgres
       DB_PORT: 5432
       DB_USER: placeholdarr
+      # Password: use DB_PASS (below) or omit it and set DB_PASS_FILE to a mounted
+      # secret path (e.g. /run/secrets/placeholdarr_db_pass). Same vars as .env.
+      # Non-empty DB_PASS wins. For bundled Postgres, also set POSTGRES_PASSWORD
+      # or POSTGRES_PASSWORD_FILE on placeholdarr_postgres to the same value.
       DB_PASS: placeholdarr
+      # DB_PASS_FILE: /run/secrets/placeholdarr_db_pass
       DB_NAME: placeholdarr
       PUID: 1000
       PGID: 1000
@@ -40,7 +45,10 @@ services:
       start_period: 10s
     environment:
       POSTGRES_USER: "placeholdarr"
+      # Match Placeholdarr's DB_PASS / DB_PASS_FILE. Official image also supports
+      # POSTGRES_PASSWORD_FILE for Docker/GitOps secrets.
       POSTGRES_PASSWORD: "placeholdarr"
+      # POSTGRES_PASSWORD_FILE: /run/secrets/placeholdarr_db_pass
       POSTGRES_DB: "placeholdarr"
     volumes:
       - ${PLACEHOLDARR_APPDATA:-./.appdata}/postgres:/var/lib/postgresql

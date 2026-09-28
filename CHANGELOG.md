@@ -7,6 +7,20 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-09-28
+
+### Summary
+
+- **DB_PASS_FILE**: Docker/GitOps secrets for the Postgres password (literal `DB_PASS` still wins).
+- **What's New CTA**: Open… dismisses the notice before navigate.
+- **Placeholder Sync errors**: Failed art/metadata batches show the real job reason.
+- **Dummy Video leave prompt**: Upload no longer trips leave-without-saving from an unrelated field.
+- **Art refresh last batch**: No DetachedInstanceError when the final art batch completes.
+
+### Added
+
+- **DB_PASS_FILE**: Read the Postgres password from a file path (Docker/GitOps secrets). Non-empty `DB_PASS` still wins.
+
 ### Fixed
 
 - **What's New CTA**: Open… links dismiss the notice (same as Got it) then navigate.
