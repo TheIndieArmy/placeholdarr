@@ -42,7 +42,6 @@ import {
   DensitySearchIdeasStep,
   StepGuide,
   WelcomeStep,
-  TvPlayProfilePicker,
   type TvDensityChoice,
   type TvDensityRetireWhen,
 } from "./onboarding";
@@ -207,19 +206,19 @@ function readStoredThemeMode(): ThemeMode {
   return "dark";
 }
 const SETTINGS_SECTION_ORDER = [
-  "Security",
+  "Paths",
   "Media Integrations",
   "ARR Integrations",
   "Optional APIs",
-  "Paths",
+  "Density & Lookahead",
+  "Playback",
   "Library sync",
   "Calendar",
-  "Lookahead",
-  "Playback",
   "Status Updates",
   "Poster Overlay",
   "Dummy Video",
   "Advanced",
+  "Security",
 ];
 
 const SETTINGS_SECTION_ICONS: Record<string, string> = {
@@ -230,7 +229,7 @@ const SETTINGS_SECTION_ICONS: Record<string, string> = {
   Paths: "folder",
   "Library sync": "sync",
   Calendar: "calendar_month",
-  Lookahead: "fast_forward",
+  "Density & Lookahead": "fast_forward",
   Playback: "play_circle",
   "Status Updates": "edit_notifications",
   "Poster Overlay": "image",
@@ -245,7 +244,7 @@ const SETTINGS_SECTION_SLUGS: Record<string, string> = {
   Paths: "paths",
   "Library sync": "library-sync",
   Calendar: "calendar",
-  Lookahead: "lookahead",
+  "Density & Lookahead": "density-lookahead",
   Playback: "playback",
   "Status Updates": "status-updates",
   "Poster Overlay": "poster-overlay",
@@ -314,13 +313,15 @@ function resolveSettingsSectionFromSlug(slug: string): string | undefined {
   if (slug === "status-messages") return "Status Updates";
   // Former Collection Sources URL (bookmarks / old CTAs).
   if (slug === "collection-sources") return "Optional APIs";
+  // Former Lookahead settings URL (bookmarks / What's New CTAs).
+  if (slug === "lookahead") return "Density & Lookahead";
   return SETTINGS_SECTION_ORDER.find((name) => SETTINGS_SECTION_SLUGS[name] === slug);
 }
 const BEHAVIOR_WIZARD_SECTIONS = [
   "ARR Integrations",
   "Library sync",
   "Calendar",
-  "Lookahead",
+  "Density & Lookahead",
   "Playback",
   "Advanced",
 ] as const;
@@ -2574,7 +2575,7 @@ export function App() {
                       (Boolean(integrationsStatus?.arr_has_failure) ||
                         arrInstancesHaveMissingApiKey(fieldValues)));
                   const subBase =
-                    "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-[13px] font-headline uppercase tracking-wider transition-colors ";
+                    "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-[13px] font-headline uppercase tracking-wide transition-colors ";
                   const subActiveClass = isStudioGlass
                     ? "bg-[#1e2430] text-slate-100"
                     : "bg-[color:var(--brand-fg)] text-[color:var(--brand-accent)]";
@@ -2587,11 +2588,12 @@ export function App() {
                       type="button"
                       onClick={() => tryNavigate(subPath)}
                       className={`${subBase}${isSubActive ? subActiveClass : subInactiveClass}`}
+                      title={name}
                     >
-                      <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
+                      <span className="material-symbols-outlined shrink-0" style={{ fontSize: 14 }}>
                         {SETTINGS_SECTION_ICONS[name] || "settings"}
                       </span>
-                      <span className="truncate">{name}</span>
+                      <span className="min-w-0 flex-1 leading-snug">{name}</span>
                       {sectionFail ? (
                         <IntegrationFailureBadge
                           size="sm"
@@ -6807,83 +6809,41 @@ function LibraryPathsForm(props: {
 }
 
 
-type LookaheadIntroVariant = "settings" | "onboarding";
+function lookaheadDensityFromValues(values: FieldValueMap): TvDensityChoice {
+  const raw = String(values.TV_PLACEHOLDER_DENSITY ?? "episode").trim().toLowerCase();
+  return (["episode", "season", "series"].includes(raw) ? raw : "episode") as TvDensityChoice;
+}
 
-function LookaheadSectionIntro(props: {
-  variant: LookaheadIntroVariant;
-  embedded?: boolean;
-  values?: FieldValueMap;
-  onChange?: (key: string, value: unknown) => void;
-  showProfiles?: boolean;
+function lookaheadSearchFromValues(values: FieldValueMap): TvDensityChoice {
+  const raw = String(values.TV_PLAY_MODE ?? "episode").trim().toLowerCase();
+  return (["episode", "season", "series"].includes(raw) ? raw : "episode") as TvDensityChoice;
+}
+
+function lookaheadRetireFromValues(values: FieldValueMap): TvDensityRetireWhen {
+  return String(values.TV_DENSITY_RETIRE_WHEN ?? "") === "when_any_episode_has_file"
+    ? "when_any_episode_has_file"
+    : "when_no_episode_needs_placeholder";
+}
+
+function LookaheadDensityPanel(props: {
+  variant: "wizard" | "settings";
+  values: FieldValueMap;
+  onChange: (key: string, value: unknown) => void;
+  guide?: ReactNode;
 }) {
-  const wrapClass =
-    props.variant === "settings"
-      ? "px-6 py-5 border-b border-[#424753]/20"
-      : props.embedded
-        ? "space-y-3"
-        : WIZARD_ONBOARDING_SECTION_SURFACE_CLASS;
-  const density = String(props.values?.TV_PLACEHOLDER_DENSITY ?? "episode").trim().toLowerCase();
-  const searchMode = String(props.values?.TV_PLAY_MODE ?? "episode").trim().toLowerCase();
   return (
-    <div className={wrapClass}>
-      {props.showProfiles && props.values && props.onChange ? (
-        <div className="mb-4">
-          <TvPlayProfilePicker
-            density={density}
-            searchMode={searchMode}
-            onApplyProfile={(nextDensity, nextSearch) => {
-              props.onChange?.("TV_PLACEHOLDER_DENSITY", nextDensity);
-              props.onChange?.("TV_PLAY_MODE", nextSearch);
-            }}
-          />
-        </div>
-      ) : null}
-      <p className="ui-field-description text-slate-300 leading-relaxed">
-        Lookahead keeps storage use down by only monitoring and searching episodes in Sonarr as you progress through a
-        show.
-        {props.showProfiles
-          ? " A starting profile above pairs library density with Search mode; you can still change each setting on its own."
-          : null}
-      </p>
-      <p className="ui-field-description mt-3 text-slate-300 leading-relaxed">
-        <span className="font-medium text-slate-200">TV placeholder density</span> is how many placeholder files appear
-        in the player (every episode, one per season, or one per show). Episode density shows the most library detail;
-        with Season or Series search that detail is mostly informational, because play already widens the Arr target
-        list. The &quot;most flexible requesting&quot; benefit of episode density applies when Search mode is also Episode.{" "}
-        <span className="font-medium text-slate-200">Search mode</span> is what drives how wide Sonarr searches on play.
-      </p>
-      <p className="ui-field-description mt-3 text-slate-400 leading-relaxed">
-        <span className="font-medium text-slate-200">Search Mode</span> determines the scope of what gets monitored and
-        searched each time you play something:
-      </p>
-      <ul className="mt-3 list-disc space-y-2 pl-5 text-[14px] text-slate-400 leading-relaxed">
-        <li>
-          <span className="font-medium text-slate-200">Series</span>
-          {": "}The entire series is monitored and searched. This mirrors default Sonarr behavior.
-        </li>
-        <li>
-          <span className="font-medium text-slate-200">Season</span>
-          {": "}Missing episodes in the played season are always monitored and searched. When the first episode of the
-          next season enters your configured{" "}
-          <span className="font-medium text-slate-200">Lookahead Range</span>, Placeholdarr monitors and searches that
-          next season too.
-        </li>
-        <li>
-          <span className="font-medium text-slate-200">Episode</span>
-          {": "}Only the played episode and the next few episodes, up to your configured{" "}
-          <span className="font-medium text-slate-200">Lookahead Range</span>, are monitored and searched.
-        </li>
-      </ul>
-      <p className="ui-field-description mt-3 text-slate-400 leading-relaxed">
-        Regardless of which mode you choose, Placeholdarr will monitor the full series once your lookahead window reaches
-        the end of available content, ensuring Sonarr can pick up new episodes as they air.
-      </p>
-      <p className="ui-field-description mt-3 text-slate-400 leading-relaxed">
-        <span className="font-medium text-slate-200">Lookahead Range</span> applies to Episode and Season modes. In
-        Episode mode it sets how many episodes forward from the one you played are included. In Season mode it sets how
-        many episodes ahead before the next season is included.
-      </p>
-    </div>
+    <DensitySearchIdeasStep
+      variant={props.variant}
+      guide={props.guide}
+      density={lookaheadDensityFromValues(props.values)}
+      searchMode={lookaheadSearchFromValues(props.values)}
+      lookahead={Math.max(1, Number(props.values.EPISODES_LOOKAHEAD) || 3)}
+      retireWhen={lookaheadRetireFromValues(props.values)}
+      onDensityChange={(value) => props.onChange("TV_PLACEHOLDER_DENSITY", value)}
+      onSearchModeChange={(value) => props.onChange("TV_PLAY_MODE", value)}
+      onLookaheadChange={(value) => props.onChange("EPISODES_LOOKAHEAD", value)}
+      onRetireWhenChange={(value) => props.onChange("TV_DENSITY_RETIRE_WHEN", value)}
+    />
   );
 }
 
@@ -7091,32 +7051,6 @@ function PosterOverlayExamples(props: { selectedMode: string; compact?: boolean 
         </div>
       </div>
     </details>
-  );
-}
-
-/** Lookahead range: copy lives here; `EPISODES_LOOKAHEAD.description` in app_config is intentionally empty. */
-function EpisodesLookaheadDescription(props: { spacing: "settings" | "wizard"; tvPlayMode: string }) {
-  const top = props.spacing === "settings" ? "mt-1" : "mb-2";
-  const mode = String(props.tvPlayMode ?? "episode").trim().toLowerCase();
-  if (mode === "season") {
-    return (
-      <p className={`ui-field-description leading-relaxed ${top}`}>
-        In Season mode, how many episodes ahead of the one you played before Placeholdarr monitors and searches the next
-        season. Missing episodes in the current season are always included.
-      </p>
-    );
-  }
-  if (mode === "series") {
-    return (
-      <p className={`ui-field-description leading-relaxed ${top}`}>
-        Lookahead range applies to Episode and Season search modes. Series mode monitors the full show.
-      </p>
-    );
-  }
-  return (
-    <p className={`ui-field-description leading-relaxed ${top}`}>
-      In Episode mode, how many upcoming episodes without files to include forward from the played episode.
-    </p>
   );
 }
 
@@ -7804,8 +7738,6 @@ function SettingsPanel(props: {
                 <PlaceholderPosterOverlayDescription spacing="settings" />
               ) : field.key === "ENABLE_COMING_SOON_COUNTDOWN" ? (
                 <ComingSoonCountdownDescription spacing="settings" />
-              ) : field.key === "EPISODES_LOOKAHEAD" ? (
-                <EpisodesLookaheadDescription spacing="settings" tvPlayMode={tvPlayMode} />
               ) : field.description && !isPlexSectionIdField(field.key) && !isPosterLanguageFieldKey(field.key) ? (
                 <p className="ui-field-description mt-1">{field.description}</p>
               ) : null)}
@@ -8234,18 +8166,24 @@ function SettingsPanel(props: {
                   </div>
 
                 </>
-              ) : active.name === "Lookahead" ? (
-                renderOnboardingStyleSectionRows(active.fields, {
-                  intro: (
-                    <LookaheadSectionIntro
-                      variant="onboarding"
-                      embedded
-                      showProfiles
-                      values={props.values}
-                      onChange={props.onValueChange}
-                    />
-                  ),
-                })
+              ) : active.name === "Density & Lookahead" ? (
+                <div className="px-6 py-5">
+                  <LookaheadDensityPanel
+                    variant="settings"
+                    values={props.values}
+                    onChange={props.onValueChange}
+                  />
+                  {(() => {
+                    const remaining = active.fields.filter(
+                      (field) => !(DENSITY_SEARCH_STEP_KEYS as readonly string[]).includes(field.key),
+                    );
+                    return remaining.length ? (
+                      <div className="mt-6 border-t border-[#424753]/25 pt-4">
+                        {renderOnboardingStyleSectionRows(remaining)}
+                      </div>
+                    ) : null;
+                  })()}
+                </div>
               ) : active.name === "Playback" ? (
                 <div className="px-6 py-5">
                   <div className={`${UI_SECTION_FRAME_CLASS} overflow-hidden divide-y divide-[#424753]/20`}>
@@ -11170,8 +11108,6 @@ function OnboardingWizard(props: {
             <PlaceholderPosterOverlayDescription spacing="wizard" />
           ) : field.key === "ENABLE_COMING_SOON_COUNTDOWN" ? (
             <ComingSoonCountdownDescription spacing="wizard" />
-          ) : field.key === "EPISODES_LOOKAHEAD" ? (
-            <EpisodesLookaheadDescription spacing="wizard" tvPlayMode={tvPlayMode} />
           ) : field.description && !isPosterLanguageFieldKey(field.key) ? (
             <p className="ui-field-description mb-2 leading-relaxed">{field.description}</p>
           ) : null)}
@@ -11342,27 +11278,10 @@ function OnboardingWizard(props: {
           }
         >
           {step.key === "density_search" ? (
-            <DensitySearchIdeasStep
-              density={
-                (["episode", "season", "series"].includes(String(props.values.TV_PLACEHOLDER_DENSITY ?? ""))
-                  ? String(props.values.TV_PLACEHOLDER_DENSITY)
-                  : "episode") as TvDensityChoice
-              }
-              searchMode={
-                (["episode", "season", "series"].includes(String(props.values.TV_PLAY_MODE ?? ""))
-                  ? String(props.values.TV_PLAY_MODE)
-                  : "episode") as "episode" | "season" | "series"
-              }
-              lookahead={Math.max(1, Number(props.values.EPISODES_LOOKAHEAD) || 3)}
-              retireWhen={
-                (String(props.values.TV_DENSITY_RETIRE_WHEN ?? "") === "when_any_episode_has_file"
-                  ? "when_any_episode_has_file"
-                  : "when_no_episode_needs_placeholder") as TvDensityRetireWhen
-              }
-              onDensityChange={(value) => props.onChange("TV_PLACEHOLDER_DENSITY", value)}
-              onSearchModeChange={(value) => props.onChange("TV_PLAY_MODE", value)}
-              onLookaheadChange={(value) => props.onChange("EPISODES_LOOKAHEAD", value)}
-              onRetireWhenChange={(value) => props.onChange("TV_DENSITY_RETIRE_WHEN", value)}
+            <LookaheadDensityPanel
+              variant="wizard"
+              values={props.values}
+              onChange={props.onChange}
               guide={
                 playFirstMode && stepGuides.density_search ? (
                   <StepGuide guide={stepGuides.density_search} />
@@ -11937,7 +11856,7 @@ function OnboardingWizard(props: {
             <div className="space-y-6">
               {BEHAVIOR_WIZARD_SECTIONS.map((sectionName) => {
                 // Play & search already covers density, search mode, lookahead range, and playback search toggles.
-                if (playFirstMode && sectionName === "Lookahead") return null;
+                if (playFirstMode && sectionName === "Density & Lookahead") return null;
                 if (playFirstMode && sectionName === "Playback") return null;
                 const secFields = fields.filter((f) => {
                   if (f.section !== sectionName) return false;
@@ -11965,16 +11884,13 @@ function OnboardingWizard(props: {
                 return (
                   <div key={sectionName}>
                     <h2 className={ONBOARDING_SECTION_TITLE_CLASS}>{sectionName}</h2>
-                    {sectionName === "Lookahead" ? (
+                    {sectionName === "Density & Lookahead" ? (
                       <div className={surfaceClass}>
-                        <LookaheadSectionIntro
-                          variant="onboarding"
-                          embedded
-                          showProfiles
+                        <LookaheadDensityPanel
+                          variant="settings"
                           values={props.values}
                           onChange={props.onChange}
                         />
-                        <div className="mt-4 border-t border-[#424753]/25 pt-4">{fieldsBlock}</div>
                       </div>
                     ) : sectionName === "Playback" ? (
                       <div className={surfaceClass}>
@@ -12415,7 +12331,7 @@ function fieldsForWizardStep(stepKey: string, sections: { name: string; fields: 
   const paths = map.Paths || [];
   const librarySync = map["Library sync"] || [];
   const calendar = map.Calendar || [];
-  const lookahead = map.Lookahead || [];
+  const lookahead = map["Density & Lookahead"] || [];
   const playback = map.Playback || [];
   const statusUpdates = map["Status Updates"] || [];
   const advanced = map.Advanced || [];

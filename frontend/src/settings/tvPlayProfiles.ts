@@ -1,4 +1,4 @@
-/** Shared TV density + search profiles for onboarding Profile and Settings → Lookahead. */
+/** Shared TV density + search profiles for onboarding Profile and Settings → Density & Lookahead. */
 
 export type TvDensityKey = "episode" | "season" | "series";
 export type TvSearchKey = "episode" | "season" | "series";
@@ -31,7 +31,7 @@ export const TV_PLAY_PROFILES: readonly TvPlayProfile[] = [
     label: "Watch as you go",
     star: "Progressive watching",
     summary:
-      "Episode placeholders in your library. Play to fetch that episode plus a short Lookahead buffer, instead of the whole show up front.",
+      "Episode placeholders in your library. Play to monitor and search that episode plus a short Lookahead buffer, instead of the whole show up front.",
     density: "episode",
     searchMode: "episode",
   },
@@ -40,7 +40,7 @@ export const TV_PLAY_PROFILES: readonly TvPlayProfile[] = [
     label: "Season at a time",
     star: "Balanced approach",
     summary:
-      "One placeholder per season that still needs content. Play to fetch that season, and open the next when you get close to the end.",
+      "One placeholder per season that still needs content. Play to monitor and search that season; the next season is included when its first episode enters your Lookahead range.",
     density: "season",
     searchMode: "season",
   },
@@ -49,7 +49,7 @@ export const TV_PLAY_PROFILES: readonly TvPlayProfile[] = [
     label: "Request the show",
     star: "Keeps it simple",
     summary:
-      "One placeholder per show. Play to fetch the whole series. Fewest placeholder files and lightest sync work; less per-episode detail in the player.",
+      "One placeholder per show. Play to monitor and search the whole series. Fewest placeholder files and lightest sync work; less per-episode detail in the player.",
     density: "series",
     searchMode: "series",
   },

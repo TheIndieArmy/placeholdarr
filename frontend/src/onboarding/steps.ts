@@ -59,7 +59,7 @@ export const ONBOARDING_STEP_GUIDES: Record<OnboardingWizardStepKey, OnboardingS
   density_search: {
     title: "How Placeholdarr should work",
     paragraphs: [
-      "First, pick a starting profile for how placeholders appear in your library and what Placeholdarr requests when you play something.",
+      "Choose how placeholders appear in your library and what Placeholdarr does when you play something.",
     ],
   },
   media: {

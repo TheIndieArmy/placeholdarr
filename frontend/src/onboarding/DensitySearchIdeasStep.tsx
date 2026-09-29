@@ -26,18 +26,20 @@ function searchOptions(): { key: SearchKey; label: string; summary: string }[] {
     {
       key: "episode",
       label: "Episode",
-      summary: "Action the played entry, then the next episodes within your Lookahead range.",
+      summary:
+        "Monitor and search the played episode, then the next episodes within your Lookahead range.",
     },
     {
       key: "season",
       label: "Season",
       summary:
-        "Focus on the season, and add the next when you get within your Lookahead range of the end.",
+        "Monitor and search missing episodes in the played season. When the first episode of the next season enters your Lookahead range, that season is included too.",
     },
     {
       key: "series",
       label: "Series",
-      summary: "Action the whole show from that play. Lookahead range does not apply.",
+      summary:
+        "Monitor and search the entire series. This mirrors default Sonarr behavior. Lookahead range does not apply.",
     },
   ];
 }
@@ -50,12 +52,12 @@ function playEntryCopy(density: DensityKey, search: SearchKey, lookahead: number
   const ahead = episodesPhrase(Math.max(1, Math.floor(lookahead) || 1));
   if (density === "episode") {
     if (search === "episode") {
-      return `You play a specific episode (placeholder or real). Placeholdarr actions that episode plus the next ${ahead}.`;
+      return `You play a specific episode (placeholder or real). Placeholdarr monitors and searches that episode plus the next ${ahead}.`;
     }
     if (search === "season") {
-      return `You play a specific episode (placeholder or real). Targets cover the rest of that season, and add the next season when you get within ${ahead} of the end.`;
+      return `You play a specific episode (placeholder or real). Targets monitor and search the rest of that season, and add the next season when its first episode enters the next ${ahead}.`;
     }
-    return "You play a specific episode (placeholder or real). Targets cover the whole show from that play.";
+    return "You play a specific episode (placeholder or real). Targets monitor and search the whole show from that play.";
   }
 
   if (density === "season") {
@@ -63,18 +65,18 @@ function playEntryCopy(density: DensityKey, search: SearchKey, lookahead: number
       return `You play the season placeholder. Targets start at the first episode in that season that still needs content, then continue through the next ${ahead}. You do not get a full missing-episode list to click.`;
     }
     if (search === "season") {
-      return `You play the season placeholder. Targets focus on that season, and add the next season when you get within ${ahead} of the end.`;
+      return `You play the season placeholder. Targets monitor and search that season, and add the next season when its first episode enters the next ${ahead}.`;
     }
-    return "You play the season placeholder. Targets can still widen to the whole show from that play.";
+    return "You play the season placeholder. Targets can still widen to monitor and search the whole show from that play.";
   }
 
   if (search === "episode") {
     return `You play the show placeholder. Targets start from early missing episodes in that show, then continue through the next ${ahead}. There is no per-episode list to pick from.`;
   }
   if (search === "season") {
-    return `You play the show placeholder. Targets use season-width from that single show entry, and add the next season when you get within ${ahead} of the end.`;
+    return `You play the show placeholder. Targets use season-width from that single show entry, and add the next season when its first episode enters the next ${ahead}.`;
   }
-  return "You play the show placeholder. Targets cover the whole show from that one entry.";
+  return "You play the show placeholder. Targets monitor and search the whole show from that one entry.";
 }
 
 function OptionCardGrid<K extends string>(props: {
@@ -122,7 +124,7 @@ function OptionCardGrid<K extends string>(props: {
   );
 }
 
-/** Compact profile picker for Settings → Lookahead (and reusable elsewhere). */
+/** Compact profile picker (legacy export; Prefer DensitySearchIdeasStep for Settings + onboarding). */
 export function TvPlayProfilePicker(props: {
   density: string;
   searchMode: string;
@@ -133,11 +135,11 @@ export function TvPlayProfilePicker(props: {
   return (
     <div className={`${UI_SECTION_FRAME_CLASS} space-y-3 p-4`}>
       <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-slate-400">
-        Starting profile
+        Play profile
       </p>
       <p className="ui-field-description leading-relaxed">
         Pick a common pairing of library density and Search mode. Each card shows which settings it applies. You can
-        still change density and search separately below.
+        still change density and search separately in Customize profile.
       </p>
       <div className={`grid gap-3 ${props.compact ? "grid-cols-1" : "grid-cols-1 sm:grid-cols-3"}`}>
         {TV_PLAY_PROFILES.map((profile) => {
@@ -190,7 +192,10 @@ export function DensitySearchIdeasStep(props: {
   onLookaheadChange: (value: number) => void;
   onRetireWhenChange: (value: TvDensityRetireWhen) => void;
   guide?: ReactNode;
+  /** wizard: sticky expect footer; settings: inline framed expect block. */
+  variant?: "wizard" | "settings";
 }) {
+  const variant = props.variant ?? "wizard";
   const matched = matchTvPlayProfile(props.density, props.searchMode);
   const [customizeOpen, setCustomizeOpen] = useState(matched === "custom");
   const lookaheadLocked = props.searchMode === "series";
@@ -212,6 +217,11 @@ export function DensitySearchIdeasStep(props: {
     [props.searchMode],
   );
   const entryLine = playEntryCopy(props.density, props.searchMode, lookahead);
+  const playbackExpectTail =
+    variant === "settings"
+      ? " Monitor and search filters for each library destination are under Settings → Playback."
+      : " Monitor and search filters for each library destination come next on Playback.";
+
   function applyProfile(key: TvPlayProfileKey) {
     const profile = TV_PLAY_PROFILES.find((p) => p.key === key);
     if (!profile) return;
@@ -220,16 +230,38 @@ export function DensitySearchIdeasStep(props: {
     setCustomizeOpen(false);
   }
 
+  const expectBlock = (
+    <>
+      <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-slate-400">
+        What to expect with your current settings
+      </p>
+      <p className="mt-2 text-[14px] leading-relaxed text-slate-200">
+        {entryLine}
+        {playbackExpectTail}
+      </p>
+    </>
+  );
+
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="min-h-0 flex-1 space-y-6 overflow-y-auto pb-4" data-step-scroll>
+    <div className={variant === "wizard" ? "flex min-h-0 flex-1 flex-col" : "space-y-6"}>
+      <div
+        className={
+          variant === "wizard" ? "min-h-0 flex-1 space-y-6 overflow-y-auto pb-4" : "space-y-6"
+        }
+        data-step-scroll={variant === "wizard" ? true : undefined}
+      >
         {props.guide}
         <div className="space-y-3 text-[15px] leading-relaxed text-slate-300">
-          <p>Open Customize profile for full details and to choose your own mix.</p>
+          <p>
+            Each play profile pairs how many TV placeholders appear in your library with how wide Placeholdarr monitors
+            and searches in Sonarr on play. Lookahead is the progressive part of that mix: it keeps storage use down by
+            only acting on episodes as you move through a show. Open Customize profile for full details and to choose
+            your own mix.
+          </p>
         </div>
 
         <OptionCardGrid
-          legend="Starting profile"
+          legend="Play profile"
           options={TV_PLAY_PROFILES.map((p) => ({
             key: p.key,
             label: p.label,
@@ -258,10 +290,10 @@ export function DensitySearchIdeasStep(props: {
           <div className="space-y-6 border-t border-[#424753]/30 px-4 pb-4 pt-4">
             <div className="space-y-3 text-[14px] leading-relaxed text-slate-300">
               <p>
-                Starting profiles pair TV placeholder density with Search mode. Density is how many placeholder files
-                appear in the player (lower density is lighter on sync and disk). Search mode is how wide Sonarr&apos;s
-                target list is when you play something. Episode density shows the most library detail; with Season or
-                Series search that detail is mostly informational, because play already widens the Arr target list.
+                Play profiles pair TV placeholder density with Search mode. Density is how many placeholder files
+                appear in the player. Search mode is how wide Sonarr&apos;s target list is when you play something.
+                Episode density shows the most library detail; with Season or Series search that detail is mostly
+                informational, because play already widens the Arr target list.
               </p>
             </div>
 
@@ -271,13 +303,6 @@ export function DensitySearchIdeasStep(props: {
               selected={props.density}
               onSelect={props.onDensityChange}
             />
-
-            <div className="space-y-3 text-[14px] leading-relaxed text-slate-300">
-              <p>
-                Change either half of the profile below. Search mode is what drives flexible vs broad requesting on
-                play.
-              </p>
-            </div>
 
             <OptionCardGrid
               legend="Search mode"
@@ -297,8 +322,10 @@ export function DensitySearchIdeasStep(props: {
                 Lookahead range
               </p>
               <p className="text-[14px] leading-relaxed text-slate-300">
-                For Episode and Season search modes, Lookahead range sets how far ahead Placeholdarr will try to action
-                episodes in Arr. Series search already covers the whole show, so Lookahead is unused there.
+                Lookahead range applies to Episode and Season search modes. In Episode mode it sets how many episodes
+                forward from the one you played are monitored and searched. In Season mode it sets how far ahead before
+                the next season is included. Series search mode already targets the entire series, so Lookahead is not
+                necessary.
               </p>
               <label className="block text-[14px] font-semibold text-slate-200">
                 Episodes ahead
@@ -316,10 +343,12 @@ export function DensitySearchIdeasStep(props: {
                   }}
                 />
               </label>
-              <p className="mt-2 text-[13px] leading-relaxed text-slate-400">
-                {lookaheadLocked
-                  ? "Not used while Search mode is Series (the whole show is already included)."
-                  : "In Episode search, this is how many episodes ahead to look for. In Season search, this is how many episodes from the end of the season before Placeholdarr starts actioning the next season."}
+            </div>
+
+            <div className="space-y-3 text-[14px] leading-relaxed text-slate-300">
+              <p>
+                Once your Lookahead window reaches the last aired episode Placeholdarr knows about, it marks the full
+                series monitored so Sonarr can pick up new episodes as they air.
               </p>
             </div>
           </div>
@@ -359,16 +388,16 @@ export function DensitySearchIdeasStep(props: {
           ) : null}
         </div>
 
+        {variant === "settings" ? (
+          <div className={`${UI_SECTION_FRAME_CLASS} space-y-2 p-4`}>{expectBlock}</div>
+        ) : null}
       </div>
 
-      <div className="shrink-0 -mx-6 border-t border-[#424753]/40 bg-[#121722] px-6 py-4 sm:-mx-8 sm:px-8">
-        <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-slate-400">
-          What to expect with your current settings
-        </p>
-        <p className="mt-2 text-[14px] leading-relaxed text-slate-200">
-          {entryLine} Monitor and search filters for each library destination come next on Playback.
-        </p>
-      </div>
+      {variant === "wizard" ? (
+        <div className="shrink-0 -mx-6 border-t border-[#424753]/40 bg-[#121722] px-6 py-4 sm:-mx-8 sm:px-8">
+          {expectBlock}
+        </div>
+      ) : null}
     </div>
   );
 }

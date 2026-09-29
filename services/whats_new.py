@@ -233,8 +233,8 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
             "These features are first releasing as beta. Please don't hesitate to report any "
             "issues on GitHub."
         ),
-        cta_label="Open Lookahead",
-        cta_path="/settings/lookahead",
+        cta_label="Open Density & Lookahead",
+        cta_path="/settings/density-lookahead",
         requires_ack=True,
     ),
 )

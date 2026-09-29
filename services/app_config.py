@@ -629,7 +629,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "TV_PLACEHOLDER_DENSITY",
             {
-                "section": "Lookahead",
+                "section": "Density & Lookahead",
                 "label": "TV placeholder density",
                 "description": (
                     "How many TV placeholder files Placeholdarr writes on disk (library detail). "
@@ -651,7 +651,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "TV_DENSITY_RETIRE_WHEN",
             {
-                "section": "Lookahead",
+                "section": "Density & Lookahead",
                 "label": "Remove season/series placeholder when",
                 "description": (
                     "Only applies when TV placeholder density is Season or Series. "
@@ -674,7 +674,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "TV_PLAY_MODE",
             {
-                "section": "Lookahead",
+                "section": "Density & Lookahead",
                 "label": "Search mode",
                 "description": (
                     "How wide the Sonarr search is when you play a placeholder "
@@ -691,7 +691,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "EPISODES_LOOKAHEAD",
             {
-                "section": "Lookahead",
+                "section": "Density & Lookahead",
                 "label": "Lookahead range",
                 "description": "",
                 "type": "int",
