@@ -66,13 +66,27 @@ def _step(
 
 
 def _deciding_step_key(steps: list[dict[str, Any]], final: str) -> str:
+    """Prefer the last step that set ``final`` (pass, fail, or applied)."""
+    deciding_key: str | None = None
     for step in steps:
-        if step.get("outcome") == final and step.get("status") in {"fail", "applied"}:
-            return str(step.get("key") or "final")
+        if step.get("outcome") == final and step.get("status") in {"fail", "applied", "pass"}:
+            deciding_key = str(step.get("key") or "final")
+    if deciding_key is not None:
+        return deciding_key
     for step in steps:
         if step.get("status") == "fail":
             return str(step.get("key") or "final")
     return str(steps[-1].get("key") if steps else "final")
+
+
+def _append_unevaluated_steps(
+    steps: list[dict[str, Any]],
+    remaining: list[tuple[str, str]],
+    *,
+    detail: str,
+) -> None:
+    for key, label in remaining:
+        steps.append(_step(key, label, "skip", detail=detail))
 
 
 def _build_summary(final: str, deciding_key: str, steps: list[dict[str, Any]]) -> str:
@@ -466,6 +480,63 @@ def explain_movie_determination(session, movie: Movie) -> dict[str, Any]:
     if calendar_outcome is not None:
         base = calendar_outcome
 
+    # Match determiner: path drift returns obsolete before monitored/sibling/policy.
+    if has_placeholder and _movie_placeholder_path_drifts(movie):
+        base = DETERMINATION_OBSOLETE
+        expected = movie_placeholder_path(movie)
+        stored = getattr(movie, "placeholder_filepath", None)
+        steps.append(
+            _step(
+                "path_drift",
+                "Placeholder path",
+                "fail",
+                detail=f"Stored path does not match expected location ({stored!r} vs {expected!r}).",
+                outcome=base,
+            )
+        )
+        _append_unevaluated_steps(
+            steps,
+            [
+                ("monitored_suppression", "Monitored suppression"),
+                ("sibling_suppression", "Shared-instance suppression"),
+                ("placeholder_policy", "Placeholder policy"),
+            ],
+            detail="Not evaluated; placeholder path already decided.",
+        )
+        deciding = _explain_deciding_step_key(
+            steps,
+            base,
+            movie,
+            has_file=has_file,
+            is_deleted=is_deleted,
+        )
+        title = str(getattr(movie, "title", "") or "Movie")
+        return {
+            "ok": True,
+            "media_type": "movie",
+            "title": title,
+            "determination": base,
+            "deciding_step_key": deciding,
+            "summary": _explain_summary(
+                base,
+                deciding,
+                steps,
+                movie,
+                has_file=has_file,
+                is_deleted=is_deleted,
+            ),
+            "steps": steps,
+        }
+
+    steps.append(
+        _step(
+            "path_drift",
+            "Placeholder path",
+            "pass",
+            detail="Placeholder path matches the expected location, or no placeholder is stored.",
+        )
+    )
+
     before = base
     base = _apply_monitored_placeholder_suppression(
         session,
@@ -520,29 +591,6 @@ def explain_movie_determination(session, movie: Movie) -> dict[str, Any]:
             open_detail=sibling_open,
         )
     )
-
-    if has_placeholder and _movie_placeholder_path_drifts(movie):
-        base = DETERMINATION_OBSOLETE
-        expected = movie_placeholder_path(movie)
-        stored = getattr(movie, "placeholder_filepath", None)
-        steps.append(
-            _step(
-                "path_drift",
-                "Placeholder path",
-                "fail",
-                detail=f"Stored path does not match expected location ({stored!r} vs {expected!r}).",
-                outcome=base,
-            )
-        )
-    else:
-        steps.append(
-            _step(
-                "path_drift",
-                "Placeholder path",
-                "pass",
-                detail="Placeholder path matches the expected location, or no placeholder is stored.",
-            )
-        )
 
     sibling_block = _sibling_would_suppress_creation(
         arr_type="radarr",
@@ -706,16 +754,19 @@ def explain_episode_determination(session, episode: Episode) -> dict[str, Any]:
             )
         )
         skip_detail = "Not evaluated; TV density already decided."
-        for key, label in (
-            ("file_state", "File and placeholder state"),
-            ("episode_unknown_air_date", "Unknown air date inference"),
-            ("calendar_window", "Within calendar window"),
-            ("monitored_suppression", "Monitored suppression"),
-            ("sibling_suppression", "Shared-instance suppression"),
-            ("path_drift", "Placeholder path"),
-            ("placeholder_policy", "Placeholder policy"),
-        ):
-            steps.append(_step(key, label, "skip", detail=skip_detail))
+        _append_unevaluated_steps(
+            steps,
+            [
+                ("file_state", "File and placeholder state"),
+                ("episode_unknown_air_date", "Unknown air date inference"),
+                ("calendar_window", "Within calendar window"),
+                ("path_drift", "Placeholder path"),
+                ("monitored_suppression", "Monitored suppression"),
+                ("sibling_suppression", "Shared-instance suppression"),
+                ("placeholder_policy", "Placeholder policy"),
+            ],
+            detail=skip_detail,
+        )
         deciding = _deciding_step_key(steps, density_final)
         ep_label = f"E{episode_number:02d}"
         series_title = str(getattr(series, "title", "") or "Series") if series else "Series"
@@ -807,6 +858,73 @@ def explain_episode_determination(session, episode: Episode) -> dict[str, Any]:
     if calendar_outcome is not None:
         base = calendar_outcome
 
+    # Match determiner: path drift returns obsolete before monitored/sibling/policy.
+    if has_placeholder and _episode_placeholder_path_drifts(session, episode):
+        base = DETERMINATION_OBSOLETE
+        expected = (
+            episode_placeholder_path(episode, season, series)
+            if season and series
+            else None
+        )
+        stored = getattr(episode, "placeholder_filepath", None)
+        steps.append(
+            _step(
+                "path_drift",
+                "Placeholder path",
+                "fail",
+                detail=f"Stored path does not match expected location ({stored!r} vs {expected!r}).",
+                outcome=base,
+            )
+        )
+        _append_unevaluated_steps(
+            steps,
+            [
+                ("monitored_suppression", "Monitored suppression"),
+                ("sibling_suppression", "Shared-instance suppression"),
+                ("placeholder_policy", "Placeholder policy"),
+            ],
+            detail="Not evaluated; placeholder path already decided.",
+        )
+        policy_entity = policy_flag_view(
+            effective_pol,
+            despite_sibling=bool(getattr(episode, "force_placeholder_despite_sibling", False)),
+        )
+        deciding = _explain_deciding_step_key(
+            steps,
+            base,
+            policy_entity,
+            has_file=has_file,
+            is_deleted=is_deleted,
+        )
+        ep_label = f"E{episode_number:02d}"
+        series_title = str(getattr(series, "title", "") or "Series") if series else "Series"
+        title = str(getattr(episode, "title", "") or f"Episode {episode_number}")
+        return {
+            "ok": True,
+            "media_type": "episode",
+            "title": f"{series_title} {ep_label} {title}".strip(),
+            "determination": base,
+            "deciding_step_key": deciding,
+            "summary": _explain_summary(
+                base,
+                deciding,
+                steps,
+                policy_entity,
+                has_file=has_file,
+                is_deleted=is_deleted,
+            ),
+            "steps": steps,
+        }
+
+    steps.append(
+        _step(
+            "path_drift",
+            "Placeholder path",
+            "pass",
+            detail="Placeholder path matches the expected location, or no placeholder is stored.",
+        )
+    )
+
     series_monitored = (
         _series_monitored_for_episode(session, episode)
         if _skip_placeholders_when_series_monitored_enabled()
@@ -867,33 +985,6 @@ def explain_episode_determination(session, episode: Episode) -> dict[str, Any]:
             open_detail=sibling_open,
         )
     )
-
-    if has_placeholder and _episode_placeholder_path_drifts(session, episode):
-        base = DETERMINATION_OBSOLETE
-        expected = (
-            episode_placeholder_path(episode, season, series)
-            if season and series
-            else None
-        )
-        stored = getattr(episode, "placeholder_filepath", None)
-        steps.append(
-            _step(
-                "path_drift",
-                "Placeholder path",
-                "fail",
-                detail=f"Stored path does not match expected location ({stored!r} vs {expected!r}).",
-                outcome=base,
-            )
-        )
-    else:
-        steps.append(
-            _step(
-                "path_drift",
-                "Placeholder path",
-                "pass",
-                detail="Placeholder path matches the expected location, or no placeholder is stored.",
-            )
-        )
 
     sibling_block = _sibling_would_suppress_creation(
         arr_type="sonarr",

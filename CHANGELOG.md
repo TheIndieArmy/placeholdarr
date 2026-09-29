@@ -47,7 +47,8 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Search already-monitored titles on playback**: Destination list for re-searching already-monitored titles (migrated from the former suppress toggle).
 - **TV density sync detail GETs**: Season/series density skips per-episode Sonarr still and episode-file detail requests; bulk `has_file` / air dates still sync.
 - **TV density determination**: Season/series density uses a fast path that marks leftover episode placeholders obsolete and otherwise `not_needed`, without full per-episode placeholder evaluation.
-- **Determination Why? order**: Episode explain is Specials → Density → File → Unknown air date → Calendar → Monitored → Shared-instance → Path → Policy. Season/series density decides early and marks later steps skip. Movie explain is File → Calendar → Monitored → Shared-instance → Path → Policy.
+- **Determination Why? order**: Episode explain is Specials → Density → File → Unknown air date → Calendar → Path → Monitored → Shared-instance → Policy. Season/series density or path drift decides early and marks later steps skip. Movie explain is File → Calendar → Path → Monitored → Shared-instance → Policy.
+- **Determination Why? deciding step**: Highlight prefers the last step whose outcome matches the final determination, including pass (file state), not only fail/applied.
 - **Determination Why? gate icons**: Open or satisfied conditions use pass (green check). Skip (empty circle) is only for steps not evaluated after an earlier decision.
 - **Episode status chip**: Rows with no file and no placeholder show Not needed when determination is `not_needed` (density, calendar, monitored, and similar rules); Missing stays for titles that still need a placeholder.
 - **Episode status Why?**: The status chip opens the determination explain modal (tip: Why this status?). The separate Why? link next to the pin is removed.
