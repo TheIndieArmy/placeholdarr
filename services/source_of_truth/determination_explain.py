@@ -162,15 +162,15 @@ def _calendar_guard_result(
         return None, _step(
             "calendar_window",
             "Within calendar window",
-            "skip",
-            detail="Coming-soon placeholders are disabled.",
+            "pass",
+            detail="Coming-soon placeholders are disabled, so the calendar window does not constrain this title.",
         )
     if has_file or is_deleted:
         return None, _step(
             "calendar_window",
             "Within calendar window",
-            "skip",
-            detail="Skipped because the title already has a file or is removed from the library.",
+            "pass",
+            detail="Title already has a file or is removed from the library, so the calendar window does not apply.",
         )
 
     lookahead = int(lookahead_days)
@@ -251,7 +251,7 @@ def _file_state_result(
             "file_state",
             "File and placeholder state",
             "skip",
-            detail="Calendar window already decided the outcome.",
+            detail="Not evaluated; an earlier step already decided the outcome.",
             outcome=prior_outcome,
         )
 
@@ -294,10 +294,11 @@ def _apply_modifier_step(
     label: str,
     before: str,
     after: str,
-    skip_detail: str | None = None,
+    open_detail: str | None = None,
 ) -> dict[str, Any]:
-    if before == after and skip_detail:
-        return _step(key, label, "skip", detail=skip_detail)
+    """Open/satisfied gates use pass; only outcome changes use applied."""
+    if before == after and open_detail:
+        return _step(key, label, "pass", detail=open_detail)
     if before != after:
         return _step(
             key,
@@ -326,7 +327,7 @@ def _placeholder_policy_step(
         return _step(
             "placeholder_policy",
             "Placeholder policy",
-            "skip",
+            "pass",
             detail="Policy is Auto: follow Placeholdarr settings.",
         )
     if policy == "never":
@@ -373,10 +374,10 @@ def _placeholder_policy_step(
         return _step(
             "placeholder_policy",
             "Placeholder policy",
-            "skip",
+            "pass",
             detail=(
                 "Policy is Pinned, but a shared-instance sibling has a file and "
-                "Shared Placeholder Cleanup is on."
+                "Shared Placeholder Cleanup is on, so Pin does not override."
             ),
             outcome=before,
         )
@@ -442,6 +443,14 @@ def explain_movie_determination(session, movie: Movie) -> dict[str, Any]:
 
     steps: list[dict[str, Any]] = []
 
+    base, file_step = _file_state_result(
+        has_placeholder=has_placeholder,
+        has_file=has_file,
+        is_deleted=is_deleted,
+        prior_outcome=None,
+    )
+    steps.append(file_step)
+
     calendar_outcome, calendar_step = _calendar_guard_result(
         has_placeholder=has_placeholder,
         has_file=has_file,
@@ -454,14 +463,63 @@ def explain_movie_determination(session, movie: Movie) -> dict[str, Any]:
         date_label=date_label,
     )
     steps.append(calendar_step)
+    if calendar_outcome is not None:
+        base = calendar_outcome
 
-    base, file_step = _file_state_result(
+    before = base
+    base = _apply_monitored_placeholder_suppression(
+        session,
+        base=base,
+        entity=movie,
+        media_type="movie",
         has_placeholder=has_placeholder,
         has_file=has_file,
         is_deleted=is_deleted,
-        prior_outcome=calendar_outcome,
+        movie_id=int(movie.id) if getattr(movie, "id", None) is not None else None,
     )
-    steps.append(file_step)
+    monitored_open = None
+    if not _skip_placeholders_when_monitored_enabled():
+        monitored_open = "Skip-when-monitored is off."
+    elif has_file or is_deleted:
+        monitored_open = "A real file exists or the title was removed, so monitored suppression does not apply."
+    elif not bool(getattr(movie, "radarr_monitored", False)):
+        monitored_open = "Title is not monitored in Radarr."
+    steps.append(
+        _apply_modifier_step(
+            key="monitored_suppression",
+            label="Monitored suppression",
+            before=before,
+            after=base,
+            open_detail=monitored_open,
+        )
+    )
+
+    before = base
+    sibling_has_file = sibling_movie_has_file(session, movie)
+    base = _apply_sibling_placeholder_suppression(
+        arr_type="radarr",
+        base=base,
+        has_placeholder=has_placeholder,
+        has_file=has_file,
+        is_deleted=is_deleted,
+        sibling_has_file=sibling_has_file,
+    )
+    sibling_open = None
+    if not shared_placeholder_suppresses_creation("radarr"):
+        sibling_open = "Shared-instance suppression is off."
+    elif has_file or is_deleted:
+        sibling_open = "A real file exists or the title was removed, so shared-instance suppression does not apply."
+    elif not sibling_has_file:
+        sibling_open = "No sibling instance has this title on disk."
+    steps.append(
+        _apply_modifier_step(
+            key="sibling_suppression",
+            label="Shared-instance suppression",
+            before=before,
+            after=base,
+            open_detail=sibling_open,
+        )
+    )
 
     if has_placeholder and _movie_placeholder_path_drifts(movie):
         base = DETERMINATION_OBSOLETE
@@ -481,65 +539,10 @@ def explain_movie_determination(session, movie: Movie) -> dict[str, Any]:
             _step(
                 "path_drift",
                 "Placeholder path",
-                "skip",
-                detail="No placeholder path drift detected.",
+                "pass",
+                detail="Placeholder path matches the expected location, or no placeholder is stored.",
             )
         )
-
-    before = base
-    base = _apply_monitored_placeholder_suppression(
-        session,
-        base=base,
-        entity=movie,
-        media_type="movie",
-        has_placeholder=has_placeholder,
-        has_file=has_file,
-        is_deleted=is_deleted,
-        movie_id=int(movie.id) if getattr(movie, "id", None) is not None else None,
-    )
-    monitored_skip = None
-    if not _skip_placeholders_when_monitored_enabled():
-        monitored_skip = "Skip-when-monitored is off."
-    elif has_file or is_deleted:
-        monitored_skip = "Skipped because a real file exists or the title was removed."
-    elif not bool(getattr(movie, "radarr_monitored", False)):
-        monitored_skip = "Title is not monitored in Radarr."
-    steps.append(
-        _apply_modifier_step(
-            key="monitored_suppression",
-            label="Monitored suppression",
-            before=before,
-            after=base,
-            skip_detail=monitored_skip,
-        )
-    )
-
-    before = base
-    sibling_has_file = sibling_movie_has_file(session, movie)
-    base = _apply_sibling_placeholder_suppression(
-        arr_type="radarr",
-        base=base,
-        has_placeholder=has_placeholder,
-        has_file=has_file,
-        is_deleted=is_deleted,
-        sibling_has_file=sibling_has_file,
-    )
-    sibling_skip = None
-    if not shared_placeholder_suppresses_creation("radarr"):
-        sibling_skip = "Shared-instance suppression is off."
-    elif has_file or is_deleted:
-        sibling_skip = "Skipped because a real file exists or the title was removed."
-    elif not sibling_has_file:
-        sibling_skip = "No sibling instance has this title on disk."
-    steps.append(
-        _apply_modifier_step(
-            key="sibling_suppression",
-            label="Shared-instance suppression",
-            before=before,
-            after=base,
-            skip_detail=sibling_skip,
-        )
-    )
 
     sibling_block = _sibling_would_suppress_creation(
         arr_type="radarr",
@@ -630,6 +633,10 @@ def explain_episode_determination(session, episode: Episode) -> dict[str, Any]:
         policy_flag_view,
         policy_from_entity,
     )
+    from services.source_of_truth.tv_density import (
+        density_suppresses_episode_files,
+        tv_placeholder_density_for_series,
+    )
 
     effective_pol, policy_source = episode_effective_policy(series=series, episode=episode)
     forced = effective_pol == "pinned"
@@ -669,10 +676,76 @@ def explain_episode_determination(session, episode: Episode) -> dict[str, Any]:
             _step(
                 "episode_specials",
                 "Specials policy",
-                "skip",
+                "pass",
                 detail="Not an excluded special, or specials are included.",
             )
         )
+
+    density = tv_placeholder_density_for_series(series)
+    density_blocks_episode_files = density_suppresses_episode_files(series)
+    if density_blocks_episode_files:
+        if has_placeholder or _episode_placeholder_path_drifts(session, episode):
+            density_final = DETERMINATION_OBSOLETE
+            density_detail = (
+                f"TV density is {density.title()}, so Placeholdarr does not keep per-episode placeholder files. "
+                "This leftover episode placeholder should be removed; season or series placeholders cover the show."
+            )
+        else:
+            density_final = DETERMINATION_NOT_NEEDED
+            density_detail = (
+                f"TV density is {density.title()}, so Placeholdarr does not create per-episode placeholder files. "
+                "Season or series placeholders cover the show instead."
+            )
+        steps.append(
+            _step(
+                "tv_density",
+                "TV placeholder density",
+                "fail",
+                detail=density_detail,
+                outcome=density_final,
+            )
+        )
+        skip_detail = "Not evaluated; TV density already decided."
+        for key, label in (
+            ("file_state", "File and placeholder state"),
+            ("episode_unknown_air_date", "Unknown air date inference"),
+            ("calendar_window", "Within calendar window"),
+            ("monitored_suppression", "Monitored suppression"),
+            ("sibling_suppression", "Shared-instance suppression"),
+            ("path_drift", "Placeholder path"),
+            ("placeholder_policy", "Placeholder policy"),
+        ):
+            steps.append(_step(key, label, "skip", detail=skip_detail))
+        deciding = _deciding_step_key(steps, density_final)
+        ep_label = f"E{episode_number:02d}"
+        series_title = str(getattr(series, "title", "") or "Series") if series else "Series"
+        title = str(getattr(episode, "title", "") or f"Episode {episode_number}")
+        return {
+            "ok": True,
+            "media_type": "episode",
+            "title": f"{series_title} {ep_label} {title}".strip(),
+            "determination": density_final,
+            "deciding_step_key": deciding,
+            "summary": _build_summary(density_final, deciding, steps),
+            "steps": steps,
+        }
+
+    steps.append(
+        _step(
+            "tv_density",
+            "TV placeholder density",
+            "pass",
+            detail="TV density is Episode, so per-episode placeholders are evaluated.",
+        )
+    )
+
+    base, file_step = _file_state_result(
+        has_placeholder=has_placeholder,
+        has_file=has_file,
+        is_deleted=is_deleted,
+        prior_outcome=None,
+    )
+    steps.append(file_step)
 
     target_date = getattr(episode, "air_date", None)
     inferred_air_date = False
@@ -681,6 +754,7 @@ def explain_episode_determination(session, episode: Episode) -> dict[str, Any]:
         and placeholders_enabled
         and lookahead_days >= 0
         and episode_meta is not None
+        and not (has_file or is_deleted)
     ):
         series_max = _build_series_max_known_order_within_horizon(
             session,
@@ -705,15 +779,15 @@ def explain_episode_determination(session, episode: Episode) -> dict[str, Any]:
         )
     else:
         air_detail = (
-            f"Air date is {target_date.isoformat()}."
+            f"Air date is {target_date.isoformat()}; inference is not needed."
             if target_date is not None
-            else "Air date is unknown."
+            else "Air date is unknown and no later in-horizon episode unlocked inference."
         )
         steps.append(
             _step(
                 "episode_unknown_air_date",
                 "Unknown air date inference",
-                "skip",
+                "pass",
                 detail=air_detail,
             )
         )
@@ -730,14 +804,69 @@ def explain_episode_determination(session, episode: Episode) -> dict[str, Any]:
         date_label="Air date",
     )
     steps.append(calendar_step)
+    if calendar_outcome is not None:
+        base = calendar_outcome
 
-    base, file_step = _file_state_result(
+    series_monitored = (
+        _series_monitored_for_episode(session, episode)
+        if _skip_placeholders_when_series_monitored_enabled()
+        else False
+    )
+    before = base
+    base = _apply_monitored_placeholder_suppression(
+        session,
+        base=base,
+        entity=episode,
+        media_type="episode",
         has_placeholder=has_placeholder,
         has_file=has_file,
         is_deleted=is_deleted,
-        prior_outcome=calendar_outcome,
+        episode_id=int(episode.id) if getattr(episode, "id", None) is not None else None,
+        series_monitored=series_monitored,
     )
-    steps.append(file_step)
+    monitored_open = None
+    if not _skip_placeholders_when_monitored_enabled():
+        monitored_open = "Skip-when-monitored is off."
+    elif has_file or is_deleted:
+        monitored_open = "A real file exists or the episode was removed, so monitored suppression does not apply."
+    elif not bool(getattr(episode, "sonarr_monitored", False)) and not series_monitored:
+        monitored_open = "Episode and series are not monitored in Sonarr."
+    steps.append(
+        _apply_modifier_step(
+            key="monitored_suppression",
+            label="Monitored suppression",
+            before=before,
+            after=base,
+            open_detail=monitored_open,
+        )
+    )
+
+    before = base
+    sibling_has_file = sibling_episode_has_file(session, episode)
+    base = _apply_sibling_placeholder_suppression(
+        arr_type="sonarr",
+        base=base,
+        has_placeholder=has_placeholder,
+        has_file=has_file,
+        is_deleted=is_deleted,
+        sibling_has_file=sibling_has_file,
+    )
+    sibling_open = None
+    if not shared_placeholder_suppresses_creation("sonarr"):
+        sibling_open = "Shared-instance suppression is off."
+    elif has_file or is_deleted:
+        sibling_open = "A real file exists or the episode was removed, so shared-instance suppression does not apply."
+    elif not sibling_has_file:
+        sibling_open = "No sibling instance has this episode on disk."
+    steps.append(
+        _apply_modifier_step(
+            key="sibling_suppression",
+            label="Shared-instance suppression",
+            before=before,
+            after=base,
+            open_detail=sibling_open,
+        )
+    )
 
     if has_placeholder and _episode_placeholder_path_drifts(session, episode):
         base = DETERMINATION_OBSOLETE
@@ -761,71 +890,10 @@ def explain_episode_determination(session, episode: Episode) -> dict[str, Any]:
             _step(
                 "path_drift",
                 "Placeholder path",
-                "skip",
-                detail="No placeholder path drift detected.",
+                "pass",
+                detail="Placeholder path matches the expected location, or no placeholder is stored.",
             )
         )
-
-    series_monitored = (
-        _series_monitored_for_episode(session, episode)
-        if _skip_placeholders_when_series_monitored_enabled()
-        else False
-    )
-    before = base
-    base = _apply_monitored_placeholder_suppression(
-        session,
-        base=base,
-        entity=episode,
-        media_type="episode",
-        has_placeholder=has_placeholder,
-        has_file=has_file,
-        is_deleted=is_deleted,
-        episode_id=int(episode.id) if getattr(episode, "id", None) is not None else None,
-        series_monitored=series_monitored,
-    )
-    monitored_skip = None
-    if not _skip_placeholders_when_monitored_enabled():
-        monitored_skip = "Skip-when-monitored is off."
-    elif has_file or is_deleted:
-        monitored_skip = "Skipped because a real file exists or the episode was removed."
-    elif not bool(getattr(episode, "sonarr_monitored", False)) and not series_monitored:
-        monitored_skip = "Episode and series are not monitored in Sonarr."
-    steps.append(
-        _apply_modifier_step(
-            key="monitored_suppression",
-            label="Monitored suppression",
-            before=before,
-            after=base,
-            skip_detail=monitored_skip,
-        )
-    )
-
-    before = base
-    sibling_has_file = sibling_episode_has_file(session, episode)
-    base = _apply_sibling_placeholder_suppression(
-        arr_type="sonarr",
-        base=base,
-        has_placeholder=has_placeholder,
-        has_file=has_file,
-        is_deleted=is_deleted,
-        sibling_has_file=sibling_has_file,
-    )
-    sibling_skip = None
-    if not shared_placeholder_suppresses_creation("sonarr"):
-        sibling_skip = "Shared-instance suppression is off."
-    elif has_file or is_deleted:
-        sibling_skip = "Skipped because a real file exists or the episode was removed."
-    elif not sibling_has_file:
-        sibling_skip = "No sibling instance has this episode on disk."
-    steps.append(
-        _apply_modifier_step(
-            key="sibling_suppression",
-            label="Shared-instance suppression",
-            before=before,
-            after=base,
-            skip_detail=sibling_skip,
-        )
-    )
 
     sibling_block = _sibling_would_suppress_creation(
         arr_type="sonarr",

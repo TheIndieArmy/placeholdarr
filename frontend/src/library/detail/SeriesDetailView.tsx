@@ -129,7 +129,12 @@ export function SeriesDetailView(props: {
                 <div className="flex flex-wrap items-end gap-x-8 gap-y-4">
                   {[
                     { n: stats.files, label: "downloaded", strong: true },
-                    { n: stats.placeholders, label: "placeholders", strong: true },
+                    {
+                      n: stats.placeholders,
+                      label: "placeholders",
+                      strong: true,
+                      afterNumber: String(tvDensity || "episode").trim().toLowerCase() || "episode",
+                    },
                     { n: stats.missing, label: "missing", strong: true },
                     { n: stats.future, label: "future", strong: false },
                     { n: stats.total, label: "total", strong: false },
@@ -147,6 +152,15 @@ export function SeriesDetailView(props: {
                         }`}
                       >
                         {item.n}
+                        {"afterNumber" in item && item.afterNumber ? (
+                          <span
+                            className={`ml-2 text-[13px] font-headline font-semibold uppercase tracking-wider align-middle ${
+                              isLight ? "text-slate-500" : "text-slate-400"
+                            }`}
+                          >
+                            {item.afterNumber}
+                          </span>
+                        ) : null}
                       </div>
                       <div className="mt-1.5 text-[13px] font-headline uppercase tracking-wider text-slate-500">
                         {item.label}

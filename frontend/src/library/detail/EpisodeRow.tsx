@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 import type { ThemeMode } from "../../brandTypes";
 import type { SeriesEpisodeDetail } from "../../types/api";
-import { detailMutedChipClass, detailStatusChipClass } from "./detailFormatters";
+import { detailMutedChipClass, detailStatusChipClass, unresolvedDetailStatus } from "./detailFormatters";
 import { DeterminationWhyLink } from "./DeterminationWhyLink";
 import { PlaceholderPolicyCycle, type PolicySyncPhase } from "./PlaceholderPolicyCycle";
 import {
@@ -30,18 +30,50 @@ export function EpisodeRow(props: {
     ? "Set by series. Change the series chip to unlock."
     : densityPolicyUnavailableReason("episode", props.tvPlaceholderDensity) || undefined;
 
-  let statusChip: ReactNode;
+  const policyBusy = policyPhase === "creating" || policyPhase === "removing";
+  let statusLabel: string;
+  let statusKind: "file" | "placeholder" | "missing" | "not_needed";
   if (policyPhase === "creating") {
-    statusChip = <span className={detailStatusChipClass(isLight, "placeholder")}>Creating…</span>;
+    statusLabel = "Creating…";
+    statusKind = "placeholder";
   } else if (policyPhase === "removing") {
-    statusChip = <span className={detailStatusChipClass(isLight, "missing")}>Removing…</span>;
+    statusLabel = "Removing…";
+    statusKind = "missing";
   } else if (ep.has_placeholder) {
-    statusChip = <span className={detailStatusChipClass(isLight, "placeholder")}>Placeholder</span>;
+    statusLabel = "Placeholder";
+    statusKind = "placeholder";
   } else if (ep.has_file) {
-    statusChip = <span className={detailStatusChipClass(isLight, "file")}>Downloaded</span>;
+    statusLabel = "Downloaded";
+    statusKind = "file";
   } else {
-    statusChip = <span className={detailStatusChipClass(isLight, "missing")}>Missing</span>;
+    const unresolved = unresolvedDetailStatus(ep.determination);
+    statusLabel = unresolved.label;
+    statusKind = unresolved.kind;
   }
+
+  const statusClass = `${detailStatusChipClass(isLight, statusKind)}${
+    !policyBusy && ep.determination
+      ? isLight
+        ? " cursor-pointer hover:border-sky-300 hover:bg-sky-50"
+        : " cursor-pointer hover:border-sky-500/50 hover:bg-sky-500/10"
+      : ""
+  }`;
+
+  const statusChip =
+    !policyBusy && ep.determination ? (
+      <DeterminationWhyLink
+        mediaType="episode"
+        entityId={ep.id}
+        determination={ep.determination}
+        themeMode={props.themeMode}
+        className={statusClass}
+        title="Why this status?"
+      >
+        {statusLabel}
+      </DeterminationWhyLink>
+    ) : (
+      <span className={statusClass}>{statusLabel}</span>
+    );
 
   return (
     <div className={`border-t ${isLight ? "border-slate-200" : "border-[#424753]/15"}`}>
@@ -76,33 +108,23 @@ export function EpisodeRow(props: {
           {ep.sonarr_monitored === false ? (
             <span className="text-[10px] uppercase tracking-wider text-slate-500">Unmonitored</span>
           ) : null}
-          <div className="flex items-center gap-2">
-            {ep.determination ? (
-              <DeterminationWhyLink
-                mediaType="episode"
-                entityId={ep.id}
-                determination={ep.determination}
-                themeMode={props.themeMode}
-              />
-            ) : null}
-            <PlaceholderPolicyCycle
-              mediaType="episode"
-              entityId={ep.id}
-              placeholderPolicy={ep.placeholder_policy}
-              forcePlaceholder={ep.force_placeholder}
-              blockPlaceholder={ep.block_placeholder}
-              hasPlaceholder={ep.has_placeholder}
-              hasFile={ep.has_file}
-              locked={episodeLocked}
-              lockedReason={episodeLockedReason}
-              accentHex={props.accentHex}
-              themeMode={props.themeMode}
-              size="sm"
-              showInlineProgress={false}
-              onPhaseChange={setPolicyPhase}
-              onApplied={props.onPolicyApplied}
-            />
-          </div>
+          <PlaceholderPolicyCycle
+            mediaType="episode"
+            entityId={ep.id}
+            placeholderPolicy={ep.placeholder_policy}
+            forcePlaceholder={ep.force_placeholder}
+            blockPlaceholder={ep.block_placeholder}
+            hasPlaceholder={ep.has_placeholder}
+            hasFile={ep.has_file}
+            locked={episodeLocked}
+            lockedReason={episodeLockedReason}
+            accentHex={props.accentHex}
+            themeMode={props.themeMode}
+            size="sm"
+            showInlineProgress={false}
+            onPhaseChange={setPolicyPhase}
+            onApplied={props.onPolicyApplied}
+          />
           {props.refreshControl}
         </div>
       </div>
