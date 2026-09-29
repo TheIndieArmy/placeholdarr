@@ -10,6 +10,10 @@ import { EpisodeRow } from "./EpisodeRow";
 import { SeriesFileStateSection } from "./FileStateSections";
 import { PlaceholderPolicyCycle } from "./PlaceholderPolicyCycle";
 import {
+  densityLocksSeasonPins,
+  densityPolicyUnavailableReason,
+} from "./placeholderPolicyUtils";
+import {
   detailMutedChipClass,
   formatMonitoredLabel,
   formatSonarrStatusLabel,
@@ -34,6 +38,9 @@ export function SeriesDetailView(props: {
   const stats = payload.episode_stats;
   const mutedChip = detailMutedChipClass(isLight);
   const seriesGateLocked = payload.placeholder_policy === "never" || payload.placeholder_policy === "pinned";
+  const tvDensity = payload.tv_placeholder_density ?? "episode";
+  const densityLocksSeasons = densityLocksSeasonPins(tvDensity);
+  const seasonDensityReason = densityPolicyUnavailableReason("season", tvDensity);
 
   return (
     <div>
@@ -152,7 +159,11 @@ export function SeriesDetailView(props: {
             <div className="space-y-2">
               {seasonsDesc.map((season) => {
                 const open = openSeasons.includes(season.id);
-                const seasonLocked = Boolean(season.policy_locked) || seriesGateLocked;
+                const seriesLocksSeason = Boolean(season.policy_locked) || seriesGateLocked;
+                const seasonLocked = seriesLocksSeason || densityLocksSeasons;
+                const seasonLockedReason = seriesLocksSeason
+                  ? "Set by series. Change the series chip to unlock."
+                  : seasonDensityReason || undefined;
                 return (
                   <div
                     key={season.id}
@@ -196,7 +207,7 @@ export function SeriesDetailView(props: {
                           hasPlaceholder={season.episode_placeholders > 0}
                           hasFile={season.episode_files > 0 && season.episode_placeholders === 0}
                           locked={seasonLocked}
-                          lockedReason="Set by series. Change the series chip to unlock."
+                          lockedReason={seasonLockedReason}
                           accentHex={props.accent.hex}
                           themeMode={props.themeMode}
                           size="sm"
@@ -217,6 +228,7 @@ export function SeriesDetailView(props: {
                             episode={ep}
                             themeMode={props.themeMode}
                             accentHex={props.accent.hex}
+                            tvPlaceholderDensity={tvDensity}
                             onPolicyApplied={props.onPolicyApplied}
                             refreshControl={
                               <LibraryReconcileControl

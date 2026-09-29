@@ -543,11 +543,17 @@ def _dashboard_not_built_response() -> PlainTextResponse:
 _SETUP_PREVIEW_SNIPPET = "<script>window.__PLACEHOLDARR_SETUP_PREVIEW__=!0</script>"
 
 
-def _serve_dashboard_index(inject_setup_preview: bool = False) -> FileResponse | PlainTextResponse | HTMLResponse:
+def _serve_dashboard_index(
+    *,
+    inject_setup_preview: bool = False,
+) -> FileResponse | PlainTextResponse | HTMLResponse:
     index_path = _dashboard_dist_index_path()
     if not os.path.isfile(index_path):
         return _dashboard_not_built_response()
-    if not inject_setup_preview:
+    inject_snippet = ""
+    if inject_setup_preview:
+        inject_snippet = _SETUP_PREVIEW_SNIPPET
+    if not inject_snippet:
         return FileResponse(index_path, media_type="text/html", headers=_HTML_NO_STORE_HEADERS)
     try:
         with open(index_path, encoding="utf-8") as handle:
@@ -555,9 +561,9 @@ def _serve_dashboard_index(inject_setup_preview: bool = False) -> FileResponse |
     except OSError:
         return FileResponse(index_path, media_type="text/html", headers=_HTML_NO_STORE_HEADERS)
     if "<head>" in html:
-        html = html.replace("<head>", "<head>" + _SETUP_PREVIEW_SNIPPET, 1)
+        html = html.replace("<head>", "<head>" + inject_snippet, 1)
     else:
-        html = _SETUP_PREVIEW_SNIPPET + html
+        html = inject_snippet + html
     return HTMLResponse(content=html, media_type="text/html", headers=_HTML_NO_STORE_HEADERS)
 
 
@@ -626,15 +632,15 @@ async def dashboard_settings_nested(path: str):
 @router.get("/setup", response_class=HTMLResponse)
 async def dashboard_setup_page(request: Request):
     """Serve SPA for onboarding wizard (client-side /setup route)."""
-    inject = request.query_params.get("preview") == "1"
-    return _serve_dashboard_index(inject_setup_preview=inject)
+    inject_preview = request.query_params.get("preview") == "1"
+    return _serve_dashboard_index(inject_setup_preview=inject_preview)
 
 
 @router.get("/setup/{path:path}", response_class=HTMLResponse)
 async def dashboard_setup_nested(path: str):
     """Deep links under /setup still load the SPA shell."""
-    inject = path == "preview" or path.startswith("preview/")
-    return _serve_dashboard_index(inject_setup_preview=inject)
+    inject_preview = path == "preview" or path.startswith("preview/")
+    return _serve_dashboard_index(inject_setup_preview=inject_preview)
 
 
 @router.get("/dashboard-next", response_class=HTMLResponse)
@@ -1165,6 +1171,10 @@ def _humanize_activity_reason(reason: str | None) -> str:
         "import completed": "Import completed",
         "event materialization": "Event processing",
         "materialization run": "Materialization",
+        "series_placeholder_retired": "Series placeholder retired",
+        "season_placeholder_retired": "Season placeholder retired",
+        "series_stub_retired": "Series placeholder retired",
+        "season_stub_retired": "Season placeholder retired",
     }
     raw = str(reason or "").strip()
     if not raw:
@@ -4455,9 +4465,11 @@ async def series_detail(series_id: int):
         )
         instance_meta = _arr_instance_meta(series.instance_key, getattr(series, "instance_id", None))
         from services.source_of_truth.placeholder_policy import policy_from_entity, series_gate_active
+        from services.source_of_truth.tv_density import PLACEHOLDER_KIND_SEASON_STUB, tv_placeholder_density
 
         series_policy = policy_from_entity(series)
         series_gate = series_gate_active(series)
+        density = tv_placeholder_density()
         tag_control = resolve_policy_tag_control(
             instance_key=series.instance_key,
             arr_type="sonarr",
@@ -4483,15 +4495,40 @@ async def series_detail(series_id: int):
             all_episode_ids.extend(int(e.id) for e in episodes_raw)
         ep_display = _episode_display_status_map(session, all_episode_ids)
 
+        # Season/series density stubs are Placeholder rows (not episode.has_placeholder).
+        season_stub_ids: set[int] = set()
+        if density == "season":
+            stub_rows = (
+                session.query(Placeholder.season_id)
+                .filter(
+                    Placeholder.series_id == int(series_id),
+                    Placeholder.placeholder_kind == PLACEHOLDER_KIND_SEASON_STUB,
+                    Placeholder.has_placeholder == True,  # noqa: E712
+                    Placeholder.episode_id.is_(None),
+                    Placeholder.season_id.isnot(None),
+                )
+                .all()
+            )
+            season_stub_ids = {int(sid) for (sid,) in stub_rows if sid is not None}
+
         seasons_out = []
         for season, episodes_raw in season_episode_lists:
             ep_total = len(episodes_raw)
             ep_files = sum(1 for e in episodes_raw if e.has_file)
-            ep_placeholders = sum(1 for e in episodes_raw if e.has_placeholder)
+            if density == "season":
+                ep_placeholders = 1 if int(season.id) in season_stub_ids else 0
+            elif density == "series":
+                # One series-level stub; seasons do not own it for per-season PH counts.
+                ep_placeholders = 0
+            else:
+                ep_placeholders = sum(1 for e in episodes_raw if e.has_placeholder)
             ep_future = 0
             ep_missing = 0
             for e in episodes_raw:
                 if bool(e.has_file) or bool(e.has_placeholder):
+                    continue
+                # Season stub covers missing episodes for that season in the season header counts.
+                if density == "season" and int(season.id) in season_stub_ids:
                     continue
                 if episode_row_is_future_outside_lookahead(e, int(season.season_number or 0)):
                     ep_future += 1
@@ -4593,6 +4630,7 @@ async def series_detail(series_id: int):
             "placeholder_policy": series_policy,
             "force_placeholder": bool(getattr(series, "force_placeholder", False)),
             "block_placeholder": bool(getattr(series, "block_placeholder", False)),
+            "tv_placeholder_density": density,
             "placeholder_policy_source": (
                 str(getattr(series, "placeholder_policy_source", None) or "").strip().lower() or None
             ),

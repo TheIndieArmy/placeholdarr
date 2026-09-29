@@ -293,14 +293,23 @@ class Settings(BaseSettings):
     PLACEHOLDER_DIR_MODE: str = os.getenv("PLACEHOLDER_DIR_MODE", "777").split('#')[0].strip()
     ENABLE_PRIMER: bool = False
 
-    # Play mode settings
+    # Play mode settings (search width on playback; orthogonal to density)
     TV_PLAY_MODE: Literal["episode", "season", "series"] = "episode"
-    EPISODES_LOOKAHEAD: int = 5
+    EPISODES_LOOKAHEAD: int = 3
+    # How many TV placeholder files to write on disk (episode = one per missing episode).
+    TV_PLACEHOLDER_DENSITY: Literal["episode", "season", "series"] = "episode"
+    # When a series/season stub is removed (only applies when density is season or series).
+    TV_DENSITY_RETIRE_WHEN: Literal[
+        "when_no_episode_needs_placeholder",
+        "when_any_episode_has_file",
+    ] = "when_no_episode_needs_placeholder"
     
-    # Playback-related settings (all default off: mark unmonitored + search full target set)
+    # Playback-related settings (movies + TV). Future-title suppress defaults on (do not search
+    # unaired / not-yet-released unless opted in via the affirmative UI toggle). Finished installs
+    # without a saved row are grandfathered to the old default by migrate_playback_future_search_suppress_default.
     PLAYBACK_MONITOR_ONLY_NO_SEARCH: bool = False
     PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED: bool = False
-    PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES: bool = False
+    PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES: bool = True
     ENABLE_PLAYBACK_FALLBACK_SEARCH: bool = True
     PLAYBACK_FALLBACK_TIMEOUT_MINUTES: int = 30
     # When multiple Radarr or Sonarr instances share on-disk paths for the same TMDB/TVDB title:

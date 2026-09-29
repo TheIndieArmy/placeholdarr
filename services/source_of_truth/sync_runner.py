@@ -146,34 +146,76 @@ def _fill_missing_series_art(fields: Dict, series_entry: Dict, base_url: str, ap
     return fields
 
 
-def _resolve_episode_file_payload(entry: Dict, base_url: str, api_key: str) -> Dict:
+def _episode_detail_fetches_enabled() -> bool:
+    """Per-id still/file GETs only help episode-density thumbs and rare path backfill."""
+    from services.source_of_truth.tv_density import density_uses_episode_files
+
+    return density_uses_episode_files()
+
+
+def _bump_sync_counter(stats: Dict | None, key: str) -> None:
+    if stats is None:
+        return
+    stats[key] = int(stats.get(key) or 0) + 1
+
+
+def _resolve_episode_file_payload(
+    entry: Dict,
+    base_url: str,
+    api_key: str,
+    *,
+    allow_file_detail: bool | None = None,
+    stats: Dict | None = None,
+) -> Dict:
     ep_file = entry.get('episodeFile') or {}
     if isinstance(ep_file, dict) and ep_file.get('path'):
         return ep_file
 
     # Sonarr may return episodeFileId without embedding episodeFile on /episode.
     episode_file_id = entry.get('episodeFileId')
-    if episode_file_id:
-        fetched = fetch_sonarr_episodefile(int(episode_file_id), base_url, api_key)
-        if isinstance(fetched, dict):
-            return fetched
+    if not episode_file_id:
+        return ep_file if isinstance(ep_file, dict) else {}
+
+    enabled = _episode_detail_fetches_enabled() if allow_file_detail is None else bool(allow_file_detail)
+    if not enabled:
+        _bump_sync_counter(stats, 'episode_file_detail_skipped')
+        return ep_file if isinstance(ep_file, dict) else {}
+
+    fetched = fetch_sonarr_episodefile(int(episode_file_id), base_url, api_key)
+    if isinstance(fetched, dict):
+        _bump_sync_counter(stats, 'episode_file_detail_fetched')
+        return fetched
     return ep_file if isinstance(ep_file, dict) else {}
 
 
-def _resolve_episode_sync_payload(ep: Dict, base_url: str, api_key: str) -> Dict:
+def _resolve_episode_sync_payload(
+    ep: Dict,
+    base_url: str,
+    api_key: str,
+    *,
+    allow_still_detail: bool | None = None,
+    stats: Dict | None = None,
+) -> Dict:
     """Use bulk /episode rows from fetch_sonarr_episodes (includeImages + includeEpisodeFile).
 
     Per-id GET is a last resort when still art is missing (older Sonarr or cache miss).
+    Under season/series density, skip that GET: thumbs are unused and ``has_file`` /
+    air dates already come from the bulk row.
     Episode file paths are resolved in _resolve_episode_file_payload (embedded object or /episodefile).
     """
     if not isinstance(ep, dict):
         return ep
     if _extract_image_url(ep, ('screenshot', 'still', 'cover')):
         return ep
+    enabled = _episode_detail_fetches_enabled() if allow_still_detail is None else bool(allow_still_detail)
+    if not enabled:
+        _bump_sync_counter(stats, 'episode_still_detail_skipped')
+        return ep
     sonarr_ep_id = ep.get('id')
     if sonarr_ep_id:
         detailed = fetch_sonarr_episode_item(int(sonarr_ep_id), url=base_url, api_key=api_key)
         if isinstance(detailed, dict):
+            _bump_sync_counter(stats, 'episode_still_detail_fetched')
             return detailed
     return ep
 
@@ -742,11 +784,16 @@ def run_full_sync(
         'episodes_seen': 0,
         'episodes_created': 0,
         'episodes_updated': 0,
+        'episode_still_detail_skipped': 0,
+        'episode_still_detail_fetched': 0,
+        'episode_file_detail_skipped': 0,
+        'episode_file_detail_fetched': 0,
     }
 
     session = get_session()
     touched_movie_row_ids: list[int] = []
     touched_series_row_ids: list[int] = []
+    allow_episode_detail = _episode_detail_fetches_enabled()
     try:
         requested_key = str(instance_key or '').strip().lower() or None
         for content_type, base_url, api_key, sync_instance_key in _iter_arr_endpoints(
@@ -823,8 +870,20 @@ def run_full_sync(
                             extra={'emoji_type': 'info'},
                         )
                     for ep in episodes:
-                        ep_effective = _resolve_episode_sync_payload(ep, base_url, api_key)
-                        episode_file = _resolve_episode_file_payload(ep_effective, base_url, api_key)
+                        ep_effective = _resolve_episode_sync_payload(
+                            ep,
+                            base_url,
+                            api_key,
+                            allow_still_detail=allow_episode_detail,
+                            stats=stats,
+                        )
+                        episode_file = _resolve_episode_file_payload(
+                            ep_effective,
+                            base_url,
+                            api_key,
+                            allow_file_detail=allow_episode_detail,
+                            stats=stats,
+                        )
                         prepared_episodes.append((ep, ep_effective, episode_file))
 
                     seen_tvdbids.add(s_fields['tvdbid'])
@@ -943,6 +1002,15 @@ def run_full_sync(
 
         elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
         stats['duration_seconds'] = round(elapsed, 2)
+        still_skipped = int(stats.get('episode_still_detail_skipped') or 0)
+        file_skipped = int(stats.get('episode_file_detail_skipped') or 0)
+        if still_skipped or file_skipped:
+            logger.info(
+                "Series sync skipped episode detail GETs under season/series density: "
+                f"still_skipped={still_skipped} still_fetched={int(stats.get('episode_still_detail_fetched') or 0)} "
+                f"file_skipped={file_skipped} file_fetched={int(stats.get('episode_file_detail_fetched') or 0)}",
+                extra={'emoji_type': 'info'},
+            )
         log_phase_boundary(
             "arr_full_sync",
             event="end",
@@ -952,6 +1020,10 @@ def run_full_sync(
                 "instance_key": str(instance_key or ""),
                 "episodes_seen": int(stats.get("episodes_seen") or 0),
                 "movies_seen": int(stats.get("movies_seen") or 0),
+                "episode_still_detail_skipped": still_skipped,
+                "episode_still_detail_fetched": int(stats.get("episode_still_detail_fetched") or 0),
+                "episode_file_detail_skipped": file_skipped,
+                "episode_file_detail_fetched": int(stats.get("episode_file_detail_fetched") or 0),
             },
         )
         logger.info(f"Source-of-truth fullsync complete: {stats}", extra={'emoji_type': 'success'})
@@ -1160,6 +1232,10 @@ def sync_sonarr_series_specials_season0_backfill(
         "touched_episode_row_ids": [],
         # Series where Sonarr returned at least one season-0 episode (for progress clarity).
         "series_with_season0": 0,
+        "episode_still_detail_skipped": 0,
+        "episode_still_detail_fetched": 0,
+        "episode_file_detail_skipped": 0,
+        "episode_file_detail_fetched": 0,
     }
     if not items:
         return stats
@@ -1169,6 +1245,7 @@ def sync_sonarr_series_specials_season0_backfill(
     session = get_session()
     touched_episode_ids: set[int] = set()
     pending_episode_rows: List[Any] = []
+    allow_episode_detail = _episode_detail_fetches_enabled()
     try:
         total_series = len(items)
         last_overall_log_mono = time.monotonic()
@@ -1236,9 +1313,21 @@ def sync_sonarr_series_specials_season0_backfill(
                     stats["seasons_created"] += 1
 
                 sonarr_ep_id = ep.get("id")
-                ep_effective = _resolve_episode_sync_payload(ep, base_url, api_key)
+                ep_effective = _resolve_episode_sync_payload(
+                    ep,
+                    base_url,
+                    api_key,
+                    allow_still_detail=allow_episode_detail,
+                    stats=stats,
+                )
 
-                episode_file = _resolve_episode_file_payload(ep_effective, base_url, api_key)
+                episode_file = _resolve_episode_file_payload(
+                    ep_effective,
+                    base_url,
+                    api_key,
+                    allow_file_detail=allow_episode_detail,
+                    stats=stats,
+                )
                 ep_fields = _episode_fields(series_row, season_row, ep_effective, episode_file)
 
                 overview = str(ep.get("overview") or "").strip()
@@ -1347,6 +1436,10 @@ def sync_sonarr_series_by_ids(
         'episodes_updated': 0,
         'episodes_marked_deleted': 0,
         'touched_episode_row_ids': [],
+        'episode_still_detail_skipped': 0,
+        'episode_still_detail_fetched': 0,
+        'episode_file_detail_skipped': 0,
+        'episode_file_detail_fetched': 0,
     }
     if not ids:
         return stats
@@ -1355,6 +1448,7 @@ def sync_sonarr_series_by_ids(
 
     session = get_session()
     touched_episode_ids: set[int] = set()
+    allow_episode_detail = _episode_detail_fetches_enabled()
     try:
         total_series = len(ids)
         _ep_log_every = 100
@@ -1457,9 +1551,21 @@ def sync_sonarr_series_by_ids(
 
                 # Use bulk row when sufficient; detail GET only for missing episodeFile embed.
                 sonarr_ep_id = ep.get('id')
-                ep = _resolve_episode_sync_payload(ep, base_url, api_key)
+                ep = _resolve_episode_sync_payload(
+                    ep,
+                    base_url,
+                    api_key,
+                    allow_still_detail=allow_episode_detail,
+                    stats=stats,
+                )
 
-                episode_file = _resolve_episode_file_payload(ep, base_url, api_key)
+                episode_file = _resolve_episode_file_payload(
+                    ep,
+                    base_url,
+                    api_key,
+                    allow_file_detail=allow_episode_detail,
+                    stats=stats,
+                )
                 ep_fields = _episode_fields(series_row, season_row, ep, episode_file)
 
                 overview = str(ep.get('overview') or '').strip()

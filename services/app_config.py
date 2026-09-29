@@ -58,6 +58,14 @@ DESTINATION_REMATERIALIZE_SETTING_KEYS = frozenset(
     }
 )
 
+# Settings that rematerialize TV stub density on disk (Apply now or next full sync).
+TV_DENSITY_REMATERIALIZE_SETTING_KEYS = frozenset(
+    {
+        "TV_PLACEHOLDER_DENSITY",
+        "TV_DENSITY_RETIRE_WHEN",
+    }
+)
+
 _POSTER_LANGUAGE_OPTIONS = [
     {"value": "en", "label": "English (en)"},
     {"value": "de", "label": "German (de)"},
@@ -114,12 +122,12 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 ),
                 "type": "choice",
                 "options": [
-                    {"value": "builtin", "label": "Builtin — Placeholdarr username/password (default)"},
+                    {"value": "builtin", "label": "Builtin: Placeholdarr username/password (default)"},
                     {
                         "value": "forward_auth",
-                        "label": "Forward auth — trust Remote-User / X-Forwarded-User from trusted proxies",
+                        "label": "Forward auth: trust Remote-User / X-Forwarded-User from trusted proxies",
                     },
-                    {"value": "disabled", "label": "Disabled — no login checks (unsafe if the port is reachable)"},
+                    {"value": "disabled", "label": "Disabled: no login checks (unsafe if the port is reachable)"},
                 ],
                 "required": True,
                 "restart_required": False,
@@ -362,9 +370,9 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "section": "Paths",
                 "label": "Library Root",
                 "description": (
-                    "Sets the default Placeholdarr destinations: `movies` and `tv` under this root. "
+                    "Creates the default Placeholdarr destinations, `movies` and `tv` under this root. "
                     "Unmapped Arr roots use those folders and the default Plex libraries below. "
-                    "Use Library destinations only when an Arr root should land in a different folder or Plex library. "
+                    "Use Library destinations only when an Arr root needs a different folder or Plex library. "
                     "Keep this path separate from Radarr/Sonarr library roots to avoid library-management conflicts."
                 ),
                 "type": "path",
@@ -427,22 +435,31 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "label": "Startup ARR sync mode",
                 # Intro copy is also structured in `frontend/src/App.tsx` (`StartupSyncModeDescription`); update both together.
                 "description": (
-                    "One input to the single boot sync decision, together with overdue scheduled lite/full tasks. "
-                    "At most one sync runs at startup: any full demand wins (overdue full, Full mode, or Auto when a first full is still needed); "
-                    "otherwise lite when overdue or when Lite/Auto requests it. "
+                    "When Placeholdarr starts, it can run one Arr sync to catch up with your libraries. "
+                    "Your choice here is weighed with any overdue scheduled lite or full sync. "
+                    "If a full sync is already due, Placeholdarr runs full instead of lite. "
                     "Off means do not request a sync only because the process started; overdue schedules can still promote a full or lite run. "
                     "Full sync scans *arr catalogs and Placeholdarr roots, then add/delete placeholders as needed. "
-                    "Lite sync diffs live catalogs to the database, syncs changed titles, then scoped determination and materialization (no full filesystem scan). "
-                    "Placeholdarr work is relatively quick; media players may still take time to rescan large library changes. "
+                    "Lite sync compares live Arr catalogs to Placeholdarr's database, syncs only titles that changed, then updates placeholders for those titles (no full filesystem scan). "
+                    "Media players still need to rescan before new or removed placeholders show up in your libraries. "
                     "A full sync will automatically start in the background at the completion of this setup."
                 ),
                 "type": "choice",
                 "restart_required": True,
                 "options": [
-                    {"value": "auto", "label": "Auto: Full when first full is needed; otherwise request lite (overdue full still wins)"},
-                    {"value": "full", "label": "Full: always request full on every startup"},
-                    {"value": "lite", "label": "Lite: request lite (overdue full still wins)"},
-                    {"value": "off", "label": "Off: no startup request; overdue schedules still run"},
+                    {
+                        "value": "auto",
+                        "label": "Auto: full when the scheduled full sync is overdue; otherwise lite",
+                    },
+                    {"value": "full", "label": "Full: always run full on every startup"},
+                    {
+                        "value": "lite",
+                        "label": "Lite: run lite on startup (full still runs if the scheduled full sync is overdue)",
+                    },
+                    {
+                        "value": "off",
+                        "label": "Off: no startup sync; overdue schedules can still run",
+                    },
                 ],
             },
         ),
@@ -490,9 +507,10 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "PLACEHOLDER_POLICY_NEVER_TAGS",
             {
                 "section": "Library sync",
-                "label": "Never placeholder tags",
+                "label": "Never create placeholders",
                 "description": (
-                    "Movies/series with any of these Arr tags get Never on sync. Default: placeholdarr-never."
+                    "Titles with any of these Arr tags will not get placeholders on sync. "
+                    "Default: placeholdarr-never. Add your own existing Arr tags if you prefer."
                 ),
                 "type": "string_list",
                 "restart_required": False,
@@ -503,10 +521,10 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "PLACEHOLDER_POLICY_PINNED_TAGS",
             {
                 "section": "Library sync",
-                "label": "Pinned placeholder tags",
+                "label": "Always keep placeholders",
                 "description": (
-                    "Movies/series with any of these Arr tags get Pinned on sync (unless a Never tag also matches). "
-                    "Default: placeholdarr-pinned."
+                    "Titles with any of these Arr tags always keep placeholders on sync. "
+                    "Default: placeholdarr-pinned. If a Never-create tag also matches, Never wins."
                 ),
                 "type": "string_list",
                 "restart_required": False,
@@ -530,9 +548,9 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "label": "Skip placeholders for monitored titles",
                 "description": (
                     "When enabled, do not create placeholder files for movies or episodes that are monitored in "
-                    "Radarr or Sonarr (and have no real file). Existing placeholders are removed on the next ARR sync "
-                    "after monitoring is detected. Import still removes placeholders when a real file arrives. "
-                    "Manual monitor toggles in Radarr/Sonarr may take until the next full sync to apply."
+                    "Radarr or Sonarr (even ones that have no real file yet). Import still removes placeholders when "
+                    "a real file arrives. Manual monitor toggles in Radarr/Sonarr may take until the next full sync "
+                    "to apply."
                 ),
                 "type": "bool",
                 "restart_required": False,
@@ -544,8 +562,8 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "section": "Library sync",
                 "label": "TV: skip when series is monitored (Sonarr)",
                 "description": (
-                    "When the series is monitored in Sonarr, do not create placeholders for any episode in that show—even "
-                    "when individual seasons or episodes are unmonitored. Movies are unchanged."
+                    "When the series is monitored in Sonarr, do not create placeholders for any episode in that show, "
+                    "even when individual seasons or episodes are unmonitored. Movies are unchanged."
                 ),
                 "type": "bool",
                 "restart_required": False,
@@ -571,7 +589,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "CALENDAR_SYNC_INTERVAL_HOURS",
             {
                 "section": "Calendar",
-                "label": "Calendar sync interval (hours, legacy)",
+                "label": "Calendar sync interval (hours)",
                 "description": (
                     "Only used when lite sync interval is 0. When lite sync is enabled, calendar date refresh and "
                     "status updates run as part of lite sync instead. Set to 0 to disable."
@@ -609,12 +627,59 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "TV_PLACEHOLDER_DENSITY",
+            {
+                "section": "Lookahead",
+                "label": "TV placeholder density",
+                "description": (
+                    "How many TV placeholder files Placeholdarr writes on disk (library detail). "
+                    "Separate from Search mode below, which controls how wide Sonarr searches on play. "
+                    "Episode density is mostly informational when Search mode is Season or Series; "
+                    "most flexible requesting pairs Episode density with Episode search. "
+                    "Changing this rematerializes existing TV placeholders (Apply now or next full sync). "
+                    "Moving to Season or Series deletes per-episode placeholder files."
+                ),
+                "type": "choice",
+                "restart_required": False,
+                "options": [
+                    {"value": "episode", "label": "Episode (one placeholder per missing episode)"},
+                    {"value": "season", "label": "Season (one season placeholder per season that still needs content)"},
+                    {"value": "series", "label": "Series (one series placeholder per show that still needs content)"},
+                ],
+            },
+        ),
+        (
+            "TV_DENSITY_RETIRE_WHEN",
+            {
+                "section": "Lookahead",
+                "label": "Remove season/series placeholder when",
+                "description": (
+                    "Only applies when TV placeholder density is Season or Series. "
+                    "Episode density still removes each episode placeholder when that episode no longer needs one."
+                ),
+                "type": "choice",
+                "restart_required": False,
+                "options": [
+                    {
+                        "value": "when_no_episode_needs_placeholder",
+                        "label": "No episode still needs a placeholder (recommended)",
+                    },
+                    {
+                        "value": "when_any_episode_has_file",
+                        "label": "Any episode in the show (or season) has a real file",
+                    },
+                ],
+            },
+        ),
+        (
             "TV_PLAY_MODE",
             {
                 "section": "Lookahead",
                 "label": "Search mode",
-                "description": "How wide the Sonarr search is from the episode you played.",
-                "type": "choice",
+                "description": (
+                    "How wide the Sonarr search is when you play a placeholder "
+                    "(search targets come from catalog state, not the placeholder filename)."
+                ),                "type": "choice",
                 "restart_required": False,
                 "options": [
                     {"value": "episode", "label": "Episode"},
@@ -637,12 +702,12 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "PLAYBACK_MONITOR_ONLY_NO_SEARCH",
             {
-                "section": "Lookahead",
+                "section": "Playback",
                 "label": "Monitor only on playback (no search)",
                 "description": (
-                    "When enabled, playback marks unmonitored target episodes monitored in Sonarr but never runs "
-                    "a search or SEARCHING placeholder updates. While this is on, the two search filters below "
-                    "have no effect."
+                    "When disabled, searching on play stays on (the default); the two filters below only change which "
+                    "targets in the list are searched. When enabled, only mark unmonitored titles monitored in "
+                    "Radarr/Sonarr, without searching. While monitor only is on, those two filters have no effect."
                 ),
                 "type": "bool",
                 "restart_required": False,
@@ -651,14 +716,18 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED",
             {
-                "section": "Lookahead",
-                "label": "Do not search already-monitored episodes",
+                "section": "Playback",
+                "label": "Search already-monitored titles on playback",
                 "description": (
-                    "When enabled, target episodes already monitored in Sonarr are excluded from playback searches. "
-                    "Episodes not yet monitored are marked monitored in Sonarr and searched. When disabled, every "
-                    "target episode in your search mode can be searched, including those already monitored."
+                    "When enabled, titles already monitored in Radarr/Sonarr can be searched again on playback. "
+                    "When disabled, those titles are skipped for search (assuming Arr already searched and is "
+                    "tracking them); titles not yet monitored are marked monitored and searched. "
+                    "Leaving this off is useful if your indexers have stricter limits."
                 ),
                 "type": "bool",
+                # Stored value remains PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED (True = do not search).
+                # UI shows the affirmative "Search already-monitored…" polarity.
+                "invert_bool": True,
                 "restart_required": False,
                 "disabled_when": "PLAYBACK_MONITOR_ONLY_NO_SEARCH",
             },
@@ -666,15 +735,18 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES",
             {
-                "section": "Lookahead",
-                "label": "Do not search future episodes on playback",
+                "section": "Playback",
+                "label": "Search future titles on playback",
                 "description": (
-                    "When enabled, target episodes that have not aired yet (or unknown air dates treated as future) "
-                    "are marked monitored in Sonarr if needed but are not searched. When disabled, future episodes "
-                    "in the target list can be searched like any other. Applies to Episode, Season, and Series "
-                    "search modes."
+                    "When enabled, not-yet-released titles are searched like any other on play. When disabled, those "
+                    "titles are marked monitored if needed but are not searched on this play, which cuts API hits for "
+                    "media that is likely not available yet. For TV this uses episode air dates; for movies it uses "
+                    "your preferred movie release date from Calendar."
                 ),
                 "type": "bool",
+                # Stored value remains PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES (True = do not search).
+                # UI shows the affirmative "Search future…" polarity.
+                "invert_bool": True,
                 "restart_required": False,
                 "disabled_when": "PLAYBACK_MONITOR_ONLY_NO_SEARCH",
             },
@@ -703,10 +775,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Status Updates",
                 "label": "Project status into",
-                "description": (
-                    "Choose where bracketed placeholder status appears in media library metadata. "
-                    "Changing this can trigger a metadata placeholder refresh (now or next full sync)."
-                ),
+                "description": "",
                 "type": "choice",
                 "restart_required": True,
                 "options": [
@@ -733,8 +802,8 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "options": [
                     {"value": "off", "label": "Off (raw download, no overlay)"},
                     {"value": "grayscale", "label": "Grayscale poster"},
-                    {"value": "top_banner", "label": "Top banner — PLACEHOLDER"},
-                    {"value": "corner_logo", "label": "Corner badge — Placeholdarr logo"},
+                    {"value": "top_banner", "label": "Top banner: PLACEHOLDER"},
+                    {"value": "corner_logo", "label": "Corner badge: Placeholdarr logo"},
                 ],
             },
         ),
@@ -914,7 +983,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "ARR Integrations",
                 "label": "Radarr shared placeholder cleanup",
-                "description": "When two Radarr instances share the same Placeholdarr folder, choose when placeholder files are removed from disk. Not used when each instance maps to its own destination.",
+                "description": "When two Radarr instances share the same Placeholdarr folder (Library Root, or the same custom Library destination), pick when those placeholders are removed after a real file lands. If each instance has its own Library destination, this setting is unused; each folder is cleaned up on its own.",
                 "type": "choice",
                 "restart_required": False,
                 "default": "protect_siblings",
@@ -929,7 +998,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "ARR Integrations",
                 "label": "Sonarr shared placeholder cleanup",
-                "description": "When two Sonarr instances share the same Placeholdarr folder, choose when placeholder files are removed from disk. Not used when each instance maps to its own destination.",
+                "description": "When two Sonarr instances share the same Placeholdarr folder (Library Root, or the same custom Library destination), pick when those placeholders are removed after a real file lands. If each instance has its own Library destination, this setting is unused; each folder is cleaned up on its own.",
                 "type": "choice",
                 "restart_required": False,
                 "default": "protect_siblings",
@@ -948,9 +1017,9 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                     "Optional. The URL that ARR, Tautulli, Jellyfin, and Emby should use to call "
                     "Placeholdarr. When set, this replaces the dashboard origin in the webhook "
                     "setup instructions. Use this when the address those services should reach "
-                    "Placeholdarr at is different from the URL you use to view the dashboard — "
-                    "for example, an internal Docker/Kubernetes service name when the dashboard "
-                    "is reached through a public reverse proxy. Leave blank to use the dashboard's "
+                    "Placeholdarr at is different from the URL you use to view the dashboard "
+                    "(for example, an internal Docker/Kubernetes service name when the dashboard "
+                    "is reached through a public reverse proxy). Leave blank to use the dashboard's "
                     "own URL. Format: http(s)://host[:port] (no trailing slash)."
                 ),
                 "type": "url",
@@ -1571,6 +1640,52 @@ def _apply_runtime_library_defaults() -> None:
 _LEGACY_4K_FOLDER_KEYS = ("MOVIE_LIBRARY_4K_FOLDER", "TV_LIBRARY_4K_FOLDER")
 _LEGACY_4K_PLEX_SECTION_KEYS = ("PLEX_MOVIE_4K_SECTION_ID", "PLEX_TV_4K_SECTION_ID")
 _RETIRED_ARR_INSTANCE_FIELDS = ("role", "is_4k")
+_PLAYBACK_FUTURE_SEARCH_SUPPRESS_KEY = "PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES"
+
+
+def migrate_playback_future_search_suppress_default(session=None) -> dict[str, Any]:
+    """Freeze the old default for finished installs that never saved this key.
+
+    The runtime default flipped to suppress=True (do not search future episodes).
+    Anyone who already completed setup without a persisted row previously behaved
+    as False (search futures). Persist False once so upgrades do not change them.
+    Idempotent when a row already exists or setup is incomplete.
+    """
+    owns_session = session is None
+    session = session or get_session()
+    try:
+        setup_row = _get_row(session, SETUP_COMPLETED_KEY)
+        if not (setup_row and setup_row.value):
+            return {"ok": True, "grandfathered": False, "reason": "setup_incomplete"}
+        existing = _get_row(session, _PLAYBACK_FUTURE_SEARCH_SUPPRESS_KEY)
+        if existing is not None:
+            return {"ok": True, "grandfathered": False, "reason": "already_persisted"}
+        meta = SETTINGS_SCHEMA.get(_PLAYBACK_FUTURE_SEARCH_SUPPRESS_KEY) or {}
+        session.add(
+            AppConfig(
+                key=_PLAYBACK_FUTURE_SEARCH_SUPPRESS_KEY,
+                value=False,
+                value_type=str(meta.get("type") or "bool"),
+                restart_required=bool(meta.get("restart_required", False)),
+                description=str(meta.get("description") or ""),
+            )
+        )
+        session.commit()
+        logger.info(
+            "Grandfathered PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES=false for finished setup",
+            extra={"emoji_type": "update"},
+        )
+        return {"ok": True, "grandfathered": True}
+    except Exception as exc:
+        session.rollback()
+        logger.warning(
+            f"Playback future-search suppress default migration failed: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+        return {"ok": False, "grandfathered": False, "error": str(exc)}
+    finally:
+        if owns_session:
+            session.close()
 
 
 def migrate_legacy_library_4k_folders(session=None) -> dict[str, Any]:
@@ -1722,6 +1837,7 @@ def apply_persisted_settings(session=None) -> dict[str, Any]:
         # Own sessions so delete/rewrite commits do not share the read session below.
         migrate_legacy_library_4k_folders()
         migrate_arr_instances_drop_role_is_4k()
+        migrate_playback_future_search_suppress_default()
         rows = session.query(AppConfig).filter(AppConfig.key.in_(tuple(SETTINGS_SCHEMA.keys()))).all()
         for row in rows:
             if row.key not in SETTINGS_SCHEMA:
@@ -1817,6 +1933,8 @@ def get_settings_payload(session=None) -> dict[str, Any]:
                 entry["depends_on"] = str(meta["depends_on"])
             if meta.get("disabled_when"):
                 entry["disabled_when"] = str(meta["disabled_when"])
+            if meta.get("invert_bool"):
+                entry["invert_bool"] = True
             if meta.get("nested"):
                 entry["nested"] = True
             if key == "ARR_INSTANCES_JSON":
@@ -1950,6 +2068,16 @@ def save_settings(
             new_val = str(validated.get(key) or "").strip()
             if prev_val != new_val:
                 destination_rematerialize_keys_changed.append(key)
+
+        tv_density_rematerialize_keys_changed: list[str] = []
+        for key in TV_DENSITY_REMATERIALIZE_SETTING_KEYS:
+            if key not in validated:
+                continue
+            prev_row = _get_row(session, key)
+            prev_val = "" if not prev_row or prev_row.value is None else str(prev_row.value).strip()
+            new_val = str(validated.get(key) or "").strip()
+            if prev_val != new_val:
+                tv_density_rematerialize_keys_changed.append(key)
 
         if "LIBRARY_DESTINATION_MAP_JSON" in validated:
             raw_map = str(validated.get("LIBRARY_DESTINATION_MAP_JSON") or "").strip()
@@ -2363,6 +2491,32 @@ def save_settings(
                 )
                 destination_rematerialize_summary = {"ok": False, "error": str(dest_exc)}
 
+        tv_density_rematerialize_summary: dict[str, Any] | None = None
+        if tv_density_rematerialize_keys_changed and apply_scope:
+            effective_density_scope = str(apply_scope)
+            if effective_density_scope == "future":
+                effective_density_scope = "next_full_sync"
+            try:
+                from services.source_of_truth.tv_density_rematerialize import (
+                    execute_tv_density_rematerialize_apply_scope,
+                )
+
+                tv_density_rematerialize_summary = execute_tv_density_rematerialize_apply_scope(
+                    effective_density_scope,
+                    source="settings_save:tv_density",
+                )
+                logger.info(
+                    f"TV density rematerialize after settings save scope={effective_density_scope} "
+                    f"keys={tv_density_rematerialize_keys_changed}",
+                    extra={"emoji_type": "processing"},
+                )
+            except Exception as dens_exc:
+                logger.warning(
+                    f"TV density rematerialize after settings save failed: {dens_exc}",
+                    extra={"emoji_type": "warning"},
+                )
+                tv_density_rematerialize_summary = {"ok": False, "error": str(dens_exc)}
+
         logger.info(
             "Settings saved"
             f" partial={partial}"
@@ -2384,6 +2538,8 @@ def save_settings(
             "art_backfill": art_backfill_summary,
             "destination_rematerialize_keys_changed": destination_rematerialize_keys_changed,
             "destination_rematerialize": destination_rematerialize_summary,
+            "tv_density_rematerialize_keys_changed": tv_density_rematerialize_keys_changed,
+            "tv_density_rematerialize": tv_density_rematerialize_summary,
         }
     except Exception as exc:
         session.rollback()

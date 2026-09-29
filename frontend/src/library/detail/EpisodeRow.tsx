@@ -4,11 +4,17 @@ import type { SeriesEpisodeDetail } from "../../types/api";
 import { detailMutedChipClass, detailStatusChipClass } from "./detailFormatters";
 import { DeterminationWhyLink } from "./DeterminationWhyLink";
 import { PlaceholderPolicyCycle, type PolicySyncPhase } from "./PlaceholderPolicyCycle";
+import {
+  densityLocksEpisodePins,
+  densityPolicyUnavailableReason,
+} from "./placeholderPolicyUtils";
 
 export function EpisodeRow(props: {
   episode: SeriesEpisodeDetail;
   themeMode: ThemeMode;
   accentHex: string;
+  /** Global TV density; greys episode pins under season/series modes. */
+  tvPlaceholderDensity?: string | null;
   refreshControl?: ReactNode;
   onPolicyApplied?: () => void;
 }) {
@@ -17,6 +23,12 @@ export function EpisodeRow(props: {
   const [open, setOpen] = useState(false);
   const [policyPhase, setPolicyPhase] = useState<PolicySyncPhase>("idle");
   const hasOverview = Boolean(ep.overview?.trim());
+  const seriesGateLocked = Boolean(ep.policy_locked);
+  const densityLocked = densityLocksEpisodePins(props.tvPlaceholderDensity);
+  const episodeLocked = seriesGateLocked || densityLocked;
+  const episodeLockedReason = seriesGateLocked
+    ? "Set by series. Change the series chip to unlock."
+    : densityPolicyUnavailableReason("episode", props.tvPlaceholderDensity) || undefined;
 
   let statusChip: ReactNode;
   if (policyPhase === "creating") {
@@ -81,8 +93,8 @@ export function EpisodeRow(props: {
               blockPlaceholder={ep.block_placeholder}
               hasPlaceholder={ep.has_placeholder}
               hasFile={ep.has_file}
-              locked={Boolean(ep.policy_locked)}
-              lockedReason="Set by series. Change the series chip to unlock."
+              locked={episodeLocked}
+              lockedReason={episodeLockedReason}
               accentHex={props.accentHex}
               themeMode={props.themeMode}
               size="sm"

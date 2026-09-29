@@ -5,6 +5,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 from core.config import settings
@@ -21,6 +22,11 @@ from services.source_of_truth.placeholder_job_enqueue import (
     job_placeholder_ids as _job_placeholder_ids,
     normalize_placeholder_ids as _normalize_placeholder_ids,
     set_job_placeholder_ids as _set_job_placeholder_ids,
+)
+from services.source_of_truth.tv_density import (
+    DENSITY_PLACEHOLDER_TITLE,
+    PLACEHOLDER_KIND_SEASON_STUB,
+    PLACEHOLDER_KIND_SERIES_STUB,
 )
 
 
@@ -131,6 +137,62 @@ def _refresh_episode_nfo(session, placeholder: Placeholder, episode: Episode) ->
     target_path = str(getattr(placeholder, "path", "") or getattr(episode, "placeholder_filepath", "") or "").strip()
     if not target_path:
         return False
+
+    status = _placeholder_display_status(placeholder) or "REQUEST"
+    setattr(episode, "placeholder_status", status)
+    setattr(series, "placeholder_status", status)
+    episode_written = ensure_episode_nfo(target_path, episode, season, series)
+    series_written = ensure_series_nfo(series, folder=getattr(series, "placeholder_folder", None))
+    return bool(episode_written or series_written)
+
+
+def _refresh_density_stub_nfo(session, placeholder: Placeholder) -> bool:
+    """Rewrite episode-shaped NFO for series/season density stubs (no episode_id row)."""
+    kind = str(getattr(placeholder, "placeholder_kind", "") or "")
+    if kind not in {PLACEHOLDER_KIND_SERIES_STUB, PLACEHOLDER_KIND_SEASON_STUB}:
+        return False
+    if getattr(placeholder, "movie_id", None) or getattr(placeholder, "episode_id", None):
+        return False
+    if not getattr(placeholder, "series_id", None):
+        return False
+
+    series = session.query(Series).get(int(placeholder.series_id))
+    if series is None:
+        return False
+
+    target_path = str(getattr(placeholder, "path", "") or "").strip()
+    if not target_path:
+        return False
+
+    season = None
+    if getattr(placeholder, "season_id", None):
+        season = session.query(Season).get(int(placeholder.season_id))
+    if season is None and kind == PLACEHOLDER_KIND_SERIES_STUB:
+        season = (
+            session.query(Season)
+            .filter(Season.series_id == int(series.id), Season.season_number == 1)
+            .first()
+        )
+    if season is None:
+        season = SimpleNamespace(
+            id=None,
+            series_id=series.id,
+            season_number=1,
+            title=f"{series.title} Season 01",
+            year=getattr(series, "year", None) or 0,
+        )
+
+    episode = SimpleNamespace(
+        id=None,
+        season_id=getattr(season, "id", None),
+        episode_number=1,
+        title=DENSITY_PLACEHOLDER_TITLE,
+        air_date=None,
+        overview=None,
+        sonarr_episode_overview=None,
+        runtime=getattr(series, "sonarr_runtime", None),
+        absolute_episode_number=None,
+    )
 
     status = _placeholder_display_status(placeholder) or "REQUEST"
     setattr(episode, "placeholder_status", status)
@@ -328,6 +390,12 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
             if episode and _refresh_episode_nfo(session, placeholder, episode):
                 refreshed += 1
                 refreshed_for_player_push.append((placeholder, ("episode", int(episode.id))))
+                continue
+            if _refresh_density_stub_nfo(session, placeholder):
+                refreshed += 1
+                kind = str(getattr(placeholder, "placeholder_kind", "") or "") or "series_stub"
+                entity_id = int(placeholder.season_id or placeholder.series_id or placeholder.id)
+                refreshed_for_player_push.append((placeholder, (kind, entity_id)))
     finally:
         stop_nfo_hb.set()
 

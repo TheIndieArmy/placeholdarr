@@ -304,7 +304,7 @@ export function ArrAddModal(props: {
           <div>
             <h2 className={theme.heading}>Add to {arrLabel}</h2>
             <p className={`mt-1 ${theme.muted}`}>
-              {props.items.length} title{props.items.length === 1 ? "" : "s"} — membership in Plex updates after ARR
+              {props.items.length} title{props.items.length === 1 ? "" : "s"}. Membership in Plex updates after ARR
               webhook and Placeholdarr sync.
             </p>
           </div>

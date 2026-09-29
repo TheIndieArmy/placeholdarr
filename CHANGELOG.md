@@ -5,7 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog,
 and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
+Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Released**.
+
 ## [Unreleased]
+
+## Pre-release
+
+### [0.11.0-beta.1] - 2026-09-28
+
+#### Summary
+
+- **TV placeholder density**: Episode, season, or series placeholder files, with retire-when and rematerialize prompts.
+- **Play-first setup**: Welcome → Play → Players → Arr → Folders → Watching → Appearance; `/setup/preview` mirrors live without saving.
+- **Playback filters**: Monitor/search toggles apply to movies and TV under Settings → Playback.
+- **Lookahead default**: New installs default to 3 episodes ahead (was 5).
+- **What's new TV density / play-first (0.11.0-beta.1)**: Startup ack for density and play-first setup.
+
+#### Added
+
+- **Play-first onboarding**: Unfinished `/setup` uses Welcome → Play → Players → Arr → Folders → Watching → Appearance (Routing when needed).
+- **Setup preview**: `/setup/preview` mirrors live Play-first setup with current settings and does not save.
+- **What's new TV density / play-first (0.11.0-beta.1)**: Startup ack for TV placeholder density and play-first setup.
+- **TV placeholder density**: Settings for how many TV placeholder files to write (episode, season, or series), with retire-when options for season/series placeholders. Series density creates one playable S01E01 placeholder per show; season density creates one sNNe01 placeholder per season that still needs content.
+- **TV density apply scope**: Changing density or retire-when prompts Apply now or next full sync; consolidating to Season/Series warns that per-episode placeholders will be deleted.
+- **Tracearr thin playback fallbacks**: When a stream webhook has a Plex `ratingKey` but missing path/ids, Placeholdarr asks Plex for Guids and path; series/season density placeholders also resolve via title/path markers and active density rows when catalog kind would stay unknown.
+- **DOWNLOAD_UNAVAILABLE status**: When Arr reports `downloadClientUnavailable` or a queue warning/error/failed, Placeholdarr sets a terminal status with a Status Updates message and stops queue monitoring for that title.
+
+#### Changed
+
+- **Lookahead range default**: New installs default to 3 episodes ahead (was 5). Existing saved values are unchanged.
+- **Retire-when on Play**: Season/series placeholder retire-when sits below Customize profile; greyed out for episode density. Settings → Lookahead matches.
+- **Playback section**: Monitor-only and search filters moved out of Lookahead into Settings → Playback; they apply to movie and TV placeholder plays.
+- **Movie playback filters**: Monitor only, already-monitored, and future-title suppress now apply to Radarr placeholder plays (movie future uses the preferred Calendar release date).
+- **TV play profiles**: Play step and Settings → Lookahead offer starting profiles that pair density with Search mode; Customize (Play) or the fields below still edit each setting.
+- **Episode density star**: Star says most flexible requesting only when Search mode is Episode; otherwise mostly informational detail.
+- **Search future titles on playback**: Affirmative Playback toggle; default is off (do not search unaired / not-yet-released). Finished installs without a saved value are grandfathered to the old search-on behavior so upgrades do not flip them.
+- **Search already-monitored titles on playback**: Affirmative Playback toggle (same stored suppress flag); default unchanged.
+- **TV density sync detail GETs**: Season/series density skips per-episode Sonarr still and episode-file detail requests; bulk `has_file` / air dates still sync.
+- **TV density determination**: Season/series density uses a fast path that marks leftover episode placeholders obsolete and otherwise `not_needed`, without full per-episode placeholder evaluation.
+- **Tracearr webhook flatten**: Copies Plex `ratingKey` into `media.ids` so playback resolve can use it.
+- **Density pin hover copy**: Under Season density, episode pins are greyed with a tip to pin the season or series instead. Under Series density, episode and season pins are greyed with a tip to pin the series instead.
+- **Density wording**: User-facing copy uses episode / season / series placeholder (not stub) in Settings, Lookahead help, rematerialize prompts, pin tips, queue-monitor activity, density filenames, and NFO titles.
+
+#### Removed
+
+- **Setup lab**: Dropped `/setup/lab` and the experimental lab step lists after Play-first cutover. Use `/setup/preview` to walk live setup without saving.
+
+#### Fixed
+
+- **TV density apply estimate**: The Apply now count for density changes includes only TV placeholders (movies are excluded).
+- **TV density placeholders**: Season/series placeholder creation uses the same dummy video resolution as episode placeholders (`/config/dummy.mp4` fallback), so Apply now no longer fails with `DUMMY_FILE_PATH missing`.
+- **Density stub playback status**: Season/series stub plays only project SEARCHING when an Arr search was actually triggered (monitor-only / future suppress no longer flip the stub to SEARCHING).
+- **Season detail density stubs**: Season PH counts and policy chips use season stub Placeholder rows under season density (not episode `has_placeholder`).
+- **Gated density stub SEARCH_QUEUED**: While startup sync is gated, playing a season/series density stub sets SEARCH_QUEUED on the stub Placeholder (not only episode rows).
+- **Gated playback series resolve**: SEARCH_QUEUED falls back to `path_info.series_id` when `_find_series_rows` misses (episode-level TVDB / density stub).
+- **Density stub detection respects density**: Season/series stub path helpers ignore leftover stub rows/filenames when `TV_PLACEHOLDER_DENSITY` is no longer season/series.
+- **Season density stub path match**: When the played path does not exactly match a stub row, resolve by season from the filename/folder (or webhook season). Do not fall back to the first stub for the show.
+- **Playback catalog TVDB**: Episode-level TVDB Guids from Plex/Tracearr match Sonarr episode ids, not only series TVDB.
+- **Density placeholder NFO refresh**: Series/season density status changes rewrite the placeholder NFO (and push player metadata); previously only movie/episode placeholders were refreshed, so density files could keep showing REQUEST.
+
+## Released
 
 ## [0.10.3] - 2026-09-28
 

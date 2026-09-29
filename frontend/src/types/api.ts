@@ -405,6 +405,8 @@ export interface SeriesDetailResponse {
   placeholder_policy?: "auto" | "never" | "pinned";
   force_placeholder?: boolean;
   block_placeholder?: boolean;
+  /** Current TV placeholder density setting (episode | season | series). */
+  tv_placeholder_density?: "episode" | "season" | "series" | string | null;
   placeholder_policy_source?: "manual" | "tag" | null;
   policy_tag_control?: PolicyTagControl | null;
   first_aired?: string | null;
@@ -540,6 +542,8 @@ export interface SettingsField {
   depends_on?: string;
   /** When set, the field is non-interactive while the parent bool setting is enabled. */
   disabled_when?: string;
+  /** When true, the UI toggle is the opposite of the stored bool (store still uses the schema key semantics). */
+  invert_bool?: boolean;
   /** Indent under the parent setting in the settings UI. */
   nested?: boolean;
 }

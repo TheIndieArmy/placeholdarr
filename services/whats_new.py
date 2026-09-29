@@ -217,6 +217,26 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         cta_path="/settings/dummy-video",
         requires_ack=True,
     ),
+    WhatsNewNotice(
+        id="tv-density-play-first-0-11-0-beta-1",
+        since_version="0.11.0-beta.1",
+        title="TV placeholder density and play-first setup",
+        body=(
+            "This beta adds TV placeholder density and a Play-first setup flow.\n\n"
+            "On Play (and Settings → Lookahead) you can start from a profile, then choose how many TV "
+            "placeholder files to write: every missing episode, one per season that still needs content, "
+            "or one per show. Season and series density include retire-when (greyed out for Every episode). "
+            "Changing density prompts Apply now or next full sync.\n\n"
+            "New installs use Welcome → Play → Players → Arr → Folders → Watching → Appearance. "
+            "/setup/preview mirrors that flow without saving. Lookahead for new installs defaults to 3 "
+            "episodes ahead (your saved value is unchanged). Playback monitor/search toggles now apply to "
+            "movies and TV under Settings → Playback.\n\n"
+            "This is a beta. Please report issues on GitHub if density rematerialize or playback looks wrong."
+        ),
+        cta_label="Open Lookahead",
+        cta_path="/settings/lookahead",
+        requires_ack=True,
+    ),
 )
 
 
