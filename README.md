@@ -10,8 +10,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/TheIndieArmy/placeholdarr/pkgs/container/placeholdarr"><img alt="GHCR" src="https://img.shields.io/badge/GHCR-placeholdarr-blue?logo=github" /></a>
-  <a href="CHANGELOG.md"><img alt="Changelog" src="https://img.shields.io/badge/changelog-Keep%20a%20Changelog-informational" /></a>
+  <a href="https://github.com/TheIndieArmy/placeholdarr/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/TheIndieArmy/placeholdarr?label=release" /></a>
+  <a href="https://github.com/TheIndieArmy/placeholdarr/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/TheIndieArmy/placeholdarr?style=flat&logo=github" /></a>
 </p>
 
 ---
