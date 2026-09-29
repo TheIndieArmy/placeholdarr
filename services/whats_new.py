@@ -220,18 +220,18 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
     WhatsNewNotice(
         id="tv-density-play-first-0-11-0-beta-1",
         since_version="0.11.0-beta.1",
-        title="TV placeholder density and play-first setup",
+        title="More options to keep you in control",
         body=(
-            "This beta adds TV placeholder density and a Play-first setup flow.\n\n"
-            "On Play (and Settings → Lookahead) you can start from a profile, then choose how many TV "
-            "placeholder files to write: every missing episode, one per season that still needs content, "
-            "or one per show. Season and series density include retire-when (greyed out for Every episode). "
-            "Changing density prompts Apply now or next full sync.\n\n"
-            "New installs use Welcome → Play → Players → Arr → Folders → Watching → Appearance. "
-            "/setup/preview mirrors that flow without saving. Lookahead for new installs defaults to 3 "
-            "episodes ahead (your saved value is unchanged). Playback monitor/search toggles now apply to "
-            "movies and TV under Settings → Playback.\n\n"
-            "This is a beta. Please report issues on GitHub if density rematerialize or playback looks wrong."
+            "Choose episode, season, or series density to decide what placeholders represent in your "
+            "media library. Match them to what you care about most, and show fewer than before. "
+            "That means less to scan and rematerialize, so full syncs go faster and media player "
+            "scans stay lighter. Or keep things just the way they have been with episode density "
+            "to continue getting the full picture in media players.\n\n"
+            "Playback filters expand beyond just TV. Apply monitor-only, re-search monitored, or "
+            "search unreleased to movies as well, and set them per destination folder. More "
+            "customization, more control, Placeholdarr working the way you want.\n\n"
+            "These features are first releasing as beta. Please don't hesitate to report any "
+            "issues on GitHub."
         ),
         cta_label="Open Lookahead",
         cta_path="/settings/lookahead",

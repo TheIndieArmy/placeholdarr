@@ -700,55 +700,52 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
-            "PLAYBACK_MONITOR_ONLY_NO_SEARCH",
+            "PLAYBACK_MONITOR_ONLY_DESTS",
             {
                 "section": "Playback",
                 "label": "Monitor only on playback (no search)",
                 "description": (
-                    "When disabled, searching on play stays on (the default); the two filters below only change which "
-                    "targets in the list are searched. When enabled, only mark unmonitored titles monitored in "
-                    "Radarr/Sonarr, without searching. While monitor only is on, those two filters have no effect."
+                    "Pick library destinations where play only marks titles monitored in Radarr/Sonarr, without "
+                    "searching. Leave empty to search on play everywhere (the default). On destinations listed "
+                    "here, the two filters below do not apply."
                 ),
-                "type": "bool",
+                "type": "string_list",
                 "restart_required": False,
+                "default": [],
+                "playback_dest_filter": True,
             },
         ),
         (
-            "PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED",
+            "PLAYBACK_SEARCH_ALREADY_MONITORED_DESTS",
             {
                 "section": "Playback",
                 "label": "Search already-monitored titles on playback",
                 "description": (
-                    "When enabled, titles already monitored in Radarr/Sonarr can be searched again on playback. "
-                    "When disabled, those titles are skipped for search (assuming Arr already searched and is "
-                    "tracking them); titles not yet monitored are marked monitored and searched. "
-                    "Leaving this off is useful if your indexers have stricter limits."
+                    "Pick destinations where titles already monitored in Radarr/Sonarr can be searched again on "
+                    "play. Destinations not listed skip search for already-monitored titles (unmonitored targets "
+                    "are still monitored, then searched). Useful when indexers have stricter limits."
                 ),
-                "type": "bool",
-                # Stored value remains PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED (True = do not search).
-                # UI shows the affirmative "Search already-monitored…" polarity.
-                "invert_bool": True,
+                "type": "string_list",
                 "restart_required": False,
-                "disabled_when": "PLAYBACK_MONITOR_ONLY_NO_SEARCH",
+                "default": [],
+                "playback_dest_filter": True,
             },
         ),
         (
-            "PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES",
+            "PLAYBACK_SEARCH_FUTURE_DESTS",
             {
                 "section": "Playback",
                 "label": "Search future titles on playback",
                 "description": (
-                    "When enabled, not-yet-released titles are searched like any other on play. When disabled, those "
-                    "titles are marked monitored if needed but are not searched on this play, which cuts API hits for "
-                    "media that is likely not available yet. For TV this uses episode air dates; for movies it uses "
-                    "your preferred movie release date from Calendar."
+                    "Pick destinations where not-yet-released titles are searched on play like any other. "
+                    "Destinations not listed still monitor those titles when needed but do not search them on "
+                    "this play. For TV this uses episode air dates; for movies it uses your preferred Calendar "
+                    "release date."
                 ),
-                "type": "bool",
-                # Stored value remains PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES (True = do not search).
-                # UI shows the affirmative "Search future…" polarity.
-                "invert_bool": True,
+                "type": "string_list",
                 "restart_required": False,
-                "disabled_when": "PLAYBACK_MONITOR_ONLY_NO_SEARCH",
+                "default": [],
+                "playback_dest_filter": True,
             },
         ),
         (
@@ -1641,6 +1638,13 @@ _LEGACY_4K_FOLDER_KEYS = ("MOVIE_LIBRARY_4K_FOLDER", "TV_LIBRARY_4K_FOLDER")
 _LEGACY_4K_PLEX_SECTION_KEYS = ("PLEX_MOVIE_4K_SECTION_ID", "PLEX_TV_4K_SECTION_ID")
 _RETIRED_ARR_INSTANCE_FIELDS = ("role", "is_4k")
 _PLAYBACK_FUTURE_SEARCH_SUPPRESS_KEY = "PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES"
+_PLAYBACK_LEGACY_MONITOR_ONLY_KEY = "PLAYBACK_MONITOR_ONLY_NO_SEARCH"
+_PLAYBACK_LEGACY_SUPPRESS_MONITORED_KEY = "PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED"
+_PLAYBACK_DEST_FILTER_KEYS = (
+    "PLAYBACK_MONITOR_ONLY_DESTS",
+    "PLAYBACK_SEARCH_ALREADY_MONITORED_DESTS",
+    "PLAYBACK_SEARCH_FUTURE_DESTS",
+)
 
 
 def migrate_playback_future_search_suppress_default(session=None) -> dict[str, Any]:
@@ -1650,6 +1654,9 @@ def migrate_playback_future_search_suppress_default(session=None) -> dict[str, A
     Anyone who already completed setup without a persisted row previously behaved
     as False (search futures). Persist False once so upgrades do not change them.
     Idempotent when a row already exists or setup is incomplete.
+
+    Writes the legacy bool key; :func:`migrate_playback_filters_to_dest_lists` converts
+    it into ``PLAYBACK_SEARCH_FUTURE_DESTS``.
     """
     owns_session = session is None
     session = session or get_session()
@@ -1657,17 +1664,18 @@ def migrate_playback_future_search_suppress_default(session=None) -> dict[str, A
         setup_row = _get_row(session, SETUP_COMPLETED_KEY)
         if not (setup_row and setup_row.value):
             return {"ok": True, "grandfathered": False, "reason": "setup_incomplete"}
+        if _get_row(session, "PLAYBACK_SEARCH_FUTURE_DESTS") is not None:
+            return {"ok": True, "grandfathered": False, "reason": "dest_lists_present"}
         existing = _get_row(session, _PLAYBACK_FUTURE_SEARCH_SUPPRESS_KEY)
         if existing is not None:
             return {"ok": True, "grandfathered": False, "reason": "already_persisted"}
-        meta = SETTINGS_SCHEMA.get(_PLAYBACK_FUTURE_SEARCH_SUPPRESS_KEY) or {}
         session.add(
             AppConfig(
                 key=_PLAYBACK_FUTURE_SEARCH_SUPPRESS_KEY,
                 value=False,
-                value_type=str(meta.get("type") or "bool"),
-                restart_required=bool(meta.get("restart_required", False)),
-                description=str(meta.get("description") or ""),
+                value_type="bool",
+                restart_required=False,
+                description="Legacy playback future-search suppress (migrated to dest lists).",
             )
         )
         session.commit()
@@ -1683,6 +1691,105 @@ def migrate_playback_future_search_suppress_default(session=None) -> dict[str, A
             extra={"emoji_type": "warning"},
         )
         return {"ok": False, "grandfathered": False, "error": str(exc)}
+    finally:
+        if owns_session:
+            session.close()
+
+
+def _delete_legacy_playback_filter_bools(session) -> list[str]:
+    legacy_keys = (
+        _PLAYBACK_LEGACY_MONITOR_ONLY_KEY,
+        _PLAYBACK_LEGACY_SUPPRESS_MONITORED_KEY,
+        _PLAYBACK_FUTURE_SEARCH_SUPPRESS_KEY,
+    )
+    deleted: list[str] = []
+    rows = session.query(AppConfig).filter(AppConfig.key.in_(legacy_keys)).all()
+    for row in rows:
+        deleted.append(str(row.key))
+        session.delete(row)
+    return deleted
+
+
+def migrate_playback_filters_to_dest_lists(session=None) -> dict[str, Any]:
+    """Convert legacy playback filter booleans into per-destination string lists.
+
+    Affirmative list membership = behavior on for that dest_folder.
+    - monitor-only true → all selectable dests; false → []
+    - suppress already-monitored false → all dests (search monitored on); true → []
+    - suppress future false → all dests; true → []
+    Fresh installs with no legacy rows: monitor=[], search-monitored=all, search-future=[].
+    Idempotent when dest-list keys already exist. Deletes legacy bool rows after convert.
+    """
+    owns_session = session is None
+    session = session or get_session()
+    try:
+        existing_dest = {key: _get_row(session, key) for key in _PLAYBACK_DEST_FILTER_KEYS}
+        if all(row is not None for row in existing_dest.values()):
+            deleted = _delete_legacy_playback_filter_bools(session)
+            if deleted:
+                session.commit()
+            return {"ok": True, "migrated": False, "reason": "already_dest_lists", "deleted_legacy": deleted}
+
+        from services.playback_dest_filters import all_selectable_dest_folders
+
+        all_dests = all_selectable_dest_folders()
+        all_dests_json = json.dumps(all_dests)
+        empty_json = "[]"
+
+        def _legacy_bool(key: str, default: bool) -> bool:
+            row = _get_row(session, key)
+            if row is None or row.value is None:
+                return default
+            return _coerce_bool(row.value)
+
+        monitor_only = _legacy_bool(_PLAYBACK_LEGACY_MONITOR_ONLY_KEY, False)
+        suppress_monitored = _legacy_bool(_PLAYBACK_LEGACY_SUPPRESS_MONITORED_KEY, False)
+        suppress_future = _legacy_bool(_PLAYBACK_FUTURE_SEARCH_SUPPRESS_KEY, True)
+
+        values = {
+            "PLAYBACK_MONITOR_ONLY_DESTS": all_dests_json if monitor_only else empty_json,
+            "PLAYBACK_SEARCH_ALREADY_MONITORED_DESTS": (
+                empty_json if suppress_monitored else all_dests_json
+            ),
+            "PLAYBACK_SEARCH_FUTURE_DESTS": empty_json if suppress_future else all_dests_json,
+        }
+
+        for key, value in values.items():
+            if existing_dest.get(key) is not None:
+                continue
+            meta = SETTINGS_SCHEMA.get(key) or {}
+            session.add(
+                AppConfig(
+                    key=key,
+                    value=value,
+                    value_type=str(meta.get("type") or "string_list"),
+                    restart_required=bool(meta.get("restart_required", False)),
+                    description=str(meta.get("description") or ""),
+                )
+            )
+            _set_runtime_value(key, value)
+
+        deleted = _delete_legacy_playback_filter_bools(session)
+        session.commit()
+        logger.info(
+            "Migrated playback filters to destination lists "
+            f"(monitor_only={monitor_only}, suppress_monitored={suppress_monitored}, "
+            f"suppress_future={suppress_future}, dests={len(all_dests)}, deleted_legacy={deleted})",
+            extra={"emoji_type": "update"},
+        )
+        return {
+            "ok": True,
+            "migrated": True,
+            "dest_count": len(all_dests),
+            "deleted_legacy": deleted,
+        }
+    except Exception as exc:
+        session.rollback()
+        logger.warning(
+            f"Playback dest-filter migration failed: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+        return {"ok": False, "migrated": False, "error": str(exc)}
     finally:
         if owns_session:
             session.close()
@@ -1837,7 +1944,12 @@ def apply_persisted_settings(session=None) -> dict[str, Any]:
         # Own sessions so delete/rewrite commits do not share the read session below.
         migrate_legacy_library_4k_folders()
         migrate_arr_instances_drop_role_is_4k()
+        # Apply path/dest settings before playback dest-list migration so "all dests"
+        # is not empty when LIBRARY_ROOT / folders / map already exist in the DB.
+        _preload_library_path_settings_for_migration(session)
+        _apply_runtime_library_defaults()
         migrate_playback_future_search_suppress_default()
+        migrate_playback_filters_to_dest_lists()
         rows = session.query(AppConfig).filter(AppConfig.key.in_(tuple(SETTINGS_SCHEMA.keys()))).all()
         for row in rows:
             if row.key not in SETTINGS_SCHEMA:
@@ -1850,6 +1962,20 @@ def apply_persisted_settings(session=None) -> dict[str, Any]:
     finally:
         if owns_session:
             session.close()
+
+
+def _preload_library_path_settings_for_migration(session) -> None:
+    """Load dest-related keys into runtime settings before dest-list migration."""
+    path_keys = (
+        "LIBRARY_ROOT",
+        "MOVIE_LIBRARY_FOLDER",
+        "TV_LIBRARY_FOLDER",
+        "LIBRARY_DESTINATION_MAP_JSON",
+    )
+    for key in path_keys:
+        row = _get_row(session, key)
+        if row is not None and not _is_blank(row.value):
+            _set_runtime_value(key, row.value)
 
 
 def get_onboarding_status(session=None) -> dict[str, Any]:
@@ -1937,6 +2063,8 @@ def get_settings_payload(session=None) -> dict[str, Any]:
                 entry["invert_bool"] = True
             if meta.get("nested"):
                 entry["nested"] = True
+            if meta.get("playback_dest_filter"):
+                entry["playback_dest_filter"] = True
             if key == "ARR_INSTANCES_JSON":
                 redacted_value, any_saved = _redact_arr_instances_json_for_payload(effective_value)
                 entry["value"] = redacted_value
@@ -1945,12 +2073,14 @@ def get_settings_payload(session=None) -> dict[str, Any]:
             grouped[meta["section"]].append(entry)
 
         from services.auth import ensure_webhook_api_key
+        from services.library_destinations import selectable_playback_dests
 
         return {
             "status": get_onboarding_status(session=session),
             "sections": [{"name": name, "fields": fields} for name, fields in grouped.items()],
             # Own session: do not commit the settings-read transaction.
             "webhook_api_key": ensure_webhook_api_key(),
+            "playback_dest_options": selectable_playback_dests(),
         }
     finally:
         if owns_session:

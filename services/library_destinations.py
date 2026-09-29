@@ -331,25 +331,21 @@ def resolve_series_dest(
 
 def all_configured_dest_roots(*, map_rows: list[dict[str, Any]] | None = None) -> list[str]:
     """All Placeholdarr destination folders (default movie/TV + mapped dests), deduped."""
-    rows = map_rows if map_rows is not None else parse_library_destination_map()
-    roots: list[str] = []
-    for folder in (default_movie_dest_folder(), default_tv_dest_folder()):
-        if folder:
-            roots.append(folder)
-    for row in rows:
-        dest = str(row.get("dest_folder") or "").strip()
-        if dest:
-            roots.append(dest)
-    # Preserve order, drop empties/dupes (case-sensitive path strings as configured).
-    out: list[str] = []
-    seen: set[str] = set()
-    for root in roots:
-        key = _normalize_path(root).lower()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        out.append(root)
-    return out
+    grouped = selectable_playback_dests(map_rows=map_rows)
+    return list(grouped["movies"]) + list(grouped["tv"])
+
+
+def selectable_playback_dests(*, map_rows: list[dict[str, Any]] | None = None) -> dict[str, list[str]]:
+    """Dest folders for Playback filter multi-select, grouped Movies / TV (normalized paths)."""
+    return {
+        "movies": all_movie_dest_roots(map_rows=map_rows),
+        "tv": all_tv_dest_roots(map_rows=map_rows),
+    }
+
+
+def normalize_dest_folder(path: str | None) -> str:
+    """Public wrapper for dest path normalization (membership checks / settings)."""
+    return _normalize_path(path)
 
 
 def all_movie_dest_roots(*, map_rows: list[dict[str, Any]] | None = None) -> list[str]:

@@ -2128,6 +2128,9 @@ def _run_movie_search_for_row(session, movie_row: Movie) -> dict[str, Any]:
 
     was_monitored = bool(getattr(movie_row, 'radarr_monitored', False))
     is_future = movie_is_future_for_playback_search(movie_row)
+    from services.playback_dest_filters import dest_folder_for_movie_row
+
+    dest_folder = dest_folder_for_movie_row(movie_row)
 
     monitored_updated = False
     if not was_monitored and getattr(movie_row, 'radarrid', None):
@@ -2138,11 +2141,11 @@ def _run_movie_search_for_row(session, movie_row: Movie) -> dict[str, Any]:
 
     search_triggered = False
     skipped_search_reason: str | None = None
-    if _playback_monitor_only_no_search():
+    if _playback_monitor_only_no_search(dest_folder):
         skipped_search_reason = "monitor_only_no_search"
-    elif was_monitored and _suppress_search_for_already_monitored():
+    elif was_monitored and _suppress_search_for_already_monitored(dest_folder):
         skipped_search_reason = "already_monitored"
-    elif is_future and _suppress_search_for_future_titles():
+    elif is_future and _suppress_search_for_future_titles(dest_folder):
         skipped_search_reason = "future_only"
     elif getattr(movie_row, 'radarrid', None):
         search_triggered = trigger_radarr_movie_search(int(movie_row.radarrid), url=base_url, api_key=api_key)
@@ -2159,6 +2162,7 @@ def _run_movie_search_for_row(session, movie_row: Movie) -> dict[str, Any]:
         'media_type': 'movie',
         'movie_id': int(movie_row.id),
         'instance': instance_key,
+        'dest_folder': dest_folder or '',
         'monitored_updated': monitored_updated,
         'search_triggered': bool(search_triggered),
         'skipped_search_reason': skipped_search_reason,
@@ -2176,16 +2180,22 @@ def _episode_season_number(session, episode: Episode) -> int:
     return int(getattr(season_row, "season_number", 0) or 0) if season_row else 0
 
 
-def _suppress_search_for_already_monitored() -> bool:
-    return bool(getattr(settings, "PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED", False))
+def _suppress_search_for_already_monitored(dest_folder: str | None = None) -> bool:
+    from services.playback_dest_filters import suppress_search_already_monitored_for_dest
+
+    return suppress_search_already_monitored_for_dest(dest_folder)
 
 
-def _suppress_search_for_future_titles() -> bool:
-    return bool(getattr(settings, "PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES", True))
+def _suppress_search_for_future_titles(dest_folder: str | None = None) -> bool:
+    from services.playback_dest_filters import suppress_search_future_for_dest
+
+    return suppress_search_future_for_dest(dest_folder)
 
 
-def _playback_monitor_only_no_search() -> bool:
-    return bool(getattr(settings, "PLAYBACK_MONITOR_ONLY_NO_SEARCH", False))
+def _playback_monitor_only_no_search(dest_folder: str | None = None) -> bool:
+    from services.playback_dest_filters import monitor_only_for_dest
+
+    return monitor_only_for_dest(dest_folder)
 
 
 def _partition_playback_targets(
@@ -2194,6 +2204,7 @@ def _partition_playback_targets(
     targets: list[Episode],
     *,
     now_date: date | None = None,
+    dest_folder: str | None = None,
 ) -> dict[str, Any]:
     """Split lookahead targets into monitor vs search buckets."""
     eff = now_date or datetime.now(timezone.utc).date()
@@ -2204,6 +2215,9 @@ def _partition_playback_targets(
     search_eligible: list[Episode] = []
     future_episodes: list[Episode] = []
     is_future_by_episode: list[bool] = []
+    monitor_only = _playback_monitor_only_no_search(dest_folder)
+    suppress_future = (not monitor_only) and _suppress_search_for_future_titles(dest_folder)
+    suppress_monitored = (not monitor_only) and _suppress_search_for_already_monitored(dest_folder)
 
     for ep in targets:
         season_number = _episode_season_number(session, ep)
@@ -2220,19 +2234,23 @@ def _partition_playback_targets(
         if not bool(getattr(ep, "sonarr_monitored", False)):
             to_monitor.append(ep)
 
-        if is_future and _suppress_search_for_future_titles():
+        if monitor_only:
             continue
-        if bool(getattr(ep, "sonarr_monitored", False)) and _suppress_search_for_already_monitored():
+        if is_future and suppress_future:
+            continue
+        if bool(getattr(ep, "sonarr_monitored", False)) and suppress_monitored:
             continue
         search_eligible.append(ep)
 
     skipped_search_reason: str | None = None
-    if not search_eligible and targets:
-        if future_episodes and _suppress_search_for_future_titles():
+    if monitor_only and targets:
+        skipped_search_reason = "monitor_only_no_search"
+    elif not search_eligible and targets:
+        if future_episodes and suppress_future:
             skipped_search_reason = "future_only"
         elif not to_monitor:
             skipped_search_reason = "no_unmonitored_search_targets"
-        elif _suppress_search_for_already_monitored():
+        elif suppress_monitored:
             skipped_search_reason = "suppressed_monitored"
 
     monitor_ids = [int(ep.sonarrid) for ep in to_monitor if getattr(ep, "sonarrid", None)]
@@ -2245,6 +2263,7 @@ def _partition_playback_targets(
         "already_monitored_count": sum(1 for ep in targets if bool(getattr(ep, "sonarr_monitored", False))),
         "search_count": len(search_eligible),
         "skipped_search_reason": skipped_search_reason,
+        "dest_folder": dest_folder or "",
     }
 
 
@@ -2373,15 +2392,14 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
     if not base_url or not api_key:
         return {'ok': False, 'reason': 'missing_series_arr_config', 'series_id': int(series_row.id), 'instance': instance_key}
 
-    partition = _partition_playback_targets(session, series_row, targets)
+    from services.playback_dest_filters import dest_folder_for_series_row
+
+    dest_folder = dest_folder_for_series_row(series_row)
+    partition = _partition_playback_targets(session, series_row, targets, dest_folder=dest_folder)
     to_monitor: list[Episode] = partition["to_monitor"]
     search_eligible: list[Episode] = partition["search_eligible"]
     monitor_ids: list[int] = partition["monitor_ids"]
     skipped_search_reason = partition.get("skipped_search_reason")
-
-    if _playback_monitor_only_no_search():
-        search_eligible = []
-        skipped_search_reason = "monitor_only_no_search"
 
     monitor_result = {"updated": 0, "failed": 0}
     if monitor_ids:

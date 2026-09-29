@@ -546,6 +546,8 @@ export interface SettingsField {
   invert_bool?: boolean;
   /** Indent under the parent setting in the settings UI. */
   nested?: boolean;
+  /** When true, Settings/Play render destination multi-select instead of freeform chips. */
+  playback_dest_filter?: boolean;
 }
 
 export interface SettingsSection {
@@ -584,6 +586,8 @@ export interface SettingsPayload {
   sections: SettingsSection[];
   /** Not a settings field — used to display webhook URLs Radarr/Sonarr/etc. need. */
   webhook_api_key?: string | null;
+  /** Library dest folders for Playback filter multi-select (Movies / TV). */
+  playback_dest_options?: { movies: string[]; tv: string[] };
 }
 
 export interface SaveSettingsResponse {

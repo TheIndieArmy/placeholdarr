@@ -1,4 +1,4 @@
-/** Shared TV density + search profiles for lab Play & search and Settings → Lookahead. */
+/** Shared TV density + search profiles for onboarding Profile and Settings → Lookahead. */
 
 export type TvDensityKey = "episode" | "season" | "series";
 export type TvSearchKey = "episode" | "season" | "series";

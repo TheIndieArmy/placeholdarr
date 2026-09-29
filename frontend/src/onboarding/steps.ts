@@ -20,12 +20,12 @@ export type OnboardingWizardStep = { key: OnboardingWizardStepKey; name: string 
 
 export const ONBOARDING_WIZARD_STEPS: readonly OnboardingWizardStep[] = [
   { key: "welcome", name: "Welcome" },
-  { key: "density_search", name: "Play" },
+  { key: "density_search", name: "Profile" },
   { key: "media", name: "Players" },
   { key: "arr", name: "Arr" },
   { key: "paths", name: "Folders" },
-  { key: "arr_routing", name: "Routing" },
-  { key: "behavior", name: "Watching" },
+  { key: "arr_routing", name: "Playback" },
+  { key: "behavior", name: "More" },
   { key: "look_and_feel", name: "Appearance" },
 ] as const;
 
@@ -59,7 +59,7 @@ export const ONBOARDING_STEP_GUIDES: Record<OnboardingWizardStepKey, OnboardingS
   density_search: {
     title: "How Placeholdarr should work",
     paragraphs: [
-      "First, pick a starting profile for how placeholders appear in your library and what happens when you play something.",
+      "First, pick a starting profile for how placeholders appear in your library and what Placeholdarr requests when you play something.",
     ],
   },
   media: {
@@ -82,14 +82,14 @@ export const ONBOARDING_STEP_GUIDES: Record<OnboardingWizardStepKey, OnboardingS
     ],
   },
   arr_routing: {
-    title: "How Arr instances work together",
+    title: "What happens when you play something",
     paragraphs: [
-      "Now that folders and destinations are set, choose how Placeholdarr should route playback between your Radarr and Sonarr instances.",
-      "Choose shared-folder cleanup, which instance to action when a placeholder or real file plays, and whether Placeholdarr should prefer a destination that matches the played path.",
+      "With your library folders in place, choose which destinations use monitor-only or search filters when a placeholder or real file is played.",
+      "If you have more than one Radarr or Sonarr, you can also choose how Placeholdarr routes that play between instances.",
     ],
   },
   behavior: {
-    title: "A few more watching options",
+    title: "A few more options",
     paragraphs: [
       "Next, we'll cover a few miscellaneous options such as how often to sync your libraries, how future content is treated, and a few related tweaks. Defaults are fine for most setups; you can refine them later in Settings.",
     ],

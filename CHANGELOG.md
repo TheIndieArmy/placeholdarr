@@ -16,16 +16,16 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 #### Summary
 
 - **TV placeholder density**: Episode, season, or series placeholder files, with retire-when and rematerialize prompts.
-- **Play-first setup**: Welcome → Play → Players → Arr → Folders → Watching → Appearance; `/setup/preview` mirrors live without saving.
-- **Playback filters**: Monitor/search toggles apply to movies and TV under Settings → Playback.
+- **Play-first setup**: Welcome → Profile → Players → Arr → Folders → Playback → More → Appearance; `/setup/preview` mirrors live without saving.
+- **Playback filters**: Monitor/search filters apply per library destination (Movies/TV folder paths) under Settings → Playback.
 - **Lookahead default**: New installs default to 3 episodes ahead (was 5).
-- **What's new TV density / play-first (0.11.0-beta.1)**: Startup ack for density and play-first setup.
+- **What's new TV density (0.11.0-beta.1)**: Startup ack for TV placeholder density (Lookahead-focused; no setup walkthrough).
 
 #### Added
 
-- **Play-first onboarding**: Unfinished `/setup` uses Welcome → Play → Players → Arr → Folders → Watching → Appearance (Routing when needed).
+- **Play-first onboarding**: Unfinished `/setup` uses Welcome → Profile → Players → Arr → Folders → Playback → More → Appearance.
 - **Setup preview**: `/setup/preview` mirrors live Play-first setup with current settings and does not save.
-- **What's new TV density / play-first (0.11.0-beta.1)**: Startup ack for TV placeholder density and play-first setup.
+- **What's new TV density (0.11.0-beta.1)**: Startup ack for TV placeholder density (Lookahead-focused; no setup walkthrough).
 - **TV placeholder density**: Settings for how many TV placeholder files to write (episode, season, or series), with retire-when options for season/series placeholders. Series density creates one playable S01E01 placeholder per show; season density creates one sNNe01 placeholder per season that still needs content.
 - **TV density apply scope**: Changing density or retire-when prompts Apply now or next full sync; consolidating to Season/Series warns that per-episode placeholders will be deleted.
 - **Tracearr thin playback fallbacks**: When a stream webhook has a Plex `ratingKey` but missing path/ids, Placeholdarr asks Plex for Guids and path; series/season density placeholders also resolve via title/path markers and active density rows when catalog kind would stay unknown.
@@ -34,13 +34,16 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 #### Changed
 
 - **Lookahead range default**: New installs default to 3 episodes ahead (was 5). Existing saved values are unchanged.
-- **Retire-when on Play**: Season/series placeholder retire-when sits below Customize profile; greyed out for episode density. Settings → Lookahead matches.
-- **Playback section**: Monitor-only and search filters moved out of Lookahead into Settings → Playback; they apply to movie and TV placeholder plays.
-- **Movie playback filters**: Monitor only, already-monitored, and future-title suppress now apply to Radarr placeholder plays (movie future uses the preferred Calendar release date).
-- **TV play profiles**: Play step and Settings → Lookahead offer starting profiles that pair density with Search mode; Customize (Play) or the fields below still edit each setting.
+- **Onboarding step names**: Profile (was Play), Playback (was Routing; always shown), More (was Watching).
+- **Playback step**: Dest-scoped monitor/search filters sit on Playback after Folders; multi-instance Arr routing nests under them only when a second instance is configured.
+- **Retire-when on Profile**: Season/series placeholder retire-when sits below Customize profile; greyed out for episode density. Settings → Lookahead matches.
+- **Playback section**: Monitor-only and search filters moved out of Lookahead into Settings → Playback.
+- **Playback filters by destination**: Monitor only, search already-monitored, and search future are destination multi-selects (Movies/TV folder paths) instead of global toggles. Existing bool settings migrate after library paths are loaded; new destinations stay off until selected.
+- **Movie playback filters**: The same destination-scoped Playback filters apply to Radarr plays (movie future uses the preferred Calendar release date).
+- **TV play profiles**: Profile step and Settings → Lookahead offer starting profiles that pair density with Search mode; Customize (Profile) or the fields below still edit each setting.
 - **Episode density star**: Star says most flexible requesting only when Search mode is Episode; otherwise mostly informational detail.
-- **Search future titles on playback**: Affirmative Playback toggle; default is off (do not search unaired / not-yet-released). Finished installs without a saved value are grandfathered to the old search-on behavior so upgrades do not flip them.
-- **Search already-monitored titles on playback**: Affirmative Playback toggle (same stored suppress flag); default unchanged.
+- **Search future titles on playback**: Destination list for searching not-yet-released titles; default empty (off). Finished installs without a saved suppress value are grandfathered so upgrades do not flip them before dest migration.
+- **Search already-monitored titles on playback**: Destination list for re-searching already-monitored titles (migrated from the former suppress toggle).
 - **TV density sync detail GETs**: Season/series density skips per-episode Sonarr still and episode-file detail requests; bulk `has_file` / air dates still sync.
 - **TV density determination**: Season/series density uses a fast path that marks leftover episode placeholders obsolete and otherwise `not_needed`, without full per-episode placeholder evaluation.
 - **Tracearr webhook flatten**: Copies Plex `ratingKey` into `media.ids` so playback resolve can use it.

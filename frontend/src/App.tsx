@@ -56,6 +56,13 @@ import placeholdarrLogoYellow from "./assets/Placeholdarr_yellow.svg";
 import type { Brand, ThemeMode } from "./brandTypes";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { SettingsStringListChips } from "./SettingsStringListChips";
+import {
+  PlaybackDestFilterControls,
+  PLAYBACK_DEST_FILTER_KEYS,
+  isPlaybackDestFilterKey,
+  playbackDestOptionsFromValues,
+} from "./settings/PlaybackDestFilterControls";
+import { UI_SECTION_FRAME_CLASS } from "./uiSectionFrame";
 import { TmdbAttribution } from "./TmdbAttribution";
 import { getBrandSemanticTokens, semanticTokensToCssVars, type BrandSemanticTokens } from "./brandSemanticTheme";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "./brandAccentUi";
@@ -246,11 +253,6 @@ const SETTINGS_SECTION_SLUGS: Record<string, string> = {
   Advanced: "advanced",
 };
 
-const LOOKAHEAD_FILTER_KEYS = [
-  "PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED",
-  "PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES",
-] as const;
-
 function settingsFieldInteractionDisabled(field: SettingsField, values: Record<string, unknown>): boolean {
   const disabledWhen = field.disabled_when;
   if (disabledWhen) {
@@ -300,85 +302,6 @@ function tmdbApiKeyConfiguredFromSettings(
   return false;
 }
 
-function isLookaheadFilterFieldKey(key: string): boolean {
-  return (LOOKAHEAD_FILTER_KEYS as readonly string[]).includes(key);
-}
-
-function snapshotLookaheadFilters(values: Record<string, unknown>): Record<string, boolean> {
-  return {
-    PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED: Boolean(
-      values.PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED,
-    ),
-    PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES: Boolean(
-      values.PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES,
-    ),
-  };
-}
-
-function settingsFieldDisplayValue(
-  field: SettingsField,
-  values: Record<string, unknown>,
-  lookaheadFilterSnapshot: Record<string, boolean> | null,
-): unknown {
-  if (
-    lookaheadFilterSnapshot &&
-    Boolean(values.PLAYBACK_MONITOR_ONLY_NO_SEARCH) &&
-    isLookaheadFilterFieldKey(field.key)
-  ) {
-    return lookaheadFilterSnapshot[field.key as keyof typeof lookaheadFilterSnapshot];
-  }
-  return values[field.key];
-}
-
-function usePlaybackLookaheadFieldControls(
-  values: Record<string, unknown>,
-  onValueChange: (key: string, value: unknown) => void,
-) {
-  const [lookaheadFilterSnapshot, setLookaheadFilterSnapshot] = useState<Record<string, boolean> | null>(null);
-  const monitorOnlyEnabled = Boolean(values.PLAYBACK_MONITOR_ONLY_NO_SEARCH);
-
-  useEffect(() => {
-    if (!monitorOnlyEnabled) {
-      setLookaheadFilterSnapshot(null);
-      return;
-    }
-    setLookaheadFilterSnapshot((prev) => prev ?? snapshotLookaheadFilters(values));
-  }, [monitorOnlyEnabled]);
-
-  const handleValueChange = useCallback(
-    (key: string, value: unknown) => {
-      if (key === "PLAYBACK_MONITOR_ONLY_NO_SEARCH") {
-        const enabling = Boolean(value);
-        const wasEnabled = Boolean(values.PLAYBACK_MONITOR_ONLY_NO_SEARCH);
-        if (enabling && !wasEnabled) {
-          setLookaheadFilterSnapshot(snapshotLookaheadFilters(values));
-          onValueChange(key, value);
-          return;
-        }
-        if (!enabling && wasEnabled) {
-          const snap = lookaheadFilterSnapshot ?? snapshotLookaheadFilters(values);
-          setLookaheadFilterSnapshot(null);
-          onValueChange(key, false);
-          onValueChange(
-            "PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED",
-            snap.PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED,
-          );
-          onValueChange("PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES", snap.PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES);
-          return;
-        }
-      }
-      onValueChange(key, value);
-    },
-    [values, onValueChange, lookaheadFilterSnapshot],
-  );
-
-  const effectiveSnapshot = monitorOnlyEnabled
-    ? (lookaheadFilterSnapshot ?? snapshotLookaheadFilters(values))
-    : null;
-
-  return { handleValueChange, effectiveSnapshot };
-}
-
 function settingsFieldIsNested(field: SettingsField): boolean {
   return Boolean(field.nested);
 }
@@ -407,11 +330,8 @@ const ONBOARDING_SECTION_TITLE_CLASS =
   "mb-3 pb-2 border-b border-[#424753]/40 text-[18px] font-headline font-bold uppercase tracking-wide text-white";
 
 /**
- * Grouped settings / onboarding section surface: raised slate panel with a brand accent3 rail on all sides.
- * Requires an ancestor that sets CSS vars (e.g. `semanticTokensToCssVars` on `.brand-theme-scope`).
+ * Grouped settings / onboarding section surface: see {@link UI_SECTION_FRAME_CLASS} in uiSectionFrame.ts.
  */
-const UI_SECTION_FRAME_CLASS =
-  "rounded-lg border border-[var(--brand-accent-3)] bg-[color:color-mix(in_srgb,var(--brand-surface-panel)_92%,var(--brand-accent-3)_8%)] shadow-lg shadow-black/15";
 
 /**
  * Media / ARR service tiles (wizard + settings grids): same accent rail and surface fill as
@@ -447,23 +367,16 @@ const WIZARD_STEPS = [
   { key: "look_and_feel", name: "Look and feel" },
 ] as const;
 
-/** Density fields chosen on the Play step; omitted from Watching when using Play-first onboarding. */
+/** Density fields chosen on the Profile step; omitted from More when using play-first onboarding. */
 const PLAY_STEP_DENSITY_FIELD_KEYS = new Set(["TV_PLACEHOLDER_DENSITY", "TV_DENSITY_RETIRE_WHEN"]);
-/** Playback modifiers shown on Play; omit Playback section from Watching when using Play-first onboarding. */
-const PLAY_STEP_PLAYBACK_MODIFIER_KEYS = new Set([
-  "PLAYBACK_MONITOR_ONLY_NO_SEARCH",
-  "PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED",
-  "PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES",
-]);
-/** Keys saved on the Play (density_search) step. */
+/** Playback dest filters saved on the Playback step; omit Playback section from More when using play-first onboarding. */
+const PLAY_STEP_PLAYBACK_MODIFIER_KEYS = new Set<string>([...PLAYBACK_DEST_FILTER_KEYS]);
+/** Keys saved on the Profile (density_search) step. */
 const DENSITY_SEARCH_STEP_KEYS = [
   "TV_PLACEHOLDER_DENSITY",
   "TV_PLAY_MODE",
   "EPISODES_LOOKAHEAD",
   "TV_DENSITY_RETIRE_WHEN",
-  "PLAYBACK_MONITOR_ONLY_NO_SEARCH",
-  "PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED",
-  "PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES",
 ] as const;
 
 type WizardStepDef = { key: string; name: string };
@@ -1043,14 +956,9 @@ export function App() {
   onboardingTourRouteRef.current = onboardingTourRoute;
   const wizardSteps: readonly WizardStepDef[] = useMemo(() => {
     if (!usePlayFirstOnboarding) return WIZARD_STEPS;
-    if (needsArrRoutingStep(fieldValues)) return ONBOARDING_WIZARD_STEPS;
-    return ONBOARDING_WIZARD_STEPS.filter((step) => step.key !== "arr_routing");
-  }, [
-    usePlayFirstOnboarding,
-    fieldValues.ARR_INSTANCES_JSON,
-    fieldValues.WIZARD_RADARR_SECONDARY_ENABLED,
-    fieldValues.WIZARD_SONARR_SECONDARY_ENABLED,
-  ]);
+    // Playback step is always shown (dest filters). Multi-instance routing UI nests under it when needed.
+    return ONBOARDING_WIZARD_STEPS;
+  }, [usePlayFirstOnboarding]);
   const onboardingStepKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -6991,9 +6899,9 @@ function PlaybackSectionIntro(props: { variant: PlaybackIntroVariant; embedded?:
   return (
     <div className={wrapClass}>
       <p className="ui-field-description text-slate-300 leading-relaxed">
-        These options apply when a placeholder or real file is played for movies or TV. Use them to monitor only, skip
-        re-searching already-monitored titles, or skip searching titles that are not released yet (TV air dates; movie
-        preferred release date from Calendar).
+        When a placeholder or real file is played, choose which library destinations each filter applies to. Use them to
+        monitor only, allow re-searching already-monitored titles, or search titles that are not released yet (TV air
+        dates; movie preferred release date from Calendar). Destinations are listed under Movies and TV by folder path.
       </p>
     </div>
   );
@@ -7596,8 +7504,7 @@ function SettingsPanel(props: {
   const mediaPanelOpenedViaAddRef = useRef(false);
   const mediaPanelSnapshotRef = useRef<Record<string, unknown>>({});
   const mediaPanelCancelRef = useRef<() => void>(() => {});
-  const { handleValueChange: handleSettingsValueChange, effectiveSnapshot: lookaheadEffectiveSnapshot } =
-    usePlaybackLookaheadFieldControls(props.values, props.onValueChange);
+  const handleSettingsValueChange = props.onValueChange;
   const accent = getBrandAccent(props.brand, props.themeMode);
 
   useEffect(() => {
@@ -7824,7 +7731,7 @@ function SettingsPanel(props: {
 
   function renderStandardField(field: SettingsField) {
     if (HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) || SETTINGS_UI_HIDDEN_FIELD_KEYS.has(field.key)) return null;
-    const value = settingsFieldDisplayValue(field, props.values, lookaheadEffectiveSnapshot);
+    const value = props.values[field.key];
     const test = testResults[field.key];
     const testTarget = URL_TEST_TARGET[field.key];
     const statusUpdatesOff = String(props.values.PLACEHOLDER_STATUS_UPDATES ?? "").toUpperCase() === "OFF";
@@ -8340,9 +8247,29 @@ function SettingsPanel(props: {
                   ),
                 })
               ) : active.name === "Playback" ? (
-                renderOnboardingStyleSectionRows(active.fields, {
-                  intro: <PlaybackSectionIntro variant="onboarding" embedded />,
-                })
+                <div className="px-6 py-5">
+                  <div className={`${UI_SECTION_FRAME_CLASS} overflow-hidden divide-y divide-[#424753]/20`}>
+                    <div className="px-6 py-5">
+                      <PlaybackSectionIntro variant="onboarding" embedded />
+                    </div>
+                    <div className="px-6 py-5">
+                      <PlaybackDestFilterControls
+                        values={props.values}
+                        options={
+                          props.payload?.playback_dest_options ||
+                          playbackDestOptionsFromValues(props.values)
+                        }
+                        onChange={(key, next) => props.onValueChange(key, next)}
+                        hideHeading
+                      />
+                    </div>
+                    {active.fields
+                      .filter((field) => !isPlaybackDestFilterKey(field.key))
+                      .map((field) => (
+                        <Fragment key={field.key}>{renderStandardField(field)}</Fragment>
+                      ))}
+                  </div>
+                </div>
               ) : active.name === "Status Updates" ? (
                 <>
                   {renderOnboardingStyleSectionRows(active.fields, {
@@ -10986,8 +10913,7 @@ function OnboardingWizard(props: {
   const [mediaRemoveConfirmId, setMediaRemoveConfirmId] = useState<MediaCardId | null>(null);
   const mediaPanelOpenedViaAddRef = useRef(false);
   const mediaPanelSnapshotRef = useRef<Record<string, unknown>>({});
-  const { handleValueChange: handleWizardValueChange, effectiveSnapshot: wizardLookaheadSnapshot } =
-    usePlaybackLookaheadFieldControls(props.values, props.onChange);
+  const handleWizardValueChange = props.onChange;
 
   const hasUnlockedSearchBehavior = [
     canUseRadarrSecondaryBehavior
@@ -11191,7 +11117,7 @@ function OnboardingWizard(props: {
 
   function wizardFieldRow(field: SettingsField) {
     if (HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) || SETTINGS_UI_HIDDEN_FIELD_KEYS.has(field.key)) return null;
-    const displayValue = settingsFieldDisplayValue(field, props.values, wizardLookaheadSnapshot);
+    const displayValue = props.values[field.key];
     const test = testResults[field.key];
     const testTarget = URL_TEST_TARGET[field.key];
     const focus = getBrandFocusClass(props.brand, wizardUiTheme);
@@ -11433,20 +11359,10 @@ function OnboardingWizard(props: {
                   ? "when_any_episode_has_file"
                   : "when_no_episode_needs_placeholder") as TvDensityRetireWhen
               }
-              monitorOnly={Boolean(props.values.PLAYBACK_MONITOR_ONLY_NO_SEARCH)}
-              skipMonitoredSearch={Boolean(props.values.PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED)}
-              skipFutureSearch={Boolean(props.values.PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES)}
               onDensityChange={(value) => props.onChange("TV_PLACEHOLDER_DENSITY", value)}
               onSearchModeChange={(value) => props.onChange("TV_PLAY_MODE", value)}
               onLookaheadChange={(value) => props.onChange("EPISODES_LOOKAHEAD", value)}
               onRetireWhenChange={(value) => props.onChange("TV_DENSITY_RETIRE_WHEN", value)}
-              onMonitorOnlyChange={(value) => props.onChange("PLAYBACK_MONITOR_ONLY_NO_SEARCH", value)}
-              onSkipMonitoredSearchChange={(value) =>
-                props.onChange("PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED", value)
-              }
-              onSkipFutureSearchChange={(value) =>
-                props.onChange("PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES", value)
-              }
               guide={
                 playFirstMode && stepGuides.density_search ? (
                   <StepGuide guide={stepGuides.density_search} />
@@ -11494,19 +11410,40 @@ function OnboardingWizard(props: {
               </div>
             )
           ) : step.key === "arr_routing" ? (
-            <ArrMultiInstanceBehaviorStack
-              values={props.values}
-              onChange={props.onChange}
-              brand={props.brand}
-              themeMode={wizardUiTheme}
-              accent={accent}
-              canUseRadarrSecondaryBehavior={canUseRadarrSecondaryBehavior}
-              canUseSonarrSecondaryBehavior={canUseSonarrSecondaryBehavior}
-              canUseAnySecondaryBehavior={canUseAnySecondaryBehavior}
-              fallbackUnnecessaryBecauseAllBoth={fallbackUnnecessaryBecauseAllBoth}
-              radarrInstances={radarrInstances}
-              sonarrInstances={sonarrInstances}
-            />
+            <div className="space-y-8">
+              <PlaybackDestFilterControls
+                values={props.values}
+                options={
+                  props.payload.playback_dest_options ||
+                  playbackDestOptionsFromValues(props.values)
+                }
+                onChange={(key, next) => props.onChange(key, next)}
+              />
+              {needsArrRoutingStep(props.values) ? (
+                <div className="space-y-3 border-t border-[#424753]/30 pt-6">
+                  <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-slate-400">
+                    Multi-instance routing
+                  </p>
+                  <p className="text-[14px] leading-relaxed text-slate-300">
+                    Choose how Placeholdarr routes plays between your Radarr and Sonarr instances, shared-folder
+                    cleanup, and whether to prefer a destination that matches the played path.
+                  </p>
+                  <ArrMultiInstanceBehaviorStack
+                    values={props.values}
+                    onChange={props.onChange}
+                    brand={props.brand}
+                    themeMode={wizardUiTheme}
+                    accent={accent}
+                    canUseRadarrSecondaryBehavior={canUseRadarrSecondaryBehavior}
+                    canUseSonarrSecondaryBehavior={canUseSonarrSecondaryBehavior}
+                    canUseAnySecondaryBehavior={canUseAnySecondaryBehavior}
+                    fallbackUnnecessaryBecauseAllBoth={fallbackUnnecessaryBecauseAllBoth}
+                    radarrInstances={radarrInstances}
+                    sonarrInstances={sonarrInstances}
+                  />
+                </div>
+              ) : null}
+            </div>
           ) : step.key === "media" ? (() => {
             const fieldByKey = new Map(fields.map((f) => [f.key, f]));
 
@@ -12042,7 +11979,22 @@ function OnboardingWizard(props: {
                     ) : sectionName === "Playback" ? (
                       <div className={surfaceClass}>
                         <PlaybackSectionIntro variant="onboarding" embedded />
-                        <div className="mt-4 border-t border-[#424753]/25 pt-4">{fieldsBlock}</div>
+                        <div className="mt-4 border-t border-[#424753]/25 pt-4">
+                          <PlaybackDestFilterControls
+                            values={props.values}
+                            options={
+                              props.payload.playback_dest_options ||
+                              playbackDestOptionsFromValues(props.values)
+                            }
+                            onChange={(key, next) => props.onChange(key, next)}
+                            hideHeading
+                          />
+                          <div className="mt-4 space-y-5">
+                            {secFields
+                              .filter((field) => !isPlaybackDestFilterKey(field.key))
+                              .map((field) => wizardFieldRow(field))}
+                          </div>
+                        </div>
                       </div>
                     ) : sectionName === "Calendar" ? (
                       <div className={surfaceClass}>
@@ -12419,8 +12371,15 @@ function formatCalendarItemMeta(item: CalendarDay["items"][number]) {
 }
 
 function fieldsForWizardStep(stepKey: string, sections: { name: string; fields: SettingsField[] }[]) {
-  if (stepKey === "welcome" || stepKey === "arr_routing") {
+  if (stepKey === "welcome") {
     return [];
+  }
+  if (stepKey === "arr_routing") {
+    const allKeys = new Set(sections.flatMap((section) => section.fields.map((f) => f.key)));
+    const destKeys = PLAYBACK_DEST_FILTER_KEYS.filter((key) => allKeys.has(key));
+    // When multi-instance routing UI is shown, persist those keys with this step too.
+    const routingKeys = [...allKeys].filter((k) => ARR_BEHAVIOR_KEYS.has(k));
+    return [...destKeys, ...routingKeys];
   }
   if (stepKey === "density_search") {
     const allKeys = new Set(sections.flatMap((section) => section.fields.map((f) => f.key)));

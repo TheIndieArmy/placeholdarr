@@ -1,6 +1,6 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { ToggleSwitch } from "../ToggleSwitch";
 import { DENSITY_CHOICE_META, type TvDensityChoice } from "./steps";
+import { UI_SECTION_FRAME_CLASS } from "../uiSectionFrame";
 import {
   TV_PLAY_PROFILES,
   densityStarFor,
@@ -15,10 +15,11 @@ import {
 type DensityKey = TvDensityChoice;
 type SearchKey = TvSearchKey;
 
+/** Selected option on a framed section: brand accent (gold) so it stays distinct from accent-3 panel fill. */
 const cardSelectedClass =
-  "border-[var(--brand-accent-3)] bg-[color:color-mix(in_srgb,var(--brand-surface-panel)_88%,var(--brand-accent-3)_12%)] shadow-lg shadow-black/20";
+  "border-[var(--brand-accent)] bg-[#0b111b]/90 ring-1 ring-[var(--brand-accent)]/45 shadow-lg shadow-black/25";
 const cardIdleClass =
-  "border-[#424753]/40 bg-[#0b111b]/50 hover:border-[#424753]/70 hover:bg-[#0b111b]/80";
+  "border-[#424753]/50 bg-[#0b111b]/45 hover:border-[#424753]/75 hover:bg-[#0b111b]/65";
 
 function searchOptions(): { key: SearchKey; label: string; summary: string }[] {
   return [
@@ -76,52 +77,23 @@ function playEntryCopy(density: DensityKey, search: SearchKey, lookahead: number
   return "You play the show placeholder. Targets cover the whole show from that one entry.";
 }
 
-function playMonitorSearchCopy(input: {
-  monitorOnly: boolean;
-  skipMonitored: boolean;
-  skipFuture: boolean;
-}): string {
-  if (input.monitorOnly) {
-    return "Monitor only is enabled: unmonitored targets are marked monitored in Sonarr, without searching on this play.";
-  }
-
-  const parts: string[] = [
-    "Placeholdarr monitors targets as needed and searches the ones that still qualify.",
-  ];
-  if (input.skipMonitored && input.skipFuture) {
-    parts.push(
-      "Search already-monitored and Search future titles are disabled, so those targets are monitored if needed but not searched.",
-    );
-  } else if (input.skipMonitored) {
-    parts.push(
-      "Search already-monitored is disabled, so titles Arr already had monitored are not searched again.",
-    );
-  } else if (input.skipFuture) {
-    parts.push(
-      "Search future titles is disabled, so not-yet-released targets are monitored if needed but not searched.",
-    );
-  } else {
-    parts.push(
-      "Search already-monitored and Search future titles are enabled, so those targets in the list can be searched too.",
-    );
-  }
-  return parts.join(" ");
-}
-
 function OptionCardGrid<K extends string>(props: {
   legend: string;
   options: { key: K; label: string; summary: string; star?: string; detail?: string }[];
   selected: K | null;
   onSelect: (key: K) => void;
   columns?: "3" | "1";
+  /** Intro copy inside the framed group (above the cards). */
+  intro?: ReactNode;
 }) {
   const gridClass =
     props.columns === "1" ? "grid grid-cols-1 gap-3" : "grid grid-cols-1 items-stretch gap-3 sm:grid-cols-3";
   return (
-    <div className="space-y-2">
+    <div className={`${UI_SECTION_FRAME_CLASS} space-y-3 p-4`}>
       <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-slate-400">
         {props.legend}
       </p>
+      {props.intro ? <div className="text-[14px] leading-relaxed text-slate-300">{props.intro}</div> : null}
       <div className={gridClass}>
         {props.options.map((opt) => {
           const selected = props.selected === opt.key;
@@ -150,35 +122,6 @@ function OptionCardGrid<K extends string>(props: {
   );
 }
 
-function ToggleRow(props: {
-  label: string;
-  description: string;
-  checked: boolean;
-  disabled?: boolean;
-  onChange: (value: boolean) => void;
-}) {
-  return (
-    <div
-      className={`flex items-start gap-3 rounded-xl border border-[#424753]/40 bg-[#0b111b]/50 px-4 py-3 ${
-        props.disabled ? "opacity-55" : ""
-      }`}
-    >
-      <ToggleSwitch
-        checked={props.checked}
-        onChange={props.onChange}
-        accentHex="var(--brand-accent)"
-        disabled={props.disabled}
-        ariaLabel={props.label}
-        className="mt-0.5"
-      />
-      <div className="min-w-0">
-        <p className="text-[14px] font-semibold text-slate-200">{props.label}</p>
-        <p className="mt-1 text-[13px] leading-relaxed text-slate-400">{props.description}</p>
-      </div>
-    </div>
-  );
-}
-
 /** Compact profile picker for Settings → Lookahead (and reusable elsewhere). */
 export function TvPlayProfilePicker(props: {
   density: string;
@@ -188,7 +131,7 @@ export function TvPlayProfilePicker(props: {
 }) {
   const matched = matchTvPlayProfile(props.density, props.searchMode);
   return (
-    <div className="space-y-2">
+    <div className={`${UI_SECTION_FRAME_CLASS} space-y-3 p-4`}>
       <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-slate-400">
         Starting profile
       </p>
@@ -242,23 +185,16 @@ export function DensitySearchIdeasStep(props: {
   searchMode: SearchKey;
   lookahead: number;
   retireWhen: TvDensityRetireWhen;
-  monitorOnly: boolean;
-  skipMonitoredSearch: boolean;
-  skipFutureSearch: boolean;
   onDensityChange: (value: DensityKey) => void;
   onSearchModeChange: (value: SearchKey) => void;
   onLookaheadChange: (value: number) => void;
   onRetireWhenChange: (value: TvDensityRetireWhen) => void;
-  onMonitorOnlyChange: (value: boolean) => void;
-  onSkipMonitoredSearchChange: (value: boolean) => void;
-  onSkipFutureSearchChange: (value: boolean) => void;
   guide?: ReactNode;
 }) {
   const matched = matchTvPlayProfile(props.density, props.searchMode);
   const [customizeOpen, setCustomizeOpen] = useState(matched === "custom");
   const lookaheadLocked = props.searchMode === "series";
   const retireWhenLocked = props.density === "episode";
-  const searchFiltersLocked = props.monitorOnly;
   const lookahead = Math.max(1, Math.floor(Number(props.lookahead) || 1));
   const retireWhen: TvDensityRetireWhen =
     props.retireWhen === "when_any_episode_has_file"
@@ -276,12 +212,6 @@ export function DensitySearchIdeasStep(props: {
     [props.searchMode],
   );
   const entryLine = playEntryCopy(props.density, props.searchMode, lookahead);
-  const actionLine = playMonitorSearchCopy({
-    monitorOnly: props.monitorOnly,
-    skipMonitored: props.skipMonitoredSearch,
-    skipFuture: props.skipFutureSearch,
-  });
-
   function applyProfile(key: TvPlayProfileKey) {
     const profile = TV_PLAY_PROFILES.find((p) => p.key === key);
     if (!profile) return;
@@ -312,7 +242,7 @@ export function DensitySearchIdeasStep(props: {
         />
 
         <details
-          className="group rounded-lg border border-[#424753]/40 bg-[#0b111b]/40"
+          className={`group ${UI_SECTION_FRAME_CLASS} overflow-hidden`}
           open={customizeOpen || matched === "custom"}
           onToggle={(e) => setCustomizeOpen((e.target as HTMLDetailsElement).open)}
         >
@@ -356,7 +286,13 @@ export function DensitySearchIdeasStep(props: {
               onSelect={props.onSearchModeChange}
             />
 
-            <div className="space-y-2">
+            <div
+              className={`space-y-2 rounded-xl border px-4 py-4 ${
+                lookaheadLocked
+                  ? "border-[#424753]/30 bg-[#0b111b]/40 opacity-60"
+                  : "border-[#424753]/50 bg-[#0b111b]/45"
+              }`}
+            >
               <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-slate-400">
                 Lookahead range
               </p>
@@ -364,44 +300,34 @@ export function DensitySearchIdeasStep(props: {
                 For Episode and Season search modes, Lookahead range sets how far ahead Placeholdarr will try to action
                 episodes in Arr. Series search already covers the whole show, so Lookahead is unused there.
               </p>
-              <div
-                className={`rounded-xl border px-4 py-4 ${
-                  lookaheadLocked
-                    ? "border-[#424753]/30 bg-[#0b111b]/30 opacity-60"
-                    : "border-[#424753]/40 bg-[#0b111b]/50"
-                }`}
-              >
-                <label className="block text-[14px] font-semibold text-slate-200">
-                  Episodes ahead
-                  <input
-                    type="number"
-                    min={1}
-                    max={99}
-                    disabled={lookaheadLocked}
-                    className="mt-2 block w-24 rounded-lg border border-[#424753]/40 bg-[#0b111b] px-3 py-2 text-[15px] text-slate-200 outline-none disabled:cursor-not-allowed"
-                    value={lookahead}
-                    onChange={(e) => {
-                      const raw = e.target.value.replace(/\D/g, "");
-                      const n = Math.max(1, Math.min(99, Number(raw || "1")));
-                      props.onLookaheadChange(n);
-                    }}
-                  />
-                </label>
-                <p className="mt-2 text-[13px] leading-relaxed text-slate-400">
-                  {lookaheadLocked
-                    ? "Not used while Search mode is Series (the whole show is already included)."
-                    : "In Episode search, this is how many episodes ahead to look for. In Season search, this is how many episodes from the end of the season before Placeholdarr starts actioning the next season."}
-                </p>
-              </div>
+              <label className="block text-[14px] font-semibold text-slate-200">
+                Episodes ahead
+                <input
+                  type="number"
+                  min={1}
+                  max={99}
+                  disabled={lookaheadLocked}
+                  className="mt-2 block w-24 rounded-lg border border-[#424753]/40 bg-[#0b111b] px-3 py-2 text-[15px] text-slate-200 outline-none disabled:cursor-not-allowed"
+                  value={lookahead}
+                  onChange={(e) => {
+                    const raw = e.target.value.replace(/\D/g, "");
+                    const n = Math.max(1, Math.min(99, Number(raw || "1")));
+                    props.onLookaheadChange(n);
+                  }}
+                />
+              </label>
+              <p className="mt-2 text-[13px] leading-relaxed text-slate-400">
+                {lookaheadLocked
+                  ? "Not used while Search mode is Series (the whole show is already included)."
+                  : "In Episode search, this is how many episodes ahead to look for. In Season search, this is how many episodes from the end of the season before Placeholdarr starts actioning the next season."}
+              </p>
             </div>
           </div>
         </details>
 
         <div
-          className={`space-y-2 rounded-xl border px-4 py-4 ${
-            retireWhenLocked
-              ? "border-[#424753]/30 bg-[#0b111b]/30 opacity-60"
-              : "border-[#424753]/40 bg-[#0b111b]/50"
+          className={`${UI_SECTION_FRAME_CLASS} space-y-2 p-4 ${
+            retireWhenLocked ? "opacity-60" : ""
           }`}
         >
           <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-slate-400">
@@ -433,38 +359,6 @@ export function DensitySearchIdeasStep(props: {
           ) : null}
         </div>
 
-        <div className="space-y-2">
-          <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-slate-400">
-            Playback monitoring and searching
-          </p>
-          <p className="text-[15px] leading-relaxed text-slate-300">
-            Placeholdarr reacts when a placeholder or real file is played: it builds an Arr target list, then monitors or
-            searches accordingly. TV uses your selected profile; movies use the played title. These modifiers apply to
-            movies and TV.
-          </p>
-          <div className="space-y-2">
-            <ToggleRow
-              label="Monitor only on playback (no search)"
-              description="When disabled, searching on play stays on (the default); the filters below only change which targets in the list are searched. When enabled, only mark unmonitored titles monitored in Radarr/Sonarr, without searching."
-              checked={props.monitorOnly}
-              onChange={props.onMonitorOnlyChange}
-            />
-            <ToggleRow
-              label="Search already-monitored titles on playback"
-              description="When disabled, titles Arr already had monitored are skipped for search (assuming Arr already searched and is tracking them). Unmonitored targets are still monitored, then searched. Useful if your indexers have stricter limits. When enabled, already-monitored targets can be searched again on play too."
-              checked={!props.skipMonitoredSearch}
-              disabled={searchFiltersLocked}
-              onChange={(value) => props.onSkipMonitoredSearchChange(!value)}
-            />
-            <ToggleRow
-              label="Search future titles on playback"
-              description="When disabled, not-yet-released titles can still be monitored, but are not searched on this play (TV uses episode air dates; movies use your preferred Calendar release date). When enabled, future titles in the target list are searched like any other."
-              checked={!props.skipFutureSearch}
-              disabled={searchFiltersLocked}
-              onChange={(value) => props.onSkipFutureSearchChange(!value)}
-            />
-          </div>
-        </div>
       </div>
 
       <div className="shrink-0 -mx-6 border-t border-[#424753]/40 bg-[#121722] px-6 py-4 sm:-mx-8 sm:px-8">
@@ -472,7 +366,7 @@ export function DensitySearchIdeasStep(props: {
           What to expect with your current settings
         </p>
         <p className="mt-2 text-[14px] leading-relaxed text-slate-200">
-          {entryLine} {actionLine}
+          {entryLine} Monitor and search filters for each library destination come next on Playback.
         </p>
       </div>
     </div>

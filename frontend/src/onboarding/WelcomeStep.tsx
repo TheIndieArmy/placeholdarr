@@ -11,8 +11,8 @@ export function WelcomeStep() {
           Radarr or Sonarr to take action based on this app setup.
         </p>
         <p className="text-[16px] leading-relaxed text-slate-300">
-          Next, we&apos;ll decide how you want Placeholdarr to work, connect your player and Arr apps, choose where
-          placeholders live, set multi-Arr routing if you need it, and finish a few optional details.
+          Next, we&apos;ll pick a starting profile, connect your player and Arr apps, choose where placeholders live,
+          set what happens on playback (and multi-Arr routing if you need it), then finish a few optional details.
         </p>
       </div>
     </div>

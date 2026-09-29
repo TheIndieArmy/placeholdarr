@@ -304,12 +304,12 @@ class Settings(BaseSettings):
         "when_any_episode_has_file",
     ] = "when_no_episode_needs_placeholder"
     
-    # Playback-related settings (movies + TV). Future-title suppress defaults on (do not search
-    # unaired / not-yet-released unless opted in via the affirmative UI toggle). Finished installs
-    # without a saved row are grandfathered to the old default by migrate_playback_future_search_suppress_default.
-    PLAYBACK_MONITOR_ONLY_NO_SEARCH: bool = False
-    PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED: bool = False
-    PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES: bool = True
+    # Playback filters: JSON string lists of normalized library dest_folder paths where each
+    # behavior applies. Empty = off for all dests. Migrated from legacy booleans by
+    # migrate_playback_filters_to_dest_lists (after migrate_playback_future_search_suppress_default).
+    PLAYBACK_MONITOR_ONLY_DESTS: str = "[]"
+    PLAYBACK_SEARCH_ALREADY_MONITORED_DESTS: str = "[]"
+    PLAYBACK_SEARCH_FUTURE_DESTS: str = "[]"
     ENABLE_PLAYBACK_FALLBACK_SEARCH: bool = True
     PLAYBACK_FALLBACK_TIMEOUT_MINUTES: int = 30
     # When multiple Radarr or Sonarr instances share on-disk paths for the same TMDB/TVDB title:
