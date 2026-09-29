@@ -20,6 +20,8 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Playback filters**: Monitor/search filters apply per library destination (Movies/TV folder paths) under Settings → Playback.
 - **Lookahead default**: New installs default to 3 episodes ahead (was 5).
 - **What's new TV density (0.11.0-beta.1)**: Startup ack for TV placeholder density (Density & Lookahead CTA; no setup walkthrough).
+- **GHCR latest tag**: Pre-release version tags no longer move `:latest`.
+- **Postgres startup**: Images stay on SQLAlchemy 2.0 and the shipped psycopg2 driver.
 
 #### Added
 
@@ -33,6 +35,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 #### Changed
 
+- **GHCR latest tag**: Version tags that look like pre-releases (`beta`, `rc`, `alpha`) publish only the version tag; `:latest` is reserved for stable semver tags.
 - **Settings section rename**: Former Lookahead settings page is Density & Lookahead (slug `density-lookahead`; `/settings/lookahead` still resolves).
 - **Lookahead range default**: New installs default to 3 episodes ahead (was 5). Existing saved values are unchanged.
 - **Onboarding step names**: Profile (was Play), Playback (was Routing; always shown), More (was Watching).
@@ -62,6 +65,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 #### Fixed
 
+- **Postgres startup on SQLAlchemy 2.1**: Pin SQLAlchemy to 2.0.x and use the psycopg2 driver URL so images that resolve newer SQLAlchemy still start with the shipped driver.
 - **Playback dest-filter migrate**: Defers writing destination lists until library folders exist, and reseeds search-already-monitored during unfinished setup if a first boot froze empty lists.
 - **TV density Apply now pending**: Keeps the rematerialize-pending flag set until the background Apply now run finishes so a crash mid-job can still retry on the next full sync.
 - **TV density Apply now pipeline lock**: Apply now rematerialize takes the same pipeline lock as full sync so it cannot run determination/materialization alongside a scheduled sync.

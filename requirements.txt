@@ -8,7 +8,8 @@ pydantic>=2.5.2
 typing-extensions>=4.8.0
 plexapi>=4.15.7
 pydantic-settings>=2.1.0
-sqlalchemy>=2.0.44
+# Keep on 2.0.x: SQLAlchemy 2.1 defaults postgresql:// to psycopg3, but we ship psycopg2.
+sqlalchemy>=2.0.44,<2.1
 psycopg2-binary
 apscheduler
 alembic>=1.11.1
