@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/logo-blue.svg" alt="Placeholdarr" width="120" />
+  <img src="docs/images/logo.svg" alt="Placeholdarr" width="120" />
 </p>
 
 <h1 align="center">Placeholdarr</h1>
