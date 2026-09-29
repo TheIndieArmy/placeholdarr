@@ -7,6 +7,10 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+### Changed
+
+- **GHCR latest tag**: Version tags that look like pre-releases (`beta`, `rc`, `alpha`) publish only the version tag; `:latest` is reserved for stable semver tags.
+
 ## [0.10.3] - 2026-09-28
 
 ### Summary

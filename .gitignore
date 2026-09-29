@@ -33,7 +33,9 @@ DESIGN_DECISIONS.md
 tools/
 scripts/
 services_old/
-docs/
+docs/*
+!docs/images/
+!docs/images/**
 tests/
 .archive/
 .github/agents
