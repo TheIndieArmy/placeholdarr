@@ -25,13 +25,13 @@ Placeholdarr is AI-developed, and we are open about that. TheIndieArmy designs a
 ## See it in action
 
 <p align="center">
-  <img src="docs/images/library.jpg" alt="Placeholdarr library grid" width="23%" />
+  <img src="docs/images/library.png" alt="Placeholdarr library grid" width="23%" />
   &nbsp;
-  <img src="docs/images/player.jpg" alt="Media player showing download percent in the placeholder description" width="23%" />
+  <img src="docs/images/player.png" alt="Media player showing download percent in the placeholder description" width="23%" />
   &nbsp;
-  <img src="docs/images/detail.jpg" alt="Placeholdarr movie detail with scores and Arr status" width="23%" />
+  <img src="docs/images/detail.png" alt="Placeholdarr movie detail with scores and Arr status" width="23%" />
   &nbsp;
-  <img src="docs/images/collections.jpg" alt="Placeholdarr collections recipe with live preview" width="23%" />
+  <img src="docs/images/collections.png" alt="Placeholdarr collections recipe with live preview" width="23%" />
 </p>
 
 ## What it makes possible
