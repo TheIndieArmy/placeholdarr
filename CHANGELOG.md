@@ -38,7 +38,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Playback step**: Dest-scoped monitor/search filters sit on Playback after Folders; multi-instance Arr routing nests under them only when a second instance is configured.
 - **Retire-when on Profile**: Season/series placeholder retire-when sits below Customize profile; greyed out for episode density. Settings → Lookahead matches.
 - **Playback section**: Monitor-only and search filters moved out of Lookahead into Settings → Playback.
-- **Playback filters by destination**: Monitor only, search already-monitored, and search future are destination multi-selects (Movies/TV folder paths) instead of global toggles. Existing bool settings migrate after library paths are loaded; new destinations stay off until selected.
+- **Playback filters by destination**: Monitor only, search already-monitored, and search future are destination multi-selects (Movies/TV folder paths) instead of global toggles. Existing bool settings migrate after library paths are loaded; dest-list writes defer until folders exist. New destinations stay off until selected.
 - **Movie playback filters**: The same destination-scoped Playback filters apply to Radarr plays (movie future uses the preferred Calendar release date).
 - **TV play profiles**: Profile step and Settings → Lookahead offer starting profiles that pair density with Search mode; Customize (Profile) or the fields below still edit each setting.
 - **Episode density star**: Star says most flexible requesting only when Search mode is Episode; otherwise mostly informational detail.
@@ -56,6 +56,9 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 #### Fixed
 
+- **Playback dest-filter migrate**: Defers writing destination lists until library folders exist, and reseeds search-already-monitored during unfinished setup if a first boot froze empty lists.
+- **TV density Apply now pending**: Keeps the rematerialize-pending flag set until the background Apply now run finishes so a crash mid-job can still retry on the next full sync.
+- **TV density Apply now pipeline lock**: Apply now rematerialize takes the same pipeline lock as full sync so it cannot run determination/materialization alongside a scheduled sync.
 - **TV density apply estimate**: The Apply now count for density changes includes only TV placeholders (movies are excluded).
 - **TV density placeholders**: Season/series placeholder creation uses the same dummy video resolution as episode placeholders (`/config/dummy.mp4` fallback), so Apply now no longer fails with `DUMMY_FILE_PATH missing`.
 - **Density stub playback status**: Season/series stub plays only project SEARCHING when an Arr search was actually triggered (monitor-only / future suppress no longer flip the stub to SEARCHING).

@@ -1710,6 +1710,36 @@ def _delete_legacy_playback_filter_bools(session) -> list[str]:
     return deleted
 
 
+def _playback_dest_list_from_row(row) -> list[str]:
+    if row is None or row.value is None:
+        return []
+    from services.playback_dest_filters import parse_playback_dest_list
+
+    return parse_playback_dest_list(row.value)
+
+
+def _upsert_playback_dest_list(session, key: str, value: str) -> None:
+    meta = SETTINGS_SCHEMA.get(key) or {}
+    row = _get_row(session, key)
+    if not row:
+        session.add(
+            AppConfig(
+                key=key,
+                value=value,
+                value_type=str(meta.get("type") or "string_list"),
+                restart_required=bool(meta.get("restart_required", False)),
+                description=str(meta.get("description") or ""),
+            )
+        )
+    else:
+        row.value = value
+        row.value_type = str(meta.get("type") or "string_list")
+        row.restart_required = bool(meta.get("restart_required", False))
+        row.description = str(meta.get("description") or "")
+        session.add(row)
+    _set_runtime_value(key, value)
+
+
 def migrate_playback_filters_to_dest_lists(session=None) -> dict[str, Any]:
     """Convert legacy playback filter booleans into per-destination string lists.
 
@@ -1718,23 +1748,58 @@ def migrate_playback_filters_to_dest_lists(session=None) -> dict[str, Any]:
     - suppress already-monitored false → all dests (search monitored on); true → []
     - suppress future false → all dests; true → []
     Fresh installs with no legacy rows: monitor=[], search-monitored=all, search-future=[].
-    Idempotent when dest-list keys already exist. Deletes legacy bool rows after convert.
+
+    Defers writing when selectable dests are still empty so a first-boot migrate does not
+    persist search-monitored=[] forever. Re-runs after library paths exist (startup preload
+    or path settings save). While setup is incomplete, repairs the empty-seed signature
+    (all three lists empty) by seeding search-monitored to all current dests.
+    Deletes legacy bool rows after a successful convert.
     """
     owns_session = session is None
     session = session or get_session()
     try:
-        existing_dest = {key: _get_row(session, key) for key in _PLAYBACK_DEST_FILTER_KEYS}
-        if all(row is not None for row in existing_dest.values()):
-            deleted = _delete_legacy_playback_filter_bools(session)
-            if deleted:
-                session.commit()
-            return {"ok": True, "migrated": False, "reason": "already_dest_lists", "deleted_legacy": deleted}
-
         from services.playback_dest_filters import all_selectable_dest_folders
 
+        existing_dest = {key: _get_row(session, key) for key in _PLAYBACK_DEST_FILTER_KEYS}
         all_dests = all_selectable_dest_folders()
         all_dests_json = json.dumps(all_dests)
         empty_json = "[]"
+        setup_row = _get_row(session, SETUP_COMPLETED_KEY)
+        setup_complete = bool(setup_row and setup_row.value)
+
+        if all(row is not None for row in existing_dest.values()):
+            deleted = _delete_legacy_playback_filter_bools(session)
+            repaired = False
+            # Empty-seed from first boot before folders existed: all three lists [].
+            # Only auto-fix while setup is still in progress so intentional all-off
+            # after finish is preserved.
+            if (
+                not setup_complete
+                and all_dests
+                and not _playback_dest_list_from_row(existing_dest["PLAYBACK_MONITOR_ONLY_DESTS"])
+                and not _playback_dest_list_from_row(
+                    existing_dest["PLAYBACK_SEARCH_ALREADY_MONITORED_DESTS"]
+                )
+                and not _playback_dest_list_from_row(existing_dest["PLAYBACK_SEARCH_FUTURE_DESTS"])
+            ):
+                _upsert_playback_dest_list(
+                    session, "PLAYBACK_SEARCH_ALREADY_MONITORED_DESTS", all_dests_json
+                )
+                repaired = True
+                logger.info(
+                    "Seeded PLAYBACK_SEARCH_ALREADY_MONITORED_DESTS to all destinations "
+                    f"after empty first-boot migrate ({len(all_dests)} dests)",
+                    extra={"emoji_type": "update"},
+                )
+            if deleted or repaired:
+                session.commit()
+            return {
+                "ok": True,
+                "migrated": False,
+                "reason": "seeded_search_monitored" if repaired else "already_dest_lists",
+                "deleted_legacy": deleted,
+                "dest_count": len(all_dests),
+            }
 
         def _legacy_bool(key: str, default: bool) -> bool:
             row = _get_row(session, key)
@@ -1742,9 +1807,28 @@ def migrate_playback_filters_to_dest_lists(session=None) -> dict[str, Any]:
                 return default
             return _coerce_bool(row.value)
 
+        has_legacy = any(
+            _get_row(session, key) is not None
+            for key in (
+                _PLAYBACK_LEGACY_MONITOR_ONLY_KEY,
+                _PLAYBACK_LEGACY_SUPPRESS_MONITORED_KEY,
+                _PLAYBACK_FUTURE_SEARCH_SUPPRESS_KEY,
+            )
+        )
         monitor_only = _legacy_bool(_PLAYBACK_LEGACY_MONITOR_ONLY_KEY, False)
         suppress_monitored = _legacy_bool(_PLAYBACK_LEGACY_SUPPRESS_MONITORED_KEY, False)
         suppress_future = _legacy_bool(_PLAYBACK_FUTURE_SEARCH_SUPPRESS_KEY, True)
+
+        needs_all_dests = monitor_only or (not suppress_monitored) or (not suppress_future)
+        if not all_dests and (not has_legacy or needs_all_dests):
+            # Fresh install or upgrade that still needs "all dests" membership: wait until
+            # library paths exist so we do not freeze search-monitored as [].
+            return {
+                "ok": True,
+                "migrated": False,
+                "reason": "deferred_no_dests",
+                "dest_count": 0,
+            }
 
         values = {
             "PLAYBACK_MONITOR_ONLY_DESTS": all_dests_json if monitor_only else empty_json,
@@ -1757,17 +1841,7 @@ def migrate_playback_filters_to_dest_lists(session=None) -> dict[str, Any]:
         for key, value in values.items():
             if existing_dest.get(key) is not None:
                 continue
-            meta = SETTINGS_SCHEMA.get(key) or {}
-            session.add(
-                AppConfig(
-                    key=key,
-                    value=value,
-                    value_type=str(meta.get("type") or "string_list"),
-                    restart_required=bool(meta.get("restart_required", False)),
-                    description=str(meta.get("description") or ""),
-                )
-            )
-            _set_runtime_value(key, value)
+            _upsert_playback_dest_list(session, key, value)
 
         deleted = _delete_legacy_playback_filter_bools(session)
         session.commit()
@@ -2468,6 +2542,22 @@ def save_settings(
                 session.add(setup_row)
 
         session.commit()
+        path_keys_for_playback_migrate = {
+            "LIBRARY_ROOT",
+            "MOVIE_LIBRARY_FOLDER",
+            "TV_LIBRARY_FOLDER",
+            "LIBRARY_DESTINATION_MAP_JSON",
+        }
+        if path_keys_for_playback_migrate.intersection(saved_keys) or derived_library_paths:
+            # Folders may have just appeared (play-first onboarding). Re-run so deferred
+            # or empty-seed dest-list migration can seed search-monitored to all dests.
+            try:
+                migrate_playback_filters_to_dest_lists()
+            except Exception as migrate_exc:
+                logger.warning(
+                    f"Playback dest-filter migrate after path settings save failed: {migrate_exc}",
+                    extra={"emoji_type": "warning"},
+                )
         plex_location_cache_keys = {
             "ENABLE_PLEX",
             "PLEX_URL",

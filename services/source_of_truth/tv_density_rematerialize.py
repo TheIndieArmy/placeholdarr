@@ -93,35 +93,51 @@ def clear_tv_density_rematerialize_pending() -> None:
 
 
 def run_tv_density_rematerialize(*, source: str = "settings_save") -> dict[str, Any]:
-    """Run determination + materialization so disk matches the current density setting."""
+    """Run determination + materialization so disk matches the current density setting.
+
+    Holds the shared pipeline lock for the whole pass so Apply now cannot race a
+    scheduled full/lite sync materialization on the same catalog and filesystem.
+    """
     from services.source_of_truth.determiner import run_determination_pass
     from services.source_of_truth.materializer import run_materialization_pass
+    from services.source_of_truth.sync_coordinator import (
+        acquire_pipeline_blocking,
+        release_pipeline,
+    )
 
     logger.info(
-        f"TV density rematerialize starting ({source})",
+        f"TV density rematerialize waiting for pipeline ({source})",
         extra={"emoji_type": "gear"},
     )
-    determination = run_determination_pass()
-    materialization = run_materialization_pass()
+    acquire_pipeline_blocking()
     try:
-        clear_tv_density_rematerialize_pending()
-    except Exception as exc:
-        logger.warning(
-            f"Could not clear TV density rematerialize pending flag: {exc}",
-            extra={"emoji_type": "warning"},
+        logger.info(
+            f"TV density rematerialize starting ({source})",
+            extra={"emoji_type": "gear"},
         )
-    out = {
-        "ok": True,
-        "source": source,
-        "determination": determination,
-        "materialization": materialization,
-    }
-    logger.info(
-        f"TV density rematerialize finished ({source}): "
-        f"mat_created={materialization.get('created')} mat_deleted={materialization.get('deleted')}",
-        extra={"emoji_type": "success"},
-    )
-    return out
+        determination = run_determination_pass()
+        materialization = run_materialization_pass()
+        try:
+            clear_tv_density_rematerialize_pending()
+        except Exception as exc:
+            logger.warning(
+                f"Could not clear TV density rematerialize pending flag: {exc}",
+                extra={"emoji_type": "warning"},
+            )
+        out = {
+            "ok": True,
+            "source": source,
+            "determination": determination,
+            "materialization": materialization,
+        }
+        logger.info(
+            f"TV density rematerialize finished ({source}): "
+            f"mat_created={materialization.get('created')} mat_deleted={materialization.get('deleted')}",
+            extra={"emoji_type": "success"},
+        )
+        return out
+    finally:
+        release_pipeline()
 
 
 def start_tv_density_rematerialize_background(*, source: str = "settings_save") -> None:
@@ -158,13 +174,18 @@ def execute_tv_density_rematerialize_apply_scope(
         )
         return {"ok": True, "scope": "next_full_sync", "pending": True, "enqueued": False}
 
-    # Apply now: mark pending cleared after run; start background so settings save returns quickly.
+    # Apply now: keep pending until the background rematerialize finishes successfully
+    # (run_tv_density_rematerialize clears it). If the process dies mid-run, the next full
+    # sync still sees pending and rematerializes under current density settings.
     try:
-        mark_tv_density_rematerialize_pending(False)
-    except Exception:
-        pass
+        mark_tv_density_rematerialize_pending(True)
+    except Exception as exc:
+        logger.warning(
+            f"Could not mark TV density rematerialize pending before apply now: {exc}",
+            extra={"emoji_type": "warning"},
+        )
     start_tv_density_rematerialize_background(source=f"{source}:apply_now")
-    return {"ok": True, "scope": "now", "pending": False, "enqueued": True}
+    return {"ok": True, "scope": "now", "pending": True, "enqueued": True}
 
 
 def run_tv_density_rematerialize_if_pending(*, source: str = "full_sync") -> dict[str, Any]:

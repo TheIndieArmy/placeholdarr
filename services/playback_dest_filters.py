@@ -46,6 +46,11 @@ def _parse_dest_list(raw: Any) -> list[str]:
     return out
 
 
+def parse_playback_dest_list(raw: Any) -> list[str]:
+    """Normalize a string_list / JSON / comma setting value into dest folder paths."""
+    return _parse_dest_list(raw)
+
+
 def playback_filter_dest_list(setting_key: str) -> list[str]:
     return _parse_dest_list(getattr(settings, setting_key, None))
 
