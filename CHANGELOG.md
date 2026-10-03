@@ -11,34 +11,41 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## Pre-release
 
-### [0.11.0-beta.1] - 2026-09-28
+## Released
 
-#### Summary
+## [0.11.0] - 2026-10-03
+
+### Summary
 
 - **TV placeholder density**: Episode, season, or series placeholder files, with retire-when and rematerialize prompts.
 - **Play-first setup**: Welcome → Profile → Players → Arr → Folders → Playback → More → Appearance; `/setup/preview` mirrors live without saving.
 - **Playback filters**: Monitor/search filters apply per library destination (Movies/TV folder paths) under Settings → Playback.
+- **Play Actions matrix**: Replaces older multi-instance playback mode toggles with Off / Always / Fallback (placeholder) and Off / Always (real file) per Arr.
 - **Lookahead default**: New installs default to 3 episodes ahead (was 5).
-- **What's new TV density (0.11.0-beta.1)**: Startup ack for TV placeholder density (Density & Lookahead CTA; no setup walkthrough).
+- **What's new (0.11.0)**: Startup ack for density, playback filters, and Play Actions (Density & Lookahead CTA; confirm Play Actions under Playback).
 - **GHCR latest tag**: Pre-release version tags no longer move `:latest`.
 - **Postgres startup**: Images stay on SQLAlchemy 2.0 and the shipped psycopg2 driver.
 
-#### Added
+### Added
 
 - **Play-first onboarding**: Unfinished `/setup` uses Welcome → Profile → Players → Arr → Folders → Playback → More → Appearance.
 - **Setup preview**: `/setup/preview` mirrors live Play-first setup with current settings and does not save.
-- **What's new TV density (0.11.0-beta.1)**: Startup ack for TV placeholder density (Density & Lookahead CTA; no setup walkthrough).
+- **What's new (0.11.0)**: Startup ack for TV placeholder density, playback filters, and Play Actions (Density & Lookahead CTA; nudges upgrades to confirm the migrated matrix under Settings → Playback).
 - **TV placeholder density**: Settings for how many TV placeholder files to write (episode, season, or series), with retire-when options for season/series placeholders. Series density creates one playable S01E01 placeholder per show; season density creates one sNNe01 placeholder per season that still needs content.
 - **TV density apply scope**: Changing density or retire-when prompts Apply now or next full sync; consolidating to Season/Series warns that per-episode placeholders will be deleted.
 - **Tracearr thin playback fallbacks**: When a stream webhook has a Plex `ratingKey` but missing path/ids, Placeholdarr asks Plex for Guids and path; series/season density placeholders also resolve via title/path markers and active density rows when catalog kind would stay unknown.
 - **DOWNLOAD_UNAVAILABLE status**: When Arr reports `downloadClientUnavailable` or a queue warning/error/failed, Placeholdarr sets a terminal status with a Status Updates message and stops queue monitoring for that title.
 
-#### Changed
+### Changed
 
+- **Play Actions matrix**: Replaces the older multi-instance playback mode toggles and Search Behavior controls with one Off / Always / Fallback (placeholder) and Off / Always (real file) matrix per Arr instance. Path match is tried first; Fallback timeout stays under the matrix; ambiguous plays follow Placeholder play.
+- **Play Actions placement**: Multi-instance targeting and Shared Placeholder Cleanup sit under Settings → Playback next to dest filters (not Paths), so monitor-only destinations and Arr targeting read as one Playback story.
+- **Play Actions upgrades**: Existing installs map the old fallback enable flag and TV real-file / cross-instance modes into the new Always / Fallback lists (movie Real Always stays empty; that path was a noop).
+- **Playback dest filters**: Destinations already under Monitor only are greyed out in the search lists so the two filters cannot contradict each other.
+- **Density & Lookahead / setup copy**: Points to Play Actions for which Arr instances also search on play; onboarding stacks the Movies and TV matrix columns for readable controls.
 - **GHCR latest tag**: Version tags that look like pre-releases (`beta`, `rc`, `alpha`) publish only the version tag; `:latest` is reserved for stable semver tags.
 - **Settings section rename**: Former Lookahead settings page is Density & Lookahead (slug `density-lookahead`; `/settings/lookahead` still resolves).
 - **Lookahead range default**: New installs default to 3 episodes ahead (was 5). Existing saved values are unchanged.
-- **Onboarding step names**: Profile (was Play), Playback (was Routing; always shown), More (was Watching).
 - **Playback step**: Dest-scoped monitor/search filters sit on Playback after Folders; multi-instance Arr routing nests under them only when a second instance is configured.
 - **Retire-when on Profile**: Season/series placeholder retire-when sits below Customize profile; greyed out for episode density. Settings → Density & Lookahead matches.
 - **Playback section**: Monitor-only and search filters moved out of Density & Lookahead into Settings → Playback.
@@ -59,11 +66,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Density pin hover copy**: Under Season density, episode pins are greyed with a tip to pin the season or series instead. Under Series density, episode and season pins are greyed with a tip to pin the series instead.
 - **Density wording**: User-facing copy uses episode / season / series placeholder (not stub) in Settings, Lookahead help, rematerialize prompts, pin tips, queue-monitor activity, density filenames, and NFO titles.
 
-#### Removed
-
-- **Setup lab**: Dropped `/setup/lab` and the experimental lab step lists after Play-first cutover. Use `/setup/preview` to walk live setup without saving.
-
-#### Fixed
+### Fixed
 
 - **Postgres startup on SQLAlchemy 2.1**: Pin SQLAlchemy to 2.0.x and use the psycopg2 driver URL so images that resolve newer SQLAlchemy still start with the shipped driver.
 - **Playback dest-filter migrate**: Defers writing destination lists until library folders exist, and reseeds search-already-monitored during unfinished setup if a first boot froze empty lists.
@@ -79,8 +82,6 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Season density stub path match**: When the played path does not exactly match a stub row, resolve by season from the filename/folder (or webhook season). Do not fall back to the first stub for the show.
 - **Playback catalog TVDB**: Episode-level TVDB Guids from Plex/Tracearr match Sonarr episode ids, not only series TVDB.
 - **Density placeholder NFO refresh**: Series/season density status changes rewrite the placeholder NFO (and push player metadata); previously only movie/episode placeholders were refreshed, so density files could keep showing REQUEST.
-
-## Released
 
 ## [0.10.3] - 2026-09-28
 

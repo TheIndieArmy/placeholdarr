@@ -369,7 +369,10 @@ const WIZARD_STEPS = [
 ] as const;
 
 /** Density fields chosen on the Profile step; omitted from More when using play-first onboarding. */
-const PLAY_STEP_DENSITY_FIELD_KEYS = new Set(["TV_PLACEHOLDER_DENSITY", "TV_DENSITY_RETIRE_WHEN"]);
+const PLAY_STEP_DENSITY_FIELD_KEYS = new Set([
+  "TV_PLACEHOLDER_DENSITY",
+  "TV_DENSITY_RETIRE_WHEN",
+]);
 /** Playback dest filters saved on the Playback step; omit Playback section from More when using play-first onboarding. */
 const PLAY_STEP_PLAYBACK_MODIFIER_KEYS = new Set<string>([...PLAYBACK_DEST_FILTER_KEYS]);
 /** Keys saved on the Profile (density_search) step. */
@@ -450,25 +453,35 @@ const SETTINGS_UI_HIDDEN_FIELD_KEYS = new Set<string>([
   "PLEX_PLAYBACK_NOTIFIER",
   "JELLYFIN_PLAYBACK_NOTIFIER",
   "EMBY_PLAYBACK_NOTIFIER",
+  // Legacy multi-instance modes; Play Actions lists own runtime behavior.
+  "MOVIE_PLACEHOLDER_SEARCH_MODE",
+  "TV_PLACEHOLDER_SEARCH_MODE",
+  "MOVIE_PLACEHOLDER_PREFER_PATH_MATCH",
+  "TV_PLACEHOLDER_PREFER_PATH_MATCH",
+  "MOVIE_PLAYBACK_INSTANCE_MODE",
+  "TV_PLAYBACK_INSTANCE_MODE",
+  "MOVIE_PLAYBACK_PREFER_PATH_MATCH",
+  "TV_PLAYBACK_PREFER_PATH_MATCH",
+  "TV_CROSS_INSTANCE_LOOKAHEAD",
+  // Derived from Play Actions "Fallback" selections; not shown as its own toggle.
+  "ENABLE_PLAYBACK_FALLBACK_SEARCH",
+  // Superseded by ALWAYS + FALLBACK lists.
+  "MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES",
+  "TV_PLAY_PLACEHOLDER_ALSO_INSTANCES",
 ]);
 
 const ARR_CONFIGURATION_KEYS = new Set<string>([
   "ARR_INSTANCES_JSON",
 ]);
 
-const ARR_SEARCH_PLAYBACK_KEYS = new Set<string>([
-  "MOVIE_PLACEHOLDER_SEARCH_MODE",
-  "TV_PLACEHOLDER_SEARCH_MODE",
-  "MOVIE_PLACEHOLDER_PREFER_PATH_MATCH",
-  "TV_PLACEHOLDER_PREFER_PATH_MATCH",
-]);
-
-const ARR_REAL_FILE_PLAYBACK_KEYS = new Set<string>([
-  "MOVIE_PLAYBACK_INSTANCE_MODE",
-  "TV_PLAYBACK_INSTANCE_MODE",
-  "MOVIE_PLAYBACK_PREFER_PATH_MATCH",
-  "TV_PLAYBACK_PREFER_PATH_MATCH",
-  "ENABLE_PLAYBACK_FALLBACK_SEARCH",
+/** Play Actions matrix keys (path match is always on). */
+const ARR_PLAY_ACTIONS_KEYS = new Set<string>([
+  "MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES",
+  "MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES",
+  "MOVIE_PLAY_REAL_ALSO_INSTANCES",
+  "TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES",
+  "TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES",
+  "TV_PLAY_REAL_ALSO_INSTANCES",
   "PLAYBACK_FALLBACK_TIMEOUT_MINUTES",
 ]);
 
@@ -478,8 +491,7 @@ const ARR_SHARED_PLACEHOLDER_CLEANUP_KEYS = new Set<string>([
 ]);
 
 const ARR_BEHAVIOR_KEYS = new Set<string>([
-  ...ARR_SEARCH_PLAYBACK_KEYS,
-  ...ARR_REAL_FILE_PLAYBACK_KEYS,
+  ...ARR_PLAY_ACTIONS_KEYS,
   ...ARR_SHARED_PLACEHOLDER_CLEANUP_KEYS,
 ]);
 
@@ -957,7 +969,7 @@ export function App() {
   onboardingTourRouteRef.current = onboardingTourRoute;
   const wizardSteps: readonly WizardStepDef[] = useMemo(() => {
     if (!usePlayFirstOnboarding) return WIZARD_STEPS;
-    // Playback step is always shown (dest filters). Multi-instance routing UI nests under it when needed.
+    // Playback step is always shown (dest filters). Multi-instance Arr actions nest under it when needed.
     return ONBOARDING_WIZARD_STEPS;
   }, [usePlayFirstOnboarding]);
   const onboardingStepKeyRef = useRef<string | null>(null);
@@ -1996,6 +2008,8 @@ export function App() {
           integrationsStatus={integrationsStatus}
           onIntegrationsStatusRefresh={refreshIntegrationsStatus}
           onOpenOptionalApis={() => tryNavigate("/settings/optional-apis")}
+          onOpenArrIntegrations={() => tryNavigate("/settings/arr-integrations")}
+          onOpenPlayback={() => tryNavigate("/settings/playback")}
           onLogout={async () => {
             const status = await logoutAuth();
             setAuthStatus(status);
@@ -4257,15 +4271,6 @@ function arrMultiInstanceBehaviorUnlocked(
   return sessionTestOk || arrSecondaryPersistedWithCredentials(values, arrType);
 }
 
-const RESERVED_INSTANCE_SEARCH_MODES = new Set(["match", "both", "primary", "secondary"]);
-
-const PLACEHOLDER_SEARCH_HELP: Record<string, string> = {
-  both: "Searches every configured instance of that type.",
-};
-
-const PREFER_PATH_MATCH_HELP =
-  "When the played path maps to exactly one library destination, search that Arr instance instead of the preference above. Shared or unmatched paths still use the preference.";
-
 function settingBool(value: unknown, defaultValue = false): boolean {
   if (value === undefined || value === null || value === "") return defaultValue;
   if (typeof value === "boolean") return value;
@@ -4275,81 +4280,285 @@ function settingBool(value: unknown, defaultValue = false): boolean {
   return defaultValue;
 }
 
-function resolveInstanceSearchModeForUi(mode: string, instances: ArrInstanceDraft[]): string {
-  const normalized = String(mode || "both").trim().toLowerCase() || "both";
-  // Legacy "match" was path-first with All as the fallback preference.
-  if (normalized === "match" || normalized === "both") return "both";
-  if (normalized === "primary") {
-    const key = normalizeInstanceKey(String(instances[0]?.instance_key || ""));
-    return key || "both";
+function asPlayAlsoInstanceKeyList(value: unknown): string[] {
+  if (typeof value === "boolean" || value == null) return [];
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || "").trim().toLowerCase()).filter(Boolean);
   }
-  if (normalized === "secondary") {
-    const key = normalizeInstanceKey(String(instances[1]?.instance_key || ""));
-    return key || "both";
+  const text = String(value).trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (typeof parsed === "boolean") return [];
+    if (Array.isArray(parsed)) {
+      return parsed.map((item) => String(item || "").trim().toLowerCase()).filter(Boolean);
+    }
+  } catch {
+    /* comma-separated fallback */
   }
-  if (instances.some((item) => normalizeInstanceKey(String(item.instance_key || "")) === normalized)) {
-    return normalized;
+  return text
+    .split(",")
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function arrInstanceKeys(instances: ArrInstanceDraft[]): string[] {
+  const keys: string[] = [];
+  for (const inst of instances) {
+    const key = normalizeInstanceKey(String(inst.instance_key || ""));
+    if (key && !keys.includes(key)) keys.push(key);
   }
-  return "both";
+  return keys;
 }
 
-function resolvePreferPathMatchForUi(mode: string, preferRaw: unknown): boolean {
-  const normalized = String(mode || "").trim().toLowerCase();
-  if (normalized === "match") return true;
-  if (preferRaw === undefined || preferRaw === null || String(preferRaw).trim() === "") {
-    // Legacy modes other than match did not path-override.
-    return false;
+function resolveAlsoInstanceKeysForUi(value: unknown, instances: ArrInstanceDraft[]): string[] {
+  const allowed = new Set(arrInstanceKeys(instances));
+  return asPlayAlsoInstanceKeyList(value).filter((key) => allowed.has(key));
+}
+
+function toggleAlsoInstanceKey(keys: string[], key: string, on: boolean): string[] {
+  if (on) {
+    return keys.includes(key) ? keys : [...keys, key];
   }
-  return settingBool(preferRaw, false);
+  return keys.filter((item) => item !== key);
 }
 
-function isAllowedInstanceSearchMode(mode: string, instances: ArrInstanceDraft[]): boolean {
-  const normalized = String(mode || "").trim().toLowerCase();
-  if (!normalized) return false;
-  if (RESERVED_INSTANCE_SEARCH_MODES.has(normalized)) return true;
-  return instances.some((item) => normalizeInstanceKey(String(item.instance_key || "")) === normalized);
+type PlaceholderPlayMode = "off" | "fallback" | "always";
+
+const PLACEHOLDER_PLAY_MODE_OPTIONS: { value: PlaceholderPlayMode; label: string }[] = [
+  { value: "off", label: "Off" },
+  { value: "fallback", label: "Fallback" },
+  { value: "always", label: "Always" },
+];
+
+type RealFilePlayMode = "off" | "always";
+
+const REAL_FILE_PLAY_MODE_OPTIONS: { value: RealFilePlayMode; label: string }[] = [
+  { value: "off", label: "Off" },
+  { value: "always", label: "Always" },
+];
+
+function placeholderPlayModeForKey(
+  key: string,
+  alwaysKeys: string[],
+  fallbackKeys: string[],
+): PlaceholderPlayMode {
+  if (alwaysKeys.includes(key)) return "always";
+  if (fallbackKeys.includes(key)) return "fallback";
+  return "off";
 }
 
-function coercePersistedInstanceSearchMode(mode: string, instances: ArrInstanceDraft[], multiUnlocked: boolean): string {
-  if (!multiUnlocked || instances.length < 2) return "both";
-  const normalized = String(mode || "both").trim().toLowerCase() || "both";
-  if (!isAllowedInstanceSearchMode(normalized, instances)) return "both";
-  // Persist concrete preference (never legacy "match").
-  return resolveInstanceSearchModeForUi(normalized, instances);
+function applyPlaceholderPlayMode(
+  key: string,
+  mode: PlaceholderPlayMode,
+  alwaysKeys: string[],
+  fallbackKeys: string[],
+): { alwaysKeys: string[]; fallbackKeys: string[] } {
+  const withoutAlways = alwaysKeys.filter((item) => item !== key);
+  const withoutFallback = fallbackKeys.filter((item) => item !== key);
+  if (mode === "always") {
+    return { alwaysKeys: [...withoutAlways, key], fallbackKeys: withoutFallback };
+  }
+  if (mode === "fallback") {
+    return { alwaysKeys: withoutAlways, fallbackKeys: [...withoutFallback, key] };
+  }
+  return { alwaysKeys: withoutAlways, fallbackKeys: withoutFallback };
 }
 
-function coercePersistedPreferPathMatch(
-  mode: string,
-  preferRaw: unknown,
-  multiUnlocked: boolean,
-): boolean {
-  if (!multiUnlocked) return true;
-  return resolvePreferPathMatchForUi(mode, preferRaw);
+/** True when a Play Actions list key is present in form/API values (including an intentional empty list). */
+function isPlayActionsListPresent(raw: unknown): boolean {
+  return raw !== undefined && raw !== null;
 }
 
-function instanceSearchModeHelp(mode: string, instances: ArrInstanceDraft[]): string {
-  const resolved = resolveInstanceSearchModeForUi(mode, instances);
-  if (resolved === "both") return PLACEHOLDER_SEARCH_HELP.both;
-  const inst = instances.find((item) => normalizeInstanceKey(String(item.instance_key || "")) === resolved);
-  const name = String(inst?.label || resolved).trim() || resolved;
-  return `Always searches ${name} only.`;
+/**
+ * Resolve placeholder Always list.
+ *
+ * Once Always or Fallback has been persisted (including `[]`), trust Always so all-Off stays Off.
+ * Only when both keys are still unset, fall back to the legacy ALSO list for pre-migration upgrades.
+ */
+function resolvePlaceholderAlwaysKeysForUi(
+  alwaysRaw: unknown,
+  legacyAlsoRaw: unknown,
+  instances: ArrInstanceDraft[],
+  fallbackRaw?: unknown,
+): string[] {
+  if (isPlayActionsListPresent(alwaysRaw) || isPlayActionsListPresent(fallbackRaw)) {
+    return resolveAlsoInstanceKeysForUi(alwaysRaw, instances);
+  }
+  return resolveAlsoInstanceKeysForUi(legacyAlsoRaw, instances);
 }
 
-function InstanceSearchModeOptions(props: { instances: ArrInstanceDraft[] }) {
+function PlayActionsInstanceMatrix(props: {
+  title: string;
+  instances: ArrInstanceDraft[];
+  enabled: boolean;
+  brand: Brand;
+  themeMode: ThemeMode;
+  placeholderAlwaysKeys: string[];
+  placeholderFallbackKeys: string[];
+  realKeys: string[];
+  onPlaceholderModesChange: (next: { alwaysKeys: string[]; fallbackKeys: string[] }) => void;
+  onRealKeysChange: (keys: string[]) => void;
+  realColumnNote?: string;
+}) {
+  const focus = getBrandFocusClass(props.brand, props.themeMode);
+
+  if (!props.enabled || props.instances.length < 2) {
+    return (
+      <div className="min-w-0 flex h-full flex-col gap-2">
+        <h4 className="text-[14px] font-semibold text-slate-300">{props.title}</h4>
+        <p className="ui-field-description-compact">Not applicable, no second instance set up.</p>
+      </div>
+    );
+  }
+
+  const idPrefix = props.title.toLowerCase().includes("movie") ? "movie" : "tv";
+
+  function setMode(key: string, mode: PlaceholderPlayMode) {
+    props.onPlaceholderModesChange(
+      applyPlaceholderPlayMode(key, mode, props.placeholderAlwaysKeys, props.placeholderFallbackKeys),
+    );
+  }
+
+  function setRealMode(key: string, mode: RealFilePlayMode) {
+    props.onRealKeysChange(toggleAlsoInstanceKey(props.realKeys, key, mode === "always"));
+  }
+
   return (
-    <>
-      <option value="both">All instances</option>
-      {props.instances.map((inst) => {
-        const key = normalizeInstanceKey(String(inst.instance_key || ""));
-        if (!key) return null;
-        const label = String(inst.label || key).trim() || key;
-        return (
-          <option key={key} value={key}>
-            {label} only
-          </option>
-        );
-      })}
-    </>
+    <div className="min-w-0 flex h-full flex-col gap-3">
+      <h4 className="text-[14px] font-semibold text-slate-300">{props.title}</h4>
+      <div className="hidden min-w-0 sm:block">
+        {/* table-fixed + shared header height keep Movies/TV matrices aligned side-by-side */}
+        <table className="w-full table-fixed border-collapse text-[13px]">
+          <colgroup>
+            <col />
+            <col className="w-[7.5rem]" />
+            <col className="w-[7.5rem]" />
+          </colgroup>
+          <thead>
+            <tr className="border-b border-[#424753]/35 text-slate-400">
+              <th scope="col" className="h-12 py-2 pr-3 text-left align-bottom font-semibold">
+                Instance
+              </th>
+              <th scope="col" className="h-12 w-[7.5rem] px-1 py-2 text-center align-bottom font-semibold leading-snug">
+                Placeholder
+                <br />
+                play
+              </th>
+              <th scope="col" className="h-12 w-[7.5rem] px-1 py-2 text-center align-bottom font-semibold leading-snug">
+                Real
+                <br />
+                file
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {props.instances.map((inst) => {
+              const key = normalizeInstanceKey(String(inst.instance_key || ""));
+              if (!key) return null;
+              const label = String(inst.label || key).trim() || key;
+              const phMode = placeholderPlayModeForKey(
+                key,
+                props.placeholderAlwaysKeys,
+                props.placeholderFallbackKeys,
+              );
+              const realMode: RealFilePlayMode = props.realKeys.includes(key) ? "always" : "off";
+              return (
+                <tr key={key} className="border-b border-[#424753]/20 last:border-0">
+                  <td className="min-w-0 truncate py-2.5 pr-3 text-left font-medium text-slate-200" title={label}>
+                    {label}
+                  </td>
+                  <td className="w-[8.25rem] px-1 py-2 text-center">
+                    <select
+                      id={`${idPrefix}-ph-mode-${key}`}
+                      aria-label={`Placeholder play for ${label}`}
+                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-1.5 py-1.5 text-[12px] text-slate-200 outline-none transition-colors ${focus}`}
+                      value={phMode}
+                      onChange={(e) => setMode(key, e.target.value as PlaceholderPlayMode)}
+                    >
+                      {PLACEHOLDER_PLAY_MODE_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td className="w-[8.25rem] px-1 py-2 text-center">
+                    <select
+                      id={`${idPrefix}-real-mode-${key}`}
+                      aria-label={`Real file play for ${label}`}
+                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-1.5 py-1.5 text-[12px] text-slate-200 outline-none transition-colors ${focus}`}
+                      value={realMode}
+                      onChange={(e) => setRealMode(key, e.target.value as RealFilePlayMode)}
+                    >
+                      {REAL_FILE_PLAY_MODE_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <ul className="space-y-2 sm:hidden">
+        {props.instances.map((inst) => {
+          const key = normalizeInstanceKey(String(inst.instance_key || ""));
+          if (!key) return null;
+          const label = String(inst.label || key).trim() || key;
+          const phMode = placeholderPlayModeForKey(
+            key,
+            props.placeholderAlwaysKeys,
+            props.placeholderFallbackKeys,
+          );
+          const realMode: RealFilePlayMode = props.realKeys.includes(key) ? "always" : "off";
+          return (
+            <li
+              key={key}
+              className="rounded-lg border border-[#424753]/35 bg-[#0b111b]/40 px-3 py-2.5 space-y-2"
+            >
+              <div className="text-[14px] font-semibold text-slate-200">{label}</div>
+              <label className="block text-[13px] text-slate-300">
+                <span className="mb-1 block font-semibold text-slate-400">Placeholder play</span>
+                <select
+                  className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-2 py-2 text-[14px] text-slate-200 outline-none transition-colors ${focus}`}
+                  value={phMode}
+                  onChange={(e) => setMode(key, e.target.value as PlaceholderPlayMode)}
+                >
+                  {PLACEHOLDER_PLAY_MODE_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="block text-[13px] text-slate-300">
+                <span className="mb-1 block font-semibold text-slate-400">Real file</span>
+                <select
+                  className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-2 py-2 text-[14px] text-slate-200 outline-none transition-colors ${focus}`}
+                  value={realMode}
+                  onChange={(e) => setRealMode(key, e.target.value as RealFilePlayMode)}
+                >
+                  {REAL_FILE_PLAY_MODE_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </li>
+          );
+        })}
+      </ul>
+      {props.realColumnNote ? (
+        <p className="ui-field-description-compact mt-auto min-h-[3.25rem]">{props.realColumnNote}</p>
+      ) : (
+        <div className="mt-auto min-h-[3.25rem]" aria-hidden />
+      )}
+    </div>
   );
 }
 
@@ -4476,20 +4685,25 @@ function SharedPlaceholderCleanupPanel(props: {
   themeMode: ThemeMode;
   canUseRadarrSecondaryBehavior: boolean;
   canUseSonarrSecondaryBehavior: boolean;
+  /** Onboarding: always stack Movies/TV for readable select labels. Settings keeps side-by-side from sm. */
+  stackColumns?: boolean;
 }) {
+  const columnsClass = props.stackColumns
+    ? "grid grid-cols-1 gap-4"
+    : "grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5";
   return (
     <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
-      <div className="text-center">
-        <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider mb-1">
+      <div className="space-y-2">
+        <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-white">
           Shared Placeholder Cleanup
-        </h3>
-        <p className="ui-field-description mx-auto max-w-2xl">
+        </p>
+        <p className="ui-field-description leading-relaxed">
           When two instances share the same Placeholdarr folder (Library Root, or the same custom Library
           destination), pick when those placeholders are removed after a real file lands. If each instance has its
           own Library destination, this setting is unused; each folder is cleaned up on its own.
         </p>
       </div>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5">
+      <div className={columnsClass}>
         <SharedPlaceholderCleanupColumn
           label="Movies (Radarr)"
           settingKey="RADARR_SHARED_PLACEHOLDER_CLEANUP"
@@ -4535,20 +4749,179 @@ function ArrMultiInstanceBehaviorStack(props: {
   canUseRadarrSecondaryBehavior: boolean;
   canUseSonarrSecondaryBehavior: boolean;
   canUseAnySecondaryBehavior: boolean;
-  fallbackUnnecessaryBecauseAllBoth: boolean;
   radarrInstances: ArrInstanceDraft[];
   sonarrInstances: ArrInstanceDraft[];
+  /** Settings only: jump to ARR Integrations to reorder Fallback tries. */
+  onOpenArrIntegrations?: () => void;
+  /** Onboarding: stack Movies/TV columns for readable controls. Settings keeps side-by-side from sm. */
+  stackColumns?: boolean;
 }) {
   const {
     canUseRadarrSecondaryBehavior,
     canUseSonarrSecondaryBehavior,
     canUseAnySecondaryBehavior,
-    fallbackUnnecessaryBecauseAllBoth,
     radarrInstances,
     sonarrInstances,
   } = props;
+  const matrixColumnsClass = props.stackColumns
+    ? "grid grid-cols-1 items-start gap-4"
+    : "grid grid-cols-1 items-start gap-4 sm:grid-cols-2 sm:items-stretch sm:gap-5";
+  const movieAlwaysKeys = resolvePlaceholderAlwaysKeysForUi(
+    props.values.MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES,
+    props.values.MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES,
+    radarrInstances,
+    props.values.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES,
+  );
+  const movieFallbackKeys = canUseRadarrSecondaryBehavior
+    ? resolveAlsoInstanceKeysForUi(props.values.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES, radarrInstances).filter(
+        (key) => !movieAlwaysKeys.includes(key),
+      )
+    : [];
+  const movieRealKeys = resolveAlsoInstanceKeysForUi(
+    props.values.MOVIE_PLAY_REAL_ALSO_INSTANCES,
+    radarrInstances,
+  );
+  const tvAlwaysKeys = resolvePlaceholderAlwaysKeysForUi(
+    props.values.TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES,
+    props.values.TV_PLAY_PLACEHOLDER_ALSO_INSTANCES,
+    sonarrInstances,
+    props.values.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES,
+  );
+  const tvFallbackKeys = canUseSonarrSecondaryBehavior
+    ? resolveAlsoInstanceKeysForUi(props.values.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES, sonarrInstances).filter(
+        (key) => !tvAlwaysKeys.includes(key),
+      )
+    : [];
+  const tvRealKeys = resolveAlsoInstanceKeysForUi(
+    props.values.TV_PLAY_REAL_ALSO_INSTANCES,
+    sonarrInstances,
+  );
+  const hasFallback =
+    (canUseRadarrSecondaryBehavior && movieFallbackKeys.length > 0) ||
+    (canUseSonarrSecondaryBehavior && tvFallbackKeys.length > 0);
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
+      <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
+        <div className="space-y-2">
+          <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-white">
+            Play Actions
+          </p>
+          <div className="ui-field-description leading-relaxed">
+            <p className="mb-2">
+              When the library path is clear, the path-matched Arr is always included. Each control chooses whether that
+              instance is also actioned (monitor and/or search, per your destination filters). Ambiguous plays follow
+              Placeholder play.
+            </p>
+            <ul className="list-disc space-y-1.5 pl-5">
+              <li>
+                <span className="font-semibold text-slate-300">Off</span>: do not action this instance in addition to the
+                path-matched Arr.
+              </li>
+              <li>
+                <span className="font-semibold text-slate-300">Always</span>: also action this instance in addition to the
+                path-matched Arr.
+              </li>
+              <li>
+                <span className="font-semibold text-slate-300">Fallback</span>: also action this instance only when the
+                path-matched Arr does not have the title, or its action does not resolve within the timeout. Multiple
+                Fallback instances are tried in the order shown in the matrix (same as order set in{" "}
+                {props.onOpenArrIntegrations ? (
+                  <button
+                    type="button"
+                    onClick={props.onOpenArrIntegrations}
+                    className="font-medium text-slate-200 underline underline-offset-2 transition hover:text-white"
+                  >
+                    ARR Integrations
+                  </button>
+                ) : (
+                  "ARR Integrations"
+                )}
+                ).
+              </li>
+            </ul>
+          </div>
+        </div>
+        <div className={matrixColumnsClass}>
+          <PlayActionsInstanceMatrix
+            title="Movies (Radarr)"
+            instances={[...radarrInstances].sort((a, b) => a.priority - b.priority)}
+            enabled={canUseRadarrSecondaryBehavior}
+            brand={props.brand}
+            themeMode={props.themeMode}
+            placeholderAlwaysKeys={movieAlwaysKeys}
+            placeholderFallbackKeys={movieFallbackKeys}
+            realKeys={movieRealKeys}
+            onPlaceholderModesChange={({ alwaysKeys, fallbackKeys }) => {
+              props.onChange("MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES", alwaysKeys);
+              props.onChange("MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES", fallbackKeys);
+            }}
+            onRealKeysChange={(keys) => props.onChange("MOVIE_PLAY_REAL_ALSO_INSTANCES", keys)}
+            realColumnNote="Movies: Real file · Always is only useful when another Radarr still needs the title."
+          />
+          <PlayActionsInstanceMatrix
+            title="TV Shows (Sonarr)"
+            instances={[...sonarrInstances].sort((a, b) => a.priority - b.priority)}
+            enabled={canUseSonarrSecondaryBehavior}
+            brand={props.brand}
+            themeMode={props.themeMode}
+            placeholderAlwaysKeys={tvAlwaysKeys}
+            placeholderFallbackKeys={tvFallbackKeys}
+            realKeys={tvRealKeys}
+            onPlaceholderModesChange={({ alwaysKeys, fallbackKeys }) => {
+              props.onChange("TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES", alwaysKeys);
+              props.onChange("TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES", fallbackKeys);
+            }}
+            onRealKeysChange={(keys) => props.onChange("TV_PLAY_REAL_ALSO_INSTANCES", keys)}
+            realColumnNote="TV: Real file · Always also runs Lookahead on that Sonarr (Search mode and range still apply)."
+          />
+        </div>
+        {canUseAnySecondaryBehavior ? (
+          <div
+            className={`space-y-2 rounded-xl border px-4 py-4 ${
+              hasFallback
+                ? "border-[#424753]/50 bg-[#0b111b]/45"
+                : "border-[#424753]/30 bg-[#0b111b]/40 opacity-60"
+            }`}
+          >
+            <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-white">
+              Fallback timeout
+            </p>
+            <p className="ui-field-description-compact">
+              After actioning the path-matched Arr, wait this long before trying instances set to Fallback. Immediate try
+              still happens when the preferred Arr does not have the title. Adjust this based on how long typical Arr
+              jobs take in your environment for quicker fallback.
+            </p>
+            <label className="block text-[14px] font-semibold text-slate-200" htmlFor="playback-fallback-timeout">
+              Minutes
+              <input
+                id="playback-fallback-timeout"
+                className={`mt-2 block w-24 bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[15px] tabular-nums tracking-tight text-slate-200 outline-none transition-colors disabled:cursor-not-allowed ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                type="text"
+                inputMode="numeric"
+                maxLength={3}
+                autoComplete="off"
+                disabled={!hasFallback}
+                title={
+                  hasFallback
+                    ? undefined
+                    : "Set at least one instance to Fallback to edit this timeout"
+                }
+                value={(() => {
+                  const raw = props.values.PLAYBACK_FALLBACK_TIMEOUT_MINUTES;
+                  const digits = String(raw ?? "").replace(/\D/g, "").slice(0, 3);
+                  if (digits.length > 0) return digits;
+                  return raw === undefined || raw === null || String(raw).trim() === "" ? "30" : "";
+                })()}
+                onChange={(e) => {
+                  const d = e.target.value.replace(/\D/g, "").slice(0, 3);
+                  props.onChange("PLAYBACK_FALLBACK_TIMEOUT_MINUTES", d);
+                }}
+              />
+            </label>
+          </div>
+        ) : null}
+      </div>
       <SharedPlaceholderCleanupPanel
         values={props.values}
         onChange={props.onChange}
@@ -4556,342 +4929,8 @@ function ArrMultiInstanceBehaviorStack(props: {
         themeMode={props.themeMode}
         canUseRadarrSecondaryBehavior={canUseRadarrSecondaryBehavior}
         canUseSonarrSecondaryBehavior={canUseSonarrSecondaryBehavior}
+        stackColumns={props.stackColumns}
       />
-      <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
-        <div className="text-center">
-          <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider mb-1">Placeholder Search Behavior</h3>
-          <p className="ui-field-description mx-auto max-w-2xl">
-            When a placeholder is played, choose which Arr instance(s) to search.
-          </p>
-        </div>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5">
-          <div className="min-w-0 space-y-3">
-            <div>
-              <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
-              <select
-                className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
-                value={
-                  canUseRadarrSecondaryBehavior
-                    ? resolveInstanceSearchModeForUi(
-                        String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both"),
-                        radarrInstances,
-                      )
-                    : "na"
-                }
-                onChange={(e) => props.onChange("MOVIE_PLACEHOLDER_SEARCH_MODE", e.target.value)}
-                disabled={!canUseRadarrSecondaryBehavior}
-              >
-                {canUseRadarrSecondaryBehavior ? (
-                  <InstanceSearchModeOptions instances={radarrInstances} />
-                ) : (
-                  <option value="na">Not applicable, no second instance set up.</option>
-                )}
-              </select>
-              <p className="ui-field-description-compact mt-1.5">
-                {canUseRadarrSecondaryBehavior
-                  ? instanceSearchModeHelp(
-                      String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both"),
-                      radarrInstances,
-                    )
-                  : "Not applicable, no second instance set up."}
-              </p>
-            </div>
-            <label
-              className={`flex items-start gap-3 select-none ${
-                canUseRadarrSecondaryBehavior ? "cursor-pointer" : "opacity-60 cursor-not-allowed"
-              }`}
-            >
-              <ToggleSwitch
-                checked={
-                  canUseRadarrSecondaryBehavior
-                    ? resolvePreferPathMatchForUi(
-                        String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both"),
-                        props.values.MOVIE_PLACEHOLDER_PREFER_PATH_MATCH,
-                      )
-                    : false
-                }
-                onChange={(v) => props.onChange("MOVIE_PLACEHOLDER_PREFER_PATH_MATCH", v)}
-                accentHex={props.accent.hex}
-                disabled={!canUseRadarrSecondaryBehavior}
-                ariaLabel="Prefer matched library path for movie placeholders"
-              />
-              <span className="min-w-0">
-                <span className="block text-[14px] font-semibold text-slate-300">
-                  Prefer matched library path when possible
-                </span>
-                <span className="ui-field-description-compact mt-1 block">{PREFER_PATH_MATCH_HELP}</span>
-              </span>
-            </label>
-          </div>
-          <div className="min-w-0 space-y-3">
-            <div>
-              <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
-              <select
-                className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
-                value={
-                  canUseSonarrSecondaryBehavior
-                    ? resolveInstanceSearchModeForUi(
-                        String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both"),
-                        sonarrInstances,
-                      )
-                    : "na"
-                }
-                onChange={(e) => props.onChange("TV_PLACEHOLDER_SEARCH_MODE", e.target.value)}
-                disabled={!canUseSonarrSecondaryBehavior}
-              >
-                {canUseSonarrSecondaryBehavior ? (
-                  <InstanceSearchModeOptions instances={sonarrInstances} />
-                ) : (
-                  <option value="na">Not applicable, no second instance set up.</option>
-                )}
-              </select>
-              <p className="ui-field-description-compact mt-1.5">
-                {canUseSonarrSecondaryBehavior
-                  ? instanceSearchModeHelp(
-                      String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both"),
-                      sonarrInstances,
-                    )
-                  : "Not applicable, no second instance set up."}
-              </p>
-            </div>
-            <label
-              className={`flex items-start gap-3 select-none ${
-                canUseSonarrSecondaryBehavior ? "cursor-pointer" : "opacity-60 cursor-not-allowed"
-              }`}
-            >
-              <ToggleSwitch
-                checked={
-                  canUseSonarrSecondaryBehavior
-                    ? resolvePreferPathMatchForUi(
-                        String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both"),
-                        props.values.TV_PLACEHOLDER_PREFER_PATH_MATCH,
-                      )
-                    : false
-                }
-                onChange={(v) => props.onChange("TV_PLACEHOLDER_PREFER_PATH_MATCH", v)}
-                accentHex={props.accent.hex}
-                disabled={!canUseSonarrSecondaryBehavior}
-                ariaLabel="Prefer matched library path for TV placeholders"
-              />
-              <span className="min-w-0">
-                <span className="block text-[14px] font-semibold text-slate-300">
-                  Prefer matched library path when possible
-                </span>
-                <span className="ui-field-description-compact mt-1 block">{PREFER_PATH_MATCH_HELP}</span>
-              </span>
-            </label>
-          </div>
-        </div>
-      </div>
-      <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
-        <div className="text-center">
-          <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider mb-1">Real-File Search Behavior</h3>
-          <p className="ui-field-description mx-auto max-w-2xl">
-            When an actual media file is played, choose which Arr instance(s) to search.
-          </p>
-        </div>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5">
-          <div className="min-w-0 space-y-3">
-            <div>
-              <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
-              <select
-                className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
-                value={
-                  canUseRadarrSecondaryBehavior
-                    ? resolveInstanceSearchModeForUi(
-                        String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "both"),
-                        radarrInstances,
-                      )
-                    : "na"
-                }
-                onChange={(e) => props.onChange("MOVIE_PLAYBACK_INSTANCE_MODE", e.target.value)}
-                disabled={!canUseRadarrSecondaryBehavior}
-              >
-                {canUseRadarrSecondaryBehavior ? (
-                  <InstanceSearchModeOptions instances={radarrInstances} />
-                ) : (
-                  <option value="na">Not applicable, no second instance set up.</option>
-                )}
-              </select>
-              <p className="ui-field-description-compact mt-1.5">
-                {canUseRadarrSecondaryBehavior
-                  ? instanceSearchModeHelp(
-                      String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "both"),
-                      radarrInstances,
-                    )
-                  : "Not applicable, no second instance set up."}
-              </p>
-            </div>
-            <label
-              className={`flex items-start gap-3 select-none ${
-                canUseRadarrSecondaryBehavior ? "cursor-pointer" : "opacity-60 cursor-not-allowed"
-              }`}
-            >
-              <ToggleSwitch
-                checked={
-                  canUseRadarrSecondaryBehavior
-                    ? resolvePreferPathMatchForUi(
-                        String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "both"),
-                        props.values.MOVIE_PLAYBACK_PREFER_PATH_MATCH,
-                      )
-                    : false
-                }
-                onChange={(v) => props.onChange("MOVIE_PLAYBACK_PREFER_PATH_MATCH", v)}
-                accentHex={props.accent.hex}
-                disabled={!canUseRadarrSecondaryBehavior}
-                ariaLabel="Prefer matched library path for movie real-file search"
-              />
-              <span className="min-w-0">
-                <span className="block text-[14px] font-semibold text-slate-300">
-                  Prefer matched library path when possible
-                </span>
-                <span className="ui-field-description-compact mt-1 block">{PREFER_PATH_MATCH_HELP}</span>
-              </span>
-            </label>
-          </div>
-          <div className="min-w-0 space-y-3">
-            <div>
-              <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
-              <select
-                className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
-                value={
-                  canUseSonarrSecondaryBehavior
-                    ? resolveInstanceSearchModeForUi(
-                        String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "both"),
-                        sonarrInstances,
-                      )
-                    : "na"
-                }
-                onChange={(e) => props.onChange("TV_PLAYBACK_INSTANCE_MODE", e.target.value)}
-                disabled={!canUseSonarrSecondaryBehavior}
-              >
-                {canUseSonarrSecondaryBehavior ? (
-                  <InstanceSearchModeOptions instances={sonarrInstances} />
-                ) : (
-                  <option value="na">Not applicable, no second instance set up.</option>
-                )}
-              </select>
-              <p className="ui-field-description-compact mt-1.5">
-                {canUseSonarrSecondaryBehavior
-                  ? instanceSearchModeHelp(
-                      String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "both"),
-                      sonarrInstances,
-                    )
-                  : "Not applicable, no second instance set up."}
-              </p>
-            </div>
-            <label
-              className={`flex items-start gap-3 select-none ${
-                canUseSonarrSecondaryBehavior ? "cursor-pointer" : "opacity-60 cursor-not-allowed"
-              }`}
-            >
-              <ToggleSwitch
-                checked={
-                  canUseSonarrSecondaryBehavior
-                    ? resolvePreferPathMatchForUi(
-                        String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "both"),
-                        props.values.TV_PLAYBACK_PREFER_PATH_MATCH,
-                      )
-                    : false
-                }
-                onChange={(v) => props.onChange("TV_PLAYBACK_PREFER_PATH_MATCH", v)}
-                accentHex={props.accent.hex}
-                disabled={!canUseSonarrSecondaryBehavior}
-                ariaLabel="Prefer matched library path for TV real-file search"
-              />
-              <span className="min-w-0">
-                <span className="block text-[14px] font-semibold text-slate-300">
-                  Prefer matched library path when possible
-                </span>
-                <span className="ui-field-description-compact mt-1 block">{PREFER_PATH_MATCH_HELP}</span>
-              </span>
-            </label>
-          </div>
-        </div>
-        <div className="border-t border-[#424753]/20 pt-4">
-          <div className="mx-auto flex max-w-lg flex-col items-center gap-4 text-center">
-            <div>
-              <div className="text-[14px] font-semibold text-slate-300">Fallback search</div>
-              <div className="ui-field-description mt-1">
-                {fallbackUnnecessaryBecauseAllBoth ? (
-                  "Fallback is not needed because every unlocked search behavior already searches all instances."
-                ) : canUseAnySecondaryBehavior ? (
-                  <div className="mx-auto w-full max-w-md text-left">
-                    <p>When enabled, remaining configured instances are searched in ARR Integrations list order if:</p>
-                    <ul className="mt-2 list-disc space-y-1.5 pl-4">
-                      <li>The selected instance doesn&apos;t have the content added (immediate fallback search), or</li>
-                      <li>
-                        The content isn&apos;t imported before the fallback timeout (e.g. content not found, indexer/download errors, etc.)
-                      </li>
-                    </ul>
-                  </div>
-                ) : (
-                  "Not applicable, no second instance set up."
-                )}
-              </div>
-            </div>
-            <label className="flex cursor-pointer select-none items-center justify-center gap-3">
-              <ToggleSwitch
-                checked={Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH)}
-                onChange={(v) => props.onChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", v)}
-                accentHex={props.accent.hex}
-                disabled={!canUseAnySecondaryBehavior || fallbackUnnecessaryBecauseAllBoth}
-                ariaLabel="Playback fallback search"
-              />
-              <span className="text-[16px] text-slate-300">
-                {fallbackUnnecessaryBecauseAllBoth
-                  ? "Not needed"
-                  : canUseAnySecondaryBehavior
-                  ? (Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "Enabled" : "Disabled")
-                  : "Not applicable, no second instance set up."}
-              </span>
-            </label>
-            <div className="text-center">
-              <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">Fallback timeout (minutes)</label>
-              {canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? (
-                <input
-                  className={`mx-auto mt-0.5 block w-[4.25rem] bg-[#0b111b] border border-[#424753]/40 rounded-lg px-2 py-2 text-center text-[16px] tabular-nums tracking-tight text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
-                  type="text"
-                  inputMode="numeric"
-                  maxLength={3}
-                  autoComplete="off"
-                  value={(() => {
-                    const raw = props.values.PLAYBACK_FALLBACK_TIMEOUT_MINUTES;
-                    const digits = String(raw ?? "").replace(/\D/g, "").slice(0, 3);
-                    if (digits.length > 0) return digits;
-                    return raw === undefined || raw === null || String(raw).trim() === "" ? "30" : "";
-                  })()}
-                  onChange={(e) => {
-                    const d = e.target.value.replace(/\D/g, "").slice(0, 3);
-                    props.onChange("PLAYBACK_FALLBACK_TIMEOUT_MINUTES", d);
-                  }}
-                />
-              ) : fallbackUnnecessaryBecauseAllBoth ? (
-                <input
-                  className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-500 opacity-60 cursor-not-allowed"
-                  type="text"
-                  value="Not needed because all unlocked behaviors already search all instances."
-                  disabled
-                />
-              ) : canUseAnySecondaryBehavior ? (
-                <input
-                  className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-500 opacity-60 cursor-not-allowed"
-                  type="text"
-                  value="Enable fallback search."
-                  disabled
-                />
-              ) : (
-                <input
-                  className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-500 opacity-60 cursor-not-allowed"
-                  type="text"
-                  value="Not applicable, no second instance set up."
-                  disabled
-                />
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }
@@ -4914,56 +4953,72 @@ function buildPersistableSettingsValues(values: FieldValueMap, payload: Settings
   const hasRadarrSecondary = radarrInstances.length > 1;
   const hasSonarrSecondary = sonarrInstances.length > 1;
 
-  const rawMoviePlaceholderMode = String(cleaned.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both");
-  const rawTvPlaceholderMode = String(cleaned.TV_PLACEHOLDER_SEARCH_MODE ?? "both");
-  const rawMoviePlaybackMode = String(cleaned.MOVIE_PLAYBACK_INSTANCE_MODE ?? "both");
-  const rawTvPlaybackMode = String(cleaned.TV_PLAYBACK_INSTANCE_MODE ?? "both");
-
-  cleaned.MOVIE_PLACEHOLDER_PREFER_PATH_MATCH = coercePersistedPreferPathMatch(
-    rawMoviePlaceholderMode,
-    cleaned.MOVIE_PLACEHOLDER_PREFER_PATH_MATCH,
-    hasRadarrSecondary,
-  );
-  cleaned.TV_PLACEHOLDER_PREFER_PATH_MATCH = coercePersistedPreferPathMatch(
-    rawTvPlaceholderMode,
-    cleaned.TV_PLACEHOLDER_PREFER_PATH_MATCH,
-    hasSonarrSecondary,
-  );
-  cleaned.MOVIE_PLAYBACK_PREFER_PATH_MATCH = coercePersistedPreferPathMatch(
-    rawMoviePlaybackMode,
-    cleaned.MOVIE_PLAYBACK_PREFER_PATH_MATCH,
-    hasRadarrSecondary,
-  );
-  cleaned.TV_PLAYBACK_PREFER_PATH_MATCH = coercePersistedPreferPathMatch(
-    rawTvPlaybackMode,
-    cleaned.TV_PLAYBACK_PREFER_PATH_MATCH,
-    hasSonarrSecondary,
-  );
-  cleaned.MOVIE_PLACEHOLDER_SEARCH_MODE = coercePersistedInstanceSearchMode(
-    rawMoviePlaceholderMode,
-    radarrInstances,
-    hasRadarrSecondary,
-  );
-  cleaned.TV_PLACEHOLDER_SEARCH_MODE = coercePersistedInstanceSearchMode(
-    rawTvPlaceholderMode,
-    sonarrInstances,
-    hasSonarrSecondary,
-  );
-  cleaned.MOVIE_PLAYBACK_INSTANCE_MODE = coercePersistedInstanceSearchMode(
-    rawMoviePlaybackMode,
-    radarrInstances,
-    hasRadarrSecondary,
-  );
-  cleaned.TV_PLAYBACK_INSTANCE_MODE = coercePersistedInstanceSearchMode(
-    rawTvPlaybackMode,
-    sonarrInstances,
-    hasSonarrSecondary,
-  );
-
-  if (!hasRadarrSecondary && !hasSonarrSecondary) {
-    cleaned.ENABLE_PLAYBACK_FALLBACK_SEARCH = false;
+  // Only normalize Play Actions when multi-instance applies. Single-instance saves must not
+  // persist empty lists (or flip ENABLE off), or adding a second Arr later looks intentionally Off.
+  let movieFallbackForEnable: string[] | null = null;
+  let tvFallbackForEnable: string[] | null = null;
+  if (hasRadarrSecondary) {
+    const movieAlways = resolvePlaceholderAlwaysKeysForUi(
+      cleaned.MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES,
+      cleaned.MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES,
+      radarrInstances,
+      cleaned.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES,
+    );
+    const movieFallback = resolveAlsoInstanceKeysForUi(
+      cleaned.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES,
+      radarrInstances,
+    ).filter((key) => !movieAlways.includes(key));
+    const movieRealAlso = resolveAlsoInstanceKeysForUi(
+      cleaned.MOVIE_PLAY_REAL_ALSO_INSTANCES,
+      radarrInstances,
+    );
+    cleaned.MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES = movieAlways;
+    cleaned.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES = movieFallback;
+    cleaned.MOVIE_PLAY_REAL_ALSO_INSTANCES = movieRealAlso;
+    cleaned.MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES = movieAlways;
+    movieFallbackForEnable = movieFallback;
+  } else {
+    delete cleaned.MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES;
+    delete cleaned.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES;
+    delete cleaned.MOVIE_PLAY_REAL_ALSO_INSTANCES;
+    delete cleaned.MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES;
   }
-
+  if (hasSonarrSecondary) {
+    const tvAlways = resolvePlaceholderAlwaysKeysForUi(
+      cleaned.TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES,
+      cleaned.TV_PLAY_PLACEHOLDER_ALSO_INSTANCES,
+      sonarrInstances,
+      cleaned.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES,
+    );
+    const tvFallback = resolveAlsoInstanceKeysForUi(
+      cleaned.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES,
+      sonarrInstances,
+    ).filter((key) => !tvAlways.includes(key));
+    const tvRealAlso = resolveAlsoInstanceKeysForUi(cleaned.TV_PLAY_REAL_ALSO_INSTANCES, sonarrInstances);
+    cleaned.TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES = tvAlways;
+    cleaned.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES = tvFallback;
+    cleaned.TV_PLAY_REAL_ALSO_INSTANCES = tvRealAlso;
+    cleaned.TV_PLAY_PLACEHOLDER_ALSO_INSTANCES = tvAlways;
+    cleaned.TV_CROSS_INSTANCE_LOOKAHEAD = tvRealAlso;
+    tvFallbackForEnable = tvFallback;
+  } else {
+    delete cleaned.TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES;
+    delete cleaned.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES;
+    delete cleaned.TV_PLAY_REAL_ALSO_INSTANCES;
+    delete cleaned.TV_PLAY_PLACEHOLDER_ALSO_INSTANCES;
+    delete cleaned.TV_CROSS_INSTANCE_LOOKAHEAD;
+  }
+  if (hasRadarrSecondary || hasSonarrSecondary) {
+    const movieFb =
+      movieFallbackForEnable ??
+      resolveAlsoInstanceKeysForUi(values.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES, radarrInstances);
+    const tvFb =
+      tvFallbackForEnable ??
+      resolveAlsoInstanceKeysForUi(values.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES, sonarrInstances);
+    cleaned.ENABLE_PLAYBACK_FALLBACK_SEARCH = movieFb.length > 0 || tvFb.length > 0;
+  } else {
+    delete cleaned.ENABLE_PLAYBACK_FALLBACK_SEARCH;
+  }
   const radarrSharedCleanupMode = String(cleaned.RADARR_SHARED_PLACEHOLDER_CLEANUP ?? "protect_siblings")
     .trim()
     .toLowerCase();
@@ -5383,12 +5438,12 @@ function ArrInstancesEditor(props: {
     const canUp = canReorder && slotIndex > 0;
     const canDown = canReorder && slotIndex < connectedCount - 1;
     return (
-      <div className="flex shrink-0 flex-col gap-0.5" role="group" aria-label="Change search priority">
+      <div className="flex shrink-0 flex-col justify-center gap-1" role="group" aria-label="Change search priority">
         <button
           type="button"
           disabled={!canUp}
           onClick={() => moveInstanceSlot(arrType, slotIndex, -1)}
-          className={`inline-flex h-7 w-7 items-center justify-center rounded-md border transition ${
+          className={`relative z-10 inline-flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-md border transition ${
             canUp
               ? "border-white/15 bg-white/[0.05] text-slate-200 hover:border-white/25 hover:bg-white/[0.09]"
               : "cursor-not-allowed border-white/[0.06] bg-transparent text-slate-600"
@@ -5396,7 +5451,7 @@ function ArrInstancesEditor(props: {
           title={canReorder ? "Move earlier in search/fallback order" : "Connect another instance to reorder"}
           aria-label="Move earlier in search priority"
         >
-          <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
+          <span className="material-symbols-outlined leading-none" style={{ fontSize: 18 }}>
             keyboard_arrow_up
           </span>
         </button>
@@ -5404,7 +5459,7 @@ function ArrInstancesEditor(props: {
           type="button"
           disabled={!canDown}
           onClick={() => moveInstanceSlot(arrType, slotIndex, 1)}
-          className={`inline-flex h-7 w-7 items-center justify-center rounded-md border transition ${
+          className={`relative z-10 inline-flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-md border transition ${
             canDown
               ? "border-white/15 bg-white/[0.05] text-slate-200 hover:border-white/25 hover:bg-white/[0.09]"
               : "cursor-not-allowed border-white/[0.06] bg-transparent text-slate-600"
@@ -5412,7 +5467,7 @@ function ArrInstancesEditor(props: {
           title={canReorder ? "Move later in search/fallback order" : "Connect another instance to reorder"}
           aria-label="Move later in search priority"
         >
-          <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
+          <span className="material-symbols-outlined leading-none" style={{ fontSize: 18 }}>
             keyboard_arrow_down
           </span>
         </button>
@@ -5992,11 +6047,11 @@ function ArrInstancesEditor(props: {
                             Slot {slotIndex + 1}
                           </div>
                           <div
-                            className={`flex h-[8.25rem] flex-col justify-start gap-2 overflow-hidden rounded-xl border border-white/[0.08] bg-[#0a0f18]/95 px-4 py-2.5 ${motionClass}`}
+                            className={`flex h-[8.25rem] items-stretch gap-2 overflow-hidden rounded-xl border border-white/[0.08] bg-[#0a0f18]/95 px-4 py-2.5 ${motionClass}`}
                           >
-                            <div className="flex min-h-0 items-start gap-2">
-                              <div className="min-w-0 flex-1">
-                                <div className="flex items-center gap-2 min-w-0">
+                            <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-2">
+                              <div className="min-w-0">
+                                <div className="flex min-w-0 items-center gap-2">
                                   <div className="truncate text-[15px] font-semibold text-white font-headline">{item.label}</div>
                                   {warn ? <IntegrationFailureBadge size="sm" title={warn.title} /> : null}
                                 </div>
@@ -6008,17 +6063,18 @@ function ArrInstancesEditor(props: {
                                   {warn?.message || "—"}
                                 </div>
                               </div>
-                              {instanceReorderControls(arrType, slotIndex, connectedCount)}
-                            </div>
-                            <div className="mt-auto flex flex-wrap items-center gap-2">
-                              <div className="flex min-w-0 flex-1 flex-wrap gap-2">
+                              <div className="mt-auto flex items-center gap-1.5">
                                 <button
                                   type="button"
                                   onClick={() => openSlotPanel({ arrType, slotIndex, isNew: false })}
-                                  className="rounded-lg border border-white/15 bg-white/[0.05] px-2.5 py-1.5 text-[12px] font-headline font-semibold uppercase tracking-wider text-slate-200 transition hover:border-white/25 hover:bg-white/[0.09]"
+                                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-white/15 bg-white/[0.05] text-slate-200 transition hover:border-white/25 hover:bg-white/[0.09] disabled:opacity-40"
                                   disabled={busy}
+                                  title="Configure"
+                                  aria-label="Configure"
                                 >
-                                  Configure
+                                  <span className="material-symbols-outlined leading-none" style={{ fontSize: 18 }}>
+                                    settings
+                                  </span>
                                 </button>
                                 <button
                                   type="button"
@@ -6030,27 +6086,36 @@ function ArrInstancesEditor(props: {
                                       label: String(item.label || ""),
                                     });
                                   }}
-                                  className="rounded-lg border border-white/10 bg-transparent px-2.5 py-1.5 text-[12px] font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
+                                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-white/10 bg-transparent text-slate-400 transition hover:border-white/20 hover:text-slate-200 disabled:opacity-40"
                                   disabled={busy}
+                                  title="Webhook"
+                                  aria-label="Webhook"
                                 >
-                                  Webhook
+                                  <span className="material-symbols-outlined leading-none" style={{ fontSize: 18 }}>
+                                    webhook
+                                  </span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setDisconnectDialog({
+                                      arrType,
+                                      slotIndex,
+                                      label: String(item.label || arrType),
+                                    })
+                                  }
+                                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-red-400/20 bg-transparent text-red-400 transition hover:border-red-400/35 hover:bg-red-500/10 hover:text-red-300 disabled:opacity-40"
+                                  disabled={busy}
+                                  title="Remove"
+                                  aria-label="Remove"
+                                >
+                                  <span className="material-symbols-outlined leading-none" style={{ fontSize: 18 }}>
+                                    delete
+                                  </span>
                                 </button>
                               </div>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setDisconnectDialog({
-                                    arrType,
-                                    slotIndex,
-                                    label: String(item.label || arrType),
-                                  })
-                                }
-                                className="ml-auto shrink-0 rounded-lg px-2 py-1.5 text-[12px] font-medium text-red-400 transition hover:text-red-300 disabled:opacity-40"
-                                disabled={busy}
-                              >
-                                Remove
-                              </button>
                             </div>
+                            {instanceReorderControls(arrType, slotIndex, connectedCount)}
                           </div>
                         </div>
                       );
@@ -6830,7 +6895,9 @@ function LookaheadDensityPanel(props: {
   values: FieldValueMap;
   onChange: (key: string, value: unknown) => void;
   guide?: ReactNode;
+  accentHex?: string;
 }) {
+  void props.accentHex;
   return (
     <DensitySearchIdeasStep
       variant={props.variant}
@@ -6852,13 +6919,16 @@ type PlaybackIntroVariant = "settings" | "onboarding";
 function PlaybackSectionIntro(props: { variant: PlaybackIntroVariant; embedded?: boolean }) {
   const wrapClass =
     props.variant === "settings"
-      ? "px-6 py-5 border-b border-[#424753]/20"
+      ? "px-6 py-5 border-b border-[#424753]/20 space-y-2"
       : props.embedded
-        ? "space-y-3"
-        : WIZARD_ONBOARDING_SECTION_SURFACE_CLASS;
+        ? "space-y-2"
+        : `${WIZARD_ONBOARDING_SECTION_SURFACE_CLASS} space-y-2`;
   return (
     <div className={wrapClass}>
-      <p className="ui-field-description text-slate-300 leading-relaxed">
+      <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-white">
+        Playback monitoring and searching
+      </p>
+      <p className="ui-field-description leading-relaxed text-slate-300">
         When a placeholder or real file is played, choose which library destinations each filter applies to. Use them to
         monitor only, allow re-searching already-monitored titles, or search titles that are not released yet (TV air
         dates; movie preferred release date from Calendar). Destinations are listed under Movies and TV by folder path.
@@ -7426,6 +7496,8 @@ function SettingsPanel(props: {
   onTestConnection: (input: { service: "plex" | "jellyfin" | "emby" | "radarr" | "sonarr"; urlKey: string; credentialKey: string }) => Promise<{ ok: boolean; message: string }>;
   onPartialPersist?: (partial: Record<string, unknown>) => Promise<void>;
   onOpenOptionalApis?: () => void;
+  onOpenArrIntegrations?: () => void;
+  onOpenPlayback?: () => void;
 }) {
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
   const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
@@ -7460,81 +7532,6 @@ function SettingsPanel(props: {
     "sonarr",
     arrSecondaryTestStatus.sonarr,
   );
-  const unlockedSettingsSearchBehavior = [
-    canUseRadarrSecondaryBehavior
-      ? {
-          preference: resolveInstanceSearchModeForUi(
-            String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both"),
-            radarrInstances,
-          ),
-          preferPath: resolvePreferPathMatchForUi(
-            String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both"),
-            props.values.MOVIE_PLACEHOLDER_PREFER_PATH_MATCH,
-          ),
-        }
-      : null,
-    canUseSonarrSecondaryBehavior
-      ? {
-          preference: resolveInstanceSearchModeForUi(
-            String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both"),
-            sonarrInstances,
-          ),
-          preferPath: resolvePreferPathMatchForUi(
-            String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both"),
-            props.values.TV_PLACEHOLDER_PREFER_PATH_MATCH,
-          ),
-        }
-      : null,
-    canUseRadarrSecondaryBehavior
-      ? {
-          preference: resolveInstanceSearchModeForUi(
-            String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "both"),
-            radarrInstances,
-          ),
-          preferPath: resolvePreferPathMatchForUi(
-            String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "both"),
-            props.values.MOVIE_PLAYBACK_PREFER_PATH_MATCH,
-          ),
-        }
-      : null,
-    canUseSonarrSecondaryBehavior
-      ? {
-          preference: resolveInstanceSearchModeForUi(
-            String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "both"),
-            sonarrInstances,
-          ),
-          preferPath: resolvePreferPathMatchForUi(
-            String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "both"),
-            props.values.TV_PLAYBACK_PREFER_PATH_MATCH,
-          ),
-        }
-      : null,
-  ].filter((value): value is { preference: string; preferPath: boolean } => Boolean(value));
-  const fallbackUnnecessaryBecauseAllBoth =
-    unlockedSettingsSearchBehavior.length > 0 &&
-    unlockedSettingsSearchBehavior.every((item) => item.preference === "both" && !item.preferPath);
-
-  useEffect(() => {
-    if (!props.payload) return;
-    // Only heal on the section that owns this toggle. Running on Dummy Video (and other
-    // tabs) was marking Settings dirty and prompting leave-without-saving after upload.
-    if (props.activeSection !== "ARR Integrations") return;
-    if (fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH)) {
-      if (props.onCoerceFieldValues) {
-        props.onCoerceFieldValues({ ENABLE_PLAYBACK_FALLBACK_SEARCH: false });
-      } else {
-        props.onValueChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", false);
-      }
-    }
-  }, [
-    fallbackUnnecessaryBecauseAllBoth,
-    props.payload,
-    props.activeSection,
-    props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH,
-    props.onValueChange,
-    props.onCoerceFieldValues,
-  ]);
-
   /** Must run before any conditional return — hook order must match when payload transitions null → loaded. */
   const allSettingsFieldsByKey = useMemo(() => {
     const m = new Map<string, SettingsField>();
@@ -7937,40 +7934,23 @@ function SettingsPanel(props: {
                 />
               ) : null}
               {active.name === "Paths" ? (
-                <>
-                  <LibraryPathsForm
-                    fields={[
-                      ...active.fields,
-                      ...PATH_PLEX_DEFAULT_SECTION_KEYS.map((key) => allSettingsFieldsByKey.get(key)).filter(
-                        (field): field is SettingsField =>
-                          Boolean(field) && !active.fields.some((existing) => existing.key === field!.key),
-                      ),
-                    ]}
-                    values={props.values}
-                    brand={props.brand}
-                    themeMode={props.themeMode}
-                    accent={accent}
-                    layout="settings"
-                    onValueChange={props.onValueChange}
-                    runTest={runTest}
-                    testResults={testResults}
-                  />
-                  <div className="px-6 pb-5">
-                    <ArrMultiInstanceBehaviorStack
-                      values={props.values}
-                      onChange={props.onValueChange}
-                      brand={props.brand}
-                      themeMode={props.themeMode}
-                      accent={accent}
-                      canUseRadarrSecondaryBehavior={canUseRadarrSecondaryBehavior}
-                      canUseSonarrSecondaryBehavior={canUseSonarrSecondaryBehavior}
-                      canUseAnySecondaryBehavior={canUseAnySecondaryBehavior}
-                      fallbackUnnecessaryBecauseAllBoth={fallbackUnnecessaryBecauseAllBoth}
-                      radarrInstances={radarrInstances}
-                      sonarrInstances={sonarrInstances}
-                    />
-                  </div>
-                </>
+                <LibraryPathsForm
+                  fields={[
+                    ...active.fields,
+                    ...PATH_PLEX_DEFAULT_SECTION_KEYS.map((key) => allSettingsFieldsByKey.get(key)).filter(
+                      (field): field is SettingsField =>
+                        Boolean(field) && !active.fields.some((existing) => existing.key === field!.key),
+                    ),
+                  ]}
+                  values={props.values}
+                  brand={props.brand}
+                  themeMode={props.themeMode}
+                  accent={accent}
+                  layout="settings"
+                  onValueChange={props.onValueChange}
+                  runTest={runTest}
+                  testResults={testResults}
+                />
               ) : active.name === "Media Integrations" ? (
                 (() => {
                   const fieldByKey = new Map(active.fields.map((f) => [f.key, f]));
@@ -8054,12 +8034,11 @@ function SettingsPanel(props: {
                                       ariaLabel={`${card.title} ${enabled ? "enabled" : "paused"}`}
                                     />
                                   </label>
-                                  <dl className="space-y-1.5 rounded-xl border border-white/[0.06] bg-black/20 p-3 text-[13px] leading-snug">
-                                    <div className="flex min-w-0 gap-2">
-                                      <dt className="w-[4.75rem] shrink-0 font-medium text-slate-500">Address</dt>
-                                      <dd className="truncate font-mono text-slate-200" title={address || undefined}>{address || "—"}</dd>
-                                    </div>
-                                  </dl>
+                                  <div className="min-w-0 rounded-xl border border-white/[0.06] bg-black/20 p-3 text-[13px] leading-snug">
+                                    <p className="truncate font-mono text-slate-200" title={address || undefined}>
+                                      {address || "—"}
+                                    </p>
+                                  </div>
                                   <div className="mt-2 flex min-h-[2.5rem] flex-col justify-center text-[14px]">
                                     {!enabled ? (
                                       <p className="ui-field-description">Integration paused. Placeholdarr will not sync to {card.title} until re-enabled.</p>
@@ -8150,7 +8129,22 @@ function SettingsPanel(props: {
                   <div className="px-6 py-5">
                     <div className="mb-3">
                       <h3 className="text-[18px] font-bold text-white font-headline">ARR Instances</h3>
-                      <p className="ui-field-description mt-1">Configure up to 4 Radarr and 4 Sonarr instances. Use the arrows to set list order (fallback when those options apply). These entries also power webhook labels and instance-aware routing.</p>
+                      <p className="ui-field-description mt-1">
+                        Configure up to 4 Radarr and 4 Sonarr instances. Use the arrows to set list order. On{" "}
+                        {props.onOpenPlayback ? (
+                          <button
+                            type="button"
+                            onClick={props.onOpenPlayback}
+                            className="font-medium text-slate-200 underline underline-offset-2 transition hover:text-white"
+                          >
+                            Playback
+                          </button>
+                        ) : (
+                          "Playback"
+                        )}
+                        , instances set to Fallback are tried in this order when the path-matched Arr does not resolve
+                        in time. These entries also power webhook labels and instance-aware routing.
+                      </p>
                     </div>
                     <ArrInstancesEditor
                       layout="slots"
@@ -8172,6 +8166,7 @@ function SettingsPanel(props: {
                     variant="settings"
                     values={props.values}
                     onChange={props.onValueChange}
+                    accentHex={accent.hex}
                   />
                   {(() => {
                     const remaining = active.fields.filter(
@@ -8185,28 +8180,39 @@ function SettingsPanel(props: {
                   })()}
                 </div>
               ) : active.name === "Playback" ? (
-                <div className="px-6 py-5">
-                  <div className={`${UI_SECTION_FRAME_CLASS} overflow-hidden divide-y divide-[#424753]/20`}>
-                    <div className="px-6 py-5">
-                      <PlaybackSectionIntro variant="onboarding" embedded />
-                    </div>
-                    <div className="px-6 py-5">
-                      <PlaybackDestFilterControls
-                        values={props.values}
-                        options={
-                          props.payload?.playback_dest_options ||
-                          playbackDestOptionsFromValues(props.values)
-                        }
-                        onChange={(key, next) => props.onValueChange(key, next)}
-                        hideHeading
-                      />
-                    </div>
+                <div className="px-6 py-5 space-y-6">
+                  <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
+                    <PlaybackSectionIntro variant="onboarding" embedded />
+                    <PlaybackDestFilterControls
+                      values={props.values}
+                      options={
+                        props.payload?.playback_dest_options ||
+                        playbackDestOptionsFromValues(props.values)
+                      }
+                      onChange={(key, next) => props.onValueChange(key, next)}
+                      hideHeading
+                    />
                     {active.fields
                       .filter((field) => !isPlaybackDestFilterKey(field.key))
                       .map((field) => (
                         <Fragment key={field.key}>{renderStandardField(field)}</Fragment>
                       ))}
                   </div>
+                  {canUseAnySecondaryBehavior ? (
+                    <ArrMultiInstanceBehaviorStack
+                      values={props.values}
+                      onChange={props.onValueChange}
+                      brand={props.brand}
+                      themeMode={props.themeMode}
+                      accent={accent}
+                      canUseRadarrSecondaryBehavior={canUseRadarrSecondaryBehavior}
+                      canUseSonarrSecondaryBehavior={canUseSonarrSecondaryBehavior}
+                      canUseAnySecondaryBehavior={canUseAnySecondaryBehavior}
+                      radarrInstances={radarrInstances}
+                      sonarrInstances={sonarrInstances}
+                      onOpenArrIntegrations={props.onOpenArrIntegrations}
+                    />
+                  ) : null}
                 </div>
               ) : active.name === "Status Updates" ? (
                 <>
@@ -10853,59 +10859,6 @@ function OnboardingWizard(props: {
   const mediaPanelSnapshotRef = useRef<Record<string, unknown>>({});
   const handleWizardValueChange = props.onChange;
 
-  const hasUnlockedSearchBehavior = [
-    canUseRadarrSecondaryBehavior
-      ? {
-          preference: resolveInstanceSearchModeForUi(
-            String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both"),
-            radarrInstances,
-          ),
-          preferPath: resolvePreferPathMatchForUi(
-            String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both"),
-            props.values.MOVIE_PLACEHOLDER_PREFER_PATH_MATCH,
-          ),
-        }
-      : null,
-    canUseSonarrSecondaryBehavior
-      ? {
-          preference: resolveInstanceSearchModeForUi(
-            String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both"),
-            sonarrInstances,
-          ),
-          preferPath: resolvePreferPathMatchForUi(
-            String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both"),
-            props.values.TV_PLACEHOLDER_PREFER_PATH_MATCH,
-          ),
-        }
-      : null,
-    canUseRadarrSecondaryBehavior
-      ? {
-          preference: resolveInstanceSearchModeForUi(
-            String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "both"),
-            radarrInstances,
-          ),
-          preferPath: resolvePreferPathMatchForUi(
-            String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "both"),
-            props.values.MOVIE_PLAYBACK_PREFER_PATH_MATCH,
-          ),
-        }
-      : null,
-    canUseSonarrSecondaryBehavior
-      ? {
-          preference: resolveInstanceSearchModeForUi(
-            String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "both"),
-            sonarrInstances,
-          ),
-          preferPath: resolvePreferPathMatchForUi(
-            String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "both"),
-            props.values.TV_PLAYBACK_PREFER_PATH_MATCH,
-          ),
-        }
-      : null,
-  ].filter((value): value is { preference: string; preferPath: boolean } => Boolean(value));
-  const fallbackUnnecessaryBecauseAllBoth =
-    hasUnlockedSearchBehavior.length > 0 &&
-    hasUnlockedSearchBehavior.every((item) => item.preference === "both" && !item.preferPath);
   const previewMode = Boolean(props.previewMode);
   const canProceed = previewMode
     ? true
@@ -10916,12 +10869,6 @@ function OnboardingWizard(props: {
         if (step.key === "arr") return hasConfirmedArrConnection;
         return true;
       })();
-
-  useEffect(() => {
-    if (fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH)) {
-      props.onChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", false);
-    }
-  }, [fallbackUnnecessaryBecauseAllBoth, props, props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH]);
 
   useEffect(() => {
     if (step.key !== "media") {
@@ -11010,37 +10957,73 @@ function OnboardingWizard(props: {
     for (const key of stepKeys) partial[key] = props.values[key];
 
     if (step.key === "arr" || step.key === "arr_routing") {
-      const moviePhMode = String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both");
-      const tvPhMode = String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both");
-      const moviePbMode = String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "both");
-      const tvPbMode = String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "both");
-      partial.MOVIE_PLACEHOLDER_SEARCH_MODE = canUseRadarrSecondaryBehavior
-        ? resolveInstanceSearchModeForUi(moviePhMode, radarrInstances)
-        : "both";
-      partial.TV_PLACEHOLDER_SEARCH_MODE = canUseSonarrSecondaryBehavior
-        ? resolveInstanceSearchModeForUi(tvPhMode, sonarrInstances)
-        : "both";
-      partial.MOVIE_PLAYBACK_INSTANCE_MODE = canUseRadarrSecondaryBehavior
-        ? resolveInstanceSearchModeForUi(moviePbMode, radarrInstances)
-        : "both";
-      partial.TV_PLAYBACK_INSTANCE_MODE = canUseSonarrSecondaryBehavior
-        ? resolveInstanceSearchModeForUi(tvPbMode, sonarrInstances)
-        : "both";
-      partial.MOVIE_PLACEHOLDER_PREFER_PATH_MATCH = canUseRadarrSecondaryBehavior
-        ? resolvePreferPathMatchForUi(moviePhMode, props.values.MOVIE_PLACEHOLDER_PREFER_PATH_MATCH)
-        : true;
-      partial.TV_PLACEHOLDER_PREFER_PATH_MATCH = canUseSonarrSecondaryBehavior
-        ? resolvePreferPathMatchForUi(tvPhMode, props.values.TV_PLACEHOLDER_PREFER_PATH_MATCH)
-        : true;
-      partial.MOVIE_PLAYBACK_PREFER_PATH_MATCH = canUseRadarrSecondaryBehavior
-        ? resolvePreferPathMatchForUi(moviePbMode, props.values.MOVIE_PLAYBACK_PREFER_PATH_MATCH)
-        : true;
-      partial.TV_PLAYBACK_PREFER_PATH_MATCH = canUseSonarrSecondaryBehavior
-        ? resolvePreferPathMatchForUi(tvPbMode, props.values.TV_PLAYBACK_PREFER_PATH_MATCH)
-        : true;
-      partial.ENABLE_PLAYBACK_FALLBACK_SEARCH = canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth
-        ? Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH)
-        : false;
+      let movieFallbackForEnable: string[] | null = null;
+      let tvFallbackForEnable: string[] | null = null;
+      if (canUseRadarrSecondaryBehavior) {
+        const movieAlways = resolvePlaceholderAlwaysKeysForUi(
+          props.values.MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES,
+          props.values.MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES,
+          radarrInstances,
+          props.values.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES,
+        );
+        const movieFallback = resolveAlsoInstanceKeysForUi(
+          props.values.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES,
+          radarrInstances,
+        ).filter((key) => !movieAlways.includes(key));
+        const movieRealAlso = resolveAlsoInstanceKeysForUi(
+          props.values.MOVIE_PLAY_REAL_ALSO_INSTANCES,
+          radarrInstances,
+        );
+        partial.MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES = movieAlways;
+        partial.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES = movieFallback;
+        partial.MOVIE_PLAY_REAL_ALSO_INSTANCES = movieRealAlso;
+        partial.MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES = movieAlways;
+        movieFallbackForEnable = movieFallback;
+      } else {
+        delete partial.MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES;
+        delete partial.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES;
+        delete partial.MOVIE_PLAY_REAL_ALSO_INSTANCES;
+        delete partial.MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES;
+      }
+      if (canUseSonarrSecondaryBehavior) {
+        const tvAlways = resolvePlaceholderAlwaysKeysForUi(
+          props.values.TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES,
+          props.values.TV_PLAY_PLACEHOLDER_ALSO_INSTANCES,
+          sonarrInstances,
+          props.values.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES,
+        );
+        const tvFallback = resolveAlsoInstanceKeysForUi(
+          props.values.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES,
+          sonarrInstances,
+        ).filter((key) => !tvAlways.includes(key));
+        const tvRealAlso = resolveAlsoInstanceKeysForUi(
+          props.values.TV_PLAY_REAL_ALSO_INSTANCES,
+          sonarrInstances,
+        );
+        partial.TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES = tvAlways;
+        partial.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES = tvFallback;
+        partial.TV_PLAY_REAL_ALSO_INSTANCES = tvRealAlso;
+        partial.TV_PLAY_PLACEHOLDER_ALSO_INSTANCES = tvAlways;
+        partial.TV_CROSS_INSTANCE_LOOKAHEAD = tvRealAlso;
+        tvFallbackForEnable = tvFallback;
+      } else {
+        delete partial.TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES;
+        delete partial.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES;
+        delete partial.TV_PLAY_REAL_ALSO_INSTANCES;
+        delete partial.TV_PLAY_PLACEHOLDER_ALSO_INSTANCES;
+        delete partial.TV_CROSS_INSTANCE_LOOKAHEAD;
+      }
+      if (canUseRadarrSecondaryBehavior || canUseSonarrSecondaryBehavior) {
+        const movieFb =
+          movieFallbackForEnable ??
+          resolveAlsoInstanceKeysForUi(props.values.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES, radarrInstances);
+        const tvFb =
+          tvFallbackForEnable ??
+          resolveAlsoInstanceKeysForUi(props.values.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES, sonarrInstances);
+        partial.ENABLE_PLAYBACK_FALLBACK_SEARCH = movieFb.length > 0 || tvFb.length > 0;
+      } else {
+        delete partial.ENABLE_PLAYBACK_FALLBACK_SEARCH;
+      }
       partial.PLAYBACK_FALLBACK_TIMEOUT_MINUTES = String(props.values.PLAYBACK_FALLBACK_TIMEOUT_MINUTES ?? "").trim() || 30;
       partial.RADARR_SHARED_PLACEHOLDER_CLEANUP = canUseRadarrSecondaryBehavior
         ? sharedPlaceholderCleanupMode(props.values, "RADARR_SHARED_PLACEHOLDER_CLEANUP")
@@ -11282,6 +11265,7 @@ function OnboardingWizard(props: {
               variant="wizard"
               values={props.values}
               onChange={props.onChange}
+              accentHex={accent.hex}
               guide={
                 playFirstMode && stepGuides.density_search ? (
                   <StepGuide guide={stepGuides.density_search} />
@@ -11308,59 +11292,42 @@ function OnboardingWizard(props: {
                 onValueChange={props.onChange}
               />
             ) : (
-              <div className="space-y-6">
-                <LibraryPathsForm
-                  fields={fields}
+              <LibraryPathsForm
+                fields={fields}
+                values={props.values}
+                brand={props.brand}
+                themeMode={wizardUiTheme}
+                accent={accent}
+                layout="wizard"
+                onValueChange={props.onChange}
+              />
+            )
+          ) : step.key === "arr_routing" ? (
+            <div className="space-y-6">
+              <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
+                <PlaybackDestFilterControls
                   values={props.values}
-                  brand={props.brand}
-                  themeMode={wizardUiTheme}
-                  accent={accent}
-                  layout="wizard"
-                  onValueChange={props.onChange}
+                  options={
+                    props.payload.playback_dest_options ||
+                    playbackDestOptionsFromValues(props.values)
+                  }
+                  onChange={(key, next) => props.onChange(key, next)}
                 />
-                <SharedPlaceholderCleanupPanel
+              </div>
+              {needsArrRoutingStep(props.values) ? (
+                <ArrMultiInstanceBehaviorStack
                   values={props.values}
                   onChange={props.onChange}
                   brand={props.brand}
                   themeMode={wizardUiTheme}
+                  accent={accent}
                   canUseRadarrSecondaryBehavior={canUseRadarrSecondaryBehavior}
                   canUseSonarrSecondaryBehavior={canUseSonarrSecondaryBehavior}
+                  canUseAnySecondaryBehavior={canUseAnySecondaryBehavior}
+                  radarrInstances={radarrInstances}
+                  sonarrInstances={sonarrInstances}
+                  stackColumns
                 />
-              </div>
-            )
-          ) : step.key === "arr_routing" ? (
-            <div className="space-y-8">
-              <PlaybackDestFilterControls
-                values={props.values}
-                options={
-                  props.payload.playback_dest_options ||
-                  playbackDestOptionsFromValues(props.values)
-                }
-                onChange={(key, next) => props.onChange(key, next)}
-              />
-              {needsArrRoutingStep(props.values) ? (
-                <div className="space-y-3 border-t border-[#424753]/30 pt-6">
-                  <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-slate-400">
-                    Multi-instance routing
-                  </p>
-                  <p className="text-[14px] leading-relaxed text-slate-300">
-                    Choose how Placeholdarr routes plays between your Radarr and Sonarr instances, shared-folder
-                    cleanup, and whether to prefer a destination that matches the played path.
-                  </p>
-                  <ArrMultiInstanceBehaviorStack
-                    values={props.values}
-                    onChange={props.onChange}
-                    brand={props.brand}
-                    themeMode={wizardUiTheme}
-                    accent={accent}
-                    canUseRadarrSecondaryBehavior={canUseRadarrSecondaryBehavior}
-                    canUseSonarrSecondaryBehavior={canUseSonarrSecondaryBehavior}
-                    canUseAnySecondaryBehavior={canUseAnySecondaryBehavior}
-                    fallbackUnnecessaryBecauseAllBoth={fallbackUnnecessaryBecauseAllBoth}
-                    radarrInstances={radarrInstances}
-                    sonarrInstances={sonarrInstances}
-                  />
-                </div>
               ) : null}
             </div>
           ) : step.key === "media" ? (() => {
@@ -11441,14 +11408,11 @@ function OnboardingWizard(props: {
                                 />
                               </label>
                             )}
-                            <dl className="space-y-1.5 rounded-xl border border-white/[0.06] bg-black/20 p-3 text-[13px] leading-snug">
-                              <div className="flex min-w-0 gap-2">
-                                <dt className="w-[4.75rem] shrink-0 font-medium text-slate-500">Address</dt>
-                                <dd className="truncate font-mono text-slate-200" title={address || undefined}>
-                                  {address || "—"}
-                                </dd>
-                              </div>
-                            </dl>
+                            <div className="min-w-0 rounded-xl border border-white/[0.06] bg-black/20 p-3 text-[13px] leading-snug">
+                              <p className="truncate font-mono text-slate-200" title={address || undefined}>
+                                {address || "—"}
+                              </p>
+                            </div>
                             <div className="mt-2 flex min-h-[2.5rem] flex-col justify-center text-[14px]">
                               {!playFirstMode && !enabled ? (
                                 <p className="ui-field-description">Integration paused. Placeholdarr will not sync to {card.title} until re-enabled.</p>
@@ -11536,309 +11500,19 @@ function OnboardingWizard(props: {
                   setArrSecondaryTestStatus((prev) => ({ ...prev, [arrType]: ok }));
                 }}
               />
-              <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
-                <div className="text-center">
-                  <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider mb-1">Placeholder Search Behavior</h3>
-                  <p className="mx-auto max-w-2xl text-[14px] text-slate-400">
-                    When a placeholder is played, choose which Arr instance(s) to search.
-                  </p>
-                </div>
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5">
-                  <div className="min-w-0 space-y-3">
-                    <div>
-                      <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
-                      <select
-                        className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
-                        value={
-                          canUseRadarrSecondaryBehavior
-                            ? resolveInstanceSearchModeForUi(
-                                String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both"),
-                                radarrInstances,
-                              )
-                            : "na"
-                        }
-                        onChange={(e) => props.onChange("MOVIE_PLACEHOLDER_SEARCH_MODE", e.target.value)}
-                        disabled={!canUseRadarrSecondaryBehavior}
-                      >
-                        {canUseRadarrSecondaryBehavior ? (
-                          <InstanceSearchModeOptions instances={radarrInstances} />
-                        ) : (
-                          <option value="na">Not applicable, no second instance set up.</option>
-                        )}
-                      </select>
-                    </div>
-                    <label
-                      className={`flex items-start gap-3 select-none ${
-                        canUseRadarrSecondaryBehavior ? "cursor-pointer" : "opacity-60 cursor-not-allowed"
-                      }`}
-                    >
-                      <ToggleSwitch
-                        checked={
-                          canUseRadarrSecondaryBehavior
-                            ? resolvePreferPathMatchForUi(
-                                String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both"),
-                                props.values.MOVIE_PLACEHOLDER_PREFER_PATH_MATCH,
-                              )
-                            : false
-                        }
-                        onChange={(v) => props.onChange("MOVIE_PLACEHOLDER_PREFER_PATH_MATCH", v)}
-                        accentHex={accent.hex}
-                        disabled={!canUseRadarrSecondaryBehavior}
-                        ariaLabel="Prefer matched library path for movie placeholders"
-                      />
-                      <span className="min-w-0 text-left">
-                        <span className="block text-[14px] font-semibold text-slate-300">
-                          Prefer matched library path when possible
-                        </span>
-                        <span className="ui-field-description-compact mt-1 block">{PREFER_PATH_MATCH_HELP}</span>
-                      </span>
-                    </label>
-                  </div>
-                  <div className="min-w-0 space-y-3">
-                    <div>
-                      <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
-                      <select
-                        className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
-                        value={
-                          canUseSonarrSecondaryBehavior
-                            ? resolveInstanceSearchModeForUi(
-                                String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both"),
-                                sonarrInstances,
-                              )
-                            : "na"
-                        }
-                        onChange={(e) => props.onChange("TV_PLACEHOLDER_SEARCH_MODE", e.target.value)}
-                        disabled={!canUseSonarrSecondaryBehavior}
-                      >
-                        {canUseSonarrSecondaryBehavior ? (
-                          <InstanceSearchModeOptions instances={sonarrInstances} />
-                        ) : (
-                          <option value="na">Not applicable, no second instance set up.</option>
-                        )}
-                      </select>
-                    </div>
-                    <label
-                      className={`flex items-start gap-3 select-none ${
-                        canUseSonarrSecondaryBehavior ? "cursor-pointer" : "opacity-60 cursor-not-allowed"
-                      }`}
-                    >
-                      <ToggleSwitch
-                        checked={
-                          canUseSonarrSecondaryBehavior
-                            ? resolvePreferPathMatchForUi(
-                                String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both"),
-                                props.values.TV_PLACEHOLDER_PREFER_PATH_MATCH,
-                              )
-                            : false
-                        }
-                        onChange={(v) => props.onChange("TV_PLACEHOLDER_PREFER_PATH_MATCH", v)}
-                        accentHex={accent.hex}
-                        disabled={!canUseSonarrSecondaryBehavior}
-                        ariaLabel="Prefer matched library path for TV placeholders"
-                      />
-                      <span className="min-w-0 text-left">
-                        <span className="block text-[14px] font-semibold text-slate-300">
-                          Prefer matched library path when possible
-                        </span>
-                        <span className="ui-field-description-compact mt-1 block">{PREFER_PATH_MATCH_HELP}</span>
-                      </span>
-                    </label>
-                  </div>
-                </div>
-              </div>
-              <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
-                <div className="text-center">
-                  <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider mb-1">Real-File Search Behavior</h3>
-                  <p className="mx-auto max-w-2xl text-[14px] text-slate-400">
-                    When a real media file is played, choose which Arr instance(s) to search.
-                  </p>
-                </div>
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5">
-                  <div className="min-w-0 space-y-3">
-                    <div>
-                      <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
-                      <select
-                        className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
-                        value={
-                          canUseRadarrSecondaryBehavior
-                            ? resolveInstanceSearchModeForUi(
-                                String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "both"),
-                                radarrInstances,
-                              )
-                            : "na"
-                        }
-                        onChange={(e) => props.onChange("MOVIE_PLAYBACK_INSTANCE_MODE", e.target.value)}
-                        disabled={!canUseRadarrSecondaryBehavior}
-                      >
-                        {canUseRadarrSecondaryBehavior ? (
-                          <InstanceSearchModeOptions instances={radarrInstances} />
-                        ) : (
-                          <option value="na">Not applicable, no second instance set up.</option>
-                        )}
-                      </select>
-                    </div>
-                    <label
-                      className={`flex items-start gap-3 select-none ${
-                        canUseRadarrSecondaryBehavior ? "cursor-pointer" : "opacity-60 cursor-not-allowed"
-                      }`}
-                    >
-                      <ToggleSwitch
-                        checked={
-                          canUseRadarrSecondaryBehavior
-                            ? resolvePreferPathMatchForUi(
-                                String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "both"),
-                                props.values.MOVIE_PLAYBACK_PREFER_PATH_MATCH,
-                              )
-                            : false
-                        }
-                        onChange={(v) => props.onChange("MOVIE_PLAYBACK_PREFER_PATH_MATCH", v)}
-                        accentHex={accent.hex}
-                        disabled={!canUseRadarrSecondaryBehavior}
-                        ariaLabel="Prefer matched library path for movie real-file search"
-                      />
-                      <span className="min-w-0 text-left">
-                        <span className="block text-[14px] font-semibold text-slate-300">
-                          Prefer matched library path when possible
-                        </span>
-                        <span className="ui-field-description-compact mt-1 block">{PREFER_PATH_MATCH_HELP}</span>
-                      </span>
-                    </label>
-                  </div>
-                  <div className="min-w-0 space-y-3">
-                    <div>
-                      <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
-                      <select
-                        className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
-                        value={
-                          canUseSonarrSecondaryBehavior
-                            ? resolveInstanceSearchModeForUi(
-                                String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "both"),
-                                sonarrInstances,
-                              )
-                            : "na"
-                        }
-                        onChange={(e) => props.onChange("TV_PLAYBACK_INSTANCE_MODE", e.target.value)}
-                        disabled={!canUseSonarrSecondaryBehavior}
-                      >
-                        {canUseSonarrSecondaryBehavior ? (
-                          <InstanceSearchModeOptions instances={sonarrInstances} />
-                        ) : (
-                          <option value="na">Not applicable, no second instance set up.</option>
-                        )}
-                      </select>
-                    </div>
-                    <label
-                      className={`flex items-start gap-3 select-none ${
-                        canUseSonarrSecondaryBehavior ? "cursor-pointer" : "opacity-60 cursor-not-allowed"
-                      }`}
-                    >
-                      <ToggleSwitch
-                        checked={
-                          canUseSonarrSecondaryBehavior
-                            ? resolvePreferPathMatchForUi(
-                                String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "both"),
-                                props.values.TV_PLAYBACK_PREFER_PATH_MATCH,
-                              )
-                            : false
-                        }
-                        onChange={(v) => props.onChange("TV_PLAYBACK_PREFER_PATH_MATCH", v)}
-                        accentHex={accent.hex}
-                        disabled={!canUseSonarrSecondaryBehavior}
-                        ariaLabel="Prefer matched library path for TV real-file search"
-                      />
-                      <span className="min-w-0 text-left">
-                        <span className="block text-[14px] font-semibold text-slate-300">
-                          Prefer matched library path when possible
-                        </span>
-                        <span className="ui-field-description-compact mt-1 block">{PREFER_PATH_MATCH_HELP}</span>
-                      </span>
-                    </label>
-                  </div>
-                </div>
-                <div className="border-t border-[#424753]/20 pt-4">
-                  <div className="mx-auto flex max-w-lg flex-col items-center gap-4 text-center">
-                    <div>
-                      <div className="text-[14px] font-semibold text-slate-300">Fallback search</div>
-                      <div className="ui-field-description mt-1">
-                        {fallbackUnnecessaryBecauseAllBoth ? (
-                          "Fallback is not needed because every unlocked search behavior already searches all instances."
-                        ) : canUseAnySecondaryBehavior ? (
-                          <div className="mx-auto w-full max-w-md text-left">
-                            <p>When enabled, remaining configured sources are searched in ARR Integrations list order if:</p>
-                            <ul className="mt-2 list-disc space-y-1.5 pl-4">
-                              <li>The selected source doesn&apos;t have the content added (immediate fallback search), or</li>
-                              <li>
-                                The content isn&apos;t imported before the fallback timeout (e.g. content not found, indexer/download errors, etc.)
-                              </li>
-                            </ul>
-                          </div>
-                        ) : (
-                          "Not applicable, no second instance set up."
-                        )}
-                      </div>
-                    </div>
-                    <label className="flex cursor-pointer select-none items-center justify-center gap-3">
-                      <ToggleSwitch
-                        checked={Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH)}
-                        onChange={(v) => props.onChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", v)}
-                        accentHex={accent.hex}
-                        disabled={!canUseAnySecondaryBehavior || fallbackUnnecessaryBecauseAllBoth}
-                        ariaLabel="Playback fallback search"
-                      />
-                      <span className="text-[16px] text-slate-300">
-                        {fallbackUnnecessaryBecauseAllBoth
-                          ? "Not needed"
-                          : canUseAnySecondaryBehavior
-                          ? (Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "Enabled" : "Disabled")
-                          : "Not applicable, no second instance set up."}
-                      </span>
-                    </label>
-                    <div className="text-center">
-                      <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">Fallback timeout (minutes)</label>
-                      {canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? (
-                        <input
-                          className={`mx-auto mt-0.5 block w-[4.25rem] bg-[#0b111b] border border-[#424753]/40 rounded-lg px-2 py-2 text-center text-[16px] tabular-nums tracking-tight text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)}`}
-                          type="text"
-                          inputMode="numeric"
-                          maxLength={3}
-                          autoComplete="off"
-                          value={(() => {
-                            const raw = props.values.PLAYBACK_FALLBACK_TIMEOUT_MINUTES;
-                            const digits = String(raw ?? "").replace(/\D/g, "").slice(0, 3);
-                            if (digits.length > 0) return digits;
-                            return raw === undefined || raw === null ? "30" : "";
-                          })()}
-                          onChange={(e) => {
-                            const d = e.target.value.replace(/\D/g, "").slice(0, 3);
-                            props.onChange("PLAYBACK_FALLBACK_TIMEOUT_MINUTES", d);
-                          }}
-                        />
-                      ) : fallbackUnnecessaryBecauseAllBoth ? (
-                        <input
-                          className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-500 opacity-60 cursor-not-allowed"
-                          type="text"
-                          value="Not needed because all unlocked behaviors already search all instances."
-                          disabled
-                        />
-                      ) : canUseAnySecondaryBehavior ? (
-                        <input
-                          className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-500 opacity-60 cursor-not-allowed"
-                          type="text"
-                          value="Enable fallback search."
-                          disabled
-                        />
-                      ) : (
-                        <input
-                          className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-500 opacity-60 cursor-not-allowed"
-                          type="text"
-                          value="Not applicable, no second instance set up."
-                          disabled
-                        />
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
+              <ArrMultiInstanceBehaviorStack
+                values={props.values}
+                onChange={props.onChange}
+                brand={props.brand}
+                themeMode={wizardUiTheme}
+                accent={accent}
+                canUseRadarrSecondaryBehavior={canUseRadarrSecondaryBehavior}
+                canUseSonarrSecondaryBehavior={canUseSonarrSecondaryBehavior}
+                canUseAnySecondaryBehavior={canUseAnySecondaryBehavior}
+                radarrInstances={radarrInstances}
+                sonarrInstances={sonarrInstances}
+                stackColumns
+              />
             </div>
             )
           ) : !fields.length ? (
@@ -11890,6 +11564,7 @@ function OnboardingWizard(props: {
                           variant="settings"
                           values={props.values}
                           onChange={props.onChange}
+                          accentHex={accent.hex}
                         />
                       </div>
                     ) : sectionName === "Playback" ? (

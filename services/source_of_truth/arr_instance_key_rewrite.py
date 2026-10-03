@@ -459,6 +459,18 @@ _SEARCH_MODE_KEYS = (
     "TV_PLAYBACK_INSTANCE_MODE",
 )
 
+_PLAY_ALSO_INSTANCE_LIST_KEYS = (
+    "MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES",
+    "MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES",
+    "MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES",
+    "MOVIE_PLAY_REAL_ALSO_INSTANCES",
+    "TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES",
+    "TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES",
+    "TV_PLAY_PLACEHOLDER_ALSO_INSTANCES",
+    "TV_PLAY_REAL_ALSO_INSTANCES",
+    "TV_CROSS_INSTANCE_LOOKAHEAD",
+)
+
 
 def _rewrite_search_mode_rows(session, renames: list[dict[str, str]]) -> int:
     # Search modes are not typed; map any old_key → new_key (keys are unique across types in practice
@@ -474,6 +486,48 @@ def _rewrite_search_mode_rows(session, renames: list[dict[str, str]]) -> int:
         current = _normalize_instance_key(row.value)
         if current in flat:
             row.value = flat[current]
+            changed += 1
+    return changed
+
+
+def _rewrite_play_also_instance_list_rows(session, renames: list[dict[str, str]]) -> int:
+    flat: dict[str, str] = {}
+    for row in renames:
+        flat[row["old_key"]] = row["new_key"]
+    if not flat:
+        return 0
+    changed = 0
+    rows = session.query(AppConfig).filter(AppConfig.key.in_(_PLAY_ALSO_INSTANCE_LIST_KEYS)).all()
+    for row in rows:
+        raw = row.value
+        if raw is None:
+            continue
+        try:
+            if isinstance(raw, list):
+                items = raw
+            else:
+                text = str(raw).strip()
+                if not text:
+                    continue
+                parsed = json.loads(text)
+                if not isinstance(parsed, list):
+                    continue
+                items = parsed
+        except Exception:
+            continue
+        next_items: list[str] = []
+        row_changed = False
+        for item in items:
+            key = _normalize_instance_key(item)
+            if not key:
+                continue
+            mapped = flat.get(key, key)
+            if mapped != key:
+                row_changed = True
+            if mapped and mapped not in next_items:
+                next_items.append(mapped)
+        if row_changed or next_items != [_normalize_instance_key(x) for x in items if _normalize_instance_key(x)]:
+            row.value = json.dumps(next_items)
             changed += 1
     return changed
 
@@ -533,6 +587,7 @@ def apply_instance_key_renames(
                     out_dest = rewritten
 
         search_modes = _rewrite_search_mode_rows(session, renames)
+        search_modes += _rewrite_play_also_instance_list_rows(session, renames)
         session.commit()
         logger.info(
             "ARR instance_key rename rewrite "

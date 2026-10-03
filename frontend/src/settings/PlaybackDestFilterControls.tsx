@@ -65,21 +65,33 @@ function DestGroup(props: {
   paths: string[];
   selected: string[];
   disabled?: boolean;
+  /** Paths greyed out and not selectable (e.g. already under Monitor only). */
+  blockedPaths?: string[];
+  blockedReason?: string;
   onChange: (next: string[]) => void;
 }) {
+  const blockedKeys = useMemo(() => {
+    const set = new Set<string>();
+    for (const path of props.blockedPaths || []) {
+      const key = normalizePathKey(path);
+      if (key) set.add(key);
+    }
+    return set;
+  }, [props.blockedPaths]);
+  const selectablePaths = props.paths.filter((path) => !blockedKeys.has(normalizePathKey(path)));
   const allOn =
-    props.paths.length > 0 && props.paths.every((path) => pathSelected(props.selected, path));
+    selectablePaths.length > 0 && selectablePaths.every((path) => pathSelected(props.selected, path));
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-2">
         <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-slate-400">
           {props.title}
         </p>
-        {props.paths.length > 0 ? (
+        {selectablePaths.length > 0 ? (
           <button
             type="button"
             disabled={props.disabled}
-            onClick={() => props.onChange(setGroupSelected(props.selected, props.paths, !allOn))}
+            onClick={() => props.onChange(setGroupSelected(props.selected, selectablePaths, !allOn))}
             className="text-[11px] font-headline uppercase tracking-wider text-slate-400 underline-offset-2 hover:text-slate-200 hover:underline disabled:opacity-40 disabled:no-underline"
           >
             {allOn ? "Clear" : "Select all"}
@@ -91,22 +103,36 @@ function DestGroup(props: {
       ) : (
         <ul className="space-y-1.5">
           {props.paths.map((path) => {
-            const checked = pathSelected(props.selected, path);
+            const blocked = blockedKeys.has(normalizePathKey(path));
+            const rowDisabled = Boolean(props.disabled || blocked);
+            const checked = !blocked && pathSelected(props.selected, path);
+            const title = blocked && props.blockedReason ? props.blockedReason : path;
             return (
               <li key={path}>
                 <label
-                  className={`flex cursor-pointer items-start gap-2 rounded-lg border border-[#424753]/35 bg-[#0b111b]/40 px-3 py-2 ${
-                    props.disabled ? "cursor-not-allowed opacity-55" : "hover:border-[#424753]/60"
+                  className={`flex items-start gap-2 rounded-lg border border-[#424753]/35 bg-[#0b111b]/40 px-3 py-2 ${
+                    rowDisabled
+                      ? "cursor-not-allowed opacity-45"
+                      : "cursor-pointer hover:border-[#424753]/60"
                   }`}
+                  title={title}
                 >
                   <input
                     type="checkbox"
                     className="mt-1"
                     checked={checked}
-                    disabled={props.disabled}
-                    onChange={(e) => props.onChange(togglePath(props.selected, path, e.target.checked))}
+                    disabled={rowDisabled}
+                    onChange={(e) => {
+                      if (blocked) return;
+                      props.onChange(togglePath(props.selected, path, e.target.checked));
+                    }}
                   />
-                  <span className="min-w-0 break-all font-mono text-[13px] text-slate-300" title={path}>
+                  <span
+                    className={`min-w-0 break-all font-mono text-[13px] ${
+                      blocked ? "text-slate-500" : "text-slate-300"
+                    }`}
+                    title={title}
+                  >
                     {path}
                   </span>
                 </label>
@@ -125,20 +151,19 @@ export function PlaybackDestFilterField(props: {
   value: unknown;
   options: PlaybackDestOptions;
   disabled?: boolean;
-  note?: string;
+  blockedPaths?: string[];
+  blockedReason?: string;
   onChange: (next: string[]) => void;
 }) {
   const selected = asDestPathList(props.value);
   const movies = props.options.movies || [];
   const tv = props.options.tv || [];
   const emptyOptions = movies.length === 0 && tv.length === 0;
-
   return (
     <div className={`${UI_SECTION_FRAME_CLASS} space-y-3 p-4 ${props.disabled ? "opacity-80" : ""}`}>
       <div>
         <p className="text-[14px] font-semibold text-slate-200">{props.label}</p>
         <p className="mt-1 text-[13px] leading-relaxed text-slate-400">{props.description}</p>
-        {props.note ? <p className="mt-1 text-[12px] leading-relaxed text-slate-500">{props.note}</p> : null}
       </div>
       {emptyOptions ? (
         <p className="text-[13px] text-slate-500">
@@ -151,6 +176,8 @@ export function PlaybackDestFilterField(props: {
             paths={movies}
             selected={selected}
             disabled={props.disabled}
+            blockedPaths={props.blockedPaths}
+            blockedReason={props.blockedReason}
             onChange={props.onChange}
           />
           <DestGroup
@@ -158,17 +185,11 @@ export function PlaybackDestFilterField(props: {
             paths={tv}
             selected={selected}
             disabled={props.disabled}
+            blockedPaths={props.blockedPaths}
+            blockedReason={props.blockedReason}
             onChange={props.onChange}
           />
         </div>
-      )}
-      {selected.length > 0 ? (
-        <p className="text-[12px] text-slate-500">
-          Applies to {selected.length} destination{selected.length === 1 ? "" : "s"}. New destinations are off until
-          you add them here.
-        </p>
-      ) : (
-        <p className="text-[12px] text-slate-500">Off for all destinations.</p>
       )}
     </div>
   );
@@ -195,6 +216,12 @@ const FILTER_META: Record<
   },
 };
 
+function stripBlockedPaths(selected: string[], blocked: string[]): string[] {
+  if (blocked.length === 0) return selected;
+  const blockedKeys = new Set(blocked.map(normalizePathKey));
+  return selected.filter((path) => !blockedKeys.has(normalizePathKey(path)));
+}
+
 export function PlaybackDestFilterControls(props: {
   values: Record<string, unknown>;
   options: PlaybackDestOptions;
@@ -203,23 +230,22 @@ export function PlaybackDestFilterControls(props: {
   hideHeading?: boolean;
 }) {
   const monitorOnlySelected = asDestPathList(props.values.PLAYBACK_MONITOR_ONLY_DESTS);
-  const monitorOnlyActive = monitorOnlySelected.length > 0;
-
   const fields = useMemo(() => PLAYBACK_DEST_FILTER_KEYS.map((key) => ({ key, ...FILTER_META[key] })), []);
+  const monitorOnlyReason = "Monitor only is on for this destination (no search).";
 
   return (
     <div className="space-y-5">
       {props.hideHeading ? null : (
-        <>
-          <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-slate-400">
+        <div className="space-y-2">
+          <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-white">
             Playback monitoring and searching
           </p>
-          <p className="text-[15px] leading-relaxed text-slate-300">
+          <p className="ui-field-description leading-relaxed text-slate-300">
             Placeholdarr reacts when a placeholder or real file is played: it builds an Arr target list, then monitors
             or searches accordingly. Choose which library destinations each filter applies to (Movies and TV are listed
             separately).
           </p>
-        </>
+        </div>
       )}
       {fields.map((field) => {
         const isSecondary =
@@ -232,12 +258,25 @@ export function PlaybackDestFilterControls(props: {
             description={field.description}
             value={props.values[field.key]}
             options={props.options}
-            note={
-              isSecondary && monitorOnlyActive
-                ? "On destinations also listed under Monitor only, play still monitors without searching (monitor only wins)."
-                : undefined
-            }
-            onChange={(next) => props.onChange(field.key, next)}
+            blockedPaths={isSecondary ? monitorOnlySelected : undefined}
+            blockedReason={isSecondary ? monitorOnlyReason : undefined}
+            onChange={(next) => {
+              if (field.key === "PLAYBACK_MONITOR_ONLY_DESTS") {
+                props.onChange(field.key, next);
+                const searchMonitored = asDestPathList(props.values.PLAYBACK_SEARCH_ALREADY_MONITORED_DESTS);
+                const searchFuture = asDestPathList(props.values.PLAYBACK_SEARCH_FUTURE_DESTS);
+                const nextMonitored = stripBlockedPaths(searchMonitored, next);
+                const nextFuture = stripBlockedPaths(searchFuture, next);
+                if (nextMonitored.length !== searchMonitored.length) {
+                  props.onChange("PLAYBACK_SEARCH_ALREADY_MONITORED_DESTS", nextMonitored);
+                }
+                if (nextFuture.length !== searchFuture.length) {
+                  props.onChange("PLAYBACK_SEARCH_FUTURE_DESTS", nextFuture);
+                }
+                return;
+              }
+              props.onChange(field.key, stripBlockedPaths(next, monitorOnlySelected));
+            }}
           />
         );
       })}

@@ -843,11 +843,117 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES",
+            {
+                "section": "ARR Integrations",
+                "label": "Always also search these Radarrs on placeholder play",
+                "description": (
+                    "Path-matched Radarr is tried first when the library path is clear. "
+                    "Additional Radarr instance keys to always search with it on movie placeholder play."
+                ),
+                "type": "string_list",
+                "restart_required": False,
+                "default": [],
+            },
+        ),
+        (
+            "MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES",
+            {
+                "section": "ARR Integrations",
+                "label": "Fallback: also try these Radarrs on placeholder play",
+                "description": (
+                    "Additional Radarr instance keys to try only when the preferred Arr does not have the title "
+                    "or the search does not resolve within the Fallback timeout."
+                ),
+                "type": "string_list",
+                "restart_required": False,
+                "default": [],
+            },
+        ),
+        (
+            "MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES",
+            {
+                "section": "ARR Integrations",
+                "label": "Also search these Radarrs on placeholder play (legacy)",
+                "description": "Legacy list synced from MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES.",
+                "type": "string_list",
+                "restart_required": False,
+                "default": [],
+            },
+        ),
+        (
+            "MOVIE_PLAY_REAL_ALSO_INSTANCES",
+            {
+                "section": "ARR Integrations",
+                "label": "Also search these Radarrs on real play",
+                "description": (
+                    "Additional Radarr instance keys to always search when a real movie file is played. "
+                    "Empty = no cross-instance search on real movie play (path-matched already has the file)."
+                ),
+                "type": "string_list",
+                "restart_required": False,
+                "default": [],
+            },
+        ),
+        (
+            "TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES",
+            {
+                "section": "ARR Integrations",
+                "label": "Always also search these Sonarrs on placeholder play",
+                "description": (
+                    "Path-matched Sonarr is tried first when the library path is clear. "
+                    "Additional Sonarr instance keys to always search with it on TV placeholder play."
+                ),
+                "type": "string_list",
+                "restart_required": False,
+                "default": [],
+            },
+        ),
+        (
+            "TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES",
+            {
+                "section": "ARR Integrations",
+                "label": "Fallback: also try these Sonarrs on placeholder play",
+                "description": (
+                    "Additional Sonarr instance keys to try only when the preferred Arr does not have the title "
+                    "or the search does not resolve within the Fallback timeout."
+                ),
+                "type": "string_list",
+                "restart_required": False,
+                "default": [],
+            },
+        ),
+        (
+            "TV_PLAY_PLACEHOLDER_ALSO_INSTANCES",
+            {
+                "section": "ARR Integrations",
+                "label": "Also search these Sonarrs on placeholder play (legacy)",
+                "description": "Legacy list synced from TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES.",
+                "type": "string_list",
+                "restart_required": False,
+                "default": [],
+            },
+        ),
+        (
+            "TV_PLAY_REAL_ALSO_INSTANCES",
+            {
+                "section": "ARR Integrations",
+                "label": "Also search these Sonarrs on real play",
+                "description": (
+                    "Additional Sonarr instance keys to always search (including Lookahead targets) when a real "
+                    "episode is played. Empty = path-matched only."
+                ),
+                "type": "string_list",
+                "restart_required": False,
+                "default": [],
+            },
+        ),
+        (
             "MOVIE_PLACEHOLDER_SEARCH_MODE",
             {
                 "section": "ARR Integrations",
-                "label": "Movie placeholder search preference",
-                "description": "When a movie placeholder plays, which instance(s) to search. All searches every configured Radarr. You can also force a specific instance by its key (the name you gave it).",
+                "label": "Movie placeholder search preference (legacy)",
+                "description": "Legacy preference synced from Play Actions. Prefer MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES.",
                 "type": "choice",
                 "restart_required": False,
                 "default": "both",
@@ -863,8 +969,8 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "MOVIE_PLACEHOLDER_PREFER_PATH_MATCH",
             {
                 "section": "ARR Integrations",
-                "label": "Movie placeholder prefer path match",
-                "description": "When enabled, a unique library destination match overrides the movie placeholder search preference. Shared or unmatched paths still use the preference.",
+                "label": "Movie placeholder prefer path match (legacy)",
+                "description": "Legacy toggle; Play Actions always path-matches when the path is clear.",
                 "type": "bool",
                 "restart_required": False,
                 "default": True,
@@ -874,8 +980,8 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "TV_PLACEHOLDER_SEARCH_MODE",
             {
                 "section": "ARR Integrations",
-                "label": "TV placeholder search preference",
-                "description": "When a TV placeholder plays, which instance(s) to search. All searches every configured Sonarr. You can also force a specific instance by its key (the name you gave it).",
+                "label": "TV placeholder search preference (legacy)",
+                "description": "Legacy preference synced from Play Actions. Prefer TV_PLAY_PLACEHOLDER_ALSO_INSTANCES.",
                 "type": "choice",
                 "restart_required": False,
                 "default": "both",
@@ -891,8 +997,8 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "TV_PLACEHOLDER_PREFER_PATH_MATCH",
             {
                 "section": "ARR Integrations",
-                "label": "TV placeholder prefer path match",
-                "description": "When enabled, a unique library destination match overrides the TV placeholder search preference. Shared or unmatched paths still use the preference.",
+                "label": "TV placeholder prefer path match (legacy)",
+                "description": "Legacy toggle; Play Actions always path-matches when the path is clear.",
                 "type": "bool",
                 "restart_required": False,
                 "default": True,
@@ -902,8 +1008,8 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "MOVIE_PLAYBACK_INSTANCE_MODE",
             {
                 "section": "ARR Integrations",
-                "label": "Movie real-file search preference",
-                "description": "When a real movie file is played, which instance(s) to search. All searches every configured Radarr. You can also force a specific instance by its key (the name you gave it).",
+                "label": "Movie ambiguous play instance (legacy)",
+                "description": "Legacy preference; ambiguous plays follow MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES.",
                 "type": "choice",
                 "restart_required": False,
                 "default": "both",
@@ -919,8 +1025,8 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "MOVIE_PLAYBACK_PREFER_PATH_MATCH",
             {
                 "section": "ARR Integrations",
-                "label": "Movie real-file prefer path match",
-                "description": "When enabled, a unique library destination match overrides the movie real-file search preference. Shared or unmatched paths still use the preference.",
+                "label": "Movie ambiguous prefer path match (legacy)",
+                "description": "Legacy toggle; Play Actions always path-matches when the path is clear.",
                 "type": "bool",
                 "restart_required": False,
                 "default": True,
@@ -930,8 +1036,8 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "TV_PLAYBACK_INSTANCE_MODE",
             {
                 "section": "ARR Integrations",
-                "label": "TV real-file search preference",
-                "description": "When a real TV file is played, which instance(s) to search. All searches every configured Sonarr. You can also force a specific instance by its key (the name you gave it).",
+                "label": "TV ambiguous play instance (legacy)",
+                "description": "Legacy preference; ambiguous plays follow TV_PLAY_PLACEHOLDER_ALSO_INSTANCES.",
                 "type": "choice",
                 "restart_required": False,
                 "default": "both",
@@ -947,19 +1053,36 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "TV_PLAYBACK_PREFER_PATH_MATCH",
             {
                 "section": "ARR Integrations",
-                "label": "TV real-file prefer path match",
-                "description": "When enabled, a unique library destination match overrides the TV real-file search preference. Shared or unmatched paths still use the preference.",
+                "label": "TV ambiguous prefer path match (legacy)",
+                "description": "Legacy toggle; Play Actions always path-matches when the path is clear.",
                 "type": "bool",
                 "restart_required": False,
                 "default": True,
             },
         ),
         (
+            "TV_CROSS_INSTANCE_LOOKAHEAD",
+            {
+                "section": "Density & Lookahead",
+                "label": "Also search these Sonarr instances on real TV play (legacy)",
+                "description": (
+                    "Legacy list synced from TV_PLAY_REAL_ALSO_INSTANCES (Play Actions). Empty = path-matched only."
+                ),
+                "type": "string_list",
+                "restart_required": False,
+                "default": [],
+            },
+        ),
+        (
             "ENABLE_PLAYBACK_FALLBACK_SEARCH",
             {
                 "section": "ARR Integrations",
-                "label": "Enable playback fallback search",
-                "description": "When search is forced to a specific Arr instance, content that is not present there falls back immediately, including missing rows and rows marked deleted. This setting controls delayed fallback only after a search was actually attempted first but did not resolve, such as no found releases or a failed download path.",
+                "label": "Enable playback Fallback search (derived)",
+                "description": (
+                    "Derived from Play Actions Placeholder Fallback selections. When true (or when Fallback "
+                    "instance lists are non-empty), remaining Fallback instances are tried if the preferred Arr "
+                    "does not have the title or the search does not resolve."
+                ),
                 "type": "bool",
                 "restart_required": False,
             },
@@ -968,8 +1091,13 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "PLAYBACK_FALLBACK_TIMEOUT_MINUTES",
             {
                 "section": "ARR Integrations",
-                "label": "Playback fallback timeout (minutes)",
-                "description": "Minutes to wait before delayed fallback runs on the other instance after an initial search attempt did not resolve. Content that is not present in the selected ARR instance still falls back immediately, including missing rows and rows marked deleted.",
+                "label": "Fallback timeout (minutes)",
+                "description": (
+                    "Minutes to wait before trying Placeholder Fallback instances in ARR Integrations list order "
+                    "(same order as the Play Actions matrix) after an initial search attempt did not resolve. "
+                    "Content missing on the preferred Arr still tries the next instance immediately. Adjust this "
+                    "based on how long typical indexer searches take in your environment for quicker fallback."
+                ),
                 "type": "int",
                 "min": 1,
                 "restart_required": False,
@@ -1410,7 +1538,10 @@ def _redact_arr_instances_json_for_payload(raw: Any) -> tuple[str, bool]:
 
 def _coerce_string_list(raw_value: Any) -> str:
     """Normalize a string-list setting to a canonical JSON array string for storage."""
-    if isinstance(raw_value, list):
+    if isinstance(raw_value, bool):
+        # Legacy TV_CROSS_INSTANCE_LOOKAHEAD was a bool; empty list = path-matched only.
+        items = []
+    elif isinstance(raw_value, list):
         items = raw_value
     elif isinstance(raw_value, str):
         text = raw_value.strip()
@@ -1421,6 +1552,8 @@ def _coerce_string_list(raw_value: Any) -> str:
                 parsed = json.loads(text)
                 if isinstance(parsed, list):
                     items = parsed
+                elif isinstance(parsed, bool):
+                    items = []
                 else:
                     items = [p.strip() for p in text.split(",") if p.strip()]
             except Exception:
@@ -1449,6 +1582,8 @@ def _parse_string_list_value(raw_value: Any, *, default: list[str] | None = None
     fallback = list(default or [])
     if raw_value is None:
         return fallback
+    if isinstance(raw_value, bool):
+        return fallback
     if isinstance(raw_value, list):
         items = raw_value
     elif isinstance(raw_value, str):
@@ -1459,6 +1594,8 @@ def _parse_string_list_value(raw_value: Any, *, default: list[str] | None = None
             parsed = json.loads(text)
             if isinstance(parsed, list):
                 items = parsed
+            elif isinstance(parsed, bool):
+                return fallback
             else:
                 items = [p.strip() for p in text.split(",") if p.strip()]
         except Exception:
@@ -2010,6 +2147,259 @@ def _ensure_library_root_folders(root: str, dir_mode: int) -> list[str]:
     return created
 
 
+def _arr_instance_keys_for_type(session, arr_type: str) -> list[str]:
+    row = _get_row(session, "ARR_INSTANCES_JSON")
+    raw = str(row.value or "").strip() if row else ""
+    if not raw:
+        return []
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(payload, list):
+        return []
+    want = str(arr_type or "").strip().lower()
+    keys: list[str] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("arr_type") or "").strip().lower() != want:
+            continue
+        key = _normalize_instance_key(item.get("instance_key") or item.get("key") or item.get("name") or "")
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+
+def _also_keys_from_legacy_mode(mode: str, instance_keys: list[str]) -> list[str]:
+    normalized = str(mode or "both").strip().lower() or "both"
+    if not instance_keys:
+        return []
+    # Legacy "match" was path-first only; empty also-list = path-matched only.
+    if normalized == "match":
+        return []
+    if normalized in {"", "both"}:
+        return list(instance_keys)
+    if normalized == "primary":
+        return [instance_keys[0]] if instance_keys else []
+    if normalized == "secondary":
+        return [instance_keys[1]] if len(instance_keys) > 1 else list(instance_keys)
+    if normalized in instance_keys:
+        return [normalized]
+    return list(instance_keys)
+
+
+_PLAY_ACTIONS_FALLBACK_MARKER = "PLAY_ACTIONS_FALLBACK_LEGACY_V1"
+_PLAY_ACTIONS_FALLBACK_MARKER_LEGACY = "PLAY_ACTIONS_IF_NEEDED_LEGACY_FALLBACK_V1"
+_PLAY_ACTIONS_FALLBACK_KEY_RENAMES = (
+    ("MOVIE_PLAY_PLACEHOLDER_IF_NEEDED_INSTANCES", "MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES"),
+    ("TV_PLAY_PLACEHOLDER_IF_NEEDED_INSTANCES", "TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES"),
+)
+
+
+def _keys_from_legacy_cross_instance(raw_value: Any, instance_keys: list[str]) -> list[str]:
+    """Map legacy TV_CROSS_INSTANCE_LOOKAHEAD (bool or list) to instance keys.
+
+    Bool true / truthy string meant "also search other Sonarrs" → all configured keys.
+    Bool false → none. JSON/list values pass through as instance keys.
+    """
+    if raw_value is None:
+        return []
+    if isinstance(raw_value, bool):
+        return list(instance_keys) if raw_value else []
+    if isinstance(raw_value, list):
+        return _parse_string_list_value(raw_value, default=[])
+    text = str(raw_value).strip()
+    if not text:
+        return []
+    lowered = text.lower()
+    if lowered in {"1", "true", "yes", "on"}:
+        return list(instance_keys)
+    if lowered in {"0", "false", "no", "off"}:
+        return []
+    return _parse_string_list_value(raw_value, default=[])
+
+
+def migrate_play_also_instances_from_legacy(session=None) -> dict[str, Any]:
+    """One-shot: seed Play Actions lists from legacy modes / fallback / cross-instance.
+
+    Always / Real / legacy ALSO rows seed only when missing so intentional empties after
+    save are preserved. Fallback also repairs a prior empty seed while
+    ENABLE_PLAYBACK_FALLBACK_SEARCH is still on (marker-gated once).
+    """
+    owns_session = session is None
+    session = session or get_session()
+    wrote: list[str] = []
+    try:
+        radarr_keys = _arr_instance_keys_for_type(session, "radarr")
+        sonarr_keys = _arr_instance_keys_for_type(session, "sonarr")
+
+        def _legacy_mode(key: str, default: str = "both") -> str:
+            row = _get_row(session, key)
+            if row is None or row.value is None or str(row.value).strip() == "":
+                return default
+            return str(row.value).strip()
+
+        def _legacy_bool(key: str, *, default: bool) -> bool:
+            row = _get_row(session, key)
+            if row is None or row.value is None or str(row.value).strip() == "":
+                return default
+            try:
+                return _coerce_bool(row.value)
+            except ValueError:
+                return default
+
+        def _clean_keys(items: list[str], allowed: set[str]) -> list[str]:
+            out: list[str] = []
+            seen: set[str] = set()
+            for item in items:
+                key = str(item or "").strip().lower()
+                if not key or key not in allowed or key in seen:
+                    continue
+                seen.add(key)
+                out.append(key)
+            return out
+
+        def _rename_key(old_key: str, new_key: str) -> None:
+            old_row = _get_row(session, old_key)
+            if old_row is None:
+                return
+            new_row = _get_row(session, new_key)
+            if new_row is None:
+                old_row.key = new_key
+                session.add(old_row)
+                wrote.append(f"{old_key}->{new_key}")
+                return
+            session.delete(old_row)
+            wrote.append(f"drop:{old_key}")
+
+        def _seed_list(key: str, items: list[str], allowed: set[str]) -> None:
+            if _get_row(session, key) is not None:
+                return
+            cleaned = _clean_keys(items, allowed)
+            _upsert_playback_dest_list(session, key, json.dumps(cleaned))
+            wrote.append(key)
+
+        def _seed_or_repair_fallback(key: str, items: list[str], allowed: set[str], *, repair: bool) -> None:
+            cleaned = _clean_keys(items, allowed)
+            row = _get_row(session, key)
+            if row is None:
+                _upsert_playback_dest_list(session, key, json.dumps(cleaned))
+                wrote.append(key)
+                return
+            if not repair:
+                return
+            current = _parse_string_list_value(row.value, default=[])
+            if current:
+                return
+            # Prior migration wrote [] while fallback was still enabled; restore once.
+            if cleaned:
+                _upsert_playback_dest_list(session, key, json.dumps(cleaned))
+                wrote.append(key)
+
+        # Pre-release rename: IF_NEEDED list keys → FALLBACK (no public release yet).
+        for old_key, new_key in _PLAY_ACTIONS_FALLBACK_KEY_RENAMES:
+            _rename_key(old_key, new_key)
+        legacy_marker = _get_row(session, _PLAY_ACTIONS_FALLBACK_MARKER_LEGACY)
+        if legacy_marker is not None and _get_row(session, _PLAY_ACTIONS_FALLBACK_MARKER) is None:
+            legacy_marker.key = _PLAY_ACTIONS_FALLBACK_MARKER
+            session.add(legacy_marker)
+            wrote.append(f"{_PLAY_ACTIONS_FALLBACK_MARKER_LEGACY}->{_PLAY_ACTIONS_FALLBACK_MARKER}")
+        elif legacy_marker is not None:
+            session.delete(legacy_marker)
+            wrote.append(f"drop:{_PLAY_ACTIONS_FALLBACK_MARKER_LEGACY}")
+
+        movie_also_row = _get_row(session, "MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES")
+        tv_also_row = _get_row(session, "TV_PLAY_PLACEHOLDER_ALSO_INSTANCES")
+        movie_from_also = _parse_string_list_value(movie_also_row.value if movie_also_row else None, default=[])
+        tv_from_also = _parse_string_list_value(tv_also_row.value if tv_also_row else None, default=[])
+        movie_from_mode = _also_keys_from_legacy_mode(_legacy_mode("MOVIE_PLACEHOLDER_SEARCH_MODE"), radarr_keys)
+        tv_from_mode = _also_keys_from_legacy_mode(_legacy_mode("TV_PLACEHOLDER_SEARCH_MODE"), sonarr_keys)
+        # Match runtime default (True) when the row was never saved.
+        fallback_enabled = _legacy_bool("ENABLE_PLAYBACK_FALLBACK_SEARCH", default=True)
+        fallback_movie = list(radarr_keys) if fallback_enabled else []
+        fallback_tv = list(sonarr_keys) if fallback_enabled else []
+        repair_fallback = _get_row(session, _PLAY_ACTIONS_FALLBACK_MARKER) is None
+
+        # Prefer prior ALSO list when present; otherwise legacy search mode.
+        _seed_list(
+            "MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES",
+            movie_from_also or movie_from_mode,
+            set(radarr_keys),
+        )
+        _seed_list(
+            "TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES",
+            tv_from_also or tv_from_mode,
+            set(sonarr_keys),
+        )
+        _seed_or_repair_fallback(
+            "MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES",
+            fallback_movie,
+            set(radarr_keys),
+            repair=repair_fallback,
+        )
+        _seed_or_repair_fallback(
+            "TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES",
+            fallback_tv,
+            set(sonarr_keys),
+            repair=repair_fallback,
+        )
+        _seed_list("MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES", movie_from_mode, set(radarr_keys))
+        _seed_list("TV_PLAY_PLACEHOLDER_ALSO_INSTANCES", tv_from_mode, set(sonarr_keys))
+        # Real movie play was historically a noop; keep Real · Always empty (do not use
+        # MOVIE_PLAYBACK_INSTANCE_MODE, which was for ambiguous/placeholder-style routing).
+        _seed_list("MOVIE_PLAY_REAL_ALSO_INSTANCES", [], set(radarr_keys))
+        # One-shot undo for pre-release seeds that copied MOVIE_PLAYBACK_INSTANCE_MODE.
+        movie_real_noop_marker = "PLAY_ACTIONS_MOVIE_REAL_NOOP_V1"
+        if _get_row(session, movie_real_noop_marker) is None:
+            real_row = _get_row(session, "MOVIE_PLAY_REAL_ALSO_INSTANCES")
+            if real_row is not None:
+                current = _clean_keys(
+                    _parse_string_list_value(real_row.value, default=[]),
+                    set(radarr_keys),
+                )
+                mode_keys = _clean_keys(
+                    _also_keys_from_legacy_mode(_legacy_mode("MOVIE_PLAYBACK_INSTANCE_MODE"), radarr_keys),
+                    set(radarr_keys),
+                )
+                if current and set(current) == set(mode_keys):
+                    _upsert_playback_dest_list(session, "MOVIE_PLAY_REAL_ALSO_INSTANCES", "[]")
+                    wrote.append("MOVIE_PLAY_REAL_ALSO_INSTANCES")
+            _upsert_playback_dest_list(session, movie_real_noop_marker, "1")
+            wrote.append(movie_real_noop_marker)
+        cross_row = _get_row(session, "TV_CROSS_INSTANCE_LOOKAHEAD")
+        if cross_row is not None:
+            tv_real_keys = _keys_from_legacy_cross_instance(cross_row.value, sonarr_keys)
+        else:
+            tv_real_keys = _also_keys_from_legacy_mode(
+                _legacy_mode("TV_PLAYBACK_INSTANCE_MODE"),
+                sonarr_keys,
+            )
+        _seed_list("TV_PLAY_REAL_ALSO_INSTANCES", tv_real_keys, set(sonarr_keys))
+
+        if repair_fallback and _get_row(session, _PLAY_ACTIONS_FALLBACK_MARKER) is None:
+            _upsert_playback_dest_list(session, _PLAY_ACTIONS_FALLBACK_MARKER, "1")
+            wrote.append(_PLAY_ACTIONS_FALLBACK_MARKER)
+
+        if wrote:
+            session.commit()
+            logger.info(
+                "Migrated Play Actions also-instance lists from legacy modes",
+                extra={"emoji_type": "update", "keys": wrote},
+            )
+        return {"ok": True, "wrote": wrote}
+    except Exception as exc:
+        session.rollback()
+        logger.warning(
+            f"Play Actions also-instance migration failed: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+        return {"ok": False, "wrote": wrote, "error": str(exc)}
+    finally:
+        if owns_session:
+            session.close()
+
+
 def apply_persisted_settings(session=None) -> dict[str, Any]:
     owns_session = session is None
     session = session or get_session()
@@ -2024,6 +2414,7 @@ def apply_persisted_settings(session=None) -> dict[str, Any]:
         _apply_runtime_library_defaults()
         migrate_playback_future_search_suppress_default()
         migrate_playback_filters_to_dest_lists()
+        migrate_play_also_instances_from_legacy()
         rows = session.query(AppConfig).filter(AppConfig.key.in_(tuple(SETTINGS_SCHEMA.keys()))).all()
         for row in rows:
             if row.key not in SETTINGS_SCHEMA:

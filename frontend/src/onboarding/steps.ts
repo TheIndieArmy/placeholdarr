@@ -85,7 +85,7 @@ export const ONBOARDING_STEP_GUIDES: Record<OnboardingWizardStepKey, OnboardingS
     title: "What happens when you play something",
     paragraphs: [
       "With your library folders in place, choose which destinations use monitor-only or search filters when a placeholder or real file is played.",
-      "If you have more than one Radarr or Sonarr, you can also choose how Placeholdarr routes that play between instances.",
+      "If you have more than one Radarr or Sonarr, choose which instance Placeholdarr should direct for those plays (and shared-folder cleanup after a real file lands).",
     ],
   },
   behavior: {

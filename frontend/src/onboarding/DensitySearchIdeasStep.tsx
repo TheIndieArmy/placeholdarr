@@ -92,7 +92,7 @@ function OptionCardGrid<K extends string>(props: {
     props.columns === "1" ? "grid grid-cols-1 gap-3" : "grid grid-cols-1 items-stretch gap-3 sm:grid-cols-3";
   return (
     <div className={`${UI_SECTION_FRAME_CLASS} space-y-3 p-4`}>
-      <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-slate-400">
+      <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-white">
         {props.legend}
       </p>
       {props.intro ? <div className="text-[14px] leading-relaxed text-slate-300">{props.intro}</div> : null}
@@ -134,7 +134,7 @@ export function TvPlayProfilePicker(props: {
   const matched = matchTvPlayProfile(props.density, props.searchMode);
   return (
     <div className={`${UI_SECTION_FRAME_CLASS} space-y-3 p-4`}>
-      <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-slate-400">
+      <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-white">
         Play profile
       </p>
       <p className="ui-field-description leading-relaxed">
@@ -219,8 +219,8 @@ export function DensitySearchIdeasStep(props: {
   const entryLine = playEntryCopy(props.density, props.searchMode, lookahead);
   const playbackExpectTail =
     variant === "settings"
-      ? " Monitor and search filters for each library destination are under Settings → Playback."
-      : " Monitor and search filters for each library destination come next on Playback.";
+      ? " Which Arr instances also search on play is under Settings → Playback (Play Actions). Monitor and search filters for each library destination are under Settings → Playback too."
+      : " Which Arr instances also search on play is next on Playback (Play Actions), along with monitor and search filters for each library destination.";
 
   function applyProfile(key: TvPlayProfileKey) {
     const profile = TV_PLAY_PROFILES.find((p) => p.key === key);
@@ -232,7 +232,7 @@ export function DensitySearchIdeasStep(props: {
 
   const expectBlock = (
     <>
-      <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-slate-400">
+      <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-white">
         What to expect with your current settings
       </p>
       <p className="mt-2 text-[14px] leading-relaxed text-slate-200">
@@ -318,7 +318,7 @@ export function DensitySearchIdeasStep(props: {
                   : "border-[#424753]/50 bg-[#0b111b]/45"
               }`}
             >
-              <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-slate-400">
+              <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-white">
                 Lookahead range
               </p>
               <p className="text-[14px] leading-relaxed text-slate-300">
@@ -359,7 +359,7 @@ export function DensitySearchIdeasStep(props: {
             retireWhenLocked ? "opacity-60" : ""
           }`}
         >
-          <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-slate-400">
+          <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-white">
             Remove season/series placeholder when
           </p>
           <p className="text-[14px] leading-relaxed text-slate-300">

@@ -312,6 +312,17 @@ class Settings(BaseSettings):
     PLAYBACK_SEARCH_FUTURE_DESTS: str = "[]"
     ENABLE_PLAYBACK_FALLBACK_SEARCH: bool = True
     PLAYBACK_FALLBACK_TIMEOUT_MINUTES: int = 30
+    # Play Actions lists (path-matched tried first; Always now; Fallback via timeout).
+    MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES: str = "[]"
+    MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES: str = "[]"
+    MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES: str = "[]"  # legacy mirror of ALWAYS
+    MOVIE_PLAY_REAL_ALSO_INSTANCES: str = "[]"
+    TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES: str = "[]"
+    TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES: str = "[]"
+    TV_PLAY_PLACEHOLDER_ALSO_INSTANCES: str = "[]"  # legacy mirror of ALWAYS
+    TV_PLAY_REAL_ALSO_INSTANCES: str = "[]"
+    # Legacy mirror of TV_PLAY_REAL_ALSO_INSTANCES.
+    TV_CROSS_INSTANCE_LOOKAHEAD: str = "[]"
     # When multiple Radarr or Sonarr instances share on-disk paths for the same TMDB/TVDB title:
     # - protect_siblings: keep placeholder files until no sibling instance still needs them (default)
     # - any_instance_has_file: delete on obsolete cleanup when this instance has a real file
