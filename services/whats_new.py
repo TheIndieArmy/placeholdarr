@@ -217,6 +217,29 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         cta_path="/settings/dummy-video",
         requires_ack=True,
     ),
+    WhatsNewNotice(
+        id="tv-density-play-first-0-11-0",
+        since_version="0.11.0",
+        title="More options to keep you in control",
+        body=(
+            "Choose episode, season, or series density to decide what placeholders represent in your "
+            "media library. Match them to what you care about most, and show fewer than before. "
+            "That means less to scan and rematerialize, so full syncs go faster and media player "
+            "scans stay lighter. Or keep things just the way they have been with episode density "
+            "to continue getting the full picture in media players.\n\n"
+            "Playback filters expand beyond just TV. Apply monitor-only, re-search monitored, or "
+            "search unreleased to movies as well, and set them per destination folder.\n\n"
+            "Multi-instance Arr targeting is clearer too. The older playback mode toggles are "
+            "replaced by Play Actions under Settings → Playback: Off / Always / Fallback per Arr "
+            "for placeholder plays, and Off / Always for real-file plays. Path match still runs "
+            "first. Existing installs keep equivalent behavior; open Playback and confirm the "
+            "matrix still matches what you want.\n\n"
+            "Please don't hesitate to report any issues on GitHub."
+        ),
+        cta_label="Open Density & Lookahead",
+        cta_path="/settings/density-lookahead",
+        requires_ack=True,
+    ),
 )
 
 

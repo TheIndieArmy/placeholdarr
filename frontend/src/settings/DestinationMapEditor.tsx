@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ensureDestFolder, getArrRootFolders } from "../api/dashboard";
 import { getCollectionPlexSections } from "../api/collections";
 import type { PlexSectionOption } from "../types/api";
@@ -237,6 +237,7 @@ export function DestinationMapEditor(props: {
 }) {
   const [instances, setInstances] = useState<ArrRootInstance[]>([]);
   const [sections, setSections] = useState<PlexSectionOption[]>([]);
+  const [plexSectionsLoading, setPlexSectionsLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [rules, setRules] = useState<DestinationRule[]>(() => rowsToRules(parseMapJson(props.value)));
@@ -248,6 +249,25 @@ export function DestinationMapEditor(props: {
     kind: "created" | "exists" | "error";
     message: string;
   }>(null);
+
+  const loadPlexSections = useCallback(() => {
+    if (!props.plexActive) {
+      setSections([]);
+      setPlexSectionsLoading(false);
+      return;
+    }
+    setPlexSectionsLoading(true);
+    getCollectionPlexSections()
+      .then((payload) => {
+        setSections(payload.sections || []);
+      })
+      .catch(() => {
+        setSections([]);
+      })
+      .finally(() => {
+        setPlexSectionsLoading(false);
+      });
+  }, [props.plexActive]);
 
   useEffect(() => {
     let cancelled = false;
@@ -684,17 +704,34 @@ export function DestinationMapEditor(props: {
 
           {plexActive ? (
             <div className={plexSectionsAvailable ? undefined : "opacity-70"}>
-              <label className="mb-1 block text-[14px] font-semibold text-slate-300">
-                Plex library (optional override)
-              </label>
+              <div className="mb-1 flex items-center gap-2">
+                <label className="block text-[14px] font-semibold text-slate-300">
+                  Plex library (optional override)
+                </label>
+                <button
+                  type="button"
+                  disabled={plexSectionsLoading}
+                  onClick={() => loadPlexSections()}
+                  className="ml-auto inline-flex items-center gap-1 rounded-lg border border-[#424753]/55 bg-[#0f1419] px-2.5 py-1 text-[12px] font-headline uppercase tracking-wider text-slate-300 transition hover:bg-[#151b24] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <span
+                    className={`material-symbols-outlined ${plexSectionsLoading ? "animate-spin" : ""}`}
+                    style={{ fontSize: 16 }}
+                    aria-hidden
+                  >
+                    {plexSectionsLoading ? "progress_activity" : "refresh"}
+                  </span>
+                  Rescan libraries
+                </button>
+              </div>
               {!sectionType ? (
                 <p className="ui-field-description-compact">
                   Select Arr instances first to choose a Movies or TV Plex library override.
                 </p>
               ) : !sections.length ? (
                 <p className="ui-field-description-compact">
-                  Could not load Plex libraries yet. Leave blank to use the default Movies/TV section under Library
-                  Root, or reconnect Plex and reopen Settings.
+                  Could not load Plex libraries yet. Use Rescan libraries after creating them in Plex, or leave blank to
+                  use the default Movies/TV section under Library Root.
                 </p>
               ) : (
                 <select
@@ -751,10 +788,14 @@ export function DestinationMapEditor(props: {
   const body = (
     <div className="space-y-4">
       <p className="ui-field-description leading-relaxed">
-        Map Arr root folders to Placeholdarr folders (and optional Plex libraries). Anything left unmapped keeps the
-        default destinations from Library Root above (<span className="font-mono text-slate-400">movies</span> /{" "}
-        <span className="font-mono text-slate-400">tv</span>). After Save Settings, choose Apply now or Next full sync so
-        existing placeholders move.
+        Optionally, use custom Library destinations when you want placeholders for a particular Arr instance and root
+        folder to live somewhere other than Library Root. This can keep separation in your media player, like a separate
+        library for 4K placeholders from a 4K Arr root. Anything left unmapped still uses{" "}
+        <span className="font-mono text-slate-400">movies</span> /{" "}
+        <span className="font-mono text-slate-400">tv</span> above
+        {props.layout === "wizard"
+          ? "."
+          : ". After you save, choose Apply now or Next full sync so existing placeholders move."}
       </p>
 
       {loading ? <p className="ui-field-description">Loading Arr root folders…</p> : null}

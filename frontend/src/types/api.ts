@@ -405,6 +405,8 @@ export interface SeriesDetailResponse {
   placeholder_policy?: "auto" | "never" | "pinned";
   force_placeholder?: boolean;
   block_placeholder?: boolean;
+  /** Current TV placeholder density setting (episode | season | series). */
+  tv_placeholder_density?: "episode" | "season" | "series" | string | null;
   placeholder_policy_source?: "manual" | "tag" | null;
   policy_tag_control?: PolicyTagControl | null;
   first_aired?: string | null;
@@ -540,8 +542,12 @@ export interface SettingsField {
   depends_on?: string;
   /** When set, the field is non-interactive while the parent bool setting is enabled. */
   disabled_when?: string;
+  /** When true, the UI toggle is the opposite of the stored bool (store still uses the schema key semantics). */
+  invert_bool?: boolean;
   /** Indent under the parent setting in the settings UI. */
   nested?: boolean;
+  /** When true, Settings/Play render destination multi-select instead of freeform chips. */
+  playback_dest_filter?: boolean;
 }
 
 export interface SettingsSection {
@@ -580,6 +586,8 @@ export interface SettingsPayload {
   sections: SettingsSection[];
   /** Not a settings field — used to display webhook URLs Radarr/Sonarr/etc. need. */
   webhook_api_key?: string | null;
+  /** Library dest folders for Playback filter multi-select (Movies / TV). */
+  playback_dest_options?: { movies: string[]; tv: string[] };
 }
 
 export interface SaveSettingsResponse {

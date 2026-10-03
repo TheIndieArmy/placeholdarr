@@ -293,16 +293,36 @@ class Settings(BaseSettings):
     PLACEHOLDER_DIR_MODE: str = os.getenv("PLACEHOLDER_DIR_MODE", "777").split('#')[0].strip()
     ENABLE_PRIMER: bool = False
 
-    # Play mode settings
+    # Play mode settings (search width on playback; orthogonal to density)
     TV_PLAY_MODE: Literal["episode", "season", "series"] = "episode"
-    EPISODES_LOOKAHEAD: int = 5
+    EPISODES_LOOKAHEAD: int = 3
+    # How many TV placeholder files to write on disk (episode = one per missing episode).
+    TV_PLACEHOLDER_DENSITY: Literal["episode", "season", "series"] = "episode"
+    # When a series/season stub is removed (only applies when density is season or series).
+    TV_DENSITY_RETIRE_WHEN: Literal[
+        "when_no_episode_needs_placeholder",
+        "when_any_episode_has_file",
+    ] = "when_no_episode_needs_placeholder"
     
-    # Playback-related settings (all default off: mark unmonitored + search full target set)
-    PLAYBACK_MONITOR_ONLY_NO_SEARCH: bool = False
-    PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED: bool = False
-    PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES: bool = False
+    # Playback filters: JSON string lists of normalized library dest_folder paths where each
+    # behavior applies. Empty = off for all dests. Migrated from legacy booleans by
+    # migrate_playback_filters_to_dest_lists (after migrate_playback_future_search_suppress_default).
+    PLAYBACK_MONITOR_ONLY_DESTS: str = "[]"
+    PLAYBACK_SEARCH_ALREADY_MONITORED_DESTS: str = "[]"
+    PLAYBACK_SEARCH_FUTURE_DESTS: str = "[]"
     ENABLE_PLAYBACK_FALLBACK_SEARCH: bool = True
     PLAYBACK_FALLBACK_TIMEOUT_MINUTES: int = 30
+    # Play Actions lists (path-matched tried first; Always now; Fallback via timeout).
+    MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES: str = "[]"
+    MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES: str = "[]"
+    MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES: str = "[]"  # legacy mirror of ALWAYS
+    MOVIE_PLAY_REAL_ALSO_INSTANCES: str = "[]"
+    TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES: str = "[]"
+    TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES: str = "[]"
+    TV_PLAY_PLACEHOLDER_ALSO_INSTANCES: str = "[]"  # legacy mirror of ALWAYS
+    TV_PLAY_REAL_ALSO_INSTANCES: str = "[]"
+    # Legacy mirror of TV_PLAY_REAL_ALSO_INSTANCES.
+    TV_CROSS_INSTANCE_LOOKAHEAD: str = "[]"
     # When multiple Radarr or Sonarr instances share on-disk paths for the same TMDB/TVDB title:
     # - protect_siblings: keep placeholder files until no sibling instance still needs them (default)
     # - any_instance_has_file: delete on obsolete cleanup when this instance has a real file

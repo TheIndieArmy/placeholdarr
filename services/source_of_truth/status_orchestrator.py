@@ -398,6 +398,7 @@ class StatusOrchestrator:
                 DisplayStatus.SEARCHING.value,
                 DisplayStatus.DOWNLOADING.value,
                 DisplayStatus.NOT_FOUND.value,
+                DisplayStatus.DOWNLOAD_UNAVAILABLE.value,
             }:
                 intents.append(StatusIntent(
                     placeholder_id=ph.id,
@@ -515,6 +516,7 @@ class StatusOrchestrator:
                 terminal_clear = {
                     DisplayStatus.AVAILABLE.value,
                     DisplayStatus.NOT_FOUND.value,
+                    DisplayStatus.DOWNLOAD_UNAVAILABLE.value,
                     DisplayStatus.DELETED.value,
                     DisplayStatus.ARCHIVED.value,
                 }

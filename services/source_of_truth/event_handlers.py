@@ -41,6 +41,7 @@ from services.source_of_truth.import_grace import (
 )
 from services.source_of_truth.sync_runner import (
     _apply_season_remote_posters,
+    _episode_detail_fetches_enabled,
     _episode_fields,
     _fill_missing_series_art,
     _movie_fields,
@@ -181,6 +182,10 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
         "seasons_upserted": 0,
         "episodes_upserted": 0,
         "episodes_touched": 0,
+        "episode_still_detail_skipped": 0,
+        "episode_still_detail_fetched": 0,
+        "episode_file_detail_skipped": 0,
+        "episode_file_detail_fetched": 0,
     }
 
     series_id = _extract_series_id(payload)
@@ -204,6 +209,7 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
         raise ValueError("seriesadd_missing_series_payload")
 
     session = get_session()
+    allow_episode_detail = _episode_detail_fetches_enabled()
     try:
         s_fields = _series_fields(series_entry, resolved_instance_key)
         if not s_fields.get("tvdbid"):
@@ -234,9 +240,21 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
                 stats["seasons_upserted"] += 1
 
             sonarr_ep_id = ep.get("id")
-            ep_effective = _resolve_episode_sync_payload(ep, base_url, api_key)
+            ep_effective = _resolve_episode_sync_payload(
+                ep,
+                base_url,
+                api_key,
+                allow_still_detail=allow_episode_detail,
+                stats=stats,
+            )
 
-            episode_file = _resolve_episode_file_payload(ep_effective, base_url, api_key)
+            episode_file = _resolve_episode_file_payload(
+                ep_effective,
+                base_url,
+                api_key,
+                allow_file_detail=allow_episode_detail,
+                stats=stats,
+            )
             ep_fields = _episode_fields(series_row, season_row, ep_effective, episode_file)
 
             overview = str(ep.get("overview") or "").strip()

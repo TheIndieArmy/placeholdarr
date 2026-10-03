@@ -109,7 +109,7 @@ export const LIBRARY_CARD_VARIANT_META: Record<
     label: "Polaroid",
     tagline: "Instant print",
     description:
-      "Thick white frame, drop shadow, and caption under the photo—reads like a physical print on the shelf, not a UI card.",
+      "Thick white frame, drop shadow, and caption under the photo. Reads like a physical print in the library, not a UI card.",
   },
   framed: {
     label: "Framed",
@@ -126,12 +126,12 @@ export const LIBRARY_CARD_VARIANT_META: Record<
     label: "Spotlight",
     tagline: "Poster on stage",
     description:
-      "Dark stage card with a large centered poster, soft accent glow, and a compact title strip below—year stays small in the footer.",
+      "Dark stage card with a large centered poster, soft accent glow, and a compact title strip below. Year stays small in the footer.",
   },
   ticket: {
     label: "Stack",
     tagline: "Title · poster · details",
     description:
-      "Title, full 2:3 poster, then status bar and metadata—taller card so nothing sits on the art.",
+      "Title, full 2:3 poster, then status bar and metadata. Taller card so nothing sits on the art.",
   },
 };

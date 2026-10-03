@@ -242,3 +242,23 @@ def episode_is_future_for_playback_search(
     ):
         return False
     return True
+
+
+def movie_is_future_for_playback_search(movie: Movie, *, now_date: date | None = None) -> bool:
+    """True when a movie placeholder play should skip search under the future-search suppress.
+
+    Uses the configured preferred release date (same preference as calendar Coming Soon).
+    Unknown preferred date is treated as future unless Radarr release status is ``released``.
+    """
+    eff = now_date or datetime.now(timezone.utc).date()
+    preferred = str(getattr(settings, "PREFERRED_MOVIE_DATE_TYPE", "inCinemas") or "inCinemas").strip()
+    mapping = {
+        "inCinemas": "theater_release_date",
+        "digitalRelease": "digital_release_date",
+        "physicalRelease": "physical_release_date",
+    }
+    field = mapping.get(preferred, "theater_release_date")
+    target_date = getattr(movie, field, None)
+    if target_date is not None:
+        return target_date > eff
+    return str(getattr(movie, "radarr_release_status", None) or "").strip().lower() != "released"

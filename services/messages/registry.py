@@ -688,6 +688,36 @@ def _build_registry() -> tuple[MessageKey, ...]:
             sample_context={},
         )
     )
+    keys.append(
+        MessageKey(
+            key="queue.stall.download_client",
+            label="Download client unavailable",
+            default="Download client unavailable",
+            group="Queue Monitor",
+            subgroup="Stall",
+            tooltip=(
+                "Shown when Arr reports downloadClientUnavailable. Queue monitoring stops for this title; "
+                "fix the download client in Arr, then clear or re-search from Placeholdarr."
+            ),
+            allowed_tokens=queue_tokens,
+            sample_context={},
+        )
+    )
+    keys.append(
+        MessageKey(
+            key="queue.stall.queue_failure",
+            label="Download failed in Arr queue",
+            default="Download failed in Arr queue",
+            group="Queue Monitor",
+            subgroup="Stall",
+            tooltip=(
+                "Shown when Arr reports the queue item as warning, error, or failed. Queue monitoring stops "
+                "for this title; resolve the failure in Arr, then clear or re-search from Placeholdarr."
+            ),
+            allowed_tokens=queue_tokens,
+            sample_context={},
+        )
+    )
 
     # --- Import grace ---
     keys.append(
