@@ -1,58 +1,82 @@
-# Placeholdarr
+<p align="center">
+  <img src="docs/images/logo.svg" alt="Placeholdarr" width="120" />
+</p>
 
-**Placeholdarr** keeps titles visible in Plex\*, Jellyfin, or Emby without requiring everything to stay downloaded. It is AI-developed, maintained by TheIndieArmy, and inspired by [Infinite Plex Library](https://github.com/arjanterheegde/infiniteplexlibrary) and [Chronicle](https://github.com/iwouldratherbeatthebeach/chronicle).
+<h1 align="center">Placeholdarr</h1>
 
-\***Placeholdarr** with **Plex** needs **Tautulli** or **Tracearr** so playback can trigger placeholder search.
+<p align="center">
+  <strong>Your whole catalog. On demand.</strong><br />
+  Keep movies and shows visible across the three major media servers without filling every disk first.
+</p>
 
-## Overview
+<p align="center">
+  <a href="https://github.com/TheIndieArmy/placeholdarr/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/TheIndieArmy/placeholdarr?label=release" /></a>
+  <a href="https://github.com/TheIndieArmy/placeholdarr/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/TheIndieArmy/placeholdarr?style=flat&logo=github" /></a>
+</p>
 
-Placeholdarr allows you to maintain a comprehensive **Plex**, Jellyfin, or Emby library without the storage overhead of keeping everything downloaded at once. It automates placeholder creation, status tracking, and on-demand downloads.
+---
 
-## Benefits & Features
+Placeholdarr sits between your Arr stack and your media server. It puts lightweight placeholders into your libraries so titles stay browseable, searchable, and playable to request. When someone hits play, Placeholdarr asks Radarr or Sonarr to find the real file. When the download lands, the placeholder steps aside.
 
-- **Keep your library visible without downloading everything.**  
-Placeholders let users browse and request content first, then download on demand.
-- **Reduce storage churn while keeping content discoverable.**  
-Great for large import lists, rolling retention workflows, and "watch-when-needed" setups.
-- **Support modern multi-instance stacks.**  
-Works with Plex, Jellyfin, Emby, and multiple Radarr/Sonarr instances.
-- **Automate status and release workflows.**  
-Startup sync, calendar workflows, queue tracking, and playback-driven search are built in.
-- **Build Plex collections from recipes (Beta).**  
-Sync catalog or list-driven membership into Plex on a schedule, including Collection Sets that fan out one config into many shelves.
-- **Stay practical for real-world ops.**  
-Hardlink/copy placeholder strategies, cleanup automation, and onboarding-first configuration.
+You get the feeling of a deep, complete library. Storage stays tied to what people actually watch.
 
-## How It Works
+Placeholdarr is AI-developed, and we are open about that. TheIndieArmy designs and maintains it.
 
-1. Add content to Radarr/Sonarr without immediately searching/downloading.
-2. Placeholdarr creates lightweight placeholder files in your configured placeholder libraries.
-3. Users see those titles in Plex/Jellyfin/Emby like normal catalog items.
-4. Playback or automation events trigger search/download flows, and placeholders are replaced when real media arrives.
+## See it in action
 
-## Getting Started
+<p align="center">
+  <img src="docs/images/library.png" alt="Placeholdarr library grid" width="23%" />
+  &nbsp;
+  <img src="docs/images/player.png" alt="Media player showing download percent in the placeholder description" width="23%" />
+  &nbsp;
+  <img src="docs/images/detail.png" alt="Placeholdarr movie detail with scores and Arr status" width="23%" />
+  &nbsp;
+  <img src="docs/images/collections.png" alt="Placeholdarr collections recipe with live preview" width="23%" />
+</p>
 
-1. Run the included [docker-compose.yml](docker-compose.yml).
-2. Open Placeholdarr and complete onboarding in the WebUI.
-3. Configure ARR/media-server webhooks using the URLs shown in onboarding.
+## What it makes possible
 
-## Configuration Notes
+**Browse first, download when it matters.**  
+Friends and family see the catalog in the client they already use. When they play a placeholder, Placeholdarr asks Arr to find the real file.
 
-Placeholdarr is onboarding-first: most behavior is configured in the WebUI.
+**Spend disk on demand.**  
+Add lists to Radarr and Sonarr unmonitored and let Placeholdarr take it from there. Your library sees more. Your storage sees less.
 
-- **Library strategy (recommended):**
-  - Keep placeholder libraries separate from real-media libraries when possible.
-  - Combined libraries are supported, but media-server trash behavior can be less predictable.
-  - Placeholder output paths should be different from ARR root paths.
-- **Plex placeholder libraries (metadata agents):** Placeholdarr writes sidecar **`.nfo`** files next to placeholders. In Plex, set each **placeholder** movie and TV library and select **Plex NFO Movies** and **Plex NFO Series** as the agent. 
-- **Environment variables:** use `.env` primarily for infrastructure/runtime overrides (host/port/log level/database).
+**Fit real Arr setups.**  
+Multiple Radarr and Sonarr instances, multiple library destinations, and support for the three major media servers.
 
-## Troubleshooting
+**Stay in control of TV footprint.**  
+Choose how dense TV placeholders should be: one file per episode, per season, or per series. Pair that with search mode and lookahead so play requests behave the way you want for your setup.
 
-- Check logs in `/config/logs/` for startup, webhook, and sync details.
-- Log files under `/config/logs/` capture full detail (VERBOSE/DEBUG and above). Use the System Logs tab display filter to narrow what you read.
+**Show titles before they release.**  
+Coming Soon placeholders put unreleased movies and episodes in media players early, with a countdown to the release date so people can see what is on the way.
+
+**Make placeholders easy to spot.**  
+Placeholdarr supports separate placeholder libraries, poster overlays, and automated metadata updates so it is clear what is a placeholder and what is real media.
+
+**Make the library feel intentional.**  
+Status and download progress show up in the player, cleanup runs when real media lands, and living Plex collections stay current without hand-editing membership every week.
+
+## Quick start
+
+```bash
+# Use the compose file in this repo, then open the WebUI and finish onboarding.
+docker compose up -d
+```
+
+Image: `ghcr.io/theindiearmy/placeholdarr:latest`  
+Prefer a pinned version from the [package page](https://github.com/TheIndieArmy/placeholdarr/pkgs/container/placeholdarr) when you want a specific release.
+
+## Learn more
+
+- [Changelog](CHANGELOG.md) for what shipped in each release
+- [docker-compose.yml](docker-compose.yml) for a ready stack with Postgres
 
 ## Credits
 
-- **Jellyfin support integration:** Thanks to [Priky-one](https://github.com/Priky-one) for implementing Jellyfin support.
-- **GHCR Docker workflow support:** Thanks to [aves-omni](https://github.com/aves-omni) for GitHub Container Registry workflow integration.
+Inspired by [Infinite Plex Library](https://github.com/arjanterheegde/infiniteplexlibrary) and [Chronicle](https://github.com/iwouldratherbeatthebeach/chronicle).
+
+- Jellyfin support and database foundation: [Priky-one](https://github.com/Priky-one)
+- GHCR workflow: [aves-omni](https://github.com/aves-omni)
+
+Maintained by [TheIndieArmy](https://github.com/TheIndieArmy).
