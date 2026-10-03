@@ -42,6 +42,13 @@ REQUEST_STATUS = "REQUEST"
 REQUEST_REASON = "placeholder_request"
 
 
+def _norm_stub_path(path: str | None) -> str:
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    return os.path.normcase(os.path.normpath(text))
+
+
 def _placeholders_enabled() -> bool:
     return bool(getattr(settings, "coming_soon_placeholders_enabled", True))
 
@@ -229,6 +236,20 @@ def _mark_series_stub_active(
             )
             session.add(row)
 
+    old_path = str(getattr(row, "path", "") or "").strip()
+    new_path = str(path or "").strip()
+    if old_path and new_path and _norm_stub_path(old_path) != _norm_stub_path(new_path):
+        # Destination / Library Root moves must not leave a playable stub behind.
+        season = None
+        if season_id is not None:
+            season = session.query(Season).filter(Season.id == int(season_id)).first()
+        cleanup_episode_placeholder_files(
+            session,
+            season=season,
+            series=series,
+            candidate_paths=[old_path],
+        )
+
     row.movie_id = None
     row.episode_id = None
     row.series_id = int(series.id)
@@ -352,6 +373,12 @@ def apply_series_density_materialization(
                     series=series,
                     candidate_paths=paths,
                 )
+            try:
+                from services.series_episode_stats_hooks import refresh_series_stats_after_bulk
+
+                refresh_series_stats_after_bulk(session, series_ids={int(series.id)})
+            except Exception:
+                pass
             if owns_session:
                 session.commit()
             return {
@@ -359,6 +386,7 @@ def apply_series_density_materialization(
                 "action": "skipped_density",
                 "series_id": int(series.id),
                 "deleted": bool(paths),
+                "paths": paths,
             }
 
         needed = series_stub_needed(session, series)
@@ -395,6 +423,11 @@ def apply_series_density_materialization(
                 series.placeholder_folder = os.path.dirname(os.path.dirname(target_path))
                 session.add(series)
 
+            prior = _active_series_stub(session, int(series.id))
+            relocated_from = str(getattr(prior, "path", "") or "").strip() if prior else ""
+            if relocated_from and _norm_stub_path(relocated_from) == _norm_stub_path(target_path):
+                relocated_from = ""
+
             row = _mark_series_stub_active(
                 session,
                 series=series,
@@ -402,6 +435,12 @@ def apply_series_density_materialization(
                 season_id=season_id,
                 activity_reason=activity_reason,
             )
+            try:
+                from services.series_episode_stats_hooks import refresh_series_stats_after_bulk
+
+                refresh_series_stats_after_bulk(session, series_ids={int(series.id)})
+            except Exception:
+                pass
             if owns_session:
                 session.commit()
             return {
@@ -411,6 +450,7 @@ def apply_series_density_materialization(
                 "nfo_written": nfo_written,
                 "series_nfo_written": series_nfo_written,
                 "path": target_path,
+                "relocated_from": relocated_from or None,
                 "series_id": int(series.id),
                 "placeholder_id": int(row.id) if getattr(row, "id", None) else None,
             }
@@ -427,6 +467,12 @@ def apply_series_density_materialization(
                 series=series,
                 candidate_paths=paths,
             )
+        try:
+            from services.series_episode_stats_hooks import refresh_series_stats_after_bulk
+
+            refresh_series_stats_after_bulk(session, series_ids={int(series.id)})
+        except Exception:
+            pass
         if owns_session:
             session.commit()
         return {
@@ -456,7 +502,15 @@ def run_series_density_for_series_ids(
     activity_reason: str | None = None,
 ) -> dict[str, Any]:
     ids = sorted({int(sid) for sid in (series_ids or []) if sid is not None})
-    stats = {"series_considered": len(ids), "created": 0, "retired": 0, "skipped": 0, "errors": 0}
+    stats: dict[str, Any] = {
+        "series_considered": len(ids),
+        "created": 0,
+        "retired": 0,
+        "skipped": 0,
+        "errors": 0,
+        "created_paths": [],
+        "deleted_paths": [],
+    }
     if not ids:
         return stats
 
@@ -474,12 +528,25 @@ def run_series_density_for_series_ids(
             stats["errors"] += 1
             continue
         action = str(out.get("action") or "")
-        if action == "created_or_exists" and out.get("created"):
-            stats["created"] += 1
+        path = str(out.get("path") or "").strip()
+        relocated_from = str(out.get("relocated_from") or "").strip()
+        deleted_paths = [str(p).strip() for p in (out.get("paths") or []) if str(p).strip()]
+        if action == "created_or_exists":
+            if out.get("created"):
+                stats["created"] += 1
+            else:
+                stats["skipped"] += 1
+            if path:
+                stats["created_paths"].append(path)
+            if relocated_from:
+                stats["deleted_paths"].append(relocated_from)
         elif action == "retired" or (action == "skipped_density" and out.get("deleted")):
             stats["retired"] += 1
+            stats["deleted_paths"].extend(deleted_paths)
         else:
             stats["skipped"] += 1
+            if deleted_paths:
+                stats["deleted_paths"].extend(deleted_paths)
     return stats
 
 

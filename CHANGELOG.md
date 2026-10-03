@@ -73,6 +73,9 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ### Fixed
 
+- **Density stub path moves**: Changing Library Root or destinations under season/series density removes the previous stub file/NFO before writing the new path so media servers do not keep duplicates.
+- **Density stub library counts**: Creating or retiring a density stub refreshes cached series placeholder counts used by library cards.
+- **Density stub media refresh**: Scoped materialization that creates or deletes a density stub schedules a TV library path refresh even when episode rows are `NOT_NEEDED`.
 - **Postgres startup on SQLAlchemy 2.1**: Pin SQLAlchemy to 2.0.x and use the psycopg2 driver URL so images that resolve newer SQLAlchemy still start with the shipped driver.
 - **Playback dest-filter migrate**: Defers writing destination lists until library folders exist, and reseeds search-already-monitored during unfinished setup if a first boot froze empty lists.
 - **TV density Apply now pending**: Keeps the rematerialize-pending flag set until the background Apply now run finishes so a crash mid-job can still retry on the next full sync.

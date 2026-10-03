@@ -43,6 +43,13 @@ REQUEST_STATUS = "REQUEST"
 REQUEST_REASON = "placeholder_request"
 
 
+def _norm_stub_path(path: str | None) -> str:
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    return os.path.normcase(os.path.normpath(text))
+
+
 def _placeholders_enabled() -> bool:
     return bool(getattr(settings, "coming_soon_placeholders_enabled", True))
 
@@ -217,6 +224,17 @@ def _mark_season_stub_active(
             )
             session.add(row)
 
+    old_path = str(getattr(row, "path", "") or "").strip()
+    new_path = str(path or "").strip()
+    if old_path and new_path and _norm_stub_path(old_path) != _norm_stub_path(new_path):
+        # Destination / Library Root moves must not leave a playable stub behind.
+        cleanup_episode_placeholder_files(
+            session,
+            season=season,
+            series=series,
+            candidate_paths=[old_path],
+        )
+
     row.movie_id = None
     row.episode_id = None
     row.series_id = int(series.id)
@@ -339,13 +357,21 @@ def apply_season_density_materialization(
                     series=series,
                     candidate_paths=paths,
                 )
+            try:
+                from services.series_episode_stats_hooks import refresh_series_stats_after_bulk
+
+                refresh_series_stats_after_bulk(session, series_ids={int(series.id)})
+            except Exception:
+                pass
             if owns_session:
                 session.commit()
             return {
                 "ok": True,
                 "action": "skipped_density",
                 "season_id": int(season.id),
+                "series_id": int(series.id),
                 "deleted": bool(paths),
+                "paths": paths,
             }
 
         needed = season_stub_needed(session, series, season)
@@ -378,6 +404,11 @@ def apply_season_density_materialization(
                 season.placeholder_folder = os.path.dirname(target_path)
                 session.add(season)
 
+            prior = _active_season_stub(session, int(season.id))
+            relocated_from = str(getattr(prior, "path", "") or "").strip() if prior else ""
+            if relocated_from and _norm_stub_path(relocated_from) == _norm_stub_path(target_path):
+                relocated_from = ""
+
             row = _mark_season_stub_active(
                 session,
                 series=series,
@@ -385,6 +416,12 @@ def apply_season_density_materialization(
                 path=target_path,
                 activity_reason=activity_reason,
             )
+            try:
+                from services.series_episode_stats_hooks import refresh_series_stats_after_bulk
+
+                refresh_series_stats_after_bulk(session, series_ids={int(series.id)})
+            except Exception:
+                pass
             if owns_session:
                 session.commit()
             return {
@@ -394,6 +431,7 @@ def apply_season_density_materialization(
                 "nfo_written": nfo_written,
                 "series_nfo_written": series_nfo_written,
                 "path": target_path,
+                "relocated_from": relocated_from or None,
                 "season_id": int(season.id),
                 "series_id": int(series.id),
                 "placeholder_id": int(row.id) if getattr(row, "id", None) else None,
@@ -411,6 +449,12 @@ def apply_season_density_materialization(
                 series=series,
                 candidate_paths=paths,
             )
+        try:
+            from services.series_episode_stats_hooks import refresh_series_stats_after_bulk
+
+            refresh_series_stats_after_bulk(session, series_ids={int(series.id)})
+        except Exception:
+            pass
         if owns_session:
             session.commit()
         return {
@@ -442,7 +486,15 @@ def apply_season_density_for_series(
     """Create/retire season stubs for every season under a series (or clear when density≠season)."""
     owns_session = session is None
     session = session or get_session()
-    stats = {"seasons_considered": 0, "created": 0, "retired": 0, "skipped": 0, "errors": 0}
+    stats: dict[str, Any] = {
+        "seasons_considered": 0,
+        "created": 0,
+        "retired": 0,
+        "skipped": 0,
+        "errors": 0,
+        "created_paths": [],
+        "deleted_paths": [],
+    }
     try:
         series = session.query(Series).filter(Series.id == int(series_id)).first()
         if not series:
@@ -461,9 +513,16 @@ def apply_season_density_for_series(
                     series=series,
                     candidate_paths=paths,
                 )
+            try:
+                from services.series_episode_stats_hooks import refresh_series_stats_after_bulk
+
+                refresh_series_stats_after_bulk(session, series_ids={int(series.id)})
+            except Exception:
+                pass
             if owns_session:
                 session.commit()
             stats["retired"] = 1 if paths else 0
+            stats["deleted_paths"] = [str(p).strip() for p in paths if str(p).strip()]
             return {**stats, "ok": True, "action": "cleared_series_season_stubs", "deleted": bool(paths)}
 
         seasons = (
@@ -483,12 +542,25 @@ def apply_season_density_for_series(
                 stats["errors"] += 1
                 continue
             action = str(out.get("action") or "")
-            if action == "created_or_exists" and out.get("created"):
-                stats["created"] += 1
+            path = str(out.get("path") or "").strip()
+            relocated_from = str(out.get("relocated_from") or "").strip()
+            deleted_paths = [str(p).strip() for p in (out.get("paths") or []) if str(p).strip()]
+            if action == "created_or_exists":
+                if out.get("created"):
+                    stats["created"] += 1
+                else:
+                    stats["skipped"] += 1
+                if path:
+                    stats["created_paths"].append(path)
+                if relocated_from:
+                    stats["deleted_paths"].append(relocated_from)
             elif action == "retired" or (action == "skipped_density" and out.get("deleted")):
                 stats["retired"] += 1
+                stats["deleted_paths"].extend(deleted_paths)
             else:
                 stats["skipped"] += 1
+                if deleted_paths:
+                    stats["deleted_paths"].extend(deleted_paths)
         if owns_session:
             session.commit()
         return {**stats, "ok": True}
@@ -512,13 +584,15 @@ def run_season_density_for_series_ids(
     activity_reason: str | None = None,
 ) -> dict[str, Any]:
     ids = sorted({int(sid) for sid in (series_ids or []) if sid is not None})
-    stats = {
+    stats: dict[str, Any] = {
         "series_considered": len(ids),
         "seasons_considered": 0,
         "created": 0,
         "retired": 0,
         "skipped": 0,
         "errors": 0,
+        "created_paths": [],
+        "deleted_paths": [],
     }
     if not ids:
         return stats
@@ -541,6 +615,12 @@ def run_season_density_for_series_ids(
         stats["retired"] += int(out.get("retired") or 0)
         stats["skipped"] += int(out.get("skipped") or 0)
         stats["errors"] += int(out.get("errors") or 0)
+        stats["created_paths"].extend(
+            [str(p).strip() for p in (out.get("created_paths") or []) if str(p).strip()]
+        )
+        stats["deleted_paths"].extend(
+            [str(p).strip() for p in (out.get("deleted_paths") or []) if str(p).strip()]
+        )
     return stats
 
 
