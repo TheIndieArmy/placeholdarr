@@ -1526,6 +1526,28 @@ def _run_materialization_for_ids(
                 f"errors={season_stats.get('errors', 0)}",
                 extra={"emoji_type": "info"},
             )
+            for path in list(series_stats.get("created_paths") or []) + list(
+                season_stats.get("created_paths") or []
+            ):
+                if path:
+                    changed_paths.add(str(path))
+            for path in list(series_stats.get("deleted_paths") or []) + list(
+                season_stats.get("deleted_paths") or []
+            ):
+                if path:
+                    delete_refresh_paths.add(str(path))
+            try:
+                from services.series_episode_stats_hooks import refresh_series_stats_after_bulk
+
+                refresh_series_stats_after_bulk(
+                    session,
+                    series_ids={int(sid) for sid in density_series_ids},
+                )
+            except Exception as stats_exc:
+                logger.debug(
+                    f"TV density series stats refresh skipped: {stats_exc}",
+                    extra={"emoji_type": "debug"},
+                )
             _scoped_phase("tv density passes done")
     except Exception as exc:
         logger.error(f"TV density pass failed: {exc}", extra={"emoji_type": "error"})
@@ -1586,6 +1608,11 @@ def _run_materialization_for_ids(
     _scoped_phase("before scheduling delayed final path refresh (async Timer or job)")
 
     if not is_full_sync:
+        # Density stubs can create/delete TV paths even when actionable episode_ids is empty
+        # (episodes are NOT_NEEDED under season/series density). Still refresh TV libraries.
+        density_touched_tv = bool(changed_paths or delete_refresh_paths)
+        has_episodes_refresh = bool(episode_ids) or density_touched_tv
+
         def _trigger_delayed_final_refresh():
             refresh_stats = refresh_all_path_batches_with_section_fallback(
                 [
@@ -1593,7 +1620,7 @@ def _run_materialization_for_ids(
                     (delete_refresh_paths, "Deleted"),
                 ],
                 has_movies=bool(movie_ids),
-                has_episodes=bool(episode_ids),
+                has_episodes=has_episodes_refresh,
                 enable_section_fallback=False,
                 fallback_wait_seconds=0,
                 include_plex=True,
@@ -1610,7 +1637,7 @@ def _run_materialization_for_ids(
             kind=KIND_DELAYED_FINAL,
             payload={
                 "has_movies": bool(movie_ids),
-                "has_episodes": bool(episode_ids),
+                "has_episodes": has_episodes_refresh,
                 "include_plex": True,
                 "created_paths": sorted(set(changed_paths)),
                 "delete_paths": sorted(set(delete_refresh_paths)),
