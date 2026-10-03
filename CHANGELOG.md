@@ -5,11 +5,157 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog,
 and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
+Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Released**.
+
 ## [Unreleased]
 
-### `multilibrary`
+### Added
 
-#### Added
+- **TMDB Discover (this branch)**: Catalog mode, Discover Library Root, sources, and Arr overlay coexistence from `experiment/tmdb-discover`, integrated onto the 0.11.0 density / Play Actions base for the 0.12 beta line.
+
+
+## Pre-release
+
+## Released
+
+## [0.11.0] - 2026-10-03
+
+### Summary
+
+- **TV placeholder density**: Episode, season, or series placeholder files, with retire-when and rematerialize prompts.
+- **Play-first setup**: Welcome → Profile → Players → Arr → Folders → Playback → More → Appearance; `/setup/preview` mirrors live without saving.
+- **Playback filters**: Monitor/search filters apply per library destination (Movies/TV folder paths) under Settings → Playback.
+- **Play Actions matrix**: Replaces older multi-instance playback mode toggles with Off / Always / Fallback (placeholder) and Off / Always (real file) per Arr.
+- **Lookahead default**: New installs default to 3 episodes ahead (was 5).
+- **What's new (0.11.0)**: Startup ack for density, playback filters, and Play Actions (Density & Lookahead CTA; confirm Play Actions under Playback).
+- **GHCR latest tag**: Pre-release version tags no longer move `:latest`.
+- **Postgres startup**: Images stay on SQLAlchemy 2.0 and the shipped psycopg2 driver.
+
+### Added
+
+- **Play-first onboarding**: Unfinished `/setup` uses Welcome → Profile → Players → Arr → Folders → Playback → More → Appearance.
+- **Setup preview**: `/setup/preview` mirrors live Play-first setup with current settings and does not save.
+- **What's new (0.11.0)**: Startup ack for TV placeholder density, playback filters, and Play Actions (Density & Lookahead CTA; nudges upgrades to confirm the migrated matrix under Settings → Playback).
+- **TV placeholder density**: Settings for how many TV placeholder files to write (episode, season, or series), with retire-when options for season/series placeholders. Series density creates one playable S01E01 placeholder per show; season density creates one sNNe01 placeholder per season that still needs content.
+- **TV density apply scope**: Changing density or retire-when prompts Apply now or next full sync; consolidating to Season/Series warns that per-episode placeholders will be deleted.
+- **Tracearr thin playback fallbacks**: When a stream webhook has a Plex `ratingKey` but missing path/ids, Placeholdarr asks Plex for Guids and path; series/season density placeholders also resolve via title/path markers and active density rows when catalog kind would stay unknown.
+- **DOWNLOAD_UNAVAILABLE status**: When Arr reports `downloadClientUnavailable` or a queue warning/error/failed, Placeholdarr sets a terminal status with a Status Updates message and stops queue monitoring for that title.
+
+### Changed
+
+- **Play Actions matrix**: Replaces the older multi-instance playback mode toggles and Search Behavior controls with one Off / Always / Fallback (placeholder) and Off / Always (real file) matrix per Arr instance. Path match is tried first; Fallback timeout stays under the matrix; ambiguous plays follow Placeholder play.
+- **Play Actions placement**: Multi-instance targeting and Shared Placeholder Cleanup sit under Settings → Playback next to dest filters (not Paths), so monitor-only destinations and Arr targeting read as one Playback story.
+- **Play Actions upgrades**: Existing installs map the old fallback enable flag and TV real-file / cross-instance modes into the new Always / Fallback lists (movie Real Always stays empty; that path was a noop).
+- **Playback dest filters**: Destinations already under Monitor only are greyed out in the search lists so the two filters cannot contradict each other.
+- **Density & Lookahead / setup copy**: Points to Play Actions for which Arr instances also search on play; onboarding stacks the Movies and TV matrix columns for readable controls.
+- **GHCR latest tag**: Version tags that look like pre-releases (`beta`, `rc`, `alpha`) publish only the version tag; `:latest` is reserved for stable semver tags.
+- **Settings section rename**: Former Lookahead settings page is Density & Lookahead (slug `density-lookahead`; `/settings/lookahead` still resolves).
+- **Lookahead range default**: New installs default to 3 episodes ahead (was 5). Existing saved values are unchanged.
+- **Playback step**: Dest-scoped monitor/search filters sit on Playback after Folders; multi-instance Arr routing nests under them only when a second instance is configured.
+- **Retire-when on Profile**: Season/series placeholder retire-when sits below Customize profile; greyed out for episode density. Settings → Density & Lookahead matches.
+- **Playback section**: Monitor-only and search filters moved out of Density & Lookahead into Settings → Playback.
+- **Playback filters by destination**: Monitor only, search already-monitored, and search future are destination multi-selects (Movies/TV folder paths) instead of global toggles. Existing bool settings migrate after library paths are loaded; dest-list writes defer until folders exist. New destinations stay off until selected.
+- **Movie playback filters**: The same destination-scoped Playback filters apply to Radarr plays (movie future uses the preferred Calendar release date).
+- **TV play profiles**: Profile step and Settings → Density & Lookahead offer play profiles that pair density with Search mode; Customize profile still edits each setting.
+- **Episode density star**: Star says most flexible requesting only when Search mode is Episode; otherwise mostly informational detail.
+- **Search future titles on playback**: Destination list for searching not-yet-released titles; default empty (off). Finished installs without a saved suppress value are grandfathered so upgrades do not flip them before dest migration.
+- **Search already-monitored titles on playback**: Destination list for re-searching already-monitored titles (migrated from the former suppress toggle).
+- **TV density sync detail GETs**: Season/series density skips per-episode Sonarr still and episode-file detail requests; bulk `has_file` / air dates still sync.
+- **TV density determination**: Season/series density uses a fast path that marks leftover episode placeholders obsolete and otherwise `not_needed`, without full per-episode placeholder evaluation.
+- **Determination Why? order**: Episode explain is Specials → Density → File → Unknown air date → Calendar → Path → Monitored → Shared-instance → Policy. Season/series density or path drift decides early and marks later steps skip. Movie explain is File → Calendar → Path → Monitored → Shared-instance → Policy.
+- **Determination Why? deciding step**: Highlight prefers the last step whose outcome matches the final determination, including pass (file state), not only fail/applied.
+- **Determination Why? gate icons**: Open or satisfied conditions use pass (green check). Skip (empty circle) is only for steps not evaluated after an earlier decision.
+- **Episode status chip**: Rows with no file and no placeholder show Not needed when determination is `not_needed` (density, calendar, monitored, and similar rules); Missing stays for titles that still need a placeholder.
+- **Episode status Why?**: The status chip opens the determination explain modal (tip: Why this status?). The separate Why? link next to the pin is removed.
+- **Tracearr webhook flatten**: Copies Plex `ratingKey` into `media.ids` so playback resolve can use it.
+- **Density pin hover copy**: Under Season density, episode pins are greyed with a tip to pin the season or series instead. Under Series density, episode and season pins are greyed with a tip to pin the series instead.
+- **Density wording**: User-facing copy uses episode / season / series placeholder (not stub) in Settings, Lookahead help, rematerialize prompts, pin tips, queue-monitor activity, density filenames, and NFO titles.
+
+### Fixed
+
+- **Postgres startup on SQLAlchemy 2.1**: Pin SQLAlchemy to 2.0.x and use the psycopg2 driver URL so images that resolve newer SQLAlchemy still start with the shipped driver.
+- **Playback dest-filter migrate**: Defers writing destination lists until library folders exist, and reseeds search-already-monitored during unfinished setup if a first boot froze empty lists.
+- **TV density Apply now pending**: Keeps the rematerialize-pending flag set until the background Apply now run finishes so a crash mid-job can still retry on the next full sync.
+- **TV density Apply now pipeline lock**: Apply now rematerialize takes the same pipeline lock as full sync so it cannot run determination/materialization alongside a scheduled sync.
+- **TV density apply estimate**: The Apply now count for density changes includes only TV placeholders (movies are excluded).
+- **TV density placeholders**: Season/series placeholder creation uses the same dummy video resolution as episode placeholders (`/config/dummy.mp4` fallback), so Apply now no longer fails with `DUMMY_FILE_PATH missing`.
+- **Density stub playback status**: Season/series stub plays only project SEARCHING when an Arr search was actually triggered (monitor-only / future suppress no longer flip the stub to SEARCHING).
+- **Season detail density stubs**: Season PH counts and policy chips use season stub Placeholder rows under season density (not episode `has_placeholder`).
+- **Gated density stub SEARCH_QUEUED**: While startup sync is gated, playing a season/series density stub sets SEARCH_QUEUED on the stub Placeholder (not only episode rows).
+- **Gated playback series resolve**: SEARCH_QUEUED falls back to `path_info.series_id` when `_find_series_rows` misses (episode-level TVDB / density stub).
+- **Density stub detection respects density**: Season/series stub path helpers ignore leftover stub rows/filenames when `TV_PLACEHOLDER_DENSITY` is no longer season/series.
+- **Season density stub path match**: When the played path does not exactly match a stub row, resolve by season from the filename/folder (or webhook season). Do not fall back to the first stub for the show.
+- **Playback catalog TVDB**: Episode-level TVDB Guids from Plex/Tracearr match Sonarr episode ids, not only series TVDB.
+- **Density placeholder NFO refresh**: Series/season density status changes rewrite the placeholder NFO (and push player metadata); previously only movie/episode placeholders were refreshed, so density files could keep showing REQUEST.
+
+## [0.10.3] - 2026-09-28
+
+### Summary
+
+- **DB_PASS_FILE**: Docker/GitOps secrets for the Postgres password (literal `DB_PASS` still wins).
+- **What's New CTA**: Open… dismisses the notice before navigate.
+- **Placeholder Sync errors**: Failed art/metadata batches show the real job reason.
+- **Dummy Video leave prompt**: Upload no longer trips leave-without-saving from an unrelated field.
+- **Art refresh last batch**: No DetachedInstanceError when the final art batch completes.
+
+### Added
+
+- **DB_PASS_FILE**: Read the Postgres password from a file path (Docker/GitOps secrets). Non-empty `DB_PASS` still wins.
+
+### Fixed
+
+- **What's New CTA**: Open… links dismiss the notice (same as Got it) then navigate.
+- **Placeholder Sync errors**: Failed metadata/art batches surface their job reason instead of opaque `linked_refresh_job_failed`.
+- **Dummy Video leave prompt**: Uploading a video no longer trips leave-without-saving from an unrelated playback-fallback auto-clear.
+- **Art refresh last batch**: Capture job id before closing the worker session so completion no longer fails with DetachedInstanceError.
+
+## [0.10.2] - 2026-09-23
+
+### Summary
+
+- **Status Updates / Poster Overlay / Dummy Video**: Placeholder look settings split into three Settings sections.
+- **Dummy Video upload**: Upload or reset standard and Coming Soon placeholder videos from Settings.
+- **Settings restart**: Restart Placeholdarr from Settings when a save requires it (Docker restart policy).
+- **What's new placeholder look (0.10.2)**: Startup ack for the Settings split and Dummy Video upload.
+
+### Added
+
+- **Dummy Video**: Upload or reset standard and Coming Soon placeholder videos under Settings → Dummy Video.
+- **Settings restart**: After a save that requires restart, restart Placeholdarr from the Settings header (needs a container restart policy).
+- **What's new placeholder look (0.10.2)**: Startup ack for Status Updates / Poster Overlay / Dummy Video.
+
+### Changed
+
+- **Status Updates / Poster Overlay / Dummy Video**: Split status text, poster look, and placeholder videos into three Settings sections.
+
+## [0.10.1] - 2026-09-23
+
+### Summary
+
+- **Arr save validation order**: Catalog transplants/renames wait until Arr settings validation succeeds.
+- **Shared destination rematerialize**: Sibling-owned placeholder files are no longer unlinked on dest moves.
+- **Playback media ID seeding**: Plex/Jellyfin ids stamp only the path-matched Arr row.
+- **Plex lookup sections**: Movie and show lookups scan only matching Plex library types.
+
+### Fixed
+
+- **Arr save validation order**: URL transplants and instance-key renames run only after Arr settings validation succeeds, so a rejected save cannot leave the catalog rewritten.
+- **Shared destination rematerialize**: Destination moves no longer unlink placeholder files still referenced by a sibling Arr instance.
+- **Playback media ID seeding**: Plex/Jellyfin item ids from playback stamp only the path-matched Arr row, not every TMDB/IMDb sibling.
+- **Plex lookup sections**: Movie and show fallback lookups scan only matching movie or TV Plex sections.
+
+## [0.10.0] - 2026-09-23
+
+### Summary
+
+- **More Arrs**: Up to four Radarr and four Sonarr instances; Slot seats with your names; list order sets search priority.
+- **Paths destinations**: Optional Arr root → Placeholdarr dest folder + Plex section for separate libraries.
+- **Arr identity**: `instance_key` and stable UUID ids; renames and URL transplants keep catalog continuity.
+- **Playback search**: Prefer matched library path or fall back through configured instances in list order.
+- **Docker PLACEHOLDARR_PORT**: Container listen port honors the env var (#89).
+- **What's new**: Startup ack for multilibrary; points to the changelog, invites GitHub issue reports, and notes webhook recopy if errors.
+
+### Added
 
 - **Library destination map**: Optional Arr instance + root folder → Placeholdarr dest folder + Plex section for Movies and TV; empty map keeps single `{LIBRARY_ROOT}/movies` and `tv`.
 - **Destination rematerialize**: Saving Library Root or the destination map offers Apply now or Next full sync to relocate existing placeholders.
@@ -24,10 +170,9 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Named instance search options**: Placeholder and real-file search preference can target any configured Arr instance using the name you gave it.
 - **Prefer matched library path**: Toggle to override the search preference when the played path maps to exactly one library destination.
 - **Full sync completion log**: Closing a full sync task run writes an INFO line with duration and placeholder create/remove counts.
-- **What's new more Arrs / libraries (0.9.28-beta.1)**: Startup ack for up to four Arrs, Paths destinations, and path-aware search fallback.
-- **What's new Arr names / slots (0.9.28-beta.1)**: Startup ack for name and list-order identity, renames, and four Slot seats.
+- **What's new multilibrary (0.10.0)**: Startup ack for up to four Arrs, Paths destinations, path-aware search fallback, changelog pointer, GitHub issue invite, and webhook recopy if errors.
 
-#### Changed
+### Changed
 
 - **Default destinations from Library Root**: Movie and TV folders under Library Root are the default Placeholdarr destinations; the optional dest map only overrides specific Arr roots.
 - **Arr identity is instance key**: Catalog, sync, playback, queue, and webhooks route by `instance_key` and list order; persisted `role` / `is_4k` on Arr rows are dropped on save.
@@ -44,8 +189,9 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Import grace cadence**: Accelerated 5-second ticks are off by default; the countdown uses 60-second steps unless `ENABLE_IMPORT_GRACE_ACCELERATED` is set.
 - **Full sync follow-up phases**: Art and metadata refresh cards appear on a full sync only when those refreshes were actually requested.
 
-#### Fixed
+### Fixed
 
+- **Docker PLACEHOLDARR_PORT**: Container listen port honors `PLACEHOLDARR_PORT` / `PLACEHOLDARR_HOST` instead of ignoring them for the hardcoded uvicorn `--port 8000` (#89).
 - **Import / queue status labels**: NFO and Plex projection use the Message Center queue lines (including customized `IMPORT_IN_PROGRESS` text) instead of the raw enum token.
 - **Multi-instance Arr routing**: Ambiguous legacy `is_4k` no longer selects an Arr endpoint; use `instance_key` (legacy `primary`/`secondary` still map to list slots 1 and 2).
 - **Instance-aware dest folders**: Unmapped Arr instances use the default movie/TV destinations from Library Root; extra trees require the dest map.
@@ -55,7 +201,6 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Legacy 4K Plex section IDs removed**: `PLEX_MOVIE_4K_SECTION_ID` / `PLEX_TV_4K_SECTION_ID` are ignored; sections come from default Paths fields and the dest map.
 - **Plex section refresh**: Bulk metadata refresh includes dest-map section IDs and default movie/TV libraries.
 - **Bare full sync coverage**: `run_full_sync` without `instance_key` syncs every configured Arr instance and passes per-instance role into folder fields.
-- **Arr catalog timeout**: Full movie/series pulls use the 120s bulk timeout (not 30s); a failed catalog fetch returns None and skips removed-from-Arr diffs so startup lite cannot treat a timeout as an empty library.
 - **Arr API key retention**: Saving Arr instances keeps stored API keys when the UI omits them; an empty instance list no longer wipes a non-empty saved config.
 - **Plex cache stampede**: Concurrent section list lookups share an in-flight request per section key instead of issuing parallel full scans.
 - **Plex ratingKey cache seeding**: Playback webhooks seed Plex and Jellyfin item IDs directly into movie and episode records so player metadata updates bypass library scans.
@@ -66,37 +211,32 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Plex status projection lock**: Title and summary edits lock those fields so Plex agents cannot revert them; a failed reload logs before/after values.
 - **Import grace countdown labels**: Accelerated cadence still uses the configured 5/4/3/2/1-minute templates so each tick is a distinct status.
 
-### `experiment/tmdb-discover`
+## [0.9.27] - 2026-09-15
 
-#### Added
+### Summary
 
-- **TMDB Discover tables**: Same Postgres DB as Arr catalog gets `catalog_source`, `tmdb_movie`, `tmdb_movie_source`, `arr_movie_overlay`, and `placeholder.tmdb_movie_id` (Alembic `0031`).
-- **Catalog mode setting**: Settings → Library sync chooses Arr catalog or TMDB Discover; both catalogs can coexist; restart after switching so schedulers follow the mode.
-- **Discover catalog sync schedule**: `DISCOVER_SYNC_INTERVAL_HOURS` (default 24; 0 disables) registers the Tasks Discover job like Collections; restart required after change.
-- **Show-level Discover TV**: TMDB TV sources, `tmdb_series` catalog, Sonarr overlay, series folder + dummy S01E01 stub, and playback add/monitor/search in Sonarr.
+- **Jellyfin 12 auth**: Modern ``Authorization: MediaBrowser Token=...`` for connection tests and all Jellyfin API calls.
+- **Integration warning !**: Client timeouts no longer sticky the Media/ARR Settings badge.
+- **Integration warning ! (cancelled setup)**: A failed Test no longer leaves the badge after Cancel.
+- **Playback setup modal**: Intro explains why a playback webhook is needed; unchanged selection shows Done.
+- **Playback setup footer**: Stable primary button so Cancel does not flash accent yellow when switching sources.
+- **Arr catalog timeout**: Full movie/series pulls use the 120s bulk timeout; failed fetches skip removed-from-Arr diffs.
 
-#### Changed
+### Changed
 
-- **Discover Placeholder Search Behavior**: Discover playback targets `MOVIE`/`TV_PLACEHOLDER_SEARCH_MODE` (All / primary / secondary / named instance) with per-instance lookup, add, monitor, and search; prefer matched library path is not applied.
+- **Playback setup modal**: Intro explains why a playback webhook is needed; unchanged selection shows Done instead of a disabled Save.
+- **Playback setup footer**: Keep one stable primary button so Cancel does not flash accent yellow when switching sources.
 
-#### Fixed
+### Fixed
 
-- **Discover playback overlay deadlock**: After add, upsert only that title's Arr overlay instead of a full library overlay refresh (which could hang the playback job against its own DB locks).
-- **Library lookup indexes**: Placeholder FK columns, `episode.season_id`, and movie/series/episode `status` are indexed so Arr library/series stats avoid sequential scans after a cold cache.
-- **Startup HTTP gate**: DB summary, CLAIMED job reset, and orphaned task-run abandon run in a background thread so Uvicorn can accept UI/API connections immediately.
-- **Startup schema no-ops**: Skip instance_key DROP/CREATE INDEX and job NOTIFY trigger reinstall when already applied.
-- **Startup legacy QUEUED reset removed**: Movie/Series/Episode `QUEUED`→`PENDING` no longer runs; nothing writes that entity status anymore.
-- **Discover placeholder history titles**: Rows created from TMDB Discover materialization were tagged as episodes with empty titles; history now resolves movie names (and year) via `tmdb_movie`.
-- **Discover Library Root path**: Discover materialize writes under `DISCOVER_LIBRARY_ROOT/movies` (not Arr `LIBRARY_ROOT`); existing titles pinned to the Arr tree relocate on the next Discover materialize.
-- **Discover folder permissions**: Discover title folders use `PLACEHOLDER_DIR_MODE` (default 777) like Arr placeholders so Emby/Jellyfin (non-root) can scan into them.
-- **Discover NFO genre and premiered**: Movie NFOs get `<genre>` (TMDB genre ids mapped to names) and `<premiered>` (release date); art backfill rewrites existing sidecars that are still missing those tags.
-- **Discover Plex section save**: Empty Discover Plex Movies library no longer fails settings save with `int(None)`; optional section id clears to unset.
-- **MovieAdded webhook dedupe**: Real Radarr/Sonarr add webhooks and Collections synthetic `{movie|series: {id}}` ingest collapse to one event within 15s (prefer the richer payload); concurrent upserts no longer fail on `ux_movie_tmdbid_instance_id`.
-- **Collections synthetic ingest**: Only already-in-*arr skips enqueue synthetic MovieAdded/SeriesAdd; fresh successful adds rely on the real *arr webhook.
-- **Discover playback already-in-Radarr**: Lookup before import; unmonitored library titles are monitored and searched instead of a fake “added” path that skipped search.
-- **playback_start dedupe**: Duplicate Emby/Jellyfin/Plex playback webhooks for the same item/path within 15s collapse to one event.
-- **Discover series stub folder.jpg**: Show-level TV stubs also write ``folder.jpg`` (copy of the stub poster) so Emby/Plex/Jellyfin show series art before real art backfill.
-- **Emby webhook Test**: Accept Emby's ``system.webhooktest`` as a connectivity test (same as Radarr/Sonarr Test) so the Test button returns 200.
+- **Jellyfin 12 auth**: Send ``Authorization: MediaBrowser Token=...`` instead of legacy ``X-Emby-Token`` (connection test and all Jellyfin API calls).
+- **Integration warning !**: Client request timeouts no longer sticky the Media/ARR Settings warning; only connection errors and auth/gateway HTTP failures do.
+- **Integration warning ! (cancelled setup)**: A failed connection Test no longer sticky the Settings warning, so Cancel after a bad Test leaves no !.
+- **Arr catalog timeout**: Full movie/series pulls use the 120s bulk timeout (not 30s); a failed catalog fetch returns None and skips removed-from-Arr diffs so startup lite cannot treat a timeout as an empty library.
+
+### Added
+
+- **What's new (0.9.27)**: Non-ack catalog notice for Jellyfin 12 auth, quieter connection warnings, and clearer playback setup.
 
 ## [0.9.26] - 2026-09-10
 

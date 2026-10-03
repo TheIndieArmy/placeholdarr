@@ -106,6 +106,7 @@ _FRIENDLY_STATUS_LABELS: dict[str, str] = {
     "IMPORT_IN_PROGRESS": "Importing",
     "RETRYING": "Retrying",
     "NOT_FOUND": "No qualifying release found",
+    "DOWNLOAD_UNAVAILABLE": "Download unavailable",
     "DOWNLOADING": "Downloading",
 }
 
@@ -125,6 +126,7 @@ _STATUSES_USING_DISPLAY_REASON: frozenset[str] = frozenset(
         "IMPORT_IN_PROGRESS",
         "RETRYING",
         "NOT_FOUND",
+        "DOWNLOAD_UNAVAILABLE",
     }
 )
 

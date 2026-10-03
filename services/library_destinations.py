@@ -331,15 +331,8 @@ def resolve_series_dest(
 
 def all_configured_dest_roots(*, map_rows: list[dict[str, Any]] | None = None) -> list[str]:
     """All Placeholdarr destination folders (default movie/TV + mapped dests + Discover), deduped."""
-    rows = map_rows if map_rows is not None else parse_library_destination_map()
-    roots: list[str] = []
-    for folder in (default_movie_dest_folder(), default_tv_dest_folder()):
-        if folder:
-            roots.append(folder)
-    for row in rows:
-        dest = str(row.get("dest_folder") or "").strip()
-        if dest:
-            roots.append(dest)
+    grouped = selectable_playback_dests(map_rows=map_rows)
+    roots: list[str] = list(grouped["movies"]) + list(grouped["tv"])
     # TMDB Discover movies live under a separate root; include it so placeholder
     # dir-mode chmod walks apply there (media servers often run as non-root).
     discover = str(getattr(settings, "DISCOVER_MOVIE_LIBRARY_FOLDER", "") or "").strip()
@@ -349,7 +342,6 @@ def all_configured_dest_roots(*, map_rows: list[dict[str, Any]] | None = None) -
             discover = os.path.join(discover_root, "movies")
     if discover:
         roots.append(discover)
-    # Preserve order, drop empties/dupes (case-sensitive path strings as configured).
     out: list[str] = []
     seen: set[str] = set()
     for root in roots:
@@ -359,6 +351,19 @@ def all_configured_dest_roots(*, map_rows: list[dict[str, Any]] | None = None) -
         seen.add(key)
         out.append(root)
     return out
+
+
+def selectable_playback_dests(*, map_rows: list[dict[str, Any]] | None = None) -> dict[str, list[str]]:
+    """Dest folders for Playback filter multi-select, grouped Movies / TV (normalized paths)."""
+    return {
+        "movies": all_movie_dest_roots(map_rows=map_rows),
+        "tv": all_tv_dest_roots(map_rows=map_rows),
+    }
+
+
+def normalize_dest_folder(path: str | None) -> str:
+    """Public wrapper for dest path normalization (membership checks / settings)."""
+    return _normalize_path(path)
 
 
 def all_movie_dest_roots(*, map_rows: list[dict[str, Any]] | None = None) -> list[str]:
@@ -457,6 +462,45 @@ def all_plex_section_ids(*, map_rows: list[dict[str, Any]] | None = None) -> lis
         if sid is not None:
             ids.append(int(sid))
     for row in rows:
+        sid = row.get("plex_section_id")
+        if sid is None:
+            continue
+        try:
+            ids.append(int(sid))
+        except (TypeError, ValueError):
+            continue
+    out: list[int] = []
+    seen: set[int] = set()
+    for sid in ids:
+        if sid in seen or sid < 1:
+            continue
+        seen.add(sid)
+        out.append(sid)
+    return out
+
+
+def plex_section_ids_for_arr_type(
+    arr_type: str,
+    *,
+    map_rows: list[dict[str, Any]] | None = None,
+) -> list[int]:
+    """Plex section IDs for Radarr (movies) or Sonarr (TV) defaults and map rows."""
+    want = str(arr_type or "").strip().lower()
+    rows = map_rows if map_rows is not None else parse_library_destination_map()
+    ids: list[int] = []
+    if want == "radarr":
+        for sid in (default_movie_plex_section_id(), default_movie_4k_plex_section_id()):
+            if sid is not None:
+                ids.append(int(sid))
+    elif want == "sonarr":
+        for sid in (default_tv_plex_section_id(), default_tv_4k_plex_section_id()):
+            if sid is not None:
+                ids.append(int(sid))
+    else:
+        return []
+    for row in rows:
+        if str(row.get("arr_type") or "").strip().lower() != want:
+            continue
         sid = row.get("plex_section_id")
         if sid is None:
             continue

@@ -131,12 +131,15 @@ def _art_refresh_completion_scan_if_last_batch(
     run_id: str,
     log_prefix: str = "Placeholder art backfill",
 ) -> None:
+    # Capture before commit/close: expire_on_commit would detach Job and make
+    # later ``job.id`` access raise DetachedInstanceError (fails the whole batch).
+    job_id = int(job.id)
     pending_same_run = (
         session.query(Job.id)
         .filter(
             Job.job_type == PLACEHOLDER_ART_REFRESH_JOB_TYPE,
             Job.status.in_(["PENDING", "CLAIMED", "WORKING"]),
-            Job.id != job.id,
+            Job.id != job_id,
             Job.payload[ART_BACKFILL_RUN_ID_KEY].as_string() == run_id,
         )
         .first()
@@ -191,7 +194,7 @@ def _art_refresh_completion_scan_if_last_batch(
     if task_run_id:
         from services.task_run_phases import finalize_art_backfill_phase
 
-        finalize_art_backfill_phase(task_run_id, run_id, exclude_job_id=int(job.id))
+        finalize_art_backfill_phase(task_run_id, run_id, exclude_job_id=job_id)
 
     try:
         refresh_stats = refresh_all_sections(

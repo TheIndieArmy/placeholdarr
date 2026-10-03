@@ -398,12 +398,28 @@ def _resolve_episode_determination(
     episode_order_meta: tuple[int, int, int] | None = None,
     series_max_known_order_within_horizon: dict[int, tuple[int, int]] | None = None,
     series_policy: str | None = None,
+    for_density_rollup: bool = False,
+    series_row: Series | None = None,
+    stats: dict | None = None,
 ) -> tuple[str, bool]:
     from services.source_of_truth.placeholder_policy import (
         policy_flag_view,
         policy_from_entity,
         resolve_episode_effective_policy,
     )
+    from services.source_of_truth.tv_density import density_suppresses_episode_files
+
+    # Season/series density never writes per-episode stubs. Keep leftover cleanup, but
+    # skip sibling/monitored/policy evaluation used only for episode-file decisions.
+    # Rollup still needs the full "would need under episode density?" answer below.
+    if not for_density_rollup and density_suppresses_episode_files(series_row):
+        if stats is not None:
+            stats["density_episode_short_circuit"] = int(stats.get("density_episode_short_circuit") or 0) + 1
+        if bool(getattr(episode, "has_placeholder", False)):
+            return DETERMINATION_OBSOLETE, True
+        if _episode_placeholder_path_drifts(session, episode):
+            return DETERMINATION_OBSOLETE, True
+        return DETERMINATION_NOT_NEEDED, False
 
     target_date = getattr(episode, 'air_date', None)
     if (
@@ -420,7 +436,9 @@ def _resolve_episode_determination(
         if max_known_order is not None and max_known_order > (int(season_number), int(episode_number)):
             target_date = now_date
 
-    has_placeholder = bool(getattr(episode, 'has_placeholder', False))
+    # Rollup asks "would this episode need a file under episode density?" so ignore
+    # any leftover episode placeholder flag (series/season stubs own disk instead).
+    has_placeholder = False if for_density_rollup else bool(getattr(episode, 'has_placeholder', False))
     has_file = bool(getattr(episode, 'has_file', False))
     is_deleted = bool(getattr(episode, 'is_deleted', False))
     base = _compute_determination(
@@ -432,7 +450,7 @@ def _resolve_episode_determination(
         placeholders_enabled=placeholders_enabled,
         now_date=now_date,
     )
-    if _episode_placeholder_path_drifts(session, episode):
+    if not for_density_rollup and _episode_placeholder_path_drifts(session, episode):
         return DETERMINATION_OBSOLETE, True
     series_monitored = (
         _series_monitored_for_episode(session, episode)
@@ -496,7 +514,43 @@ def _resolve_episode_determination(
             sibling_has_file=sibling_has_file,
         ),
     )
+
+    if for_density_rollup:
+        return base, False
+
+    # Season/series density: no per-episode stub files. Leftovers → obsolete.
+    if density_suppresses_episode_files(series_row):
+        if bool(getattr(episode, "has_placeholder", False)) or base == DETERMINATION_OBSOLETE:
+            return DETERMINATION_OBSOLETE, True
+        return DETERMINATION_NOT_NEEDED, False
+
     return base, False
+
+
+def episode_contributes_to_density_stub(
+    session,
+    episode: Episode,
+    *,
+    placeholders_enabled: bool,
+    lookahead_days: int,
+    now_date: date,
+    episode_order_meta: tuple[int, int, int] | None = None,
+    series_max_known_order_within_horizon: dict[int, tuple[int, int]] | None = None,
+    series_policy: str | None = None,
+) -> bool:
+    """True when this episode would need a placeholder under episode density."""
+    value, _ = _resolve_episode_determination(
+        session,
+        episode,
+        placeholders_enabled=placeholders_enabled,
+        lookahead_days=lookahead_days,
+        now_date=now_date,
+        episode_order_meta=episode_order_meta,
+        series_max_known_order_within_horizon=series_max_known_order_within_horizon,
+        series_policy=series_policy,
+        for_density_rollup=True,
+    )
+    return value == DETERMINATION_NEEDS
 
 
 def _preferred_movie_release_date(movie: Movie) -> date | None:
@@ -992,6 +1046,7 @@ def run_determination_pass() -> dict:
         'not_needed_air_date_unknown': 0,
         'path_drift_movies': 0,
         'path_drift_episodes': 0,
+        'density_episode_short_circuit': 0,
     }
 
     try:
@@ -1045,6 +1100,14 @@ def run_determination_pass() -> dict:
 
             include_specials = bool(getattr(settings, 'INCLUDE_SPECIALS', False))
             stats['episodes_total'] = int(session.query(Episode).count() or 0)
+            from services.source_of_truth.tv_density import density_suppresses_episode_files
+
+            if density_suppresses_episode_files():
+                logger.info(
+                    "Determination · full_scan · episodes: season/series density fast path "
+                    "(skip per-episode stub evaluation; leftovers still marked obsolete)",
+                    extra={'emoji_type': 'info'},
+                )
             logger.info(
                 f"Determination · full_scan · episodes: {stats['episodes_total']} rows to check",
                 extra={'emoji_type': 'info'},
@@ -1160,6 +1223,7 @@ def run_determination_pass() -> dict:
                         episode_order_meta=episode_meta,
                         series_max_known_order_within_horizon=series_max_known_order_within_horizon,
                         series_policy=series_pol,
+                        stats=stats,
                     )
                     if path_drift:
                         stats['path_drift_episodes'] += 1
@@ -1315,6 +1379,7 @@ def run_determination_for_entities_in_session(
         'not_needed_air_date_unknown': 0,
         'path_drift_movies': 0,
         'path_drift_episodes': 0,
+        'density_episode_short_circuit': 0,
     }
 
     started_mono = time.monotonic()
@@ -1470,6 +1535,7 @@ def run_determination_for_entities_in_session(
             episode_order_meta=episode_meta,
             series_max_known_order_within_horizon=series_max_known_order_within_horizon,
             series_policy=series_pol,
+            stats=stats,
         )
         if path_drift:
             stats['path_drift_episodes'] += 1

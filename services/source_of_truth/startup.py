@@ -1356,6 +1356,25 @@ def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
                 )
         else:
             materialization_stats = run_materialization_pass()
+            try:
+                from services.source_of_truth.tv_density_rematerialize import (
+                    clear_tv_density_rematerialize_pending,
+                    is_tv_density_rematerialize_pending,
+                )
+
+                if is_tv_density_rematerialize_pending():
+                    clear_tv_density_rematerialize_pending()
+                    materialization_stats = dict(materialization_stats or {})
+                    materialization_stats["tv_density_rematerialize_pending_cleared"] = True
+                    logger.info(
+                        "Cleared TV density rematerialize pending after startup full materialization",
+                        extra={"emoji_type": "info"},
+                    )
+            except Exception as dens_exc:
+                logger.warning(
+                    f"Could not clear TV density rematerialize pending after startup: {dens_exc}",
+                    extra={"emoji_type": "warning"},
+                )
         from services.source_of_truth.tag_placeholder_policy import merge_tag_policy_materialization_into
 
         materialization_stats = merge_tag_policy_materialization_into(

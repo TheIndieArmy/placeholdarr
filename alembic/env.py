@@ -27,7 +27,7 @@ target_metadata = Base.metadata
 # For runtime overrides, read DB connection from environment if present
 def get_url():
     from core.config import settings
-    return f"postgresql://{settings.DB_USER}:{settings.DB_PASS}@{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}"
+    return f"postgresql+psycopg2://{settings.DB_USER}:{settings.DB_PASS}@{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}"
 
 config.set_main_option('sqlalchemy.url', get_url())
 

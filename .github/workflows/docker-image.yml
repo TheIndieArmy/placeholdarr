@@ -34,7 +34,14 @@ jobs:
         run: |
           REPO="ghcr.io/${{ steps.repo.outputs.repo }}"
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            echo "tags=${REPO}:${{ github.ref_name }},${REPO}:latest" >> $GITHUB_OUTPUT
+            TAG="${{ github.ref_name }}"
+            TAG_LC="$(echo "$TAG" | tr '[:upper:]' '[:lower:]')"
+            # Pre-release tags (beta/rc/alpha) get the version tag only, not :latest.
+            if [[ "$TAG_LC" == *beta* || "$TAG_LC" == *rc* || "$TAG_LC" == *alpha* ]]; then
+              echo "tags=${REPO}:${TAG}" >> $GITHUB_OUTPUT
+            else
+              echo "tags=${REPO}:${TAG},${REPO}:latest" >> $GITHUB_OUTPUT
+            fi
           else
             ref="${GITHUB_REF#refs/heads/}"
             branch="${ref//\//-}"

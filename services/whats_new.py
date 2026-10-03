@@ -174,32 +174,70 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
             "selected Language, then the Arr poster if neither is available. Episode stills are unchanged.\n\n"
             "This needs a TMDB API key under Optional APIs."
         ),
-        cta_label="Open Status Updates",
-        cta_path="/settings/status-updates",
+        cta_label="Open Poster Overlay",
+        cta_path="/settings/poster-overlay",
         requires_ack=True,
     ),
     WhatsNewNotice(
-        id="multilibrary-arr-setup-0-9-28-beta-1",
-        since_version="0.9.28-beta.1",
+        id="jellyfin-12-support-0-9-27",
+        since_version="0.9.27",
+        title="Jellyfin 12 support",
+        body="Added support for Jellyfin 12's new API authorization method. No action required.",
+        cta_label="Open Media Integrations",
+        cta_path="/settings/media-integrations",
+    ),
+    WhatsNewNotice(
+        id="multilibrary-0-10-0",
+        since_version="0.10.0",
         title="More Arrs, more libraries",
         body=(
-            "Up to four Radarr/Sonarr instances, optional Paths destinations into separate Plex libraries, "
-            "and playback search that can follow the matched path or fall back in list order."
+            "You can now connect up to four Radarr and four Sonarr instances. "
+            "Path mapping lets you control where placeholders and library output land based on each Arr "
+            "instance and root folder. Playback search settings cover the extra instances, including "
+            "preferring the matched library path or falling back in the order you set.\n\n"
+            "This feature changes how a lot of the app functions. You can view everything in the changelog. "
+            "Please do not hesitate to report issues on GitHub.\n\n"
+            "⚠️ If you encounter webhook errors, you may need to recopy them."
         ),
         cta_label="Open Paths",
         cta_path="/settings/paths",
         requires_ack=True,
     ),
     WhatsNewNotice(
-        id="arr-names-slots-renames-0-9-28-beta-1",
-        since_version="0.9.28-beta.1",
-        title="Arr names, slots, and renames",
+        id="placeholder-look-0-10-2",
+        since_version="0.10.2",
+        title="Placeholder look settings",
         body=(
-            "Instances are identified by name and list order (not primary/4K). Renames keep a stable id and "
-            "update the catalog; four Slot seats; recopy webhooks only if something looks wrong after upgrade."
+            "Status text, poster overlays, and placeholder videos are now separate Settings pages: "
+            "Status Updates, Poster Overlay, and Dummy Video.\n\n"
+            "On Dummy Video you can upload your own standard and Coming Soon placeholder videos, or reset to the defaults. "
+            "If a settings save requires a restart, use Restart Placeholdarr in the Settings header (Docker with a restart policy)."
         ),
-        cta_label="Open ARR Integrations",
-        cta_path="/settings/arr-integrations",
+        cta_label="Open Dummy Video",
+        cta_path="/settings/dummy-video",
+        requires_ack=True,
+    ),
+    WhatsNewNotice(
+        id="tv-density-play-first-0-11-0",
+        since_version="0.11.0",
+        title="More options to keep you in control",
+        body=(
+            "Choose episode, season, or series density to decide what placeholders represent in your "
+            "media library. Match them to what you care about most, and show fewer than before. "
+            "That means less to scan and rematerialize, so full syncs go faster and media player "
+            "scans stay lighter. Or keep things just the way they have been with episode density "
+            "to continue getting the full picture in media players.\n\n"
+            "Playback filters expand beyond just TV. Apply monitor-only, re-search monitored, or "
+            "search unreleased to movies as well, and set them per destination folder.\n\n"
+            "Multi-instance Arr targeting is clearer too. The older playback mode toggles are "
+            "replaced by Play Actions under Settings → Playback: Off / Always / Fallback per Arr "
+            "for placeholder plays, and Off / Always for real-file plays. Path match still runs "
+            "first. Existing installs keep equivalent behavior; open Playback and confirm the "
+            "matrix still matches what you want.\n\n"
+            "Please don't hesitate to report any issues on GitHub."
+        ),
+        cta_label="Open Density & Lookahead",
+        cta_path="/settings/density-lookahead",
         requires_ack=True,
     ),
 )

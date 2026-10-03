@@ -656,7 +656,7 @@ export function CollectionsPanel(props: {
             </span>
             <p className={`mt-3 text-[16px] ${isLight ? "text-slate-600" : "text-slate-400"}`}>No collections yet.</p>
             <p className={`mt-1 text-[14px] max-w-md mx-auto ${theme.muted}`}>
-              Build rule-based Plex collections from your catalog, TMDB, MDBList, Trakt, StevenLu, or AniList — they
+              Build rule-based Plex collections from your catalog, TMDB, MDBList, Trakt, StevenLu, or AniList. They
               stay in sync automatically.
             </p>
           </div>
@@ -854,7 +854,7 @@ export function CollectionsPanel(props: {
 
       <p className={`mt-4 text-[13px] ${theme.muted}`}>
         Enabled collections run automatically on the collections sync schedule (Settings → Library sync). Collections
-        only include titles already present in the target Plex library — for a placeholder library that means anything
+        only include titles already present in the target Plex library. For a placeholder library that means anything
         Placeholdarr materialized; rules refine by metadata, not placeholder state.
       </p>
 

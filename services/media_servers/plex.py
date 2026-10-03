@@ -4,7 +4,7 @@ import os
 import re
 import threading
 import xml.etree.ElementTree as ET
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import quote
 
 import requests
@@ -327,6 +327,106 @@ def get_plex_section_scan_state(section_ids: set[int] | list[int]) -> dict[str, 
 PlexMetadataRefreshResult = Literal["ok", "not_found", "failed", "skipped"]
 
 
+def _parse_plex_guid_ids(guid_entries: list[Any] | None, *, top_guid: str | None = None) -> dict[str, Any]:
+    """Extract tvdb / tmdb / imdb ids from Plex Guid list and optional top-level guid."""
+    out: dict[str, Any] = {}
+    texts: list[str] = []
+    if isinstance(top_guid, str) and top_guid.strip():
+        texts.append(top_guid.strip())
+    for entry in guid_entries or []:
+        if isinstance(entry, dict):
+            raw = entry.get("id") or entry.get("tag")
+        else:
+            raw = entry
+        if isinstance(raw, str) and raw.strip():
+            texts.append(raw.strip())
+    for text in texts:
+        lower = text.lower()
+        m = re.search(r"(?:tvdb|thetvdb)(?:://|%3a%2f%2f)(\d+)", lower)
+        if m and "tvdb" not in out:
+            out["tvdb_id"] = int(m.group(1))
+        m = re.search(r"(?:tmdb|themoviedb)(?:://|%3a%2f%2f)(\d+)", lower)
+        if m and "tmdb_id" not in out:
+            out["tmdb_id"] = int(m.group(1))
+        m = re.search(r"(?:imdb)(?:://|%3a%2f%2f)?(tt\d+)", lower)
+        if m and "imdb_id" not in out:
+            out["imdb_id"] = m.group(1)
+    return out
+
+
+def fetch_plex_item_playback_hints(rating_key: str | int) -> dict[str, Any] | None:
+    """Fetch Guids, file path, and S/E for a Plex ``ratingKey``.
+
+    Used when Tracearr (or similar) sends a thin playback webhook with a ratingKey
+    but no path / external ids yet.
+    """
+    if not getattr(settings, "plex_enabled", False):
+        return None
+    key = str(rating_key or "").strip()
+    if not key or key == "0":
+        return None
+    plex_url, plex_token = _plex_base_and_token()
+    if not plex_url or not plex_token:
+        return None
+    try:
+        response = requests.get(
+            f"{plex_url}/library/metadata/{key}",
+            headers={"Accept": "application/json", "X-Plex-Token": plex_token},
+            timeout=15,
+        )
+        response.raise_for_status()
+        meta_list = (response.json().get("MediaContainer") or {}).get("Metadata") or []
+        if not meta_list or not isinstance(meta_list[0], dict):
+            return None
+        meta = meta_list[0]
+        hints = _parse_plex_guid_ids(meta.get("Guid"), top_guid=meta.get("guid") if isinstance(meta.get("guid"), str) else None)
+        media_type = str(meta.get("type") or "").strip().lower()
+        if media_type in {"episode", "show", "season"}:
+            hints["media_type"] = "episode"
+        elif media_type in {"movie"}:
+            hints["media_type"] = "movie"
+        parent_index = meta.get("parentIndex")
+        index = meta.get("index")
+        try:
+            if parent_index is not None:
+                hints["season_number"] = int(parent_index)
+        except (TypeError, ValueError):
+            pass
+        try:
+            if index is not None and media_type == "episode":
+                hints["episode_number"] = int(index)
+        except (TypeError, ValueError):
+            pass
+        file_path = None
+        for media in meta.get("Media") or []:
+            if not isinstance(media, dict):
+                continue
+            for part in media.get("Part") or []:
+                if not isinstance(part, dict):
+                    continue
+                candidate = part.get("file") or part.get("key")
+                if isinstance(candidate, str) and candidate.strip() and not candidate.startswith("/library/"):
+                    file_path = candidate.strip()
+                    break
+            if file_path:
+                break
+        if file_path:
+            hints["file_path"] = file_path
+        title = meta.get("title")
+        if isinstance(title, str) and title.strip():
+            hints["title"] = title.strip()
+        gp = meta.get("grandparentTitle")
+        if isinstance(gp, str) and gp.strip():
+            hints["grandparent_title"] = gp.strip()
+        return hints or None
+    except Exception as exc:
+        logger.debug(
+            f"Plex playback hints failed rating_key={key}: {type(exc).__name__}: {exc}",
+            extra={"emoji_type": "debug"},
+        )
+        return None
+
+
 def refresh_plex_item_metadata(rating_key: str | int) -> PlexMetadataRefreshResult:
     """Trigger a metadata refresh for a single Plex library item by rating key.
 
@@ -630,11 +730,8 @@ def refresh_plex_sections(
 
     from services.library_destinations import (
         all_plex_section_ids,
-        default_movie_4k_plex_section_id,
-        default_movie_plex_section_id,
-        default_tv_4k_plex_section_id,
-        default_tv_plex_section_id,
         parse_library_destination_map,
+        plex_section_ids_for_arr_type,
     )
 
     section_ids: list[int] = []
@@ -643,33 +740,9 @@ def refresh_plex_sections(
     else:
         map_rows = parse_library_destination_map()
         if has_movies:
-            for sid in (default_movie_plex_section_id(), default_movie_4k_plex_section_id()):
-                if sid is not None:
-                    section_ids.append(int(sid))
-            for row in map_rows:
-                if str(row.get("arr_type") or "").lower() != "radarr":
-                    continue
-                sid = row.get("plex_section_id")
-                if sid is None:
-                    continue
-                try:
-                    section_ids.append(int(sid))
-                except (TypeError, ValueError):
-                    continue
+            section_ids.extend(plex_section_ids_for_arr_type("radarr", map_rows=map_rows))
         if has_episodes:
-            for sid in (default_tv_plex_section_id(), default_tv_4k_plex_section_id()):
-                if sid is not None:
-                    section_ids.append(int(sid))
-            for row in map_rows:
-                if str(row.get("arr_type") or "").lower() != "sonarr":
-                    continue
-                sid = row.get("plex_section_id")
-                if sid is None:
-                    continue
-                try:
-                    section_ids.append(int(sid))
-                except (TypeError, ValueError):
-                    continue
+            section_ids.extend(plex_section_ids_for_arr_type("sonarr", map_rows=map_rows))
 
     deduped: list[int] = []
     seen: set[int] = set()

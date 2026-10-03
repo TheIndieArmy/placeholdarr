@@ -82,22 +82,22 @@ const SOURCE_META: Record<
   tmdb_upcoming: { label: "TMDB Upcoming / On Air", icon: "event_upcoming", description: "Upcoming movies or currently-airing shows", requires: "tmdb" },
   tmdb_discover: { label: "TMDB Discover", icon: "travel_explore", description: "Filter TMDB by genre, year, streaming service", requires: "tmdb" },
   tmdb_url: { label: "TMDB Page", icon: "link", description: "Paste a TMDB list, person, company, keyword, or collection page URL", requires: "tmdb" },
-  tmdb_list: { label: "TMDB List", icon: "format_list_bulleted", description: "A public TMDB list — paste the list URL or id", requires: "tmdb" },
-  tmdb_person: { label: "TMDB Person", icon: "person", description: "Filmography for a person — paste their TMDB page URL", requires: "tmdb" },
-  tmdb_company: { label: "TMDB Company", icon: "apartment", description: "Titles from a studio/company — paste the TMDB company URL", requires: "tmdb" },
-  tmdb_keyword: { label: "TMDB Keyword", icon: "sell", description: "Titles tagged with a TMDB keyword — paste the keyword URL", requires: "tmdb" },
-  tmdb_collection: { label: "TMDB Collection", icon: "collections_bookmark", description: "A TMDB movie collection (Star Wars, MCU) — paste the collection URL", requires: "tmdb" },
-  mdblist: { label: "MDBList", icon: "playlist_add_check", description: "A public MDBList — paste the list URL", requires: null },
+  tmdb_list: { label: "TMDB List", icon: "format_list_bulleted", description: "A public TMDB list. Paste the list URL or id", requires: "tmdb" },
+  tmdb_person: { label: "TMDB Person", icon: "person", description: "Filmography for a person. Paste their TMDB page URL", requires: "tmdb" },
+  tmdb_company: { label: "TMDB Company", icon: "apartment", description: "Titles from a studio/company. Paste the TMDB company URL", requires: "tmdb" },
+  tmdb_keyword: { label: "TMDB Keyword", icon: "sell", description: "Titles tagged with a TMDB keyword. Paste the keyword URL", requires: "tmdb" },
+  tmdb_collection: { label: "TMDB Collection", icon: "collections_bookmark", description: "A TMDB movie collection (Star Wars, MCU). Paste the collection URL", requires: "tmdb" },
+  mdblist: { label: "MDBList", icon: "playlist_add_check", description: "A public MDBList. Paste the list URL", requires: null },
   trakt: {
     label: "Trakt",
     icon: "playlist_play",
     description: "Trakt charts or a public user list (Client ID requires Trakt VIP to create an API app)",
     requires: "trakt",
   },
-  trakt_list: { label: "Trakt List", icon: "playlist_play", description: "A public Trakt user list — paste the URL or user/slug", requires: "trakt" },
+  trakt_list: { label: "Trakt List", icon: "playlist_play", description: "A public Trakt user list. Paste the URL or user/slug", requires: "trakt" },
   trakt_chart: { label: "Trakt Chart", icon: "insights", description: "Trakt trending, popular, watched, played, or collected charts", requires: "trakt" },
   stevenlu: { label: "StevenLu", icon: "star", description: "Popular movies JSON (Radarr's StevenLu list), or a compatible URL", requires: null },
-  anilist: { label: "AniList", icon: "animation", description: "A public AniList user anime list — paste the profile/list URL", requires: null },
+  anilist: { label: "AniList", icon: "animation", description: "A public AniList user anime list. Paste the profile/list URL", requires: null },
   tautulli: { label: "Tautulli", icon: "bar_chart", description: "Most popular or most watched from your Tautulli stats", requires: "tautulli" },
   arr_tag: { label: "ARR Tag", icon: "sell", description: "Titles in Radarr/Sonarr that carry a specific tag", requires: null },
 };
@@ -691,7 +691,7 @@ const FILTER_OP_LABELS: Record<string, string> = {
 function explainSourceCheckLabel(check: CollectionExplainCheck): string {
   const meta = SOURCE_META[check.type as CollectionSourceType];
   const base = meta?.label ?? check.type ?? "Source";
-  return check.list_ref ? `${base} — ${check.list_ref}` : base;
+  return check.list_ref ? `${base}: ${check.list_ref}` : base;
 }
 
 const RELEASE_BASIS_LABELS: Record<string, string> = {
@@ -761,7 +761,7 @@ function ExplainTreeNodeView(props: { node: CollectionExplainNode }) {
         <ExplainStatusIcon status={props.node.status} />
         <span className={`text-[12px] ${props.node.status === "skip" ? theme.explainSkip : theme.explainCheck}`}>
           {props.node.op === "and" ? "All of:" : "Any of:"}
-          {props.node.status === "skip" ? " — not needed" : ""}
+          {props.node.status === "skip" ? " (not needed)" : ""}
         </span>
       </div>
       <div className="ml-5 flex flex-col gap-0.5">
@@ -2153,7 +2153,7 @@ export function CollectionEditor(props: {
               }))}
               selected={block.values ?? []}
               accentHex={accentHex}
-              emptyHint={builderMeta ? "No quality profiles found — check ARR connections" : "Loading profiles…"}
+              emptyHint={builderMeta ? "No quality profiles found. Check ARR connections" : "Loading profiles…"}
               onToggle={(key) => {
                 const current = block.values ?? [];
                 update({
@@ -2381,7 +2381,7 @@ export function CollectionEditor(props: {
             </div>
           ))}
           {!children.length ? (
-            <div className={theme.dashedPanel}>Empty group — add a rule or sub-group below.</div>
+            <div className={theme.dashedPanel}>Empty group. Add a rule or sub-group below.</div>
           ) : null}
         </div>
         <div className="mt-2.5 flex flex-wrap items-center gap-2">
@@ -2674,7 +2674,7 @@ export function CollectionEditor(props: {
           <div className={theme.sectionLabel}>Sources</div>
           {definition.sources.length === 0 ? (
             <p className="text-[13px] text-slate-500">
-              No source yet. Add one below — nothing is selected by default.
+              No source yet. Add one below; nothing is selected by default.
             </p>
           ) : null}
           {definition.sources.map((block, index) => {
@@ -2766,7 +2766,7 @@ export function CollectionEditor(props: {
               Filters{" "}
               <span className="normal-case tracking-normal opacity-80">
                 {advancedFilters
-                  ? "(advanced filtering — nest AND/OR groups up to 3 levels)"
+                  ? "(advanced filtering: nest AND/OR groups up to 3 levels)"
                   : filterGroups.length > 1
                     ? "(a title passes if any group matches; all rules within a group must match)"
                     : "(all must match)"}
@@ -2778,7 +2778,7 @@ export function CollectionEditor(props: {
               }`}
               title={
                 advancedFilters && !canUseSimpleFilters
-                  ? "This recipe uses logic the simple layout can't represent — simplify groups to switch back"
+                  ? "This recipe uses logic the simple layout can't represent. Simplify groups to switch back"
                   : "Switch between simple OR groups and advanced filtering"
               }
             >
@@ -2800,7 +2800,7 @@ export function CollectionEditor(props: {
             <>
           {filterGroups.length === 0 ? (
             <div className={theme.dashedPanel}>
-              No filters — every matched title passes through.
+              No filters; every matched title passes through.
             </div>
           ) : null}
           {filterGroups.map((group, groupIndex) => {
@@ -3203,7 +3203,7 @@ export function CollectionEditor(props: {
                               }`}
                             >
                               {EXPLAIN_STAGE_LABELS[stage.key] ?? stage.key}
-                              {stage.status === "skip" ? " — not reached" : ""}
+                              {stage.status === "skip" ? " (not reached)" : ""}
                             </span>
                           </div>
                           {stage.detail ? <p className="ml-6 text-[12px] text-slate-500">{stage.detail}</p> : null}

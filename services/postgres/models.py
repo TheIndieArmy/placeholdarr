@@ -309,6 +309,8 @@ class Placeholder(Base):
     season_id = Column(Integer, ForeignKey('season.id'), nullable=True)
     episode_id = Column(Integer, ForeignKey('episode.id'), nullable=True)
     path = Column(String, nullable=False)
+    # episode | series_stub | season_stub | null (legacy episode/movie rows)
+    placeholder_kind = Column(String(32), nullable=True)
     # Whether the placeholder file currently exists on disk (FS-observed)
     has_placeholder = Column(Boolean, default=False)
     lifecycle_status = Column(String, nullable=True)

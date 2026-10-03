@@ -5,6 +5,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 from core.config import settings
@@ -13,7 +14,7 @@ from services.placeholders import ensure_episode_nfo, ensure_movie_nfo, ensure_s
 from sqlalchemy import func
 
 from services.postgres.db import get_session
-from services.postgres.models import AppConfig, Episode, Movie, Placeholder, Job, Season, Series, TmdbMovie
+from services.postgres.models import AppConfig, Episode, Movie, Placeholder, Job, Season, Series
 from services.media_servers.player_metadata_refresh import push_placeholder_batch_player_metadata
 from services.media_servers.refresh import refresh_all_sections
 from services.source_of_truth.placeholder_job_enqueue import (
@@ -21,6 +22,11 @@ from services.source_of_truth.placeholder_job_enqueue import (
     job_placeholder_ids as _job_placeholder_ids,
     normalize_placeholder_ids as _normalize_placeholder_ids,
     set_job_placeholder_ids as _set_job_placeholder_ids,
+)
+from services.source_of_truth.tv_density import (
+    DENSITY_PLACEHOLDER_TITLE,
+    PLACEHOLDER_KIND_SEASON_STUB,
+    PLACEHOLDER_KIND_SERIES_STUB,
 )
 
 
@@ -37,12 +43,11 @@ def _job_debounce_seconds() -> float:
 
 
 def _nfo_refresh_subject_summary(session, placeholders: list[Placeholder]) -> str:
-    """Short human-readable line for logs (movies / series+episode / discover)."""
+    """Short human-readable line for logs (movies / series+episode)."""
     if not placeholders:
         return ""
     mids = [int(ph.movie_id) for ph in placeholders if getattr(ph, "movie_id", None)]
     eids = [int(ph.episode_id) for ph in placeholders if getattr(ph, "episode_id", None)]
-    tids = [int(ph.tmdb_movie_id) for ph in placeholders if getattr(ph, "tmdb_movie_id", None)]
     movie_title: dict[int, str] = {}
     if mids:
         for m in session.query(Movie).filter(Movie.id.in_(mids)).all():
@@ -66,11 +71,6 @@ def _nfo_refresh_subject_summary(session, placeholders: list[Placeholder]) -> st
             if et:
                 base += f' — "{et}"'
             ep_label[int(ep.id)] = base
-    tmdb_title: dict[int, str] = {}
-    if tids:
-        for row in session.query(TmdbMovie).filter(TmdbMovie.tmdb_id.in_(tids)).all():
-            t = str(getattr(row, "title", "") or "").strip()
-            tmdb_title[int(row.tmdb_id)] = t or f"tmdb {row.tmdb_id}"
 
     per_row: list[str] = []
     for ph in placeholders:
@@ -78,8 +78,6 @@ def _nfo_refresh_subject_summary(session, placeholders: list[Placeholder]) -> st
             per_row.append(movie_title[int(ph.movie_id)])
         elif ph.episode_id and int(ph.episode_id) in ep_label:
             per_row.append(ep_label[int(ph.episode_id)])
-        elif ph.tmdb_movie_id and int(ph.tmdb_movie_id) in tmdb_title:
-            per_row.append(tmdb_title[int(ph.tmdb_movie_id)])
         else:
             per_row.append(f"placeholder id {int(ph.id)}")
 
@@ -130,6 +128,24 @@ def _refresh_movie_nfo(placeholder: Placeholder, movie: Movie) -> bool:
     return ensure_movie_nfo(target_path, movie)
 
 
+def _refresh_episode_nfo(session, placeholder: Placeholder, episode: Episode) -> bool:
+    season = session.query(Season).get(episode.season_id) if episode.season_id else None
+    series = session.query(Series).get(season.series_id) if season and season.series_id else None
+    if not season or not series:
+        return False
+
+    target_path = str(getattr(placeholder, "path", "") or getattr(episode, "placeholder_filepath", "") or "").strip()
+    if not target_path:
+        return False
+
+    status = _placeholder_display_status(placeholder) or "REQUEST"
+    setattr(episode, "placeholder_status", status)
+    setattr(series, "placeholder_status", status)
+    episode_written = ensure_episode_nfo(target_path, episode, season, series)
+    series_written = ensure_series_nfo(series, folder=getattr(series, "placeholder_folder", None))
+    return bool(episode_written or series_written)
+
+
 def _refresh_discover_movie_nfo(placeholder: Placeholder, tmdb_movie: TmdbMovie) -> bool:
     """Rewrite Discover placeholder NFO using current display status (SEARCHING, etc.)."""
     target_path = str(
@@ -141,15 +157,53 @@ def _refresh_discover_movie_nfo(placeholder: Placeholder, tmdb_movie: TmdbMovie)
     return ensure_movie_nfo(target_path, tmdb_movie)
 
 
-def _refresh_episode_nfo(session, placeholder: Placeholder, episode: Episode) -> bool:
-    season = session.query(Season).get(episode.season_id) if episode.season_id else None
-    series = session.query(Series).get(season.series_id) if season and season.series_id else None
-    if not season or not series:
+def _refresh_density_stub_nfo(session, placeholder: Placeholder) -> bool:
+    """Rewrite episode-shaped NFO for series/season density stubs (no episode_id row)."""
+    kind = str(getattr(placeholder, "placeholder_kind", "") or "")
+    if kind not in {PLACEHOLDER_KIND_SERIES_STUB, PLACEHOLDER_KIND_SEASON_STUB}:
+        return False
+    if getattr(placeholder, "movie_id", None) or getattr(placeholder, "episode_id", None):
+        return False
+    if not getattr(placeholder, "series_id", None):
         return False
 
-    target_path = str(getattr(placeholder, "path", "") or getattr(episode, "placeholder_filepath", "") or "").strip()
+    series = session.query(Series).get(int(placeholder.series_id))
+    if series is None:
+        return False
+
+    target_path = str(getattr(placeholder, "path", "") or "").strip()
     if not target_path:
         return False
+
+    season = None
+    if getattr(placeholder, "season_id", None):
+        season = session.query(Season).get(int(placeholder.season_id))
+    if season is None and kind == PLACEHOLDER_KIND_SERIES_STUB:
+        season = (
+            session.query(Season)
+            .filter(Season.series_id == int(series.id), Season.season_number == 1)
+            .first()
+        )
+    if season is None:
+        season = SimpleNamespace(
+            id=None,
+            series_id=series.id,
+            season_number=1,
+            title=f"{series.title} Season 01",
+            year=getattr(series, "year", None) or 0,
+        )
+
+    episode = SimpleNamespace(
+        id=None,
+        season_id=getattr(season, "id", None),
+        episode_number=1,
+        title=DENSITY_PLACEHOLDER_TITLE,
+        air_date=None,
+        overview=None,
+        sonarr_episode_overview=None,
+        runtime=getattr(series, "sonarr_runtime", None),
+        absolute_episode_number=None,
+    )
 
     status = _placeholder_display_status(placeholder) or "REQUEST"
     setattr(episode, "placeholder_status", status)
@@ -358,6 +412,12 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
             if tmdb_movie and _refresh_discover_movie_nfo(placeholder, tmdb_movie):
                 refreshed += 1
                 refreshed_for_player_push.append((placeholder, ("tmdb_movie", int(tmdb_movie.tmdb_id))))
+                continue
+            if _refresh_density_stub_nfo(session, placeholder):
+                refreshed += 1
+                kind = str(getattr(placeholder, "placeholder_kind", "") or "") or "series_stub"
+                entity_id = int(placeholder.season_id or placeholder.series_id or placeholder.id)
+                refreshed_for_player_push.append((placeholder, (kind, entity_id)))
     finally:
         stop_nfo_hb.set()
 
@@ -378,63 +438,47 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
     except Exception:
         pass
 
-    if do_player:
-        # Prefer rows whose NFO was rewritten; if none were (edge cases), still project
-        # any on-disk placeholders in this job so Emby/Jellyfin get the status update.
-        push_source = refreshed_for_player_push
-        if not push_source:
-            push_source = [
-                (
-                    ph,
-                    ("tmdb_movie", int(ph.tmdb_movie_id))
-                    if getattr(ph, "tmdb_movie_id", None)
-                    else ("movie", int(ph.movie_id))
-                    if getattr(ph, "movie_id", None)
-                    else ("episode", int(ph.episode_id))
-                    if getattr(ph, "episode_id", None)
-                    else ("placeholder", int(ph.id)),
-                )
-                for ph in placeholders
-                if getattr(ph, "has_placeholder", False)
-            ]
-        # One media-server refresh sequence per underlying movie/episode/tmdb row.
+    if do_player and refreshed_for_player_push:
+        # One media-server refresh sequence per underlying movie/episode row, even if several
+        # placeholder rows pointed at the same title (rare) or a batch carried duplicates.
         seen_entity: set[tuple[str, int]] = set()
         unique_for_projection: list[Placeholder] = []
-        for placeholder, entity_key in push_source:
+        for placeholder, entity_key in refreshed_for_player_push:
             if not getattr(placeholder, "has_placeholder", False):
                 continue
             if entity_key in seen_entity:
                 continue
             seen_entity.add(entity_key)
             unique_for_projection.append(placeholder)
-        if unique_for_projection:
+        try:
+            push_placeholder_batch_player_metadata(session, unique_for_projection)
             try:
-                push_placeholder_batch_player_metadata(session, unique_for_projection)
-                try:
-                    session.commit()
-                except Exception:
-                    pass
-                proj_subject = _nfo_refresh_subject_summary(session, unique_for_projection)
-                ps = f" · {proj_subject}" if proj_subject else ""
-                logger.info(
-                    f"Direct player projection attempted · {len(unique_for_projection)} placeholder(s){ps}",
-                    extra={"emoji_type": "info"},
-                )
-            except Exception as ex:
-                logger.warning(
-                    f"Player metadata refresh after NFO failed for placeholder batch size={len(unique_for_projection)}: {ex}",
-                    extra={"emoji_type": "warning"},
-                )
+                session.commit()
+            except Exception:
+                pass
+            proj_subject = _nfo_refresh_subject_summary(session, unique_for_projection)
+            ps = f" · {proj_subject}" if proj_subject else ""
+            logger.info(
+                f"Direct player projection attempted · {len(unique_for_projection)} placeholder(s){ps}",
+                extra={"emoji_type": "info"},
+            )
+        except Exception as ex:
+            logger.warning(
+                f"Player metadata refresh after NFO failed for placeholder batch size={len(unique_for_projection)}: {ex}",
+                extra={"emoji_type": "warning"},
+            )
     elif completion_refresh and run_id:
+        job_id = int(job.id)
+        nfo_payload = dict(payload) if isinstance(payload, dict) else {}
+
         def _after_request_backfill_refresh() -> None:
-            payload = job.payload if isinstance(job.payload, dict) else {}
-            raw_pr = payload.get("placeholder_refresh_task_run_id")
+            raw_pr = nfo_payload.get("placeholder_refresh_task_run_id")
             if raw_pr is None:
                 return
             from services.task_run_phases import finalize_nfo_backfill_phase, try_complete_linked_task_run
 
             finalize_nfo_backfill_phase(int(raw_pr), str(run_id))
-            try_complete_linked_task_run(int(raw_pr), exclude_job_id=int(job.id))
+            try_complete_linked_task_run(int(raw_pr), exclude_job_id=job_id)
 
         _nfo_refresh_completion_scan_if_last_batch(
             session,
@@ -447,19 +491,21 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
     elif template_completion_refresh and template_run_id:
         from services.source_of_truth import template_backfill as template_backfill_mod
 
+        job_id = int(job.id)
+        nfo_payload = dict(payload) if isinstance(payload, dict) else {}
+
         def _after_template_backfill_refresh() -> None:
             _clear_active_template_backfill_run_standalone(template_run_id)
-            payload = job.payload if isinstance(job.payload, dict) else {}
             from services.task_run_phases import finalize_nfo_backfill_phase, try_complete_linked_task_run
 
-            raw_tid = payload.get("full_sync_task_run_id")
-            raw_pr = payload.get("placeholder_refresh_task_run_id")
+            raw_tid = nfo_payload.get("full_sync_task_run_id")
+            raw_pr = nfo_payload.get("placeholder_refresh_task_run_id")
             if raw_tid is not None:
                 finalize_nfo_backfill_phase(int(raw_tid), template_run_id)
-                try_complete_linked_task_run(int(raw_tid), exclude_job_id=int(job.id))
+                try_complete_linked_task_run(int(raw_tid), exclude_job_id=job_id)
             elif raw_pr is not None:
                 finalize_nfo_backfill_phase(int(raw_pr), template_run_id)
-                try_complete_linked_task_run(int(raw_pr), exclude_job_id=int(job.id))
+                try_complete_linked_task_run(int(raw_pr), exclude_job_id=job_id)
 
         _nfo_refresh_completion_scan_if_last_batch(
             session,

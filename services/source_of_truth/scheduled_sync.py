@@ -278,6 +278,25 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
             )
             phases.end("materialization", metrics=metrics_from_pipeline(pipeline_stats).get("materialization"))
 
+            try:
+                from services.source_of_truth.tv_density_rematerialize import (
+                    clear_tv_density_rematerialize_pending,
+                    is_tv_density_rematerialize_pending,
+                )
+
+                if is_tv_density_rematerialize_pending():
+                    clear_tv_density_rematerialize_pending()
+                    pipeline_stats["tv_density_rematerialize_pending_cleared"] = True
+                    logger.info(
+                        "Cleared TV density rematerialize pending after full sync materialization",
+                        extra={"emoji_type": "info"},
+                    )
+            except Exception as dens_exc:
+                logger.warning(
+                    f"Could not clear TV density rematerialize pending after full sync: {dens_exc}",
+                    extra={"emoji_type": "warning"},
+                )
+
             phases.begin("calendar", "Calendar status")
             pipeline_stats["calendar"] = run_calendar_phase()
             pipeline_stats["orphan_placeholders"] = run_orphan_placeholder_cleanup()

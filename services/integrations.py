@@ -200,7 +200,7 @@ def _payload_text_suggests_jellyfin(data: dict[str, Any]) -> bool:
 
 
 def _assert_media_server_matches_payload(data: dict[str, Any], expected: str) -> tuple[bool, str]:
-    """Reject Jellyfin vs Emby mix-ups: both expose /System/Info with X-Emby-Token auth."""
+    """Reject Jellyfin vs Emby mix-ups: both expose /System/Info with token auth."""
     want = str(expected or '').strip().lower()
     sig = _jellyfin_emby_signature_text(data)
     has_jellyfin = 'jellyfin' in sig
@@ -247,8 +247,10 @@ def test_plex_connection(url: str, token: str) -> dict[str, Any]:
 
 
 def test_jellyfin_connection(url: str, token: str) -> dict[str, Any]:
+    from services.media_servers.jellyfin import jellyfin_auth_headers
+
     endpoint = _normalize_url(url)
-    headers = {'X-Emby-Token': str(token or '').strip(), 'Accept': 'application/json'}
+    headers = jellyfin_auth_headers(token)
     ok, message, data = _test_get_json(f'{endpoint}/System/Info', headers=headers)
     if not ok or data is None:
         return {'ok': False, 'message': message, 'service': 'jellyfin'}

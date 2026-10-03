@@ -2,6 +2,8 @@
 
 Failures are sticky until a successful Settings Test clears them.
 Runtime successes do not clear a failure.
+Client request timeouts are ignored (no sticky Settings !).
+Failed Tests do not sticky (modal shows the error; Cancel leaves no !).
 """
 
 from __future__ import annotations
@@ -46,16 +48,41 @@ def is_connectivity_http_status(status_code: int | None) -> bool:
     return code in _CONNECTIVITY_HTTP_CODES
 
 
+def is_timeout_exception(exc: BaseException) -> bool:
+    """True for client-side request timeouts (not HTTP 504 gateway responses)."""
+    try:
+        from requests.exceptions import Timeout
+    except Exception:
+        Timeout = ()  # type: ignore[misc, assignment]
+    if Timeout and isinstance(exc, Timeout):
+        return True
+    name = type(exc).__name__.lower()
+    return "timeout" in name
+
+
+def is_timeout_failure_message(message: str) -> bool:
+    """Detect timeout wording from probes / ARR helpers (e.g. ReadTimeout, Timed out after Ns)."""
+    text = str(message or "").strip().lower()
+    if not text:
+        return False
+    return "timed out" in text or "timeout" in text
+
+
 def is_connectivity_exception(exc: BaseException) -> bool:
-    """True for timeouts, connection errors, and auth/gateway HTTP failures."""
+    """True for connection errors and auth/gateway HTTP failures.
+
+    Client request timeouts are excluded so a slow reply does not sticky the Settings !.
+    """
+    if is_timeout_exception(exc):
+        return False
     try:
         import requests
         from requests.exceptions import ConnectionError as ReqConnectionError
-        from requests.exceptions import HTTPError, Timeout
+        from requests.exceptions import HTTPError
     except Exception:
         return False
 
-    if isinstance(exc, (Timeout, ReqConnectionError)):
+    if isinstance(exc, ReqConnectionError):
         return True
     if isinstance(exc, requests.exceptions.RequestException) and not isinstance(exc, HTTPError):
         # DNS failures, connection reset, etc.
@@ -70,6 +97,9 @@ def record_media_status(service: str, *, ok: bool, message: str, source: str = "
     key = str(service or "").strip().lower()
     if key not in {"plex", "jellyfin", "emby"}:
         return
+    if not ok and is_timeout_failure_message(message):
+        # Timeouts are transient; do not sticky the Settings warning !.
+        return
     src = str(source or "runtime").strip().lower()
     with _lock:
         existing = _media.get(key)
@@ -79,7 +109,6 @@ def record_media_status(service: str, *, ok: bool, message: str, source: str = "
         if ok and src == "runtime":
             return
         _media[key] = _entry(ok=ok, message=message, source=src, service=key)
-
 
 def clear_media_status(service: str) -> None:
     key = str(service or "").strip().lower()
@@ -100,6 +129,9 @@ def record_arr_status(
     iid = str(instance_id or "").strip().lower()
     if not iid:
         return
+    if not ok and is_timeout_failure_message(message):
+        # Timeouts are transient; do not sticky the Settings warning !.
+        return
     src = str(source or "runtime").strip().lower()
     with _lock:
         existing = _arr.get(iid)
@@ -116,7 +148,6 @@ def record_arr_status(
             instance_key=str(instance_key or "").strip().lower(),
             label=str(label or "").strip(),
         )
-
 
 def clear_arr_status(instance_id: str) -> None:
     iid = str(instance_id or "").strip().lower()
@@ -242,12 +273,18 @@ def refresh_integration_connection_status() -> dict[str, Any]:
         except Exception as exc:
             ok = False
             message = f"{type(exc).__name__} while testing {service}"
-        record_media_status(service, ok=ok, message=message, source="startup")
-        if not ok:
-            logger.warning(
-                f"Media connection check failed for {service}: {message}",
-                extra={"emoji_type": "warning"},
+        if not ok and is_timeout_failure_message(message):
+            logger.info(
+                f"Media connection check timed out for {service} (not marking Settings !): {message}",
+                extra={"emoji_type": "info"},
             )
+        else:
+            record_media_status(service, ok=ok, message=message, source="startup")
+            if not ok:
+                logger.warning(
+                    f"Media connection check failed for {service}: {message}",
+                    extra={"emoji_type": "warning"},
+                )
 
     seen_arr: set[str] = set()
     for item in getattr(settings, "configured_arr_instances", []) or []:
@@ -271,20 +308,26 @@ def refresh_integration_connection_status() -> dict[str, Any]:
         except Exception as exc:
             ok = False
             message = f"{type(exc).__name__} while testing {label or instance_id}"
-        record_arr_status(
-            instance_id=instance_id,
-            arr_type=arr_type,
-            instance_key=instance_key,
-            label=label,
-            ok=ok,
-            message=message,
-            source="startup",
-        )
-        if not ok:
-            logger.warning(
-                f"ARR connection check failed for {label or instance_id}: {message}",
-                extra={"emoji_type": "warning"},
+        if not ok and is_timeout_failure_message(message):
+            logger.info(
+                f"ARR connection check timed out for {label or instance_id} (not marking Settings !): {message}",
+                extra={"emoji_type": "info"},
             )
+        else:
+            record_arr_status(
+                instance_id=instance_id,
+                arr_type=arr_type,
+                instance_key=instance_key,
+                label=label,
+                ok=ok,
+                message=message,
+                source="startup",
+            )
+            if not ok:
+                logger.warning(
+                    f"ARR connection check failed for {label or instance_id}: {message}",
+                    extra={"emoji_type": "warning"},
+                )
 
     with _lock:
         global _last_refresh_at

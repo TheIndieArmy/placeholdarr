@@ -4,6 +4,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
 import requests
 
 from core.config import settings
@@ -12,7 +13,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from services.messages import render as render_message
 from services.postgres.db import get_session
-from services.postgres.models import ArrMovieOverlay, Episode, Movie, Placeholder, TmdbMovie
+from services.postgres.models import ArrMovieOverlay, Episode, Movie, Placeholder, Season, Series, TmdbMovie
 from services.activity_snapshot import clear_queue_download_snapshot, set_queue_download_snapshot
 from services.source_of_truth.arr_api import (
     ARR_HTTP_TIMEOUT_SECONDS,
@@ -21,15 +22,26 @@ from services.source_of_truth.arr_api import (
 )
 from services.source_of_truth.status_intent import DisplayStatus, StatusIntent, StatusSource
 from services.source_of_truth.status_orchestrator import StatusOrchestrator
-from types import SimpleNamespace
+
 
 ACTIVE_QUEUE_STATUSES = {
     DisplayStatus.SEARCHING.value,
     DisplayStatus.DOWNLOADING.value,
     DisplayStatus.IMPORT_IN_PROGRESS.value,
     "RETRYING",
-    # NOT_FOUND is terminal for queue-monitor purposes; do not keep polling/nudging ARR.
+    # NOT_FOUND and DOWNLOAD_UNAVAILABLE are terminal for queue-monitor purposes;
+    # do not keep polling/nudging ARR.
 }
+
+# Arr /queue statuses that mean the download path is blocked; monitor stops immediately.
+_STALLED_QUEUE_STATUSES = frozenset(
+    {
+        "downloadclientunavailable",
+        "warning",
+        "error",
+        "failed",
+    }
+)
 
 
 def _utc_now() -> datetime:
@@ -128,9 +140,6 @@ def _collect_queue_monitor_poll_context(session):
 
     Only placeholders with ``queue_monitor_active`` set (playback-initiated ARR
     search) are considered; the producer sleeps idle until NOTIFY otherwise.
-
-    Discover placeholders (``tmdb_movie_id`` only) resolve Radarr via
-    ``arr_movie_overlay.radarr_id`` instead of an Arr ``movie`` catalog row.
     """
     q = session.query(Placeholder).filter(
         Placeholder.has_placeholder == True,  # noqa: E712
@@ -147,10 +156,15 @@ def _collect_queue_monitor_poll_context(session):
 
     movie_ids = [int(ph.movie_id) for ph in placeholders if getattr(ph, "movie_id", None)]
     episode_ids = [int(ph.episode_id) for ph in placeholders if getattr(ph, "episode_id", None)]
-    tmdb_ids = [
-        int(ph.tmdb_movie_id)
+    from services.source_of_truth.tv_density import PLACEHOLDER_KIND_SERIES_STUB, PLACEHOLDER_KIND_SEASON_STUB
+
+    series_stub_ids = [
+        int(ph.series_id)
         for ph in placeholders
-        if getattr(ph, "tmdb_movie_id", None) and not getattr(ph, "movie_id", None)
+        if getattr(ph, "series_id", None)
+        and getattr(ph, "episode_id", None) is None
+        and getattr(ph, "movie_id", None) is None
+        and str(getattr(ph, "placeholder_kind", "") or "") in {PLACEHOLDER_KIND_SERIES_STUB, PLACEHOLDER_KIND_SEASON_STUB}
     ]
 
     movie_map = {
@@ -161,10 +175,24 @@ def _collect_queue_monitor_poll_context(session):
         int(row.id): row
         for row in session.query(Episode).filter(Episode.id.in_(episode_ids)).all()
     } if episode_ids else {}
+    series_map = {
+        int(row.id): row
+        for row in session.query(Series).filter(Series.id.in_(series_stub_ids)).all()
+    } if series_stub_ids else {}
+
+    movie_targets: list[tuple[Placeholder, Movie, str]] = []
+    episode_targets: list[tuple[Placeholder, Episode, str]] = []
+    series_stub_targets: list[tuple[Placeholder, Series, str, int | None]] = []
+    claimed_placeholder_ids: set[int] = set()
 
     overlay_by_tmdb: dict[int, ArrMovieOverlay] = {}
     tmdb_title_by_id: dict[int, str] = {}
     tmdb_year_by_id: dict[int, int | None] = {}
+    tmdb_ids = [
+        int(ph.tmdb_movie_id)
+        for ph in placeholders
+        if getattr(ph, "tmdb_movie_id", None) and not getattr(ph, "movie_id", None)
+    ]
     if tmdb_ids:
         for ov in (
             session.query(ArrMovieOverlay)
@@ -172,7 +200,6 @@ def _collect_queue_monitor_poll_context(session):
             .all()
         ):
             tid = int(ov.tmdb_id)
-            # Prefer an overlay that still needs queue monitoring (has radarr id, no file).
             prev = overlay_by_tmdb.get(tid)
             if prev is None:
                 overlay_by_tmdb[tid] = ov
@@ -185,9 +212,6 @@ def _collect_queue_monitor_poll_context(session):
             tmdb_title_by_id[int(row.tmdb_id)] = str(row.title or "").strip()
             tmdb_year_by_id[int(row.tmdb_id)] = row.year
 
-    movie_targets: list[tuple[Placeholder, Any, str]] = []
-    episode_targets: list[tuple[Placeholder, Episode, str]] = []
-    claimed_placeholder_ids: set[int] = set()
 
     for ph in placeholders:
         movie = movie_map.get(int(ph.movie_id)) if getattr(ph, "movie_id", None) else None
@@ -221,44 +245,63 @@ def _collect_queue_monitor_poll_context(session):
             episode_targets.append((ph, episode, instance_key))
             sonarr_instance_keys.add(instance_key)
             claimed_placeholder_ids.add(int(ph.id))
+            continue
 
-    for ph in placeholders:
+
         if int(ph.id) in claimed_placeholder_ids:
             continue
         tid = int(ph.tmdb_movie_id) if getattr(ph, "tmdb_movie_id", None) else 0
-        if not tid:
-            continue
-        overlay = overlay_by_tmdb.get(tid)
-        if overlay is None or not overlay.radarr_id:
-            continue
-        if bool(overlay.has_file):
-            continue
-        instance_key = _normalize_instance_key(overlay.instance_key)
-        if not instance_key:
-            logger.warning(
-                f"Queue monitor skipped discover tmdb_id={tid}: overlay missing instance_key",
-                extra={"emoji_type": "warning"},
-            )
-            continue
-        proxy = SimpleNamespace(
-            id=None,
-            title=tmdb_title_by_id.get(tid) or f"tmdb-{tid}",
-            year=tmdb_year_by_id.get(tid),
-            radarrid=int(overlay.radarr_id),
-            instance_key=instance_key,
-            has_file=bool(overlay.has_file),
-            tmdb_id=tid,
-        )
-        movie_targets.append((ph, proxy, instance_key))
-        radarr_instance_keys.add(instance_key)
+        if tid:
+            overlay = overlay_by_tmdb.get(tid)
+            if overlay is not None and overlay.radarr_id and not bool(overlay.has_file):
+                instance_key = _normalize_instance_key(overlay.instance_key)
+                if not instance_key:
+                    logger.warning(
+                        f"Queue monitor skipped discover tmdb_id={tid}: overlay missing instance_key",
+                        extra={"emoji_type": "warning"},
+                    )
+                else:
+                    proxy = SimpleNamespace(
+                        id=None,
+                        title=tmdb_title_by_id.get(tid) or f"tmdb-{tid}",
+                        year=tmdb_year_by_id.get(tid),
+                        radarrid=int(overlay.radarr_id),
+                        instance_key=instance_key,
+                        has_file=bool(overlay.has_file),
+                        tmdb_id=tid,
+                    )
+                    movie_targets.append((ph, proxy, instance_key))
+                    radarr_instance_keys.add(instance_key)
+                    claimed_placeholder_ids.add(int(ph.id))
+                    continue
 
-    if not movie_targets and not episode_targets:
+        kind = str(getattr(ph, "placeholder_kind", "") or "")
+        if (
+            kind in {PLACEHOLDER_KIND_SERIES_STUB, PLACEHOLDER_KIND_SEASON_STUB}
+            and getattr(ph, "series_id", None)
+            and getattr(ph, "episode_id", None) is None
+        ):
+            series = series_map.get(int(ph.series_id))
+            if series is None or bool(getattr(series, "is_deleted", False)):
+                continue
+            if not getattr(series, "sonarrid", None):
+                continue
+            target = _queue_monitor_arr_target(series=series)
+            if not target:
+                continue
+            _arr_type, instance_key = target
+            stub_season_id = int(ph.season_id) if kind == PLACEHOLDER_KIND_SEASON_STUB and getattr(ph, "season_id", None) else None
+            series_stub_targets.append((ph, series, instance_key, stub_season_id))
+            sonarr_instance_keys.add(instance_key)
+
+    if not movie_targets and not episode_targets and not series_stub_targets:
         return None
 
     return {
         "placeholders": placeholders,
         "movie_targets": movie_targets,
         "episode_targets": episode_targets,
+        "series_stub_targets": series_stub_targets,
         "radarr_instance_keys": radarr_instance_keys,
         "sonarr_instance_keys": sonarr_instance_keys,
     }
@@ -277,15 +320,57 @@ def _queue_item_percent(queue_item: dict[str, Any] | None) -> int:
         return 0
 
 
+def _best_queue_item_for_series(
+    session,
+    series: Series,
+    queue_map: dict[str, dict[str, Any]],
+    *,
+    season_id: int | None = None,
+) -> dict[str, Any] | None:
+    """Pick the highest-priority Sonarr queue row among episodes of this series (optional season)."""
+    q = (
+        session.query(Episode.sonarrid)
+        .join(Season, Episode.season_id == Season.id)
+        .filter(
+            Season.series_id == int(series.id),
+            Episode.sonarrid.isnot(None),
+            Episode.is_deleted == False,  # noqa: E712
+        )
+    )
+    if season_id is not None:
+        q = q.filter(Episode.season_id == int(season_id))
+    episode_sonarr_ids = [str(r[0]) for r in q.all() if r and r[0] is not None]
+    best: dict[str, Any] | None = None
+    best_rank = -1
+    for eid in episode_sonarr_ids:
+        item = queue_map.get(str(eid))
+        if not isinstance(item, dict):
+            continue
+        rank = _queue_status_priority(
+            item.get("status"),
+            item.get("trackedDownloadState") or item.get("trackedDownloadState"),
+        )
+        if rank > best_rank:
+            best_rank = rank
+            best = item
+    return best
+
+
 def _publish_queue_activity_snapshot(
     session,
     movie_targets: list[tuple[Placeholder, Movie, str]],
     episode_targets: list[tuple[Placeholder, Episode, str]],
     radarr_maps: dict[str, dict[str, dict[str, Any]]],
     sonarr_maps: dict[str, dict[str, dict[str, Any]]],
+    series_stub_targets: list[tuple[Placeholder, Series, str, int | None]] | None = None,
 ) -> None:
     """Publish a batched view of titles the queue monitor is tracking (for the activity page)."""
-    ph_ids = [int(ph.id) for ph, _, _ in movie_targets] + [int(ph.id) for ph, _, _ in episode_targets]
+    stub_targets = series_stub_targets or []
+    ph_ids = (
+        [int(ph.id) for ph, _, _ in movie_targets]
+        + [int(ph.id) for ph, _, _ in episode_targets]
+        + [int(ph.id) for ph, _, _, _ in stub_targets]
+    )
     fresh: dict[int, Placeholder] = {}
     if ph_ids:
         fresh = {int(r.id): r for r in session.query(Placeholder).filter(Placeholder.id.in_(ph_ids)).all()}
@@ -341,6 +426,35 @@ def _publish_queue_activity_snapshot(
                 "subtitle": subtitle,
                 "instance": instance_key or "—",
                 "line": line or "—",
+                "arr_percent": pct or None,
+            }
+        )
+
+    for ph, series, instance_key, stub_season_id in stub_targets:
+        ph2 = fresh.get(int(ph.id), ph)
+        title = str(getattr(series, "title", "") or "").strip() or "TV"
+        qm = sonarr_maps.get(instance_key) or {}
+        qi = _best_queue_item_for_series(session, series, qm, season_id=stub_season_id) or {}
+        pct = _queue_item_percent(qi if isinstance(qi, dict) else None)
+        status = str(getattr(ph2, "display_status", "") or "")
+        reason = str(getattr(ph2, "display_reason", "") or "").strip()
+        line = status
+        if reason:
+            line = f"{status}: {reason}" if status else reason
+        if pct and status.upper() == "DOWNLOADING":
+            line = f"{line} ({pct}%)" if line else f"{pct}%"
+        subtitle = "Season placeholder" if stub_season_id is not None else "Series placeholder"
+        if stub_season_id is not None:
+            season = session.query(Season).filter(Season.id == int(stub_season_id)).first()
+            if season is not None:
+                subtitle = f"Season {int(getattr(season, 'season_number', 0) or 0):02d} placeholder"
+        items.append(
+            {
+                "kind": "season_stub" if stub_season_id is not None else "series_stub",
+                "title": title,
+                "subtitle": subtitle,
+                "instance": instance_key or "-",
+                "line": line or "-",
                 "arr_percent": pct or None,
             }
         )
@@ -613,6 +727,7 @@ class QueueMonitorProducer:
 
             movie_targets = ctx["movie_targets"]
             episode_targets = ctx["episode_targets"]
+            series_stub_targets = ctx.get("series_stub_targets") or []
             placeholders = ctx["placeholders"]
 
             orchestrator = StatusOrchestrator(session=apply_session)
@@ -632,6 +747,18 @@ class QueueMonitorProducer:
                 if intent:
                     intents.append(intent)
 
+            for ph, series, instance_key, stub_season_id in series_stub_targets:
+                queue_map = sonarr_maps.get(instance_key) or {}
+                queue_item = _best_queue_item_for_series(
+                    apply_session,
+                    series,
+                    queue_map,
+                    season_id=stub_season_id,
+                )
+                intent = self._build_intent_for_placeholder(ph, queue_item)
+                if intent:
+                    intents.append(intent)
+
             if intents:
                 applied = orchestrator.apply_and_project_statuses(intents)
                 logger.info(
@@ -645,6 +772,7 @@ class QueueMonitorProducer:
                 episode_targets,
                 radarr_maps,
                 sonarr_maps,
+                series_stub_targets=series_stub_targets,
             )
             apply_session.commit()
         finally:
@@ -761,10 +889,21 @@ class QueueMonitorProducer:
                 else:
                     target_reason = render_message("queue.import.processing", {})
                 target_progress = None
-            elif queue_status in {"warning", "error", "failed"}:
-                target_status = "RETRYING"
-                target_reason = render_message("queue.retry.queue_failure", {})
+            elif queue_status in _STALLED_QUEUE_STATUSES:
+                # Terminal: Arr still has a queue row but download cannot proceed without
+                # operator action. Clear monitoring via orchestrator terminal_clear.
+                target_status = DisplayStatus.DOWNLOAD_UNAVAILABLE.value
+                if queue_status == "downloadclientunavailable":
+                    target_reason = render_message("queue.stall.download_client", {})
+                else:
+                    target_reason = render_message("queue.stall.queue_failure", {})
                 target_progress = None
+                logger.info(
+                    "Queue monitor terminal DOWNLOAD_UNAVAILABLE: "
+                    f"placeholder_id={int(getattr(placeholder, 'id', 0) or 0)} "
+                    f"arr_status={queue_status} reason={target_reason}",
+                    extra={"emoji_type": "warning"},
+                )
             else:
                 target_status = DisplayStatus.SEARCHING.value
                 # Operator-fallback line stays in English for diagnostics.

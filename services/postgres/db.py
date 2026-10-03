@@ -29,7 +29,7 @@ def get_engine():
         return _engine
 
     url = (
-        f"postgresql://{settings.DB_USER}:{settings.DB_PASS}"
+        f"postgresql+psycopg2://{settings.DB_USER}:{settings.DB_PASS}"
         f"@{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}"
     )
     # Phase 2 of the holistic NOTIFY audit: connection pool sizing is now

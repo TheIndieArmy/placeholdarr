@@ -292,6 +292,65 @@ def episode_placeholder_path(episode: Any, season: Any, series: Any) -> str:
     return os.path.join(folder, filename)
 
 
+def series_density_stub_path(series: Any) -> str:
+    """Playable series-density stub: always Season 01 / s01e01 under the series folder."""
+    series_title = sanitize_filename(getattr(series, "title", None))
+    year = getattr(series, "year", None)
+
+    from services.library_destinations import dest_folder_for_instance
+
+    arr_path = getattr(series, "sonarrpath", None)
+    instance_key = str(getattr(series, "instance_key", None) or "").strip().lower() or None
+    root = dest_folder_for_instance(
+        arr_type="sonarr",
+        instance_key=instance_key,
+        arr_path=arr_path if isinstance(arr_path, str) else None,
+    )
+    tvdb_or_id = getattr(series, "tvdbid", None) or getattr(series, "id", None)
+    series_folder_name = (
+        f"{series_title} ({year}) {{tvdb-{tvdb_or_id}}}" if year else f"{series_title} {{tvdb-{tvdb_or_id}}}"
+    )
+    pinned = str(getattr(series, "placeholder_folder", None) or "").strip()
+    series_folder = pinned if pinned else os.path.join(root, series_folder_name)
+    season_dir = os.path.join(series_folder, "Season 01")
+    year_part = f" ({year})" if year else ""
+    from services.source_of_truth.tv_density import DENSITY_PLACEHOLDER_TITLE
+
+    filename = f"{series_title}{year_part} - s01e01 - {DENSITY_PLACEHOLDER_TITLE}.mp4"
+    return os.path.join(season_dir, filename)
+
+
+def season_density_stub_path(series: Any, season: Any) -> str:
+    """Playable season-density placeholder: sNNe01 under that season's folder."""
+    series_title = sanitize_filename(getattr(series, "title", None))
+    year = getattr(series, "year", None)
+    season_number = int(getattr(season, "season_number", 0) or 0)
+
+    from services.library_destinations import dest_folder_for_instance
+
+    arr_path = getattr(series, "sonarrpath", None)
+    instance_key = str(getattr(series, "instance_key", None) or "").strip().lower() or None
+    root = dest_folder_for_instance(
+        arr_type="sonarr",
+        instance_key=instance_key,
+        arr_path=arr_path if isinstance(arr_path, str) else None,
+    )
+    tvdb_or_id = getattr(series, "tvdbid", None) or getattr(series, "id", None)
+    series_folder_name = (
+        f"{series_title} ({year}) {{tvdb-{tvdb_or_id}}}" if year else f"{series_title} {{tvdb-{tvdb_or_id}}}"
+    )
+    pinned_series = str(getattr(series, "placeholder_folder", None) or "").strip()
+    series_folder = pinned_series if pinned_series else os.path.join(root, series_folder_name)
+    season_folder_name = f"Season {season_number:02d}"
+    pinned_season = str(getattr(season, "placeholder_folder", None) or "").strip()
+    season_dir = pinned_season if pinned_season else os.path.join(series_folder, season_folder_name)
+    year_part = f" ({year})" if year else ""
+    from services.source_of_truth.tv_density import DENSITY_PLACEHOLDER_TITLE
+
+    filename = f"{series_title}{year_part} - s{season_number:02d}e01 - {DENSITY_PLACEHOLDER_TITLE}.mp4"
+    return os.path.join(season_dir, filename)
+
+
 def ensure_placeholder_file(
     path: str,
     *,
