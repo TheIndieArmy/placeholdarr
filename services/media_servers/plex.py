@@ -481,13 +481,67 @@ def _plex_text_preview(value: str, *, limit: int = 80) -> str:
     return text[: max(0, limit - 3)] + "..."
 
 
+def unlock_and_restore_plex_item_text(
+    rating_key: str | int,
+    *,
+    title: str,
+    summary: str,
+) -> PlexMetadataRefreshResult:
+    """Write clean title/summary and unlock fields so Plex agents can refresh.
+
+    Used to repair real-library items that received locked placeholder status text.
+    """
+    if not getattr(settings, "plex_enabled", False):
+        return "skipped"
+    key = str(rating_key or "").strip()
+    if not key:
+        return "skipped"
+    try:
+        from services.media_servers.plex_lookup import get_plex_server
+
+        plex = get_plex_server()
+        if plex is None:
+            return "failed"
+        item = plex.fetchItem(f"/library/metadata/{key}")
+        wanted_title = str(title or "")
+        wanted_summary = str(summary or "")
+        try:
+            item.editTitle(wanted_title, locked=False)
+        except TypeError:
+            item.editTitle(wanted_title)
+        try:
+            item.editSummary(wanted_summary, locked=False)
+        except TypeError:
+            item.editSummary(wanted_summary)
+        try:
+            # Best-effort unlock via edits API when locked= kw unsupported above.
+            item.edit(**{"title.locked": 0, "summary.locked": 0})
+        except Exception:
+            pass
+        item.reload()
+        logger.info(
+            f"Plex: unlocked/restored title/summary rating_key={key} "
+            f"title={_plex_text_preview(wanted_title)!r}",
+            extra={"emoji_type": "success"},
+        )
+        return "ok"
+    except Exception as ex:
+        text = str(ex).lower()
+        if "404" in text or "not found" in text:
+            return "not_found"
+        logger.warning(
+            f"Plex unlock/restore failed rating_key={key}: {ex}",
+            extra={"emoji_type": "warning"},
+        )
+        return "failed"
+
+
 def update_plex_item_text(rating_key: str | int, *, title: str, summary: str) -> PlexMetadataRefreshResult:
     """Directly update Plex item title/summary via PlexAPI edit methods.
 
     Title and summary are locked after the edit so Plex agents (TMDB / local NFO)
-    cannot immediately revert the projected status. Placeholder items live in the
-    dummy library and are removed on import finalize, so locking does not stick
-    on the real-file item.
+    cannot immediately revert the projected status. Callers must only pass
+    placeholder-library rating keys; real-library keys must never be edited here.
     """
     if not getattr(settings, "plex_enabled", False):
         return "skipped"

@@ -13,6 +13,20 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## Released
 
+## [0.11.1] - 2026-10-08
+
+### Summary
+
+- **Real-file import-grace plays**: Playing the Arr file during import grace no longer locks placeholder status onto the real Plex library item.
+- **Queue monitor wake**: DOWNLOAD / progress status polling starts after playback search commits, so short Usenet grabs are not skipped.
+
+### Fixed
+
+- **Import-grace real path as placeholder**: Paths outside Placeholdarr library roots are treated as real even while `has_file` is still false during import grace, so playback does not re-search or stamp the real Movies/TV rating key as the dummy id.
+- **Plex status projection target**: Direct title/summary updates prefer `plex_dummy_id` so a real-library `plex_id` from playback stamping cannot receive locked placeholder status text.
+- **Playback Plex id stamp**: Real plays update only `plex_id`; placeholder plays set `plex_dummy_id` (and mirror `plex_id` for legacy readers).
+- **Queue monitor NOTIFY race**: `placeholdarr_queue_monitor_signal` fires after the transaction that sets `queue_monitor_active` commits, so the producer no longer wakes into an empty probe and sleeps through the download window.
+
 ## [0.11.0] - 2026-10-03
 
 ### Summary

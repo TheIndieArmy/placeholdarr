@@ -660,15 +660,37 @@ def _episodes_for_media_id_stamp(
     return out
 
 
-def _stamp_movie_media_ids(session, rows: list[Movie], *, plex_key: str, jelly_key: str) -> None:
+def _stamp_movie_media_ids(
+    session,
+    rows: list[Movie],
+    *,
+    plex_key: str,
+    jelly_key: str,
+    playback_kind: str | None = None,
+) -> None:
+    """Seed media-server ids from a playback payload.
+
+    Placeholder plays may cache the dummy-library rating key on ``plex_dummy_id``
+    (and mirror ``plex_id`` for legacy readers). Real-file plays only update
+    ``plex_id`` so later status projection cannot lock text onto the real library
+    item via a stamped ``plex_dummy_id``.
+    """
     if not plex_key and not jelly_key:
         return
+    kind = str(playback_kind or "").strip().lower()
     for row in rows:
         changed = False
-        if plex_key and (row.plex_id != plex_key or row.plex_dummy_id != plex_key):
-            row.plex_id = plex_key
-            row.plex_dummy_id = plex_key
-            changed = True
+        if plex_key:
+            if kind == "real":
+                if row.plex_id != plex_key:
+                    row.plex_id = plex_key
+                    changed = True
+            elif kind == "placeholder":
+                if row.plex_dummy_id != plex_key or row.plex_id != plex_key:
+                    row.plex_dummy_id = plex_key
+                    row.plex_id = plex_key
+                    changed = True
+            # Unknown kind: do not stamp Plex keys (avoids poisoning dummy cache).
         if jelly_key and getattr(row, 'jellyfin_id', None) != jelly_key:
             row.jellyfin_id = jelly_key
             changed = True
@@ -677,15 +699,30 @@ def _stamp_movie_media_ids(session, rows: list[Movie], *, plex_key: str, jelly_k
             session.add(row)
 
 
-def _stamp_episode_media_ids(session, episodes: list[Episode], *, plex_key: str, jelly_key: str) -> None:
+def _stamp_episode_media_ids(
+    session,
+    episodes: list[Episode],
+    *,
+    plex_key: str,
+    jelly_key: str,
+    playback_kind: str | None = None,
+) -> None:
+    """Seed episode media-server ids; see ``_stamp_movie_media_ids`` for kind rules."""
     if not plex_key and not jelly_key:
         return
+    kind = str(playback_kind or "").strip().lower()
     for ep in episodes:
         changed = False
-        if plex_key and (ep.plex_id != plex_key or ep.plex_dummy_id != plex_key):
-            ep.plex_id = plex_key
-            ep.plex_dummy_id = plex_key
-            changed = True
+        if plex_key:
+            if kind == "real":
+                if ep.plex_id != plex_key:
+                    ep.plex_id = plex_key
+                    changed = True
+            elif kind == "placeholder":
+                if ep.plex_dummy_id != plex_key or ep.plex_id != plex_key:
+                    ep.plex_dummy_id = plex_key
+                    ep.plex_id = plex_key
+                    changed = True
         if jelly_key and getattr(ep, 'jellyfin_id', None) != jelly_key:
             ep.jellyfin_id = jelly_key
             changed = True
@@ -1243,6 +1280,30 @@ def _resolve_playback_context(session, payload: dict[str, Any]) -> dict[str, Any
         season_number=season_number if season_number is not None else path_info.get('season_number'),
         episode_number=episode_number if episode_number is not None else path_info.get('episode_number'),
     )
+
+    # Path roots beat catalog flags during import grace: has_file stays false until
+    # finalize, so catalog match would still say "placeholder" for a real Arr path.
+    resolved_path = _normalize_path(file_path) or _normalize_path(path_info.get('file_path'))
+    if resolved_path:
+        try:
+            from services.source_of_truth.filesystem import is_path_under_configured_roots
+
+            under_placeholder_roots = is_path_under_configured_roots(resolved_path)
+        except Exception:
+            under_placeholder_roots = False
+        kind_now = str(path_info.get('playback_kind') or 'unknown')
+        if under_placeholder_roots and kind_now != 'placeholder':
+            path_info['playback_kind'] = 'placeholder'
+            logger.info(
+                f"playback kind override under-placeholder-roots -> placeholder path={resolved_path}",
+                extra={'emoji_type': 'playback'},
+            )
+        elif not under_placeholder_roots and kind_now == 'placeholder':
+            path_info['playback_kind'] = 'real'
+            logger.info(
+                f"playback kind override outside-placeholder-roots -> real path={resolved_path}",
+                extra={'emoji_type': 'playback'},
+            )
 
     if tmdb_id is None and path_info.get('tmdb_id') is not None:
         tmdb_id = int(path_info['tmdb_id'])
@@ -1996,13 +2057,39 @@ def _collect_episode_targets(session, series_row: Series, season_number: int | N
     return targets, metadata
 
 
+def _notify_queue_monitor_signal() -> None:
+    """Wake the queue-monitor producer on a committed connection.
+
+    Must run *after* the transaction that sets ``queue_monitor_active`` commits.
+    NOTIFY before commit races the monitor into an empty probe, then up to
+    ``QUEUE_MONITOR_NOTIFY_SAFETY_POLL_SECONDS`` of silence (often longer than
+    a short Usenet download).
+    """
+    try:
+        notify_session = get_session()
+        try:
+            notify_session.execute(text("NOTIFY placeholdarr_queue_monitor_signal, ''"))
+            notify_session.commit()
+        finally:
+            notify_session.close()
+    except Exception as exc:
+        logger.debug(
+            f"NOTIFY placeholdarr_queue_monitor_signal failed (non-fatal): {exc}",
+            extra={"emoji_type": "debug"},
+        )
+
+
 def _activate_queue_monitor_after_playback_search(
     session,
     intents: list[StatusIntent],
     *,
     search_triggered: bool,
 ) -> None:
-    """Mark placeholders for NOTIFY-driven queue monitoring after a playback ARR search."""
+    """Mark placeholders for NOTIFY-driven queue monitoring after a playback ARR search.
+
+    Only flags rows here. Caller must ``commit`` then call
+    ``_notify_queue_monitor_signal`` so the producer sees committed flags.
+    """
     if not search_triggered or not intents:
         return
     now = datetime.now(timezone.utc)
@@ -2012,13 +2099,6 @@ def _activate_queue_monitor_after_playback_search(
             ph.queue_monitor_active = True
             ph.queue_monitor_active_set_at = now
             session.add(ph)
-    try:
-        session.execute(text("NOTIFY placeholdarr_queue_monitor_signal, ''"))
-    except Exception as exc:
-        logger.debug(
-            f"NOTIFY placeholdarr_queue_monitor_signal failed (non-fatal): {exc}",
-            extra={"emoji_type": "debug"},
-        )
 
 
 def _placeholder_intents_for_targets(
@@ -2341,7 +2421,23 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
             season_number=season_number,
             episode_number=episode_number,
         )
-        _stamp_episode_media_ids(session, stamp_targets, plex_key=plex_key or '', jelly_key=jelly_key or '')
+        stamp_kind = "unknown"
+        if file_path:
+            try:
+                from services.source_of_truth.filesystem import is_path_under_configured_roots
+
+                stamp_kind = (
+                    "placeholder" if is_path_under_configured_roots(file_path) else "real"
+                )
+            except Exception:
+                stamp_kind = "unknown"
+        _stamp_episode_media_ids(
+            session,
+            stamp_targets,
+            plex_key=plex_key or "",
+            jelly_key=jelly_key or "",
+            playback_kind=stamp_kind,
+        )
 
     base_url, api_key = _resolve_endpoint('series', instance_key=instance_key or None)
     if not base_url or not api_key:
@@ -2500,15 +2596,21 @@ def _process_movie_playback(session, payload: dict[str, Any], context: dict[str,
         imdb_id=context.get('imdb_id'),
         file_path=context.get('file_path'),
     )
+    playback_kind = str(context.get('playback_kind') or 'unknown')
     # Seed media player IDs directly from playback payload if available
     plex_key = str(context.get('plex_id') or '').strip()
     jelly_key = str(context.get('jellyfin_id') or '').strip()
     if plex_key or jelly_key:
         stamp_rows = _movies_for_media_id_stamp(session, movie_rows, context)
-        _stamp_movie_media_ids(session, stamp_rows, plex_key=plex_key, jelly_key=jelly_key)
+        _stamp_movie_media_ids(
+            session,
+            stamp_rows,
+            plex_key=plex_key,
+            jelly_key=jelly_key,
+            playback_kind=playback_kind,
+        )
 
     active_rows = _active_rows_by_instance(movie_rows)
-    playback_kind = str(context.get('playback_kind') or 'unknown')
 
     if playback_kind == 'real':
         selection = _select_movie_real_rows(active_rows, context.get('file_path'))
@@ -2838,6 +2940,8 @@ def process_playback_start_event(payload: dict[str, Any], instance: str | None =
             result = {'ok': False, 'reason': 'unresolved_playback_media_type'}
 
         session.commit()
+        # Wake queue monitor only after flags are visible to other connections.
+        _notify_queue_monitor_signal()
         logger.info(
             f"Processed playback_start media_type={media_type} result={result}",
             extra={'emoji_type': 'processing'},
@@ -2885,9 +2989,16 @@ def apply_search_queued_for_playback(session, payload: dict[str, Any]) -> int:
         active_rows = _active_rows_by_instance(movie_rows)
         plex_key = str(context.get('plex_id') or '').strip()
         jelly_key = str(context.get('jellyfin_id') or '').strip()
+        gated_kind = str(context.get('playback_kind') or 'unknown')
         if plex_key or jelly_key:
             stamp_rows = _movies_for_media_id_stamp(session, list(active_rows.values()), context)
-            _stamp_movie_media_ids(session, stamp_rows, plex_key=plex_key, jelly_key=jelly_key)
+            _stamp_movie_media_ids(
+                session,
+                stamp_rows,
+                plex_key=plex_key,
+                jelly_key=jelly_key,
+                playback_kind=gated_kind,
+            )
         for row in active_rows.values():
             ph_rows = (
                 session.query(Placeholder)
@@ -2970,6 +3081,7 @@ def apply_search_queued_for_playback(session, payload: dict[str, Any]) -> int:
                     stamp_targets,
                     plex_key=plex_key,
                     jelly_key=jelly_key,
+                    playback_kind=str(context.get('playback_kind') or 'unknown'),
                 )
 
             # Season/series density stubs have episode_id null; status the stub row itself.

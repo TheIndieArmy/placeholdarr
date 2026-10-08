@@ -33,16 +33,17 @@ from services.status_projection import project_summary, project_title
 
 
 def _plex_coalesce_cached_rating_key(entity: object) -> str:
-    """Return the first non-empty Plex ``ratingKey`` stored on a model row.
+    """Return the Plex ratingKey to use for status projection.
 
-    ``plex_id`` and ``plex_dummy_id`` are kept in sync when we persist from Plex;
-    both are checked for older rows written by legacy paths.
+    Prefer ``plex_dummy_id`` (placeholder-library item). ``plex_id`` may hold a
+    real-library ratingKey from playback stamping; projecting there locks status
+    text onto the real file. Fall back to ``plex_id`` only when dummy is empty
+    (legacy rows that still mirror both fields to the dummy key).
     """
-    for attr in ("plex_id", "plex_dummy_id"):
-        raw = str(getattr(entity, attr, "") or "").strip()
-        if raw:
-            return raw
-    return ""
+    dummy = str(getattr(entity, "plex_dummy_id", "") or "").strip()
+    if dummy:
+        return dummy
+    return str(getattr(entity, "plex_id", "") or "").strip()
 
 
 def _first_item_id(items: list[dict[str, Any]]) -> str | None:
