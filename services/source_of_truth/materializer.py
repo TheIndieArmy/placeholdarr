@@ -274,7 +274,40 @@ def _should_trigger_overlap_checkpoint(
 
 
 def _target_refresh_section_ids(*, has_movies: bool, has_episodes: bool) -> list[int]:
-    section_ids: list[int] = []
+    try:
+        from services.library_destinations import all_plex_section_ids, parse_library_destination_map
+
+        rows = parse_library_destination_map()
+        section_ids: list[int] = []
+        for sid in all_plex_section_ids(map_rows=rows):
+            # Filter by media type when map rows encode arr_type via defaults.
+            section_ids.append(int(sid))
+        if section_ids:
+            # When both flags false, still return empty; when either true, include matching.
+            if has_movies or has_episodes:
+                # Include mapped sections for the requested media kinds.
+                filtered: list[int] = []
+                defaults: list[int] = []
+                movie_default = getattr(settings, "PLEX_MOVIE_SECTION_ID", None)
+                tv_default = getattr(settings, "PLEX_TV_SECTION_ID", None)
+                if has_movies and movie_default is not None:
+                    defaults.append(int(movie_default))
+                if has_episodes and tv_default is not None:
+                    defaults.append(int(tv_default))
+                for row in rows:
+                    arr_type = str(row.get("arr_type") or "").lower()
+                    sid = row.get("plex_section_id")
+                    if sid is None:
+                        continue
+                    if has_movies and arr_type == "radarr":
+                        filtered.append(int(sid))
+                    if has_episodes and arr_type == "sonarr":
+                        filtered.append(int(sid))
+                return sorted(set(defaults + filtered))
+            return []
+    except Exception:
+        pass
+    section_ids = []
     if has_movies:
         movie_section = getattr(settings, "PLEX_MOVIE_SECTION_ID", None)
         if movie_section is not None:
@@ -420,6 +453,7 @@ def _mark_placeholder_row_active(
         row.episode_id = episode_id
         row.series_id = series_id
         row.season_id = season_id
+        row.placeholder_kind = "episode"
 
     # Treat (re)materialization as a reconnect event: force fresh media-id observation.
     row.plex_placeholder_id = None
@@ -496,6 +530,8 @@ def _mark_placeholder_rows_deleted(
         row.display_status_projected = None
         row.display_reason = None
         row.display_progress = None
+        row.queue_monitor_active = False
+        row.queue_monitor_active_set_at = None
         row.last_observed_at = func.now()
         row.plex_placeholder_id = None
         row.jellyfin_placeholder_id = None
@@ -539,6 +575,8 @@ def _mark_placeholder_rows_deleted_for_episodes(
         row.display_status_projected = None
         row.display_reason = None
         row.display_progress = None
+        row.queue_monitor_active = False
+        row.queue_monitor_active_set_at = None
         row.last_observed_at = func.now()
         row.plex_placeholder_id = None
         row.jellyfin_placeholder_id = None
@@ -849,8 +887,15 @@ def _run_materialization_for_ids(
     movie_ids: list[int],
     episode_ids: list[int],
     observation_source: str,
+    density_scope_episode_ids: list[int] | None = None,
 ) -> dict[str, Any]:
-    """Shared materialization core for full-sync and event-scoped runs."""
+    """Shared materialization core for full-sync and event-scoped runs.
+
+    ``density_scope_episode_ids``: episodes that define which series to evaluate for
+    series-density stubs. Defaults to ``episode_ids``. Event callers should pass the
+    original entity ids (before NEEDS/OBSOLETE filtering) so series stubs still update
+    when density short-circuits episode rows to not_needed.
+    """
     stats: dict[str, Any] = {
         "movies_considered": 0,
         "episodes_considered": 0,
@@ -1422,6 +1467,92 @@ def _run_materialization_for_ids(
         _process_single_episode_materialization(episode_id)
     _scoped_phase("episode obsolete + needs passes done")
 
+    # TV density stubs: series and/or season (also clears leftovers after switching away).
+    try:
+        from services.source_of_truth.series_density_materializer import (
+            all_active_series_ids,
+            run_series_density_for_series_ids,
+            series_ids_for_episode_ids,
+            series_ids_with_density_stubs,
+        )
+        from services.source_of_truth.season_density_materializer import (
+            run_season_density_for_series_ids,
+            series_ids_with_season_density_stubs,
+        )
+        from services.source_of_truth.tv_density import tv_placeholder_density
+
+        density = tv_placeholder_density()
+        density_series_ids: list[int] = []
+        scope_episode_ids = (
+            density_scope_episode_ids if density_scope_episode_ids is not None else episode_ids
+        )
+        if is_full_sync and density in ("series", "season"):
+            density_series_ids = all_active_series_ids(session)
+        else:
+            density_series_ids = series_ids_for_episode_ids(session, scope_episode_ids or [])
+            leftover: set[int] = set()
+            if density != "series":
+                leftover |= set(series_ids_with_density_stubs(session))
+            if density != "season":
+                leftover |= set(series_ids_with_season_density_stubs(session))
+            if leftover:
+                density_series_ids = sorted(set(density_series_ids) | leftover)
+
+        if density_series_ids:
+            series_stats = run_series_density_for_series_ids(
+                session,
+                density_series_ids,
+                activity_reason=activity_reason or "series_density",
+            )
+            stats["series_density"] = series_stats
+            logger.info(
+                f"Series density pass: considered={series_stats.get('series_considered', 0)} "
+                f"created={series_stats.get('created', 0)} "
+                f"retired={series_stats.get('retired', 0)} "
+                f"errors={series_stats.get('errors', 0)}",
+                extra={"emoji_type": "info"},
+            )
+            season_stats = run_season_density_for_series_ids(
+                session,
+                density_series_ids,
+                activity_reason=activity_reason or "season_density",
+            )
+            stats["season_density"] = season_stats
+            logger.info(
+                f"Season density pass: series={season_stats.get('series_considered', 0)} "
+                f"seasons={season_stats.get('seasons_considered', 0)} "
+                f"created={season_stats.get('created', 0)} "
+                f"retired={season_stats.get('retired', 0)} "
+                f"errors={season_stats.get('errors', 0)}",
+                extra={"emoji_type": "info"},
+            )
+            for path in list(series_stats.get("created_paths") or []) + list(
+                season_stats.get("created_paths") or []
+            ):
+                if path:
+                    changed_paths.add(str(path))
+            for path in list(series_stats.get("deleted_paths") or []) + list(
+                season_stats.get("deleted_paths") or []
+            ):
+                if path:
+                    delete_refresh_paths.add(str(path))
+            try:
+                from services.series_episode_stats_hooks import refresh_series_stats_after_bulk
+
+                refresh_series_stats_after_bulk(
+                    session,
+                    series_ids={int(sid) for sid in density_series_ids},
+                )
+            except Exception as stats_exc:
+                logger.debug(
+                    f"TV density series stats refresh skipped: {stats_exc}",
+                    extra={"emoji_type": "debug"},
+                )
+            _scoped_phase("tv density passes done")
+    except Exception as exc:
+        logger.error(f"TV density pass failed: {exc}", extra={"emoji_type": "error"})
+        stats["tv_density_error"] = str(exc)
+
     if is_full_sync and episode_phase_start_mono is not None:
         def _final_episode_refresh():
             refresh_selected_sections(has_movies=False, has_episodes=True, bypass_suppression=True)
@@ -1477,6 +1608,11 @@ def _run_materialization_for_ids(
     _scoped_phase("before scheduling delayed final path refresh (async Timer or job)")
 
     if not is_full_sync:
+        # Density stubs can create/delete TV paths even when actionable episode_ids is empty
+        # (episodes are NOT_NEEDED under season/series density). Still refresh TV libraries.
+        density_touched_tv = bool(changed_paths or delete_refresh_paths)
+        has_episodes_refresh = bool(episode_ids) or density_touched_tv
+
         def _trigger_delayed_final_refresh():
             refresh_stats = refresh_all_path_batches_with_section_fallback(
                 [
@@ -1484,7 +1620,7 @@ def _run_materialization_for_ids(
                     (delete_refresh_paths, "Deleted"),
                 ],
                 has_movies=bool(movie_ids),
-                has_episodes=bool(episode_ids),
+                has_episodes=has_episodes_refresh,
                 enable_section_fallback=False,
                 fallback_wait_seconds=0,
                 include_plex=True,
@@ -1501,7 +1637,7 @@ def _run_materialization_for_ids(
             kind=KIND_DELAYED_FINAL,
             payload={
                 "has_movies": bool(movie_ids),
-                "has_episodes": bool(episode_ids),
+                "has_episodes": has_episodes_refresh,
                 "include_plex": True,
                 "created_paths": sorted(set(changed_paths)),
                 "delete_paths": sorted(set(delete_refresh_paths)),
@@ -1676,4 +1812,5 @@ def run_materialization_for_entities_in_session(
         movie_ids=actionable_movie_ids,
         episode_ids=actionable_episode_ids,
         observation_source=observation_source,
+        density_scope_episode_ids=episode_ids,
     )

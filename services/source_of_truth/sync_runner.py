@@ -146,34 +146,76 @@ def _fill_missing_series_art(fields: Dict, series_entry: Dict, base_url: str, ap
     return fields
 
 
-def _resolve_episode_file_payload(entry: Dict, base_url: str, api_key: str) -> Dict:
+def _episode_detail_fetches_enabled() -> bool:
+    """Per-id still/file GETs only help episode-density thumbs and rare path backfill."""
+    from services.source_of_truth.tv_density import density_uses_episode_files
+
+    return density_uses_episode_files()
+
+
+def _bump_sync_counter(stats: Dict | None, key: str) -> None:
+    if stats is None:
+        return
+    stats[key] = int(stats.get(key) or 0) + 1
+
+
+def _resolve_episode_file_payload(
+    entry: Dict,
+    base_url: str,
+    api_key: str,
+    *,
+    allow_file_detail: bool | None = None,
+    stats: Dict | None = None,
+) -> Dict:
     ep_file = entry.get('episodeFile') or {}
     if isinstance(ep_file, dict) and ep_file.get('path'):
         return ep_file
 
     # Sonarr may return episodeFileId without embedding episodeFile on /episode.
     episode_file_id = entry.get('episodeFileId')
-    if episode_file_id:
-        fetched = fetch_sonarr_episodefile(int(episode_file_id), base_url, api_key)
-        if isinstance(fetched, dict):
-            return fetched
+    if not episode_file_id:
+        return ep_file if isinstance(ep_file, dict) else {}
+
+    enabled = _episode_detail_fetches_enabled() if allow_file_detail is None else bool(allow_file_detail)
+    if not enabled:
+        _bump_sync_counter(stats, 'episode_file_detail_skipped')
+        return ep_file if isinstance(ep_file, dict) else {}
+
+    fetched = fetch_sonarr_episodefile(int(episode_file_id), base_url, api_key)
+    if isinstance(fetched, dict):
+        _bump_sync_counter(stats, 'episode_file_detail_fetched')
+        return fetched
     return ep_file if isinstance(ep_file, dict) else {}
 
 
-def _resolve_episode_sync_payload(ep: Dict, base_url: str, api_key: str) -> Dict:
+def _resolve_episode_sync_payload(
+    ep: Dict,
+    base_url: str,
+    api_key: str,
+    *,
+    allow_still_detail: bool | None = None,
+    stats: Dict | None = None,
+) -> Dict:
     """Use bulk /episode rows from fetch_sonarr_episodes (includeImages + includeEpisodeFile).
 
     Per-id GET is a last resort when still art is missing (older Sonarr or cache miss).
+    Under season/series density, skip that GET: thumbs are unused and ``has_file`` /
+    air dates already come from the bulk row.
     Episode file paths are resolved in _resolve_episode_file_payload (embedded object or /episodefile).
     """
     if not isinstance(ep, dict):
         return ep
     if _extract_image_url(ep, ('screenshot', 'still', 'cover')):
         return ep
+    enabled = _episode_detail_fetches_enabled() if allow_still_detail is None else bool(allow_still_detail)
+    if not enabled:
+        _bump_sync_counter(stats, 'episode_still_detail_skipped')
+        return ep
     sonarr_ep_id = ep.get('id')
     if sonarr_ep_id:
         detailed = fetch_sonarr_episode_item(int(sonarr_ep_id), url=base_url, api_key=api_key)
         if isinstance(detailed, dict):
+            _bump_sync_counter(stats, 'episode_still_detail_fetched')
             return detailed
     return ep
 
@@ -235,29 +277,38 @@ def _sanitize_name(value: str | None) -> str:
     return text or "unknown"
 
 
-def _movie_library_root(is_4k: bool) -> str:
-    return settings.MOVIE_LIBRARY_4K_FOLDER if is_4k and settings.MOVIE_LIBRARY_4K_FOLDER else settings.MOVIE_LIBRARY_FOLDER
+def _movie_library_root(*, instance_key: str | None = None) -> str:
+    from services.library_destinations import dest_folder_for_instance
+
+    key = str(instance_key or "").strip().lower() or None
+    if not key:
+        ranked = settings.ranked_arr_instance("radarr", 0)
+        key = str(ranked.get("instance_key") or "").strip().lower() if ranked else None
+    return dest_folder_for_instance(arr_type="radarr", instance_key=key, arr_path=None)
 
 
-def _tv_library_root(is_4k: bool) -> str:
-    return settings.TV_LIBRARY_4K_FOLDER if is_4k and settings.TV_LIBRARY_4K_FOLDER else settings.TV_LIBRARY_FOLDER
+def _tv_library_root(*, instance_key: str | None = None) -> str:
+    from services.library_destinations import dest_folder_for_instance
+
+    key = str(instance_key or "").strip().lower() or None
+    if not key:
+        ranked = settings.ranked_arr_instance("sonarr", 0)
+        key = str(ranked.get("instance_key") or "").strip().lower() if ranked else None
+    return dest_folder_for_instance(arr_type="sonarr", instance_key=key, arr_path=None)
 
 
-def _default_instance_key(content_type: str, is_4k: bool) -> str:
-    """Get default/first instance key for given content type and 4k flag from configured instances."""
+def _default_instance_key(content_type: str) -> str:
+    """First ranked instance key for the given content type."""
     arr_type = 'radarr' if content_type == 'movie' else 'sonarr'
-    # Try to find matching 4k flag first
-    for item in (getattr(settings, 'configured_arr_instances', []) or []):
-        if str(item.get('arr_type', '')).lower() == arr_type and bool(item.get('is_4k', False)) == is_4k:
-            return str(item.get('instance_key', '')).lower()
-    # Fall back to first instance of type
-    for item in (getattr(settings, 'configured_arr_instances', []) or []):
-        if str(item.get('arr_type', '')).lower() == arr_type:
-            return str(item.get('instance_key', '')).lower()
+    item = settings.ranked_arr_instance(arr_type, 0)
+    if item:
+        key = str(item.get('instance_key', '')).strip().lower()
+        if key:
+            return key
     raise ValueError(f"No {arr_type} instances configured for default key generation")
 
 
-def _resolve_instance_identity(arr_type: str, instance_key: str | None, is_4k: bool) -> tuple[str, str]:
+def _resolve_instance_identity(arr_type: str, instance_key: str | None) -> tuple[str, str]:
     """Resolve canonical instance_id + webhook instance_key for persisted rows."""
     normalized_type = str(arr_type or '').strip().lower()
     normalized_key = str(instance_key or '').strip().lower()
@@ -265,9 +316,9 @@ def _resolve_instance_identity(arr_type: str, instance_key: str | None, is_4k: b
     if normalized_key:
         item = settings.resolve_arr_instance(normalized_type, instance_key=normalized_key)
     if not item:
-        item = settings.resolve_arr_instance(normalized_type, role='secondary' if bool(is_4k) else 'primary')
+        item = settings.ranked_arr_instance(normalized_type, 0)
     if not item:
-        fallback_key = normalized_key or _default_instance_key('movie' if normalized_type == 'radarr' else 'series', is_4k)
+        fallback_key = normalized_key or _default_instance_key('movie' if normalized_type == 'radarr' else 'series')
         return f"{normalized_type}:{fallback_key}", fallback_key
     resolved_key = str(item.get('instance_key') or normalized_key).strip().lower()
     resolved_id = str(item.get('instance_id') or '').strip().lower() or f"{normalized_type}:{resolved_key}"
@@ -336,28 +387,60 @@ def _series_folder_name(title: str, year: int, tvdbid: int) -> str:
     return f"{_sanitize_name(title)} {{tvdb-{tvdbid}}}"
 
 
-def _placeholder_movie_folder(entry: Dict, *, title: str, year: int, tmdbid: int, is_4k: bool) -> str:
-    root = _movie_library_root(is_4k)
-    arr_path = entry.get('path') or entry.get('folderPath') or None
+def _placeholder_movie_folder(
+    entry: Dict,
+    *,
+    title: str,
+    year: int,
+    tmdbid: int,
+    instance_key: str | None = None,
+) -> str:
+    from services.library_destinations import dest_folder_for_instance
+
+    arr_path = entry.get("path") or entry.get("folderPath") or entry.get("rootFolderPath") or None
+    root = dest_folder_for_instance(
+        arr_type="radarr",
+        instance_key=instance_key,
+        arr_path=arr_path if isinstance(arr_path, str) else None,
+    ) or _movie_library_root(instance_key=instance_key)
     folder_name = os.path.basename(arr_path) if arr_path else _movie_folder_name(title, year, tmdbid)
     return os.path.join(root, folder_name)
 
 
-def _placeholder_series_folder(entry: Dict, *, title: str, year: int, tvdbid: int, is_4k: bool) -> str:
-    root = _tv_library_root(is_4k)
-    arr_path = entry.get('path') or entry.get('folderPath') or None
+def _placeholder_series_folder(
+    entry: Dict,
+    *,
+    title: str,
+    year: int,
+    tvdbid: int,
+    instance_key: str | None = None,
+) -> str:
+    from services.library_destinations import dest_folder_for_instance
+
+    arr_path = entry.get("path") or entry.get("folderPath") or entry.get("rootFolderPath") or None
+    root = dest_folder_for_instance(
+        arr_type="sonarr",
+        instance_key=instance_key,
+        arr_path=arr_path if isinstance(arr_path, str) else None,
+    ) or _tv_library_root(instance_key=instance_key)
     folder_name = os.path.basename(arr_path) if arr_path else _series_folder_name(title, year, tvdbid)
     return os.path.join(root, folder_name)
 
 
-def _movie_fields(entry: Dict, is_4k: bool, instance_key: str) -> Dict:
+def _movie_fields(entry: Dict, instance_key: str) -> Dict:
     movie_file = entry.get('movieFile') or {}
     movie_file_path = movie_file.get('path')
     title = entry.get('title') or 'Unknown'
     year = _extract_year(entry.get('year') or entry.get('inCinemas') or entry.get('physicalRelease'), 0)
     tmdbid = int(entry.get('tmdbId') or entry.get('tmdb') or 0)
-    instance_id, resolved_instance_key = _resolve_instance_identity('radarr', instance_key, is_4k)
-    placeholder_folder = _placeholder_movie_folder(entry, title=title, year=year, tmdbid=tmdbid, is_4k=is_4k)
+    instance_id, resolved_instance_key = _resolve_instance_identity('radarr', instance_key)
+    placeholder_folder = _placeholder_movie_folder(
+        entry,
+        title=title,
+        year=year,
+        tmdbid=tmdbid,
+        instance_key=resolved_instance_key,
+    )
     return {
         'title': title,
         'year': year,
@@ -398,13 +481,19 @@ def _movie_fields(entry: Dict, is_4k: bool, instance_key: str) -> Dict:
     }
 
 
-def _series_fields(entry: Dict, is_4k: bool, instance_key: str) -> Dict:
+def _series_fields(entry: Dict, instance_key: str) -> Dict:
     stats = entry.get('statistics') or {}
     title = entry.get('title') or 'Unknown'
     year = _extract_year(entry.get('year') or entry.get('firstAired'), 0)
     tvdbid = int(entry.get('tvdbId') or entry.get('tvdbid') or 0)
-    instance_id, resolved_instance_key = _resolve_instance_identity('sonarr', instance_key, is_4k)
-    placeholder_folder = _placeholder_series_folder(entry, title=title, year=year, tvdbid=tvdbid, is_4k=is_4k)
+    instance_id, resolved_instance_key = _resolve_instance_identity('sonarr', instance_key)
+    placeholder_folder = _placeholder_series_folder(
+        entry,
+        title=title,
+        year=year,
+        tvdbid=tvdbid,
+        instance_key=resolved_instance_key,
+    )
     return {
         'title': title,
         'year': year,
@@ -483,6 +572,12 @@ def _field_values_differ(current: Any, incoming: Any) -> bool:
 def _upsert_movie(session, fields: Dict) -> Tuple[Any, bool, bool]:
     instance_key = str(fields.get('instance_key') or '').strip().lower()
     instance_id = str(fields.get('instance_id') or '').strip().lower()
+    legacy_keys = [instance_key]
+    inst = settings.resolve_arr_instance('radarr', instance_key=instance_key)
+    if inst:
+        for a in inst.get('instance_key_aliases') or []:
+            if a:
+                legacy_keys.append(str(a).strip().lower())
     with session.no_autoflush:
         existing = (
             session.query(Movie)
@@ -490,7 +585,7 @@ def _upsert_movie(session, fields: Dict) -> Tuple[Any, bool, bool]:
                 and_(
                     Movie.tmdbid == fields['tmdbid'],
                     or_(
-                        Movie.instance_key == instance_key,
+                        Movie.instance_key.in_(legacy_keys),
                         # Legacy fallback while older rows may still carry instance_id-only identity.
                         Movie.instance_id == instance_id,
                     ),
@@ -516,6 +611,12 @@ def _upsert_movie(session, fields: Dict) -> Tuple[Any, bool, bool]:
 def _upsert_series(session, fields: Dict) -> Tuple[Any, bool, bool]:
     instance_key = str(fields.get('instance_key') or '').strip().lower()
     instance_id = str(fields.get('instance_id') or '').strip().lower()
+    legacy_keys = [instance_key]
+    inst = settings.resolve_arr_instance('sonarr', instance_key=instance_key)
+    if inst:
+        for a in inst.get('instance_key_aliases') or []:
+            if a:
+                legacy_keys.append(str(a).strip().lower())
     with session.no_autoflush:
         existing = (
             session.query(Series)
@@ -523,7 +624,7 @@ def _upsert_series(session, fields: Dict) -> Tuple[Any, bool, bool]:
                 and_(
                     Series.tvdbid == fields['tvdbid'],
                     or_(
-                        Series.instance_key == instance_key,
+                        Series.instance_key.in_(legacy_keys),
                         # Legacy fallback while older rows may still carry instance_id-only identity.
                         Series.instance_id == instance_id,
                     ),
@@ -547,9 +648,8 @@ def _upsert_series(session, fields: Dict) -> Tuple[Any, bool, bool]:
 
 
 def _upsert_season(session, series: Series, season_number: int):
-    series_role = str((settings.resolve_arr_instance('sonarr', instance_id=getattr(series, 'instance_id', None), instance_key=getattr(series, 'instance_key', None)) or {}).get('role') or 'primary').strip().lower()
     season_folder = os.path.join(
-        getattr(series, 'placeholder_folder', None) or _tv_library_root(series_role != 'primary'),
+        getattr(series, 'placeholder_folder', None) or _tv_library_root(instance_key=getattr(series, 'instance_key', None)),
         f"Season {season_number:02d}" if season_number > 0 else "Season 00",
     )
     with session.no_autoflush:
@@ -625,8 +725,18 @@ def _inherit_season_policy_if_created(
     session.add(episode)
 
 
-def _iter_arr_endpoints(types: Tuple[str, ...], is_4k: bool, instance_key: str | None = None) -> Iterable[Tuple[str, str, str, bool, str]]:
-    """Yield (content_type, url, api_key, is_4k, instance_key) tuples for configured ARR instances."""
+def _iter_arr_endpoints(
+    types: Tuple[str, ...],
+    instance_key: str | None = None,
+    *,
+    all_instances: bool = False,
+) -> Iterable[Tuple[str, str, str, str]]:
+    """Yield (content_type, url, api_key, instance_key) for configured Arr instances.
+
+    When ``instance_key`` is set, yield that instance only.
+    When omitted (or ``all_instances``), yield every configured instance for the
+    requested types.
+    """
     requested_key = str(instance_key or '').strip().lower()
     normalized_types = {str(t or '').strip().lower() for t in (types or ())}
     for item in (getattr(settings, 'configured_arr_instances', []) or []):
@@ -639,25 +749,25 @@ def _iter_arr_endpoints(types: Tuple[str, ...], is_4k: bool, instance_key: str |
             continue
         if requested_key and str(item.get('instance_key', '')).strip().lower() != requested_key:
             continue
-        if not requested_key and bool(item.get('is_4k', False)) != is_4k:
-            continue
         url = str(item.get('url', '')).strip()
         api_key = str(item.get('api_key', '')).strip()
-        instance_key = str(item.get('instance_key', '')).strip().lower()
-        if url and api_key and instance_key:
-            yield (content_type, url, api_key, is_4k, instance_key)
+        resolved_key = str(item.get('instance_key', '')).strip().lower()
+        if url and api_key and resolved_key:
+            yield (content_type, url, api_key, resolved_key)
 
 
 def run_full_sync(
     dry_run: bool = False,
     batch_size: int = 50,
     types: Tuple[str, ...] = ('movie', 'series'),
-    is_4k: bool = False,
     instance_key: str | None = None,
     *,
     run_template_backfill: bool = False,
 ):
-    """Source-of-truth full sync for ARR -> DB materialization."""
+    """Source-of-truth full sync for ARR -> DB materialization.
+
+    When ``instance_key`` is omitted, sync every configured instance for ``types``.
+    """
     started_at = datetime.now(timezone.utc)
     stats = {
         'movies_seen': 0,
@@ -674,13 +784,23 @@ def run_full_sync(
         'episodes_seen': 0,
         'episodes_created': 0,
         'episodes_updated': 0,
+        'episode_still_detail_skipped': 0,
+        'episode_still_detail_fetched': 0,
+        'episode_file_detail_skipped': 0,
+        'episode_file_detail_fetched': 0,
     }
 
     session = get_session()
     touched_movie_row_ids: list[int] = []
     touched_series_row_ids: list[int] = []
+    allow_episode_detail = _episode_detail_fetches_enabled()
     try:
-        for content_type, base_url, api_key, sync_is_4k, sync_instance_key in _iter_arr_endpoints(types, is_4k, instance_key=instance_key):
+        requested_key = str(instance_key or '').strip().lower() or None
+        for content_type, base_url, api_key, sync_instance_key in _iter_arr_endpoints(
+            types,
+            instance_key=requested_key,
+            all_instances=requested_key is None,
+        ):
             if content_type == 'movie':
                 movies = fetch_radarr_movies(base_url, api_key, bypass_cache=True)
                 if movies is None:
@@ -692,7 +812,7 @@ def run_full_sync(
                     continue
                 seen_tmdbids = set()
                 for movie in movies:
-                    fields = _movie_fields(movie, sync_is_4k, sync_instance_key)
+                    fields = _movie_fields(movie, sync_instance_key)
                     fields = _fill_missing_movie_art(fields, movie, base_url, api_key)
                     if not fields['tmdbid']:
                         continue
@@ -734,7 +854,7 @@ def run_full_sync(
                 )
 
                 for series_idx, series_entry in enumerate(series_items, start=1):
-                    s_fields = _series_fields(series_entry, sync_is_4k, sync_instance_key)
+                    s_fields = _series_fields(series_entry, sync_instance_key)
                     s_fields = _fill_missing_series_art(s_fields, series_entry, base_url, api_key)
                     if not s_fields['tvdbid']:
                         continue
@@ -750,8 +870,20 @@ def run_full_sync(
                             extra={'emoji_type': 'info'},
                         )
                     for ep in episodes:
-                        ep_effective = _resolve_episode_sync_payload(ep, base_url, api_key)
-                        episode_file = _resolve_episode_file_payload(ep_effective, base_url, api_key)
+                        ep_effective = _resolve_episode_sync_payload(
+                            ep,
+                            base_url,
+                            api_key,
+                            allow_still_detail=allow_episode_detail,
+                            stats=stats,
+                        )
+                        episode_file = _resolve_episode_file_payload(
+                            ep_effective,
+                            base_url,
+                            api_key,
+                            allow_file_detail=allow_episode_detail,
+                            stats=stats,
+                        )
                         prepared_episodes.append((ep, ep_effective, episode_file))
 
                     seen_tvdbids.add(s_fields['tvdbid'])
@@ -870,6 +1002,15 @@ def run_full_sync(
 
         elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
         stats['duration_seconds'] = round(elapsed, 2)
+        still_skipped = int(stats.get('episode_still_detail_skipped') or 0)
+        file_skipped = int(stats.get('episode_file_detail_skipped') or 0)
+        if still_skipped or file_skipped:
+            logger.info(
+                "Series sync skipped episode detail GETs under season/series density: "
+                f"still_skipped={still_skipped} still_fetched={int(stats.get('episode_still_detail_fetched') or 0)} "
+                f"file_skipped={file_skipped} file_fetched={int(stats.get('episode_file_detail_fetched') or 0)}",
+                extra={'emoji_type': 'info'},
+            )
         log_phase_boundary(
             "arr_full_sync",
             event="end",
@@ -879,6 +1020,10 @@ def run_full_sync(
                 "instance_key": str(instance_key or ""),
                 "episodes_seen": int(stats.get("episodes_seen") or 0),
                 "movies_seen": int(stats.get("movies_seen") or 0),
+                "episode_still_detail_skipped": still_skipped,
+                "episode_still_detail_fetched": int(stats.get("episode_still_detail_fetched") or 0),
+                "episode_file_detail_skipped": file_skipped,
+                "episode_file_detail_fetched": int(stats.get("episode_file_detail_fetched") or 0),
             },
         )
         logger.info(f"Source-of-truth fullsync complete: {stats}", extra={'emoji_type': 'success'})
@@ -961,7 +1106,6 @@ def sync_radarr_movies_by_ids(
     base_url: str,
     api_key: str,
     instance_key: str | None = None,
-    is_4k: bool | None = None,
 ) -> dict:
     """Targeted movie sync for a specific Radarr instance and movie IDs."""
     ids = sorted({int(mid) for mid in (movie_ids or []) if mid})
@@ -976,12 +1120,7 @@ def sync_radarr_movies_by_ids(
     if not ids:
         return stats
 
-    if is_4k is None:
-        resolved = settings.resolve_arr_instance('radarr', instance_key=instance_key) or {}
-        inferred_secondary = str(resolved.get('role') or 'primary').strip().lower() != 'primary'
-    else:
-        inferred_secondary = bool(is_4k)
-    effective_instance_key = str(instance_key or _default_instance_key('movie', inferred_secondary)).strip().lower()
+    effective_instance_key = str(instance_key or _default_instance_key('movie')).strip().lower()
 
     session = get_session()
     touched_movie_row_ids: list[int] = []
@@ -1005,7 +1144,7 @@ def sync_radarr_movies_by_ids(
                 stats['movies_marked_deleted'] += int(marked or 0)
                 continue
 
-            fields = _movie_fields(movie, inferred_secondary, effective_instance_key)
+            fields = _movie_fields(movie, effective_instance_key)
             if not fields['tmdbid']:
                 continue
             stats['movies_seen'] += 1
@@ -1069,7 +1208,6 @@ def sync_sonarr_series_specials_season0_backfill(
     base_url: str,
     api_key: str,
     instance_key: str | None = None,
-    is_4k: bool | None = None,
 ) -> dict:
     """Season 0 (specials) catalog capture using bulk ``/series`` rows.
 
@@ -1094,20 +1232,20 @@ def sync_sonarr_series_specials_season0_backfill(
         "touched_episode_row_ids": [],
         # Series where Sonarr returned at least one season-0 episode (for progress clarity).
         "series_with_season0": 0,
+        "episode_still_detail_skipped": 0,
+        "episode_still_detail_fetched": 0,
+        "episode_file_detail_skipped": 0,
+        "episode_file_detail_fetched": 0,
     }
     if not items:
         return stats
 
-    if is_4k is None:
-        resolved = settings.resolve_arr_instance("sonarr", instance_key=instance_key) or {}
-        inferred_secondary = str(resolved.get("role") or "primary").strip().lower() != "primary"
-    else:
-        inferred_secondary = bool(is_4k)
-    effective_instance_key = str(instance_key or _default_instance_key("series", inferred_secondary)).strip().lower()
+    effective_instance_key = str(instance_key or _default_instance_key("series")).strip().lower()
 
     session = get_session()
     touched_episode_ids: set[int] = set()
     pending_episode_rows: List[Any] = []
+    allow_episode_detail = _episode_detail_fetches_enabled()
     try:
         total_series = len(items)
         last_overall_log_mono = time.monotonic()
@@ -1127,7 +1265,7 @@ def sync_sonarr_series_specials_season0_backfill(
             t_series = time.monotonic()
             sonarr_series_id = series_entry.get("id")
             label = _sonarr_series_display_name(series_entry, int(sonarr_series_id))
-            s_fields = _series_fields(series_entry, inferred_secondary, effective_instance_key)
+            s_fields = _series_fields(series_entry, effective_instance_key)
             s_fields = _fill_missing_series_art(s_fields, series_entry, base_url, api_key)
             if not s_fields["tvdbid"]:
                 logger.debug(
@@ -1175,9 +1313,21 @@ def sync_sonarr_series_specials_season0_backfill(
                     stats["seasons_created"] += 1
 
                 sonarr_ep_id = ep.get("id")
-                ep_effective = _resolve_episode_sync_payload(ep, base_url, api_key)
+                ep_effective = _resolve_episode_sync_payload(
+                    ep,
+                    base_url,
+                    api_key,
+                    allow_still_detail=allow_episode_detail,
+                    stats=stats,
+                )
 
-                episode_file = _resolve_episode_file_payload(ep_effective, base_url, api_key)
+                episode_file = _resolve_episode_file_payload(
+                    ep_effective,
+                    base_url,
+                    api_key,
+                    allow_file_detail=allow_episode_detail,
+                    stats=stats,
+                )
                 ep_fields = _episode_fields(series_row, season_row, ep_effective, episode_file)
 
                 overview = str(ep.get("overview") or "").strip()
@@ -1270,7 +1420,6 @@ def sync_sonarr_series_by_ids(
     base_url: str,
     api_key: str,
     instance_key: str | None = None,
-    is_4k: bool | None = None,
 ) -> dict:
     """Targeted series+episode sync for a specific Sonarr instance and series IDs."""
     ids = sorted({int(sid) for sid in (series_ids or []) if sid})
@@ -1287,19 +1436,19 @@ def sync_sonarr_series_by_ids(
         'episodes_updated': 0,
         'episodes_marked_deleted': 0,
         'touched_episode_row_ids': [],
+        'episode_still_detail_skipped': 0,
+        'episode_still_detail_fetched': 0,
+        'episode_file_detail_skipped': 0,
+        'episode_file_detail_fetched': 0,
     }
     if not ids:
         return stats
 
-    if is_4k is None:
-        resolved = settings.resolve_arr_instance('sonarr', instance_key=instance_key) or {}
-        inferred_secondary = str(resolved.get('role') or 'primary').strip().lower() != 'primary'
-    else:
-        inferred_secondary = bool(is_4k)
-    effective_instance_key = str(instance_key or _default_instance_key('series', inferred_secondary)).strip().lower()
+    effective_instance_key = str(instance_key or _default_instance_key('series')).strip().lower()
 
     session = get_session()
     touched_episode_ids: set[int] = set()
+    allow_episode_detail = _episode_detail_fetches_enabled()
     try:
         total_series = len(ids)
         _ep_log_every = 100
@@ -1353,7 +1502,7 @@ def sync_sonarr_series_by_ids(
                         stats['episodes_marked_deleted'] += int(marked_episodes or 0)
                 continue
 
-            s_fields = _series_fields(series_entry, inferred_secondary, effective_instance_key)
+            s_fields = _series_fields(series_entry, effective_instance_key)
             s_fields = _fill_missing_series_art(s_fields, series_entry, base_url, api_key)
             if not s_fields['tvdbid']:
                 logger.info(
@@ -1402,9 +1551,21 @@ def sync_sonarr_series_by_ids(
 
                 # Use bulk row when sufficient; detail GET only for missing episodeFile embed.
                 sonarr_ep_id = ep.get('id')
-                ep = _resolve_episode_sync_payload(ep, base_url, api_key)
+                ep = _resolve_episode_sync_payload(
+                    ep,
+                    base_url,
+                    api_key,
+                    allow_still_detail=allow_episode_detail,
+                    stats=stats,
+                )
 
-                episode_file = _resolve_episode_file_payload(ep, base_url, api_key)
+                episode_file = _resolve_episode_file_payload(
+                    ep,
+                    base_url,
+                    api_key,
+                    allow_file_detail=allow_episode_detail,
+                    stats=stats,
+                )
                 ep_fields = _episode_fields(series_row, season_row, ep, episode_file)
 
                 overview = str(ep.get('overview') or '').strip()

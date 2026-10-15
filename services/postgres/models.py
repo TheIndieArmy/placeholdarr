@@ -5,7 +5,6 @@ from sqlalchemy.ext.hybrid import hybrid_property
 from services.postgres.db import Base
 from datetime import datetime, timezone
 
-from core.config import settings
 
 
 def utcnow():
@@ -109,23 +108,6 @@ class Movie(Base):
 
     subflows = relationship('SubFlow', back_populates='movie')
 
-    @hybrid_property
-    def is_4k(self) -> bool:
-        """True when this row's Radarr instance is configured as the 4K/secondary library.
-
-        Uses ``ARR_INSTANCES_JSON`` (``is_4k`` on the matching ``instance_key``), not substring
-        heuristics — keys named ``4k`` still follow config (they may point at primary Radarr).
-        """
-        key = str(getattr(self, 'instance_key', '') or '').strip().lower()
-        if not key:
-            return False
-        item = settings.resolve_arr_instance("radarr", instance_key=key)
-        if item is not None:
-            return bool(item.get("is_4k", False))
-        # Legacy rows / unknown keys: keep old heuristics
-        instance_id = str(getattr(self, 'instance_id', '') or '').strip().lower()
-        return ("4k" in key) or key.endswith("_secondary") or instance_id.endswith(":secondary")
-
     def __repr__(self):
         return (
             f"<Movie(id={self.id}, title={self.title!r}, year={self.year}, "
@@ -162,6 +144,8 @@ class Placeholder(Base):
     season_id = Column(Integer, ForeignKey('season.id'), nullable=True)
     episode_id = Column(Integer, ForeignKey('episode.id'), nullable=True)
     path = Column(String, nullable=False)
+    # episode | series_stub | season_stub | null (legacy episode/movie rows)
+    placeholder_kind = Column(String(32), nullable=True)
     # Whether the placeholder file currently exists on disk (FS-observed)
     has_placeholder = Column(Boolean, default=False)
     lifecycle_status = Column(String, nullable=True)
@@ -593,18 +577,6 @@ class Series(Base):
 
     subflows = relationship('SubFlow', back_populates='series')
     season = relationship('Season', back_populates='series')
-
-    @hybrid_property
-    def is_4k(self) -> bool:
-        """True when this row's Sonarr instance is configured as the 4K/secondary library."""
-        key = str(getattr(self, 'instance_key', '') or '').strip().lower()
-        if not key:
-            return False
-        item = settings.resolve_arr_instance("sonarr", instance_key=key)
-        if item is not None:
-            return bool(item.get("is_4k", False))
-        instance_id = str(getattr(self, 'instance_id', '') or '').strip().lower()
-        return ("4k" in key) or key.endswith("_secondary") or instance_id.endswith(":secondary")
 
     def __repr__(self):
         return (

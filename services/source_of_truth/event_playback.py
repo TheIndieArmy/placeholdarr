@@ -4,7 +4,7 @@ import os
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import and_, or_, text
+from sqlalchemy import and_, func, or_, text
 
 from core.config import settings
 from core.logger import logger
@@ -20,6 +20,7 @@ from services.source_of_truth.arr_api import (
 from services.library_future_semantics import (
     build_series_max_known_order_within_horizon,
     episode_is_future_for_playback_search,
+    movie_is_future_for_playback_search,
 )
 from services.source_of_truth.status_intent import DisplayStatus, StatusIntent, StatusSource
 from services.source_of_truth.status_orchestrator import StatusOrchestrator
@@ -29,43 +30,147 @@ from services.media_servers.jellyfin import get_jellyfin_file_path
 PLAYBACK_FALLBACK_JOB_TYPE = 'playback_fallback'
 
 
-def _instance_label(is_4k: bool) -> str:
-    return '4k' if bool(is_4k) else 'standard'
+def _instance_label_for_row(row: Any) -> str | None:
+    """Telemetry label from the row's resolved instance_key."""
+    key = _row_instance_key(row)
+    return key or None
 
 
-def _search_preference() -> str:
-    # Legacy `PLAYBACK_SEARCH_PREFERENCE` removed. Use TV playback instance mode
-    # to determine preference when matching/missing in TV real-file routing.
-    mode = str(getattr(settings, 'TV_PLAYBACK_INSTANCE_MODE', 'match') or 'match').strip().lower()
-    if mode == 'primary':
-        return 'standard'
-    if mode == 'secondary':
-        return '4k'
-    return 'both'
+def _row_instance_key(row: Any) -> str:
+    raw = str(getattr(row, 'instance_key', '') or '').strip().lower()
+    arr_type = 'radarr' if hasattr(row, 'tmdbid') else 'sonarr'
+    if raw:
+        inst = settings.resolve_arr_instance(arr_type, instance_key=raw)
+        if inst and inst.get('instance_key'):
+            canonical = str(inst.get('instance_key')).strip().lower()
+            if canonical:
+                return canonical
+        if raw in {'4k', 'standard', 'radarr_4k', 'radarr_std', 'sonarr_4k', 'sonarr_std'}:
+            mapped = _legacy_label_to_key(arr_type, raw.replace('radarr_', '').replace('sonarr_', ''))
+            if mapped:
+                return mapped
+        return raw
+    instance_id = str(getattr(row, 'instance_id', '') or '').strip().lower()
+    if instance_id:
+        inst = settings.resolve_arr_instance(arr_type, instance_id=instance_id)
+        if inst and inst.get('instance_key'):
+            return str(inst.get('instance_key')).strip().lower()
+    return ''
 
 
-def _tv_instance_mode() -> str:
-    value = str(getattr(settings, 'TV_PLAYBACK_INSTANCE_MODE', 'match') or 'match').strip().lower()
-    return value if value in {'match', 'primary', 'secondary', 'both'} else 'match'
+def _instance_key_at_rank(arr_type: str, index: int) -> str | None:
+    item = settings.ranked_arr_instance(arr_type, index)
+    if not item:
+        return None
+    key = str(item.get('instance_key') or '').strip().lower()
+    return key or None
 
 
+def _legacy_label_to_key(arr_type: str, label: str) -> str | None:
+    """Map legacy standard/4k labels to ranked instance keys (index 0 / 1)."""
+    normalized = str(label or '').strip().lower()
+    instances = settings.arr_instances_for_type(arr_type)
+    if not instances:
+        return normalized or None
+    if normalized == 'standard':
+        key = _instance_key_at_rank(arr_type, 0)
+        if key:
+            return key
+        return str(instances[0].get('instance_key') or '').strip().lower() or normalized
+    if normalized == '4k':
+        key = _instance_key_at_rank(arr_type, 1)
+        if key:
+            return key
+        if len(instances) > 1:
+            k = str(instances[1].get('instance_key') or '').strip().lower()
+            if k:
+                return k
+        return str(instances[0].get('instance_key') or '').strip().lower() or normalized
+    return normalized or None
 
-def _movie_instance_mode() -> str:
-    value = str(getattr(settings, 'MOVIE_PLAYBACK_INSTANCE_MODE', 'match') or 'match').strip().lower()
-    return value if value in {'match', 'primary', 'secondary', 'both'} else 'match'
+
+def _coerce_instance_key(arr_type: str, value: str | None) -> str | None:
+    """Accept an instance_key or legacy standard/4k label."""
+    raw = str(value or '').strip().lower()
+    if not raw:
+        return None
+    if raw in {'standard', '4k'}:
+        return _legacy_label_to_key(arr_type, raw)
+    return raw
 
 
-def _placeholder_search_pref(media_type: str) -> str:
-    """Map MOVIE/TV_PLACEHOLDER_SEARCH_MODE (primary/secondary/both) to instance labels (standard/4k/both)."""
-    if media_type == 'movie':
-        value = str(getattr(settings, 'MOVIE_PLACEHOLDER_SEARCH_MODE', 'both') or 'both').strip().lower()
+def _parse_instance_key_setting(raw: Any) -> list[str]:
+    """Parse a Play Actions instance-key JSON/list setting into normalized keys."""
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        items = list(raw)
     else:
-        value = str(getattr(settings, 'TV_PLACEHOLDER_SEARCH_MODE', 'both') or 'both').strip().lower()
-    if value == 'primary':
-        return 'standard'
-    if value == 'secondary':
-        return '4k'
-    return 'both'
+        text = str(raw).strip()
+        if not text:
+            return []
+        try:
+            import json
+
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                items = parsed
+            elif isinstance(parsed, bool):
+                return []
+            else:
+                items = [parsed]
+        except Exception:
+            items = [part.strip() for part in text.split(',') if part.strip()]
+    out: list[str] = []
+    for item in items:
+        key = str(item or '').strip().lower()
+        if key and key not in out:
+            out.append(key)
+    return out
+
+
+def _play_actions_setting_name(media_type: str, kind: str) -> str:
+    prefix = 'MOVIE' if media_type == 'movie' else 'TV'
+    mapping = {
+        'always': f'{prefix}_PLAY_PLACEHOLDER_ALWAYS_INSTANCES',
+        'fallback': f'{prefix}_PLAY_PLACEHOLDER_FALLBACK_INSTANCES',
+        'real_also': f'{prefix}_PLAY_REAL_ALSO_INSTANCES',
+    }
+    return mapping[kind]
+
+
+def _play_actions_keys(media_type: str, kind: str) -> list[str]:
+    return _parse_instance_key_setting(getattr(settings, _play_actions_setting_name(media_type, kind), '[]'))
+
+
+def _effective_fallback_keys(media_type: str) -> list[str]:
+    """Play Actions Fallback keys for this media type only.
+
+    Empty means Fallback Off for that type. Do not consult the shared
+    ENABLE_PLAYBACK_FALLBACK_SEARCH flag (it can be true because the other
+    media type has Fallback rows).
+    """
+    return _play_actions_keys(media_type, 'fallback')
+
+
+def _rank_filter_keys(media_type: str, wanted: set[str]) -> list[str]:
+    """Return wanted keys in ARR Integrations list order."""
+    from services.playback_routing import get_candidate_instances_for_movie, get_candidate_instances_for_tv
+
+    ranking = (
+        get_candidate_instances_for_movie()
+        if media_type == 'movie'
+        else get_candidate_instances_for_tv()
+    )
+    ordered: list[str] = []
+    for key in ranking or []:
+        normalized = str(key or '').strip().lower()
+        if normalized and normalized in wanted and normalized not in ordered:
+            ordered.append(normalized)
+    for key in wanted:
+        if key not in ordered:
+            ordered.append(key)
+    return ordered
 
 
 def _fallback_timeout_minutes() -> int:
@@ -75,13 +180,22 @@ def _fallback_timeout_minutes() -> int:
         return 30
 
 
-def _fallback_enabled() -> bool:
-    return bool(getattr(settings, 'ENABLE_PLAYBACK_FALLBACK_SEARCH', False)) and _fallback_timeout_minutes() > 0
+def _fallback_enabled(*, media_type: str | None = None) -> bool:
+    """Delayed Fallback tries require a positive timeout and a non-empty per-type Fallback queue."""
+    if _fallback_timeout_minutes() <= 0:
+        return False
+    if media_type in {'movie', 'tv', 'episode'}:
+        mt = 'movie' if media_type == 'movie' else 'tv'
+        return bool(_effective_fallback_keys(mt))
+    return bool(_effective_fallback_keys('movie') or _effective_fallback_keys('tv'))
 
 
-def _resolve_endpoint(content_type: str, is_4k: bool) -> tuple[str, str]:
+def _resolve_endpoint(content_type: str, *, instance_key: str | None = None) -> tuple[str, str]:
     arr_type = 'radarr' if content_type == 'movie' else 'sonarr'
-    return settings.resolve_arr_endpoint(arr_type, is_4k=is_4k)
+    key = str(instance_key or '').strip().lower()
+    if not key:
+        return '', ''
+    return settings.resolve_arr_endpoint(arr_type, instance_key=key)
 
 
 def _normalize_path(value: str | None) -> str | None:
@@ -104,18 +218,87 @@ def _path_is_within_root(path: str | None, root: str | None) -> bool:
         return False
 
 
-def _match_tv_instance_from_path(path: str | None) -> str | None:
-    matches: list[str] = []
-    if _path_is_within_root(path, getattr(settings, 'TV_LIBRARY_FOLDER', '')):
-        matches.append('standard')
-    if _path_is_within_root(path, getattr(settings, 'TV_LIBRARY_4K_FOLDER', '')):
-        matches.append('4k')
+def _match_instance_key_from_path(path: str | None, *, arr_type: str) -> str | None:
+    """Match a played file path to an instance_key.
 
-    if len(matches) == 1:
-        return matches[0]
-    if len(matches) > 1:
-        return 'both'
-    return None
+    Returns a single key, ``all`` when ambiguous / shared, or ``None`` when unmatched.
+    Longest matching dest folder wins when multiple map rows apply.
+    Unmapped paths under the default library folder map to ranking index 0.
+    """
+    if not path:
+        return None
+    arr = str(arr_type or '').strip().lower()
+    if arr not in {'radarr', 'sonarr'}:
+        return None
+
+    try:
+        from services.library_destinations import parse_library_destination_map
+
+        scored: list[tuple[int, str]] = []
+        for row in parse_library_destination_map():
+            if str(row.get('arr_type') or '').lower() != arr:
+                continue
+            dest = str(row.get('dest_folder') or '')
+            norm_dest = _normalize_path(dest)
+            if not norm_dest or not _path_is_within_root(path, dest):
+                continue
+            key = str(row.get('instance_key') or '').strip().lower()
+            if not key:
+                continue
+            scored.append((len(norm_dest), key))
+
+        if scored:
+            best_len = max(length for length, _ in scored)
+            unique = list(dict.fromkeys(key for length, key in scored if length == best_len))
+            if len(unique) == 1:
+                return unique[0]
+            if len(unique) > 1:
+                return 'all'
+            return None
+
+        matched: list[str] = []
+        if arr == 'sonarr':
+            primary_folder = str(getattr(settings, 'TV_LIBRARY_FOLDER', '') or '')
+        else:
+            primary_folder = str(getattr(settings, 'MOVIE_LIBRARY_FOLDER', '') or '')
+
+        default_key = _instance_key_at_rank(arr, 0)
+        # Unmapped paths under the default dest use the first ranked instance.
+        # Other instances require the dest map for path→instance matching.
+        if default_key and primary_folder and _path_is_within_root(path, primary_folder):
+            matched.append(default_key)
+
+        unique = list(dict.fromkeys(matched))
+        if len(unique) == 1:
+            return unique[0]
+        if len(unique) > 1:
+            return 'all'
+        return None
+    except Exception:
+        matched = []
+        default_key = _instance_key_at_rank(arr, 0)
+        if arr == 'sonarr':
+            default_folder = getattr(settings, 'TV_LIBRARY_FOLDER', '')
+        else:
+            default_folder = getattr(settings, 'MOVIE_LIBRARY_FOLDER', '')
+        if default_key and default_folder and _path_is_within_root(path, default_folder):
+            matched.append(default_key)
+        unique = list(dict.fromkeys(matched))
+        if len(unique) == 1:
+            return unique[0]
+        if len(unique) > 1:
+            return 'all'
+        return None
+
+
+def _match_tv_instance_from_path(path: str | None) -> str | None:
+    """Match a played TV path to an instance_key (or ``all`` / ``None``)."""
+    return _match_instance_key_from_path(path, arr_type='sonarr')
+
+
+def _match_movie_instance_from_path(path: str | None) -> str | None:
+    """Match a played movie path to an instance_key (or ``all`` / ``None``)."""
+    return _match_instance_key_from_path(path, arr_type='radarr')
 
 
 def _as_int(value: Any) -> int | None:
@@ -305,6 +488,63 @@ def _extract_file_path(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _extract_plex_rating_key(payload: dict[str, Any]) -> str | None:
+    media = payload.get('media') if isinstance(payload.get('media'), dict) else {}
+    media_ids = media.get('ids') if isinstance(media.get('ids'), dict) else {}
+    metadata = payload.get('metadata') if isinstance(payload.get('metadata'), dict) else {}
+    plex_meta = payload.get('Metadata') if isinstance(payload.get('Metadata'), dict) else {}
+    payload_ids = payload.get('ids') if isinstance(payload.get('ids'), dict) else {}
+    data = payload.get('data') if isinstance(payload.get('data'), dict) else {}
+    data_media = data.get('media') if isinstance(data.get('media'), dict) else {}
+
+    candidates = [
+        media_ids.get('plex'),
+        media_ids.get('ratingKey'),
+        media_ids.get('rating_key'),
+        media.get('ratingKey'),
+        media.get('rating_key'),
+        payload_ids.get('plex'),
+        payload_ids.get('ratingKey'),
+        payload_ids.get('rating_key'),
+        payload.get('ratingKey'),
+        payload.get('rating_key'),
+        payload.get('plex_id'),
+        metadata.get('ratingKey'),
+        metadata.get('rating_key'),
+        plex_meta.get('ratingKey'),
+        data_media.get('ratingKey'),
+        data_media.get('rating_key'),
+    ]
+    for val in candidates:
+        if val is not None:
+            s = str(val).strip()
+            if s and s != "0":
+                return s
+    return None
+
+
+def _extract_jellyfin_item_id(payload: dict[str, Any]) -> str | None:
+    item = payload.get('Item') if isinstance(payload.get('Item'), dict) else {}
+    media = payload.get('media') if isinstance(payload.get('media'), dict) else {}
+    media_ids = media.get('ids') if isinstance(media.get('ids'), dict) else {}
+    payload_ids = payload.get('ids') if isinstance(payload.get('ids'), dict) else {}
+    candidates = [
+        payload.get('ItemId'),
+        payload.get('itemId'),
+        payload.get('jellyfin_id'),
+        payload_ids.get('jellyfin'),
+        media_ids.get('jellyfin'),
+        item.get('Id'),
+        item.get('id'),
+    ]
+    for val in candidates:
+        if val is not None:
+            s = str(val).strip()
+            if s:
+                return s
+    return None
+
+
 def _extract_declared_media_type(payload: dict[str, Any]) -> str | None:
     media = payload.get('media') if isinstance(payload.get('media'), dict) else {}
     item = payload.get('Item') if isinstance(payload.get('Item'), dict) else {}
@@ -341,6 +581,156 @@ def _dedupe_rows(rows: list[Any]) -> list[Any]:
     return list(deduped.values())
 
 
+def _movie_matches_file_path(session, movie: Movie, file_path: str | None) -> bool:
+    fp = _normalize_path(file_path)
+    if not fp:
+        return False
+    if _normalize_path(getattr(movie, 'radarr_filepath', None)) == fp:
+        return True
+    if _normalize_path(getattr(movie, 'placeholder_filepath', None)) == fp:
+        return True
+    mid = int(getattr(movie, 'id', 0) or 0)
+    if not mid:
+        return False
+    return bool(
+        session.query(Placeholder.id)
+        .filter(Placeholder.movie_id == mid, Placeholder.path == fp)
+        .first()
+    )
+
+
+def _episode_matches_file_path(session, episode: Episode, file_path: str | None) -> bool:
+    fp = _normalize_path(file_path)
+    if not fp:
+        return False
+    if _normalize_path(getattr(episode, 'sonarr_filepath', None)) == fp:
+        return True
+    if _normalize_path(getattr(episode, 'placeholder_filepath', None)) == fp:
+        return True
+    eid = int(getattr(episode, 'id', 0) or 0)
+    if not eid:
+        return False
+    return bool(
+        session.query(Placeholder.id)
+        .filter(Placeholder.episode_id == eid, Placeholder.path == fp)
+        .first()
+    )
+
+
+def _movies_for_media_id_stamp(session, movie_rows: list[Movie], context: dict[str, Any]) -> list[Movie]:
+    """Restrict plex/jellyfin ID seeding to the path-matched Arr row when possible."""
+    path_info = context.get('path_info') if isinstance(context.get('path_info'), dict) else {}
+    movie_id = path_info.get('movie_id')
+    if movie_id is not None:
+        try:
+            want = int(movie_id)
+        except (TypeError, ValueError):
+            want = None
+        if want is not None:
+            matched = [row for row in movie_rows if int(getattr(row, 'id', 0) or 0) == want]
+            if matched:
+                return matched
+    file_path = context.get('file_path')
+    if not _normalize_path(file_path):
+        return []
+    return [row for row in movie_rows if _movie_matches_file_path(session, row, file_path)]
+
+
+def _episodes_for_media_id_stamp(
+    session,
+    episodes: list[Episode],
+    *,
+    file_path: str | None,
+    season_number: int | None = None,
+    episode_number: int | None = None,
+) -> list[Episode]:
+    """Prefer path-matched episodes; otherwise keep S/E (or single-target) fallback."""
+    if _normalize_path(file_path):
+        path_matched = [ep for ep in episodes if _episode_matches_file_path(session, ep, file_path)]
+        if path_matched:
+            return path_matched
+        return []
+    out: list[Episode] = []
+    for ep in episodes:
+        if season_number is not None and episode_number is not None:
+            if ep.season_number == season_number and ep.episode_number == episode_number:
+                out.append(ep)
+        elif len(episodes) == 1:
+            out.append(ep)
+    return out
+
+
+def _stamp_movie_media_ids(
+    session,
+    rows: list[Movie],
+    *,
+    plex_key: str,
+    jelly_key: str,
+    playback_kind: str | None = None,
+) -> None:
+    """Seed media-server ids from a playback payload.
+
+    Placeholder plays may cache the dummy-library rating key on ``plex_dummy_id``
+    (and mirror ``plex_id`` for legacy readers). Real-file plays only update
+    ``plex_id`` so later status projection cannot lock text onto the real library
+    item via a stamped ``plex_dummy_id``.
+    """
+    if not plex_key and not jelly_key:
+        return
+    kind = str(playback_kind or "").strip().lower()
+    for row in rows:
+        changed = False
+        if plex_key:
+            if kind == "real":
+                if row.plex_id != plex_key:
+                    row.plex_id = plex_key
+                    changed = True
+            elif kind == "placeholder":
+                if row.plex_dummy_id != plex_key or row.plex_id != plex_key:
+                    row.plex_dummy_id = plex_key
+                    row.plex_id = plex_key
+                    changed = True
+            # Unknown kind: do not stamp Plex keys (avoids poisoning dummy cache).
+        if jelly_key and getattr(row, 'jellyfin_id', None) != jelly_key:
+            row.jellyfin_id = jelly_key
+            changed = True
+        if changed:
+            row.updated_at = func.now()
+            session.add(row)
+
+
+def _stamp_episode_media_ids(
+    session,
+    episodes: list[Episode],
+    *,
+    plex_key: str,
+    jelly_key: str,
+    playback_kind: str | None = None,
+) -> None:
+    """Seed episode media-server ids; see ``_stamp_movie_media_ids`` for kind rules."""
+    if not plex_key and not jelly_key:
+        return
+    kind = str(playback_kind or "").strip().lower()
+    for ep in episodes:
+        changed = False
+        if plex_key:
+            if kind == "real":
+                if ep.plex_id != plex_key:
+                    ep.plex_id = plex_key
+                    changed = True
+            elif kind == "placeholder":
+                if ep.plex_dummy_id != plex_key or ep.plex_id != plex_key:
+                    ep.plex_dummy_id = plex_key
+                    ep.plex_id = plex_key
+                    changed = True
+        if jelly_key and getattr(ep, 'jellyfin_id', None) != jelly_key:
+            ep.jellyfin_id = jelly_key
+            changed = True
+        if changed:
+            ep.updated_at = func.now()
+            session.add(ep)
+
+
 def _resolve_media_from_path(session, path: str | None) -> dict[str, Any]:
     file_path = _normalize_path(path)
     if not file_path:
@@ -363,7 +753,7 @@ def _resolve_media_from_path(session, path: str | None) -> dict[str, Any]:
             'playback_kind': playback_kind,
             'tmdb_id': int(movie_row.tmdbid) if getattr(movie_row, 'tmdbid', None) else None,
             'movie_id': int(movie_row.id),
-            'matched_instance': _instance_label(bool(getattr(movie_row, 'is_4k', False))),
+            'matched_instance': _instance_label_for_row(movie_row),
         }
 
     episode_row = (
@@ -388,7 +778,7 @@ def _resolve_media_from_path(session, path: str | None) -> dict[str, Any]:
             'season_number': int(episode_row.season.season_number) if episode_row.season else None,
             'episode_number': int(episode_row.episode_number) if getattr(episode_row, 'episode_number', None) else None,
             'series_id': int(series_row.id) if series_row else None,
-            'matched_instance': _instance_label(bool(getattr(series_row, 'is_4k', False))) if series_row else None,
+            'matched_instance': _instance_label_for_row(series_row) if series_row else None,
         }
 
     ph_row = session.query(Placeholder).filter(Placeholder.path == file_path).first()
@@ -401,7 +791,7 @@ def _resolve_media_from_path(session, path: str | None) -> dict[str, Any]:
                     'playback_kind': 'placeholder',
                     'tmdb_id': int(movie.tmdbid) if getattr(movie, 'tmdbid', None) else None,
                     'movie_id': int(movie.id),
-                    'matched_instance': _instance_label(bool(getattr(movie, 'is_4k', False))),
+                    'matched_instance': _instance_label_for_row(movie),
                 }
         if getattr(ph_row, 'episode_id', None):
             ep = (
@@ -420,7 +810,38 @@ def _resolve_media_from_path(session, path: str | None) -> dict[str, Any]:
                     'season_number': int(ep.season.season_number) if ep.season else None,
                     'episode_number': int(ep.episode_number) if getattr(ep, 'episode_number', None) else None,
                     'series_id': int(series.id) if series else None,
-                    'matched_instance': _instance_label(bool(getattr(series, 'is_4k', False))) if series else None,
+                    'matched_instance': _instance_label_for_row(series) if series else None,
+                }
+        # Series / season density stubs: Placeholder has series_id, no episode_id.
+        if getattr(ph_row, 'series_id', None):
+            from services.source_of_truth.tv_density import (
+                PLACEHOLDER_KIND_SEASON_STUB,
+                PLACEHOLDER_KIND_SERIES_STUB,
+            )
+
+            series = session.query(Series).filter(Series.id == int(ph_row.series_id)).first()
+            if series:
+                kind = str(getattr(ph_row, 'placeholder_kind', '') or '')
+                season_number = 1
+                episode_number = 1
+                if kind == PLACEHOLDER_KIND_SEASON_STUB and getattr(ph_row, 'season_id', None):
+                    season = session.query(Season).filter(Season.id == int(ph_row.season_id)).first()
+                    if season is not None and getattr(season, 'season_number', None) is not None:
+                        season_number = int(season.season_number)
+                return {
+                    'media_type': 'episode',
+                    'playback_kind': 'placeholder',
+                    'tvdb_id': int(series.tvdbid) if getattr(series, 'tvdbid', None) else None,
+                    'season_number': season_number,
+                    'episode_number': episode_number,
+                    'series_id': int(series.id),
+                    'matched_instance': _instance_label_for_row(series),
+                    'file_path': file_path,
+                    'density_stub_kind': (
+                        'season' if kind == PLACEHOLDER_KIND_SEASON_STUB else 'series'
+                        if kind in {PLACEHOLDER_KIND_SERIES_STUB, PLACEHOLDER_KIND_SEASON_STUB}
+                        else None
+                    ),
                 }
 
     return {'media_type': 'unknown', 'playback_kind': 'unknown'}
@@ -475,6 +896,19 @@ def _try_resolve_episode_from_catalog_ids(
         return None
     if tvdb_id is None and sonarr_series_id is None:
         return None
+
+    def _pack(episode_row: Episode) -> dict[str, Any]:
+        series_row = episode_row.season.series if episode_row.season else None
+        return {
+            'media_type': 'episode',
+            'playback_kind': _playback_kind_from_episode_row(episode_row),
+            'tvdb_id': int(series_row.tvdbid) if series_row and getattr(series_row, 'tvdbid', None) else None,
+            'season_number': int(episode_row.season.season_number) if episode_row.season else None,
+            'episode_number': int(episode_row.episode_number) if getattr(episode_row, 'episode_number', None) is not None else None,
+            'series_id': int(series_row.id) if series_row else None,
+            'matched_instance': _instance_label_for_row(series_row) if series_row else None,
+        }
+
     q = (
         session.query(Episode)
         .join(Season, Episode.season_id == Season.id)
@@ -491,6 +925,21 @@ def _try_resolve_episode_from_catalog_ids(
     else:
         q = q.filter(Series.sonarrid == int(sonarr_series_id))
     rows = q.all()
+    if not rows and tvdb_id is not None:
+        # Tracearr/Plex often put the *episode* TVDB Guid on the item, not the series id.
+        rows = (
+            session.query(Episode)
+            .join(Season, Episode.season_id == Season.id)
+            .join(Series, Season.series_id == Series.id)
+            .filter(
+                Episode.is_deleted == False,  # noqa: E712
+                Series.is_deleted == False,  # noqa: E712
+                Episode.sonarr_episode_tvdbid == int(tvdb_id),
+                Season.season_number == season_number,
+                Episode.episode_number == episode_number,
+            )
+            .all()
+        )
     if not rows:
         return None
     if len(rows) > 1:
@@ -503,16 +952,7 @@ def _try_resolve_episode_from_catalog_ids(
         )
     else:
         episode_row = rows[0]
-    series_row = episode_row.season.series if episode_row.season else None
-    return {
-        'media_type': 'episode',
-        'playback_kind': _playback_kind_from_episode_row(episode_row),
-        'tvdb_id': int(series_row.tvdbid) if series_row and getattr(series_row, 'tvdbid', None) else None,
-        'season_number': int(episode_row.season.season_number) if episode_row.season else None,
-        'episode_number': int(episode_row.episode_number) if getattr(episode_row, 'episode_number', None) is not None else None,
-        'series_id': int(series_row.id) if series_row else None,
-        'matched_instance': _instance_label(bool(getattr(series_row, 'is_4k', False))) if series_row else None,
-    }
+    return _pack(episode_row)
 
 
 def _try_resolve_movie_from_catalog_ids(session, *, tmdb_id: int | None, imdb_id: str | None) -> dict[str, Any] | None:
@@ -541,7 +981,7 @@ def _try_resolve_movie_from_catalog_ids(session, *, tmdb_id: int | None, imdb_id
         'playback_kind': _playback_kind_from_movie_row(movie_row),
         'tmdb_id': int(movie_row.tmdbid) if getattr(movie_row, 'tmdbid', None) else None,
         'movie_id': int(movie_row.id),
-        'matched_instance': _instance_label(bool(getattr(movie_row, 'is_4k', False))),
+        'matched_instance': _instance_label_for_row(movie_row),
     }
 
 
@@ -599,12 +1039,184 @@ def _merge_path_info_with_catalog_ids(
     return merged
 
 
+def _payload_indicates_placeholdarr_stub(payload: dict[str, Any]) -> bool:
+    """True when Tracearr/Tautulli text marks a Placeholdarr density placeholder play."""
+    from services.source_of_truth.tv_density import text_marks_density_placeholder
+
+    media = payload.get('media') if isinstance(payload.get('media'), dict) else {}
+    data = payload.get('data') if isinstance(payload.get('data'), dict) else {}
+    data_media = data.get('media') if isinstance(data.get('media'), dict) else {}
+    chunks = [
+        media.get('subtitle'),
+        media.get('title'),
+        data_media.get('subtitle'),
+        data_media.get('title'),
+        payload.get('title'),
+    ]
+    blob = ' '.join(str(c or '') for c in chunks)
+    return text_marks_density_placeholder(blob)
+
+
+def _enrich_ids_and_path_from_plex_rating_key(
+    *,
+    plex_id: str | None,
+    file_path: str | None,
+    tmdb_id: int | None,
+    tvdb_id: int | None,
+    imdb_id: str | None,
+    season_number: int | None,
+    episode_number: int | None,
+    declared_media_type: str | None,
+) -> dict[str, Any]:
+    """Fill missing path / Guids / S/E from Plex when the webhook is thin."""
+    out: dict[str, Any] = {
+        'file_path': file_path,
+        'tmdb_id': tmdb_id,
+        'tvdb_id': tvdb_id,
+        'imdb_id': imdb_id,
+        'season_number': season_number,
+        'episode_number': episode_number,
+        'declared_media_type': declared_media_type,
+    }
+    needs_ids = (tmdb_id is None and tvdb_id is None and not imdb_id) or not file_path
+    if not plex_id or not needs_ids:
+        return out
+    try:
+        from services.media_servers.plex import fetch_plex_item_playback_hints
+
+        hints = fetch_plex_item_playback_hints(plex_id)
+    except Exception as exc:
+        logger.debug(
+            f"Plex ratingKey enrichment skipped: {type(exc).__name__}: {exc}",
+            extra={'emoji_type': 'debug'},
+        )
+        return out
+    if not hints:
+        return out
+    logger.info(
+        f"playback Plex ratingKey enrich rating_key={plex_id} "
+        f"tvdb={hints.get('tvdb_id')} tmdb={hints.get('tmdb_id')} "
+        f"path={'yes' if hints.get('file_path') else 'no'}",
+        extra={'emoji_type': 'playback'},
+    )
+    if not out['file_path'] and hints.get('file_path'):
+        out['file_path'] = _normalize_path(hints['file_path'])
+    if out['tmdb_id'] is None and hints.get('tmdb_id') is not None:
+        out['tmdb_id'] = int(hints['tmdb_id'])
+    if out['tvdb_id'] is None and hints.get('tvdb_id') is not None:
+        out['tvdb_id'] = int(hints['tvdb_id'])
+    if not out['imdb_id'] and hints.get('imdb_id'):
+        out['imdb_id'] = str(hints['imdb_id'])
+    if out['season_number'] is None and hints.get('season_number') is not None:
+        out['season_number'] = int(hints['season_number'])
+    if out['episode_number'] is None and hints.get('episode_number') is not None:
+        out['episode_number'] = int(hints['episode_number'])
+    if not out['declared_media_type'] and hints.get('media_type') in {'movie', 'episode'}:
+        out['declared_media_type'] = str(hints['media_type'])
+    return out
+
+
+def _upgrade_unknown_kind_via_density_stub(
+    session,
+    path_info: dict[str, Any],
+    payload: dict[str, Any],
+    *,
+    season_number: int | None,
+    episode_number: int | None,
+) -> dict[str, Any]:
+    """When catalog match leaves kind unknown, treat active density stubs as placeholder."""
+    pk = str(path_info.get('playback_kind') or 'unknown')
+    if pk not in ('unknown', '', 'none', 'None'):
+        return path_info
+
+    series_id = path_info.get('series_id')
+    tvdb_id = path_info.get('tvdb_id')
+    imdb_id = _extract_imdb_id(payload)
+    series_row: Series | None = None
+    if series_id is not None:
+        series_row = session.query(Series).filter(Series.id == int(series_id), Series.is_deleted == False).first()  # noqa: E712
+    if series_row is None and tvdb_id is not None:
+        series_row = (
+            session.query(Series)
+            .filter(Series.tvdbid == int(tvdb_id), Series.is_deleted == False)  # noqa: E712
+            .order_by(Series.id.desc())
+            .first()
+        )
+    if series_row is None and imdb_id:
+        series_row = (
+            session.query(Series)
+            .filter(Series.imdbid == imdb_id, Series.is_deleted == False)  # noqa: E712
+            .order_by(Series.id.desc())
+            .first()
+        )
+    if series_row is None:
+        return path_info
+
+    from services.source_of_truth.tv_density import density_uses_season_stub, density_uses_series_stub
+
+    stub_marker = _payload_indicates_placeholdarr_stub(payload)
+    season_stub = None
+    stub_path = path_info.get('file_path')
+    if density_uses_season_stub(series_row):
+        if stub_path:
+            season_stub = _find_active_season_density_stub(
+                session,
+                series_id=int(series_row.id),
+                file_path=stub_path,
+            )
+        if season_stub is None and season_number is not None and (stub_marker or episode_number == 1):
+            season = (
+                session.query(Season)
+                .filter(Season.series_id == int(series_row.id), Season.season_number == int(season_number))
+                .first()
+            )
+            if season is not None:
+                season_stub = _find_active_season_density_stub(session, season_id=int(season.id))
+
+    series_stub = None
+    if season_stub is None and density_uses_series_stub(series_row):
+        series_stub = _find_active_series_density_stub(session, int(series_row.id))
+    if season_stub is None and series_stub is None:
+        return path_info
+
+    # Prefer explicit stub markers; otherwise only when SxxE01 matches stub convention.
+    if not stub_marker:
+        if episode_number != 1:
+            return path_info
+        if season_stub is None and (season_number not in (None, 1)):
+            return path_info
+        if season_stub is not None and season_number is not None:
+            season = session.query(Season).filter(Season.id == int(season_stub.season_id)).first() if getattr(season_stub, 'season_id', None) else None
+            if season is not None and int(getattr(season, 'season_number', -1)) != int(season_number):
+                return path_info
+
+    stub = season_stub or series_stub
+    merged = dict(path_info)
+    merged['playback_kind'] = 'placeholder'
+    merged['media_type'] = 'episode'
+    merged['series_id'] = int(series_row.id)
+    if getattr(series_row, 'tvdbid', None):
+        merged['tvdb_id'] = int(series_row.tvdbid)
+    merged['matched_instance'] = _instance_label_for_row(series_row)
+    if stub and getattr(stub, 'path', None):
+        merged['file_path'] = _normalize_path(stub.path) or stub.path
+    merged['density_stub_kind'] = 'season' if season_stub else 'series'
+    logger.info(
+        f"playback density stub kind upgrade series_id={series_row.id} "
+        f"kind={merged['density_stub_kind']} marker={stub_marker}",
+        extra={'emoji_type': 'playback'},
+    )
+    return merged
+
+
 def _resolve_playback_context(session, payload: dict[str, Any]) -> dict[str, Any]:
     tmdb_id = _extract_movie_tmdb_id(payload)
     sonarr_series_id, tvdb_id = _extract_series_ids(payload)
     imdb_id = _extract_imdb_id(payload)
     season_number, episode_number = _extract_season_episode(payload)
     file_path = _extract_file_path(payload)
+    plex_id = _extract_plex_rating_key(payload)
+    jellyfin_id = _extract_jellyfin_item_id(payload)
     # If no path found in the payload, attempt to fetch it from Jellyfin using ItemId/UserId
     if not file_path:
         try:
@@ -630,6 +1242,25 @@ def _resolve_playback_context(session, payload: dict[str, Any]) -> dict[str, Any
         except Exception as e:
             logger.debug(f"Error fetching Jellyfin file path: {e}", extra={'emoji_type': 'debug'})
     declared_media_type = _extract_declared_media_type(payload)
+
+    enriched = _enrich_ids_and_path_from_plex_rating_key(
+        plex_id=plex_id,
+        file_path=file_path,
+        tmdb_id=tmdb_id,
+        tvdb_id=tvdb_id,
+        imdb_id=imdb_id,
+        season_number=season_number,
+        episode_number=episode_number,
+        declared_media_type=declared_media_type,
+    )
+    file_path = enriched['file_path']
+    tmdb_id = enriched['tmdb_id']
+    tvdb_id = enriched['tvdb_id']
+    imdb_id = enriched['imdb_id']
+    season_number = enriched['season_number']
+    episode_number = enriched['episode_number']
+    declared_media_type = enriched['declared_media_type']
+
     path_info = _resolve_media_from_path(session, file_path)
     path_info = _merge_path_info_with_catalog_ids(
         session,
@@ -642,6 +1273,37 @@ def _resolve_playback_context(session, payload: dict[str, Any]) -> dict[str, Any
         episode_number=episode_number,
         declared_media_type=declared_media_type,
     )
+    path_info = _upgrade_unknown_kind_via_density_stub(
+        session,
+        path_info,
+        payload,
+        season_number=season_number if season_number is not None else path_info.get('season_number'),
+        episode_number=episode_number if episode_number is not None else path_info.get('episode_number'),
+    )
+
+    # Path roots beat catalog flags during import grace: has_file stays false until
+    # finalize, so catalog match would still say "placeholder" for a real Arr path.
+    resolved_path = _normalize_path(file_path) or _normalize_path(path_info.get('file_path'))
+    if resolved_path:
+        try:
+            from services.source_of_truth.filesystem import is_path_under_configured_roots
+
+            under_placeholder_roots = is_path_under_configured_roots(resolved_path)
+        except Exception:
+            under_placeholder_roots = False
+        kind_now = str(path_info.get('playback_kind') or 'unknown')
+        if under_placeholder_roots and kind_now != 'placeholder':
+            path_info['playback_kind'] = 'placeholder'
+            logger.info(
+                f"playback kind override under-placeholder-roots -> placeholder path={resolved_path}",
+                extra={'emoji_type': 'playback'},
+            )
+        elif not under_placeholder_roots and kind_now == 'placeholder':
+            path_info['playback_kind'] = 'real'
+            logger.info(
+                f"playback kind override outside-placeholder-roots -> real path={resolved_path}",
+                extra={'emoji_type': 'playback'},
+            )
 
     if tmdb_id is None and path_info.get('tmdb_id') is not None:
         tmdb_id = int(path_info['tmdb_id'])
@@ -651,6 +1313,8 @@ def _resolve_playback_context(session, payload: dict[str, Any]) -> dict[str, Any
         season_number = int(path_info['season_number'])
     if episode_number is None and path_info.get('episode_number') is not None:
         episode_number = int(path_info['episode_number'])
+    if not file_path and path_info.get('file_path'):
+        file_path = _normalize_path(path_info.get('file_path'))
 
     media_type = 'unknown'
     if path_info.get('media_type') in {'movie', 'episode'}:
@@ -671,6 +1335,8 @@ def _resolve_playback_context(session, payload: dict[str, Any]) -> dict[str, Any
         'imdb_id': imdb_id,
         'season_number': season_number,
         'episode_number': episode_number,
+        'plex_id': plex_id,
+        'jellyfin_id': jellyfin_id,
         'path_info': path_info,
     }
 
@@ -727,12 +1393,10 @@ def _find_series_rows(session, *, sonarr_id: int | None, tvdb_id: int | None, im
             .all()
         )
         rows.extend([ep.season.series for ep in episode_rows if ep.season and ep.season.series])
+        ph_rows = session.query(Placeholder).filter(Placeholder.path == file_path).all()
         ph_episode_ids = [
             int(row.episode_id)
-            for row in session.query(Placeholder).filter(
-                Placeholder.path == file_path,
-                Placeholder.episode_id.isnot(None),
-            ).all()
+            for row in ph_rows
             if getattr(row, 'episode_id', None)
         ]
         if ph_episode_ids:
@@ -744,6 +1408,13 @@ def _find_series_rows(session, *, sonarr_id: int | None, tvdb_id: int | None, im
                 .all()
             )
             rows.extend([ep.season.series for ep in episode_rows if ep.season and ep.season.series])
+        ph_series_ids = [
+            int(row.series_id)
+            for row in ph_rows
+            if getattr(row, 'series_id', None) and not getattr(row, 'episode_id', None)
+        ]
+        if ph_series_ids:
+            rows.extend(session.query(Series).filter(Series.id.in_(ph_series_ids)).all())
     return _dedupe_rows(rows)
 
 
@@ -752,147 +1423,251 @@ def _active_rows_by_instance(rows: list[Any]) -> dict[str, Any]:
     for row in rows:
         if bool(getattr(row, 'is_deleted', False)):
             continue
-        label = _instance_label(bool(getattr(row, 'is_4k', False)))
-        active[label] = row
+        key = _row_instance_key(row)
+        if not key:
+            continue
+        if getattr(row, 'instance_key', None) != key:
+            row.instance_key = key
+        active[key] = row
     return active
 
 
-def _select_rows_by_preference(rows_by_instance: dict[str, Any], preference: str) -> dict[str, Any]:
-    qualifying_instances = [label for label in ('standard', '4k') if rows_by_instance.get(label) is not None]
-    if preference == 'both':
-        return {
-            'rows': [rows_by_instance[label] for label in qualifying_instances],
-            'chosen_instances': qualifying_instances,
-            'qualifying_instances': qualifying_instances,
-            'preferred_instance': None,
-            'fallback_instance': None,
-            'selection_reason': 'preference_both',
-            'immediate_fallback': False,
-        }
+def _ranked_keys_with_rows(media_type: str, rows_by_instance: dict[str, Any]) -> list[str]:
+    from services.playback_routing import get_candidate_instances_for_movie, get_candidate_instances_for_tv
 
-    preferred_instance = '4k' if preference == '4k' else 'standard'
-    fallback_instance = 'standard' if preferred_instance == '4k' else '4k'
-    preferred_row = rows_by_instance.get(preferred_instance)
-    if preferred_row is not None:
-        return {
-            'rows': [preferred_row],
-            'chosen_instances': [preferred_instance],
-            'qualifying_instances': qualifying_instances,
-            'preferred_instance': preferred_instance,
-            'fallback_instance': fallback_instance if rows_by_instance.get(fallback_instance) is not None else None,
-            'selection_reason': 'preferred_active_row',
-            'immediate_fallback': False,
-        }
+    ranking = (
+        get_candidate_instances_for_movie()
+        if media_type == 'movie'
+        else get_candidate_instances_for_tv()
+    )
+    ordered: list[str] = []
+    for key in ranking or []:
+        normalized = str(key or '').strip().lower()
+        if normalized and normalized in rows_by_instance and normalized not in ordered:
+            ordered.append(normalized)
+    for key in rows_by_instance.keys():
+        if key not in ordered:
+            ordered.append(key)
+    return ordered
 
-    fallback_row = rows_by_instance.get(fallback_instance)
-    if fallback_row is not None:
-        return {
-            'rows': [fallback_row],
-            'chosen_instances': [fallback_instance],
-            'qualifying_instances': qualifying_instances,
-            'preferred_instance': preferred_instance,
-            'fallback_instance': fallback_instance,
-            'selection_reason': 'preferred_missing_active_row',
-            'immediate_fallback': True,
-        }
 
+def _fallback_queue(
+    preferred: str | None,
+    media_type: str,
+    rows_by_instance: dict[str, Any],
+    *,
+    fallback_keys: list[str] | None = None,
+) -> list[str]:
+    """Return Fallback try order after preferred (ARR Integrations list order)."""
+    preferred_key = str(preferred or '').strip().lower() or None
+    wanted = {str(k or '').strip().lower() for k in (fallback_keys or []) if str(k or '').strip()}
+    wanted.discard(preferred_key or '')
+    return [key for key in _rank_filter_keys(media_type, wanted) if key in rows_by_instance]
+
+
+def _selection_result(
+    rows_by_instance: dict[str, Any],
+    *,
+    chosen_keys: list[str],
+    preferred_instance: str | None,
+    fallback_instances: list[str],
+    selection_reason: str,
+    immediate_fallback: bool = False,
+    root_match: str | None = None,
+    qualifying_instances: list[str] | None = None,
+) -> dict[str, Any]:
+    qualifying = list(qualifying_instances) if qualifying_instances is not None else list(rows_by_instance.keys())
+    fallbacks = [str(k).strip().lower() for k in fallback_instances if str(k or '').strip()]
+    chosen = [str(k).strip().lower() for k in chosen_keys if str(k or '').strip() and k in rows_by_instance]
     return {
-        'rows': [],
-        'chosen_instances': [],
-        'qualifying_instances': qualifying_instances,
+        'rows': [rows_by_instance[key] for key in chosen],
+        'chosen_instances': chosen,
+        'qualifying_instances': qualifying,
         'preferred_instance': preferred_instance,
-        'fallback_instance': None,
-        'selection_reason': 'no_active_rows',
-        'immediate_fallback': False,
+        'fallback_instance': fallbacks[0] if fallbacks else None,
+        'fallback_instances': fallbacks,
+        'selection_reason': selection_reason,
+        'immediate_fallback': immediate_fallback,
+        'root_match': root_match,
     }
 
 
+def _select_play_actions_placeholder_rows(
+    rows_by_instance: dict[str, Any],
+    *,
+    media_type: str,
+    file_path: str | None,
+) -> dict[str, Any]:
+    """Path-matched first, plus Always now; Fallback becomes the delayed/immediate queue."""
+    match_fn = _match_movie_instance_from_path if media_type == 'movie' else _match_tv_instance_from_path
+    root_match = match_fn(file_path)
+    ranked = _ranked_keys_with_rows(media_type, rows_by_instance)
+    always = set(_play_actions_keys(media_type, 'always'))
+    fallback = _effective_fallback_keys(media_type)
+    always_ordered = [key for key in _rank_filter_keys(media_type, always) if key in rows_by_instance]
+
+    unique_path = (
+        str(root_match).strip().lower()
+        if root_match and root_match not in {'all', 'both'}
+        else None
+    )
+
+    if unique_path and unique_path in rows_by_instance:
+        chosen = [unique_path]
+        for key in always_ordered:
+            if key not in chosen:
+                chosen.append(key)
+        fallbacks = _fallback_queue(
+            unique_path,
+            media_type,
+            rows_by_instance,
+            fallback_keys=fallback,
+        )
+        fallbacks = [key for key in fallbacks if key not in chosen]
+        return _selection_result(
+            rows_by_instance,
+            chosen_keys=chosen,
+            preferred_instance=unique_path,
+            fallback_instances=fallbacks,
+            selection_reason='placeholder_path_match_play_actions',
+            root_match=root_match,
+            qualifying_instances=ranked,
+        )
+
+    # Path unclear or path-matched Arr has no active row: Always now; first Fallback immediate.
+    chosen = list(always_ordered)
+    fallback_with_rows = [
+        key
+        for key in _rank_filter_keys(media_type, set(fallback))
+        if key in rows_by_instance and key not in chosen
+    ]
+    immediate = False
+    preferred: str | None = unique_path
+    fallbacks: list[str] = []
+    if fallback_with_rows:
+        head, *tail = fallback_with_rows
+        chosen.append(head)
+        preferred = head
+        fallbacks = list(tail)
+        immediate = bool(unique_path)  # path existed but no row, or ambiguous with fallback
+        reason = (
+            'placeholder_path_missing_immediate_fallback'
+            if unique_path
+            else 'placeholder_ambiguous_play_actions'
+        )
+    elif chosen:
+        preferred = chosen[0]
+        reason = (
+            'placeholder_path_missing_always_only'
+            if unique_path
+            else 'placeholder_ambiguous_always_only'
+        )
+    else:
+        # Always/Fallback all Off (or no active rows): do not invent a first-ranked target.
+        return _selection_result(
+            rows_by_instance,
+            chosen_keys=[],
+            preferred_instance=unique_path,
+            fallback_instances=[],
+            selection_reason=(
+                'placeholder_play_actions_all_off' if ranked else 'placeholder_no_active_rows'
+            ),
+            root_match=root_match,
+            qualifying_instances=ranked,
+        )
+
+    return _selection_result(
+        rows_by_instance,
+        chosen_keys=chosen,
+        preferred_instance=preferred,
+        fallback_instances=fallbacks,
+        selection_reason=reason,
+        immediate_fallback=immediate,
+        root_match=root_match,
+        qualifying_instances=ranked,
+    )
+
+
+def _select_placeholder_rows(
+    rows_by_instance: dict[str, Any],
+    *,
+    media_type: str,
+    file_path: str | None,
+) -> dict[str, Any]:
+    """Select which Arr instance(s) to search when a placeholder plays."""
+    return _select_play_actions_placeholder_rows(
+        rows_by_instance,
+        media_type=media_type,
+        file_path=file_path,
+    )
+
+
 def _select_tv_real_rows(rows_by_instance: dict[str, Any], file_path: str | None) -> dict[str, Any]:
-    mode = _tv_instance_mode()
-    if mode == 'both':
-        selection = _select_rows_by_preference(rows_by_instance, 'both')
-        selection['selection_reason'] = 'tv_mode_both'
-        selection['root_match'] = _match_tv_instance_from_path(file_path)
-        return selection
+    """Real TV play: path-matched Sonarr plus Real file · Always; ambiguous follows Placeholder play."""
+    root_match = _match_tv_instance_from_path(file_path)
+    ranked = _ranked_keys_with_rows('tv', rows_by_instance)
+    real_also = set(_play_actions_keys('tv', 'real_also'))
+    also_ordered = [key for key in _rank_filter_keys('tv', real_also) if key in rows_by_instance]
+    unique_path = (
+        str(root_match).strip().lower()
+        if root_match and root_match not in {'all', 'both'}
+        else None
+    )
 
-    if mode == 'match':
-        matched_instance = _match_tv_instance_from_path(file_path)
-        if matched_instance in {'standard', '4k'} and rows_by_instance.get(matched_instance) is not None:
-            fallback_instance = '4k' if matched_instance == 'standard' else 'standard'
-            return {
-                'rows': [rows_by_instance[matched_instance]],
-                'chosen_instances': [matched_instance],
-                'qualifying_instances': [label for label in ('standard', '4k') if rows_by_instance.get(label) is not None],
-                'preferred_instance': matched_instance,
-                'fallback_instance': fallback_instance if rows_by_instance.get(fallback_instance) is not None else None,
-                'selection_reason': 'matched_by_root',
-                'immediate_fallback': False,
-                'root_match': matched_instance,
-            }
+    if unique_path and unique_path in rows_by_instance:
+        chosen: list[str] = [unique_path]
+        for key in also_ordered:
+            if key not in chosen:
+                chosen.append(key)
+        return _selection_result(
+            rows_by_instance,
+            chosen_keys=chosen,
+            preferred_instance=unique_path,
+            fallback_instances=[],
+            selection_reason='tv_real_play_actions',
+            root_match=root_match,
+            qualifying_instances=ranked,
+        )
 
-        selection = _select_rows_by_preference(rows_by_instance, _search_preference())
-        selection['selection_reason'] = 'match_ambiguous_used_preference' if matched_instance == 'both' else 'match_missing_used_preference'
-        selection['root_match'] = matched_instance
-        return selection
+    # Path unclear or path-matched Arr inactive: same Always / Fallback rules as Placeholder play.
+    return _select_play_actions_placeholder_rows(
+        rows_by_instance,
+        media_type='tv',
+        file_path=file_path,
+    )
 
-    if mode == 'primary':
-        matched_instance = _match_tv_instance_from_path(file_path)
-        qualifying_instances = [label for label in ('standard', '4k') if rows_by_instance.get(label) is not None]
-        row = rows_by_instance.get('standard')
-        fallback = rows_by_instance.get('4k')
-        if row is not None:
-            return {
-                'rows': [row],
-                'chosen_instances': ['standard'],
-                'qualifying_instances': qualifying_instances,
-                'preferred_instance': 'standard',
-                'fallback_instance': '4k' if fallback is not None else None,
-                'selection_reason': 'tv_mode_primary',
-                'immediate_fallback': False,
-                'root_match': matched_instance,
-            }
-        return {
-            'rows': [],
-            'chosen_instances': [],
-            'qualifying_instances': qualifying_instances,
-            'preferred_instance': 'standard',
-            'fallback_instance': None,
-            'selection_reason': 'tv_mode_primary_no_row',
-            'immediate_fallback': False,
-            'root_match': matched_instance,
-        }
 
-    if mode == 'secondary':
-        matched_instance = _match_tv_instance_from_path(file_path)
-        qualifying_instances = [label for label in ('standard', '4k') if rows_by_instance.get(label) is not None]
-        row = rows_by_instance.get('4k')
-        fallback = rows_by_instance.get('standard')
-        if row is not None:
-            return {
-                'rows': [row],
-                'chosen_instances': ['4k'],
-                'qualifying_instances': qualifying_instances,
-                'preferred_instance': '4k',
-                'fallback_instance': 'standard' if fallback is not None else None,
-                'selection_reason': 'tv_mode_secondary',
-                'immediate_fallback': False,
-                'root_match': matched_instance,
-            }
-        return {
-            'rows': [],
-            'chosen_instances': [],
-            'qualifying_instances': qualifying_instances,
-            'preferred_instance': '4k',
-            'fallback_instance': None,
-            'selection_reason': 'tv_mode_secondary_no_row',
-            'immediate_fallback': False,
-            'root_match': matched_instance,
-        }
+def _select_movie_real_rows(rows_by_instance: dict[str, Any], file_path: str | None) -> dict[str, Any]:
+    """Real movie play: Real file · Always when path is clear; ambiguous follows Placeholder play."""
+    root_match = _match_movie_instance_from_path(file_path)
+    ranked = _ranked_keys_with_rows('movie', rows_by_instance)
+    real_also = set(_play_actions_keys('movie', 'real_also'))
+    unique_path = (
+        str(root_match).strip().lower()
+        if root_match and root_match not in {'all', 'both'}
+        else None
+    )
 
-    selection = _select_rows_by_preference(rows_by_instance, _search_preference())
-    selection['selection_reason'] = 'tv_preference_mode'
-    selection['root_match'] = _match_tv_instance_from_path(file_path)
-    return selection
+    if unique_path and unique_path in rows_by_instance:
+        # Path-matched already has the file; only action Real file · Always instances.
+        chosen = [key for key in _rank_filter_keys('movie', real_also) if key in rows_by_instance]
+        preferred = chosen[0] if chosen else None
+        return _selection_result(
+            rows_by_instance,
+            chosen_keys=chosen,
+            preferred_instance=preferred,
+            fallback_instances=[],
+            selection_reason='movie_real_play_actions' if chosen else 'movie_real_noop',
+            root_match=root_match,
+            qualifying_instances=ranked,
+        )
+
+    # Path unclear or path-matched Arr inactive: same Always / Fallback rules as Placeholder play.
+    return _select_play_actions_placeholder_rows(
+        rows_by_instance,
+        media_type='movie',
+        file_path=file_path,
+    )
 
 
 def _play_mode() -> str:
@@ -902,9 +1677,238 @@ def _play_mode() -> str:
 
 def _episode_lookahead() -> int:
     try:
-        return max(1, int(getattr(settings, 'EPISODES_LOOKAHEAD', 5) or 5))
+        return max(1, int(getattr(settings, 'EPISODES_LOOKAHEAD', 3) or 3))
     except Exception:
         return 5
+
+
+def _find_active_series_density_stub(session, series_id: int) -> Placeholder | None:
+    from services.source_of_truth.tv_density import PLACEHOLDER_KIND_SERIES_STUB
+
+    return (
+        session.query(Placeholder)
+        .filter(
+            Placeholder.series_id == int(series_id),
+            Placeholder.placeholder_kind == PLACEHOLDER_KIND_SERIES_STUB,
+            Placeholder.episode_id.is_(None),
+            Placeholder.movie_id.is_(None),
+            Placeholder.has_placeholder == True,  # noqa: E712
+        )
+        .order_by(Placeholder.id.desc())
+        .first()
+    )
+
+
+def _season_number_hint_from_path(file_path: str) -> int | None:
+    """Best-effort season number from a density stub path (sNNeXX or Season NN folder)."""
+    import re
+
+    path = str(file_path or "").strip()
+    if not path:
+        return None
+    base = os.path.basename(path).lower().replace(" ", "")
+    m = re.search(r"s(\d{1,2})e\d{1,2}", base)
+    if m:
+        return int(m.group(1))
+    normalized = path.replace("\\", "/").lower()
+    m2 = re.search(r"(?:^|/)season[ ._-]?(\d{1,2})(?:/|$)", normalized)
+    if m2:
+        return int(m2.group(1))
+    return None
+
+
+def _find_active_season_density_stub(
+    session,
+    *,
+    series_id: int | None = None,
+    season_id: int | None = None,
+    file_path: str | None = None,
+) -> Placeholder | None:
+    from services.source_of_truth.tv_density import PLACEHOLDER_KIND_SEASON_STUB
+
+    q = session.query(Placeholder).filter(
+        Placeholder.placeholder_kind == PLACEHOLDER_KIND_SEASON_STUB,
+        Placeholder.episode_id.is_(None),
+        Placeholder.movie_id.is_(None),
+        Placeholder.has_placeholder == True,  # noqa: E712
+    )
+    if season_id is not None:
+        q = q.filter(Placeholder.season_id == int(season_id))
+    if series_id is not None:
+        q = q.filter(Placeholder.series_id == int(series_id))
+    rows = q.order_by(Placeholder.id.desc()).all()
+    if not rows:
+        return None
+    path = str(file_path or "").strip()
+    if path:
+        for row in rows:
+            if not row.path:
+                continue
+            try:
+                if os.path.normpath(os.path.abspath(row.path)) == os.path.normpath(os.path.abspath(path)):
+                    return row
+            except Exception:
+                if os.path.normpath(row.path) == os.path.normpath(path):
+                    return row
+        # Path given but no exact match: resolve by season hint from filename/folder.
+        # Never fall back to an arbitrary first stub (wrong season on multi-season shows).
+        sn = _season_number_hint_from_path(path)
+        if sn is not None and series_id is not None:
+            season = (
+                session.query(Season)
+                .filter(Season.series_id == int(series_id), Season.season_number == int(sn))
+                .first()
+            )
+            if season is not None:
+                sid = int(season.id)
+                for row in rows:
+                    if getattr(row, "season_id", None) is not None and int(row.season_id) == sid:
+                        return row
+                return None
+        if season_id is not None:
+            # Caller already scoped to one season; path was optional disambiguation.
+            return rows[0]
+        return None
+    # No path: only safe when scoped to one season, or only one stub exists.
+    if season_id is not None or len(rows) == 1:
+        return rows[0]
+    return None
+
+
+def _path_is_series_density_stub(
+    session,
+    series_row: Series,
+    file_path: str | None,
+    payload: dict[str, Any] | None = None,
+) -> bool:
+    """True when the play is this series' density stub (path and/or stub markers)."""
+    from services.source_of_truth.tv_density import density_uses_series_stub, text_marks_density_placeholder
+
+    # Ignore leftover series stub rows/filenames after density changes away from series.
+    if not density_uses_series_stub(series_row):
+        return False
+
+    path = str(file_path or "").strip()
+    if path:
+        stub = _find_active_series_density_stub(session, int(series_row.id))
+        if stub and stub.path:
+            try:
+                if os.path.normpath(os.path.abspath(stub.path)) == os.path.normpath(os.path.abspath(path)):
+                    return True
+            except Exception:
+                if os.path.normpath(stub.path) == os.path.normpath(path):
+                    return True
+        base = os.path.basename(path).lower()
+        if text_marks_density_placeholder(base) and "s01e01" in base.replace(" ", ""):
+            return True
+    if payload and _payload_indicates_placeholdarr_stub(payload):
+        return _find_active_series_density_stub(session, int(series_row.id)) is not None
+    return False
+
+
+def _path_is_season_density_stub(
+    session,
+    series_row: Series,
+    file_path: str | None,
+    payload: dict[str, Any] | None = None,
+) -> Placeholder | None:
+    """Return the season stub Placeholder when this play is a season density stub."""
+    from services.source_of_truth.tv_density import density_uses_season_stub
+
+    # Ignore leftover season stub rows/filenames after density changes away from season.
+    if not density_uses_season_stub(series_row):
+        return None
+
+    path = str(file_path or "").strip()
+    if path:
+        stub = _find_active_season_density_stub(session, series_id=int(series_row.id), file_path=path)
+        if stub:
+            return stub
+        base = os.path.basename(path).lower().replace(" ", "")
+        if "placeholdarrstub" in base or "placeholdarrplaceholder" in base:
+            import re
+
+            m = re.search(r"s(\d{1,2})e01", base)
+            if m:
+                sn = int(m.group(1))
+                season = (
+                    session.query(Season)
+                    .filter(Season.series_id == int(series_row.id), Season.season_number == sn)
+                    .first()
+                )
+                if season:
+                    return _find_active_season_density_stub(session, season_id=int(season.id))
+    if payload and _payload_indicates_placeholdarr_stub(payload):
+        season_number, _episode_number = _extract_season_episode(payload)
+        if season_number is None:
+            return None
+        season = (
+            session.query(Season)
+            .filter(Season.series_id == int(series_row.id), Season.season_number == int(season_number))
+            .first()
+        )
+        if season is None:
+            return None
+        return _find_active_season_density_stub(session, season_id=int(season.id))
+    return None
+
+
+def _catalog_anchor_season_episode(
+    session,
+    series_row: Series,
+    *,
+    restrict_season_number: int | None = None,
+) -> tuple[int | None, int | None]:
+    """First episode that still needs content (for density-stub play targeting)."""
+    from datetime import date as date_cls
+
+    from services.source_of_truth.determiner import episode_contributes_to_density_stub as ep_contrib
+
+    include_specials = bool(getattr(settings, "INCLUDE_SPECIALS", False))
+    placeholders_enabled = bool(getattr(settings, "coming_soon_placeholders_enabled", True))
+    lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+    today = date_cls.today()
+
+    if bool(getattr(series_row, "block_placeholder", False)):
+        policy = "never"
+    elif bool(getattr(series_row, "force_placeholder", False)):
+        policy = "pinned"
+    else:
+        policy = "auto"
+
+    q = (
+        session.query(Episode, Season.season_number)
+        .join(Season, Episode.season_id == Season.id)
+        .filter(
+            Season.series_id == int(series_row.id),
+            Episode.is_deleted == False,  # noqa: E712
+        )
+    )
+    if restrict_season_number is not None:
+        q = q.filter(Season.season_number == int(restrict_season_number))
+    rows = q.order_by(Season.season_number.asc(), Episode.episode_number.asc()).all()
+    for ep, sn in rows:
+        sn_i = int(sn or 0)
+        if not include_specials and sn_i == 0:
+            continue
+        meta = (int(series_row.id), sn_i, int(getattr(ep, "episode_number", 0) or 0))
+        if ep_contrib(
+            session,
+            ep,
+            placeholders_enabled=placeholders_enabled,
+            lookahead_days=lookahead_days,
+            now_date=today,
+            episode_order_meta=meta,
+            series_policy=policy,
+        ):
+            return sn_i, int(getattr(ep, "episode_number", 0) or 0)
+    for ep, sn in rows:
+        sn_i = int(sn or 0)
+        if not include_specials and sn_i == 0:
+            continue
+        if not bool(getattr(ep, "has_file", False)):
+            return sn_i, int(getattr(ep, "episode_number", 0) or 0)
+    return None, None
 
 
 def _forward_episode_window(
@@ -1053,13 +2057,39 @@ def _collect_episode_targets(session, series_row: Series, season_number: int | N
     return targets, metadata
 
 
+def _notify_queue_monitor_signal() -> None:
+    """Wake the queue-monitor producer on a committed connection.
+
+    Must run *after* the transaction that sets ``queue_monitor_active`` commits.
+    NOTIFY before commit races the monitor into an empty probe, then up to
+    ``QUEUE_MONITOR_NOTIFY_SAFETY_POLL_SECONDS`` of silence (often longer than
+    a short Usenet download).
+    """
+    try:
+        notify_session = get_session()
+        try:
+            notify_session.execute(text("NOTIFY placeholdarr_queue_monitor_signal, ''"))
+            notify_session.commit()
+        finally:
+            notify_session.close()
+    except Exception as exc:
+        logger.debug(
+            f"NOTIFY placeholdarr_queue_monitor_signal failed (non-fatal): {exc}",
+            extra={"emoji_type": "debug"},
+        )
+
+
 def _activate_queue_monitor_after_playback_search(
     session,
     intents: list[StatusIntent],
     *,
     search_triggered: bool,
 ) -> None:
-    """Mark placeholders for NOTIFY-driven queue monitoring after a playback ARR search."""
+    """Mark placeholders for NOTIFY-driven queue monitoring after a playback ARR search.
+
+    Only flags rows here. Caller must ``commit`` then call
+    ``_notify_queue_monitor_signal`` so the producer sees committed flags.
+    """
     if not search_triggered or not intents:
         return
     now = datetime.now(timezone.utc)
@@ -1069,16 +2099,15 @@ def _activate_queue_monitor_after_playback_search(
             ph.queue_monitor_active = True
             ph.queue_monitor_active_set_at = now
             session.add(ph)
-    try:
-        session.execute(text("NOTIFY placeholdarr_queue_monitor_signal, ''"))
-    except Exception as exc:
-        logger.debug(
-            f"NOTIFY placeholdarr_queue_monitor_signal failed (non-fatal): {exc}",
-            extra={"emoji_type": "debug"},
-        )
 
 
-def _placeholder_intents_for_targets(session, targets: list[Episode], movie_row: Movie | None = None) -> list[StatusIntent]:
+def _placeholder_intents_for_targets(
+    session,
+    targets: list[Episode],
+    movie_row: Movie | None = None,
+    *,
+    series_stub: Placeholder | None = None,
+) -> list[StatusIntent]:
     intents: list[StatusIntent] = []
     rows: list[Placeholder] = []
     if movie_row is not None:
@@ -1090,6 +2119,8 @@ def _placeholder_intents_for_targets(session, targets: list[Episode], movie_row:
             )
             .all()
         )
+    elif series_stub is not None and getattr(series_stub, "id", None):
+        rows = [series_stub]
     elif targets:
         episode_ids = [int(ep.id) for ep in targets if getattr(ep, 'id', None)]
         rows = (
@@ -1119,25 +2150,39 @@ def _run_movie_search_for_row(session, movie_row: Movie) -> dict[str, Any]:
     # Playback may enable Radarr monitoring and trigger search. Placeholder removal for
     # monitored titles is deferred to sync/determination (SKIP_PLACEHOLDERS_WHEN_MONITORED);
     # import still removes placeholders when a real file lands.
+    instance_key = _row_instance_key(movie_row)
     if bool(getattr(movie_row, 'is_deleted', False)):
-        return {'ok': True, 'skipped': 'deleted_in_arr', 'movie_id': int(movie_row.id), 'instance': _instance_label(bool(getattr(movie_row, 'is_4k', False)))}
+        return {'ok': True, 'skipped': 'deleted_in_arr', 'movie_id': int(movie_row.id), 'instance': instance_key}
 
     if bool(getattr(movie_row, 'has_file', False)):
-        return {'ok': True, 'skipped': 'has_file', 'movie_id': int(movie_row.id), 'instance': _instance_label(bool(getattr(movie_row, 'is_4k', False)))}
+        return {'ok': True, 'skipped': 'has_file', 'movie_id': int(movie_row.id), 'instance': instance_key}
 
-    base_url, api_key = _resolve_endpoint('movie', bool(getattr(movie_row, 'is_4k', False)))
+    base_url, api_key = _resolve_endpoint('movie', instance_key=instance_key or None)
     if not base_url or not api_key:
-        return {'ok': False, 'reason': 'missing_movie_arr_config', 'movie_id': int(movie_row.id), 'instance': _instance_label(bool(getattr(movie_row, 'is_4k', False)))}
+        return {'ok': False, 'reason': 'missing_movie_arr_config', 'movie_id': int(movie_row.id), 'instance': instance_key}
+
+    was_monitored = bool(getattr(movie_row, 'radarr_monitored', False))
+    is_future = movie_is_future_for_playback_search(movie_row)
+    from services.playback_dest_filters import dest_folder_for_movie_row
+
+    dest_folder = dest_folder_for_movie_row(movie_row)
 
     monitored_updated = False
-    if not bool(getattr(movie_row, 'radarr_monitored', False)) and getattr(movie_row, 'radarrid', None):
+    if not was_monitored and getattr(movie_row, 'radarrid', None):
         monitored_updated = set_radarr_movie_monitored(int(movie_row.radarrid), True, url=base_url, api_key=api_key)
         if monitored_updated:
             movie_row.radarr_monitored = True
             session.add(movie_row)
 
     search_triggered = False
-    if getattr(movie_row, 'radarrid', None):
+    skipped_search_reason: str | None = None
+    if _playback_monitor_only_no_search(dest_folder):
+        skipped_search_reason = "monitor_only_no_search"
+    elif was_monitored and _suppress_search_for_already_monitored(dest_folder):
+        skipped_search_reason = "already_monitored"
+    elif is_future and _suppress_search_for_future_titles(dest_folder):
+        skipped_search_reason = "future_only"
+    elif getattr(movie_row, 'radarrid', None):
         search_triggered = trigger_radarr_movie_search(int(movie_row.radarrid), url=base_url, api_key=api_key)
 
     intents = _placeholder_intents_for_targets(session, [], movie_row=movie_row)
@@ -1151,9 +2196,13 @@ def _run_movie_search_for_row(session, movie_row: Movie) -> dict[str, Any]:
         'event': 'playback_start',
         'media_type': 'movie',
         'movie_id': int(movie_row.id),
-        'instance': _instance_label(bool(getattr(movie_row, 'is_4k', False))),
+        'instance': instance_key,
+        'dest_folder': dest_folder or '',
         'monitored_updated': monitored_updated,
         'search_triggered': bool(search_triggered),
+        'skipped_search_reason': skipped_search_reason,
+        'was_monitored': was_monitored,
+        'is_future': is_future,
         'status_intents_applied': len(intents),
     }
 
@@ -1166,16 +2215,22 @@ def _episode_season_number(session, episode: Episode) -> int:
     return int(getattr(season_row, "season_number", 0) or 0) if season_row else 0
 
 
-def _suppress_search_for_monitored_episodes() -> bool:
-    return bool(getattr(settings, "PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED", False))
+def _suppress_search_for_already_monitored(dest_folder: str | None = None) -> bool:
+    from services.playback_dest_filters import suppress_search_already_monitored_for_dest
+
+    return suppress_search_already_monitored_for_dest(dest_folder)
 
 
-def _suppress_search_for_future_episodes() -> bool:
-    return bool(getattr(settings, "PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES", False))
+def _suppress_search_for_future_titles(dest_folder: str | None = None) -> bool:
+    from services.playback_dest_filters import suppress_search_future_for_dest
+
+    return suppress_search_future_for_dest(dest_folder)
 
 
-def _playback_monitor_only_no_search() -> bool:
-    return bool(getattr(settings, "PLAYBACK_MONITOR_ONLY_NO_SEARCH", False))
+def _playback_monitor_only_no_search(dest_folder: str | None = None) -> bool:
+    from services.playback_dest_filters import monitor_only_for_dest
+
+    return monitor_only_for_dest(dest_folder)
 
 
 def _partition_playback_targets(
@@ -1184,6 +2239,7 @@ def _partition_playback_targets(
     targets: list[Episode],
     *,
     now_date: date | None = None,
+    dest_folder: str | None = None,
 ) -> dict[str, Any]:
     """Split lookahead targets into monitor vs search buckets."""
     eff = now_date or datetime.now(timezone.utc).date()
@@ -1194,6 +2250,9 @@ def _partition_playback_targets(
     search_eligible: list[Episode] = []
     future_episodes: list[Episode] = []
     is_future_by_episode: list[bool] = []
+    monitor_only = _playback_monitor_only_no_search(dest_folder)
+    suppress_future = (not monitor_only) and _suppress_search_for_future_titles(dest_folder)
+    suppress_monitored = (not monitor_only) and _suppress_search_for_already_monitored(dest_folder)
 
     for ep in targets:
         season_number = _episode_season_number(session, ep)
@@ -1210,19 +2269,23 @@ def _partition_playback_targets(
         if not bool(getattr(ep, "sonarr_monitored", False)):
             to_monitor.append(ep)
 
-        if is_future and _suppress_search_for_future_episodes():
+        if monitor_only:
             continue
-        if bool(getattr(ep, "sonarr_monitored", False)) and _suppress_search_for_monitored_episodes():
+        if is_future and suppress_future:
+            continue
+        if bool(getattr(ep, "sonarr_monitored", False)) and suppress_monitored:
             continue
         search_eligible.append(ep)
 
     skipped_search_reason: str | None = None
-    if not search_eligible and targets:
-        if future_episodes and _suppress_search_for_future_episodes():
+    if monitor_only and targets:
+        skipped_search_reason = "monitor_only_no_search"
+    elif not search_eligible and targets:
+        if future_episodes and suppress_future:
             skipped_search_reason = "future_only"
         elif not to_monitor:
             skipped_search_reason = "no_unmonitored_search_targets"
-        elif _suppress_search_for_monitored_episodes():
+        elif suppress_monitored:
             skipped_search_reason = "suppressed_monitored"
 
     monitor_ids = [int(ep.sonarrid) for ep in to_monitor if getattr(ep, "sonarrid", None)]
@@ -1235,6 +2298,7 @@ def _partition_playback_targets(
         "already_monitored_count": sum(1 for ep in targets if bool(getattr(ep, "sonarr_monitored", False))),
         "search_count": len(search_eligible),
         "skipped_search_reason": skipped_search_reason,
+        "dest_folder": dest_folder or "",
     }
 
 
@@ -1293,35 +2357,100 @@ def _trigger_playback_sonarr_search_for_row(
 def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, Any]) -> dict[str, Any]:
     # Same as movie playback: do not run determination/materialization here; monitored
     # cleanup is handled on the next ARR sync when SKIP_PLACEHOLDERS_WHEN_MONITORED is on.
+    instance_key = _row_instance_key(series_row)
     if bool(getattr(series_row, 'is_deleted', False)):
-        return {'ok': True, 'skipped': 'deleted_in_arr', 'series_id': int(series_row.id), 'instance': _instance_label(bool(getattr(series_row, 'is_4k', False)))}
+        return {'ok': True, 'skipped': 'deleted_in_arr', 'series_id': int(series_row.id), 'instance': instance_key}
 
+    file_path = _extract_file_path(payload)
+    season_stub_row = _path_is_season_density_stub(session, series_row, file_path, payload)
+    series_density_stub = False if season_stub_row else _path_is_series_density_stub(
+        session, series_row, file_path, payload
+    )
+    density_stub = bool(series_density_stub or season_stub_row)
+    # When Tracearr omitted path, density detection still works via stub markers; inject
+    # the stub path so status intents and path-based helpers share one code path.
+    if density_stub and not file_path:
+        stub_ph = season_stub_row or _find_active_series_density_stub(session, int(series_row.id))
+        if stub_ph and getattr(stub_ph, 'path', None):
+            file_path = _normalize_path(stub_ph.path) or str(stub_ph.path)
+            payload['file_path'] = file_path
     season_number, episode_number = _extract_season_episode(payload)
+    if density_stub:
+        restrict_sn = None
+        if season_stub_row is not None and getattr(season_stub_row, "season_id", None):
+            season_row = session.query(Season).filter(Season.id == int(season_stub_row.season_id)).first()
+            if season_row is not None:
+                restrict_sn = int(getattr(season_row, "season_number", 0) or 0)
+                season_number = restrict_sn
+        # Stub filename is always e01; resolve search window from catalog state.
+        anchor_s, anchor_e = _catalog_anchor_season_episode(
+            session,
+            series_row,
+            restrict_season_number=restrict_sn,
+        )
+        if anchor_s is not None:
+            season_number = anchor_s
+        if anchor_e is not None:
+            episode_number = anchor_e
+
     targets, target_meta = _collect_episode_targets(session, series_row, season_number, episode_number)
+    if density_stub:
+        target_meta = dict(target_meta or {})
+        target_meta["density_stub"] = True
+        target_meta["density_stub_kind"] = "season" if season_stub_row else "series"
+        target_meta["catalog_anchor"] = {"season": season_number, "episode": episode_number}
     if not targets:
         return {
             'ok': True,
             'event': 'playback_start',
             'media_type': 'episode',
             'series_id': int(series_row.id),
-            'instance': _instance_label(bool(getattr(series_row, 'is_4k', False))),
+            'instance': instance_key,
             'skipped': 'no_targets',
             'target_meta': target_meta,
         }
 
-    base_url, api_key = _resolve_endpoint('series', bool(getattr(series_row, 'is_4k', False)))
-    if not base_url or not api_key:
-        return {'ok': False, 'reason': 'missing_series_arr_config', 'series_id': int(series_row.id), 'instance': _instance_label(bool(getattr(series_row, 'is_4k', False)))}
+    # Seed media player IDs directly from playback payload if available
+    plex_key = _extract_plex_rating_key(payload)
+    jelly_key = _extract_jellyfin_item_id(payload)
+    if plex_key or jelly_key:
+        stamp_targets = _episodes_for_media_id_stamp(
+            session,
+            targets,
+            file_path=file_path,
+            season_number=season_number,
+            episode_number=episode_number,
+        )
+        stamp_kind = "unknown"
+        if file_path:
+            try:
+                from services.source_of_truth.filesystem import is_path_under_configured_roots
 
-    partition = _partition_playback_targets(session, series_row, targets)
+                stamp_kind = (
+                    "placeholder" if is_path_under_configured_roots(file_path) else "real"
+                )
+            except Exception:
+                stamp_kind = "unknown"
+        _stamp_episode_media_ids(
+            session,
+            stamp_targets,
+            plex_key=plex_key or "",
+            jelly_key=jelly_key or "",
+            playback_kind=stamp_kind,
+        )
+
+    base_url, api_key = _resolve_endpoint('series', instance_key=instance_key or None)
+    if not base_url or not api_key:
+        return {'ok': False, 'reason': 'missing_series_arr_config', 'series_id': int(series_row.id), 'instance': instance_key}
+
+    from services.playback_dest_filters import dest_folder_for_series_row
+
+    dest_folder = dest_folder_for_series_row(series_row)
+    partition = _partition_playback_targets(session, series_row, targets, dest_folder=dest_folder)
     to_monitor: list[Episode] = partition["to_monitor"]
     search_eligible: list[Episode] = partition["search_eligible"]
     monitor_ids: list[int] = partition["monitor_ids"]
     skipped_search_reason = partition.get("skipped_search_reason")
-
-    if _playback_monitor_only_no_search():
-        search_eligible = []
-        skipped_search_reason = "monitor_only_no_search"
 
     monitor_result = {"updated": 0, "failed": 0}
     if monitor_ids:
@@ -1357,7 +2486,15 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
             series_row.sonarr_monitored = True
             session.add(series_row)
 
-    intents = _placeholder_intents_for_targets(session, search_eligible)
+    series_stub_row = _find_active_series_density_stub(session, int(series_row.id)) if series_density_stub else None
+    density_stub_ph = season_stub_row or series_stub_row
+    # Density stubs: only project SEARCHING when an Arr search was actually triggered.
+    # Monitor-only, future suppress, or empty eligible must not flip the stub to SEARCHING.
+    intents = _placeholder_intents_for_targets(
+        session,
+        search_eligible if not density_stub_ph else [],
+        series_stub=density_stub_ph if (density_stub_ph is not None and search_triggered) else None,
+    )
     if intents:
         StatusOrchestrator(session=session).apply_and_project_statuses(intents)
 
@@ -1368,7 +2505,7 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
         'event': 'playback_start',
         'media_type': 'episode',
         'series_id': int(series_row.id),
-        'instance': _instance_label(bool(getattr(series_row, 'is_4k', False))),
+        'instance': instance_key,
         'mode': mode,
         'targets': len(targets),
         'target_meta': target_meta,
@@ -1384,15 +2521,24 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
     }
 
 
-def _should_schedule_delayed_fallback(selection: dict[str, Any], chosen_instance: str | None) -> bool:
-    if not _fallback_enabled():
+def _should_schedule_delayed_fallback(
+    selection: dict[str, Any],
+    chosen_instance: str | None,
+    *,
+    media_type: str,
+) -> bool:
+    mt = 'movie' if media_type == 'movie' else 'tv'
+    if not _fallback_enabled(media_type=mt):
         return False
     if not chosen_instance:
         return False
-    if len(selection.get('chosen_instances') or []) != 1:
+    fallbacks = selection.get('fallback_instances') or []
+    if not fallbacks and selection.get('fallback_instance'):
+        fallbacks = [selection.get('fallback_instance')]
+    if not fallbacks:
         return False
-    if not selection.get('fallback_instance'):
-        return False
+    # Schedule when the preferred (usually path-matched) Arr search fired, even if Always
+    # instances were also searched in the same play.
     return chosen_instance == selection.get('preferred_instance')
 
 
@@ -1402,14 +2548,19 @@ def _enqueue_delayed_fallback(
     media_type: str,
     payload: dict[str, Any],
     preferred_instance: str,
-    fallback_instance: str,
+    fallback_instances: list[str],
     source_instance: str | None,
 ) -> int | None:
-    if not _fallback_enabled():
+    mt = 'movie' if media_type == 'movie' else 'tv'
+    if not _fallback_enabled(media_type=mt):
         return None
 
     timeout_minutes = _fallback_timeout_minutes()
     if timeout_minutes <= 0:
+        return None
+
+    queue = [str(k).strip().lower() for k in (fallback_instances or []) if str(k or '').strip()]
+    if not queue:
         return None
 
     from services.source_of_truth.job_priority import default_priority_for
@@ -1419,7 +2570,8 @@ def _enqueue_delayed_fallback(
         payload={
             'media_type': media_type,
             'preferred_instance': preferred_instance,
-            'fallback_instance': fallback_instance,
+            'fallback_instances': queue,
+            'fallback_instance': queue[0],
             'source_instance': source_instance,
             'payload': dict(payload),
         },
@@ -1431,7 +2583,7 @@ def _enqueue_delayed_fallback(
     session.add(job)
     session.flush()
     logger.info(
-        f"Enqueued playback fallback job job_id={job.id} media_type={media_type} preferred={preferred_instance} fallback={fallback_instance}",
+        f"Enqueued playback fallback job job_id={job.id} media_type={media_type} preferred={preferred_instance} fallback_queue={queue}",
         extra={'emoji_type': 'processing'},
     )
     return int(job.id)
@@ -1444,31 +2596,44 @@ def _process_movie_playback(session, payload: dict[str, Any], context: dict[str,
         imdb_id=context.get('imdb_id'),
         file_path=context.get('file_path'),
     )
-    active_rows = _active_rows_by_instance(movie_rows)
     playback_kind = str(context.get('playback_kind') or 'unknown')
+    # Seed media player IDs directly from playback payload if available
+    plex_key = str(context.get('plex_id') or '').strip()
+    jelly_key = str(context.get('jellyfin_id') or '').strip()
+    if plex_key or jelly_key:
+        stamp_rows = _movies_for_media_id_stamp(session, movie_rows, context)
+        _stamp_movie_media_ids(
+            session,
+            stamp_rows,
+            plex_key=plex_key,
+            jelly_key=jelly_key,
+            playback_kind=playback_kind,
+        )
+
+    active_rows = _active_rows_by_instance(movie_rows)
 
     if playback_kind == 'real':
-        return {
-            'ok': True,
-            'event': 'playback_start',
-            'media_type': 'movie',
-            'skipped': 'real_movie_noop',
-            'qualifying_instances': sorted(active_rows.keys()),
-        }
-
-    if playback_kind != 'placeholder':
+        selection = _select_movie_real_rows(active_rows, context.get('file_path'))
+    elif playback_kind == 'placeholder':
+        selection = _select_placeholder_rows(
+            active_rows,
+            media_type='movie',
+            file_path=context.get('file_path'),
+        )
+    else:
         return {'ok': False, 'reason': 'unresolved_movie_playback_kind'}
 
-    selection = _select_rows_by_preference(active_rows, _placeholder_search_pref('movie'))
     selected_rows = selection.get('rows') or []
     if not selected_rows:
         return {
             'ok': True,
             'event': 'playback_start',
             'media_type': 'movie',
-            'skipped': 'no_active_row',
-            'qualifying_instances': selection.get('qualifying_instances') or [],
+            'playback_kind': playback_kind,
+            'skipped': 'real_movie_noop' if playback_kind == 'real' else 'no_active_row',
             'selection_reason': selection.get('selection_reason'),
+            'root_match': selection.get('root_match'),
+            'qualifying_instances': selection.get('qualifying_instances') or sorted(active_rows.keys()),
         }
 
     per_instance_results: list[dict[str, Any]] = []
@@ -1477,13 +2642,20 @@ def _process_movie_playback(session, payload: dict[str, Any], context: dict[str,
         result = _run_movie_search_for_row(session, row)
         per_instance_results.append(result)
         chosen_instance = str(result.get('instance') or '')
-        if result.get('search_triggered') and _should_schedule_delayed_fallback(selection, chosen_instance):
+        # Ambiguous real movie plays reuse Placeholder Always/Fallback selection, including
+        # delayed Fallback tries after timeout (same as placeholder / real TV).
+        if result.get('search_triggered') and _should_schedule_delayed_fallback(
+            selection, chosen_instance, media_type='movie'
+        ):
             fallback_job_id = _enqueue_delayed_fallback(
                 session,
                 media_type='movie',
                 payload=payload,
-                preferred_instance=str(selection.get('preferred_instance')),
-                fallback_instance=str(selection.get('fallback_instance')),
+                preferred_instance=str(selection.get('preferred_instance') or ''),
+                fallback_instances=list(
+                    selection.get('fallback_instances')
+                    or ([selection.get('fallback_instance')] if selection.get('fallback_instance') else [])
+                ),
                 source_instance=source_instance,
             )
 
@@ -1495,27 +2667,50 @@ def _process_movie_playback(session, payload: dict[str, Any], context: dict[str,
         'selection_reason': selection.get('selection_reason'),
         'qualifying_instances': selection.get('qualifying_instances') or [],
         'chosen_instances': selection.get('chosen_instances') or [],
+        'root_match': selection.get('root_match'),
         'fallback_job_id': fallback_job_id,
         'results': per_instance_results,
     }
 
 
 def _process_episode_playback(session, payload: dict[str, Any], context: dict[str, Any], source_instance: str | None) -> dict[str, Any]:
-    sonarr_id, _ = _extract_series_ids(payload)
+    # Ensure density-stub path from context is visible to search helpers that read payload.
+    event_payload = payload
+    ctx_path = context.get('file_path')
+    if ctx_path and not _extract_file_path(payload):
+        event_payload = dict(payload)
+        event_payload['file_path'] = ctx_path
+
+    sonarr_id, _ = _extract_series_ids(event_payload)
     series_rows = _find_series_rows(
         session,
         sonarr_id=sonarr_id,
         tvdb_id=context.get('tvdb_id'),
         imdb_id=context.get('imdb_id'),
-        file_path=context.get('file_path'),
+        file_path=context.get('file_path') or _extract_file_path(event_payload),
     )
+    # Density stub / Tracearr may only give us series_id on path_info.
+    if not series_rows:
+        path_info = context.get('path_info') if isinstance(context.get('path_info'), dict) else {}
+        sid = path_info.get('series_id') or context.get('series_id')
+        if sid is not None:
+            row = session.query(Series).filter(Series.id == int(sid), Series.is_deleted == False).first()  # noqa: E712
+            if row is not None:
+                series_rows = [row]
     active_rows = _active_rows_by_instance(series_rows)
     playback_kind = str(context.get('playback_kind') or 'unknown')
 
     if playback_kind == 'placeholder':
-        selection = _select_rows_by_preference(active_rows, _placeholder_search_pref('tv'))
+        selection = _select_placeholder_rows(
+            active_rows,
+            media_type='tv',
+            file_path=context.get('file_path') or _extract_file_path(event_payload),
+        )
     elif playback_kind == 'real':
-        selection = _select_tv_real_rows(active_rows, context.get('file_path'))
+        selection = _select_tv_real_rows(
+            active_rows,
+            context.get('file_path') or _extract_file_path(event_payload),
+        )
     else:
         return {'ok': False, 'reason': 'unresolved_episode_playback_kind'}
 
@@ -1535,16 +2730,18 @@ def _process_episode_playback(session, payload: dict[str, Any], context: dict[st
     per_instance_results: list[dict[str, Any]] = []
     fallback_job_id: int | None = None
     for row in selected_rows:
-        result = _run_episode_search_for_row(session, row, payload)
+        result = _run_episode_search_for_row(session, row, event_payload)
         per_instance_results.append(result)
         chosen_instance = str(result.get('instance') or '')
-        if result.get('search_triggered') and _should_schedule_delayed_fallback(selection, chosen_instance):
+        if result.get('search_triggered') and _should_schedule_delayed_fallback(
+            selection, chosen_instance, media_type='episode'
+        ):
             fallback_job_id = _enqueue_delayed_fallback(
                 session,
                 media_type='episode',
-                payload=payload,
-                preferred_instance=str(selection.get('preferred_instance')),
-                fallback_instance=str(selection.get('fallback_instance')),
+                payload=event_payload,
+                preferred_instance=str(selection.get('preferred_instance') or ''),
+                fallback_instances=list(selection.get('fallback_instances') or ([selection.get('fallback_instance')] if selection.get('fallback_instance') else [])),
                 source_instance=source_instance,
             )
 
@@ -1575,21 +2772,35 @@ def _preferred_episode_import_succeeded(session, preferred_row: Series | None, p
 
 
 def process_playback_fallback_job(session, job: Job) -> dict[str, Any]:
-    if not _fallback_enabled():
-        return {'ok': True, 'skipped': 'playback_fallback_disabled'}
-
     payload = job.payload or {}
     media_type = str(payload.get('media_type') or '').strip().lower()
-    preferred_instance = str(payload.get('preferred_instance') or '').strip().lower()
-    fallback_instance = str(payload.get('fallback_instance') or '').strip().lower()
+    preferred_raw = str(payload.get('preferred_instance') or '').strip().lower()
     event_payload = payload.get('payload') if isinstance(payload.get('payload'), dict) else {}
 
     if media_type not in {'movie', 'episode'}:
         return {'ok': False, 'reason': 'invalid_media_type'}
-    if preferred_instance not in {'standard', '4k'} or fallback_instance not in {'standard', '4k'}:
+
+    if not _fallback_enabled(media_type='movie' if media_type == 'movie' else 'tv'):
+        return {'ok': True, 'skipped': 'playback_fallback_disabled'}
+
+    arr_type = 'radarr' if media_type == 'movie' else 'sonarr'
+    preferred_instance = _coerce_instance_key(arr_type, preferred_raw)
+
+    raw_queue = payload.get('fallback_instances')
+    if not isinstance(raw_queue, list) or not raw_queue:
+        legacy = payload.get('fallback_instance')
+        raw_queue = [legacy] if legacy else []
+    fallback_instances = [
+        key
+        for key in (_coerce_instance_key(arr_type, item) for item in raw_queue)
+        if key
+    ]
+    if not preferred_instance or not fallback_instances:
         return {'ok': False, 'reason': 'invalid_fallback_instances'}
 
     context = _resolve_playback_context(session, event_payload)
+    head, *tail = fallback_instances
+
     if media_type == 'movie':
         movie_rows = _find_movie_rows(
             session,
@@ -1602,17 +2813,50 @@ def process_playback_fallback_job(session, job: Job) -> dict[str, Any]:
         if _preferred_movie_import_succeeded(preferred_row):
             return {'ok': True, 'skipped': 'preferred_imported', 'preferred_instance': preferred_instance}
 
-        fallback_row = active_rows.get(fallback_instance)
+        fallback_row = active_rows.get(head)
         if fallback_row is None:
-            return {'ok': True, 'skipped': 'fallback_no_active_row', 'fallback_instance': fallback_instance}
+            if tail:
+                requeue_id = _enqueue_delayed_fallback(
+                    session,
+                    media_type='movie',
+                    payload=event_payload,
+                    preferred_instance=preferred_instance,
+                    fallback_instances=tail,
+                    source_instance=payload.get('source_instance'),
+                )
+                return {
+                    'ok': True,
+                    'skipped': 'fallback_no_active_row',
+                    'fallback_instance': head,
+                    'fallback_instances': fallback_instances,
+                    'requeue_job_id': requeue_id,
+                }
+            return {
+                'ok': True,
+                'skipped': 'fallback_no_active_row',
+                'fallback_instance': head,
+                'fallback_instances': fallback_instances,
+            }
 
         result = _run_movie_search_for_row(session, fallback_row)
+        requeue_id = None
+        if result.get('search_triggered') and tail and not _preferred_movie_import_succeeded(preferred_row):
+            requeue_id = _enqueue_delayed_fallback(
+                session,
+                media_type='movie',
+                payload=event_payload,
+                preferred_instance=preferred_instance,
+                fallback_instances=tail,
+                source_instance=payload.get('source_instance'),
+            )
         return {
             'ok': True,
             'event': 'playback_fallback',
             'media_type': 'movie',
             'preferred_instance': preferred_instance,
-            'fallback_instance': fallback_instance,
+            'fallback_instance': head,
+            'fallback_instances': fallback_instances,
+            'requeue_job_id': requeue_id,
             'result': result,
         }
 
@@ -1629,17 +2873,50 @@ def process_playback_fallback_job(session, job: Job) -> dict[str, Any]:
     if _preferred_episode_import_succeeded(session, preferred_row, event_payload):
         return {'ok': True, 'skipped': 'preferred_imported', 'preferred_instance': preferred_instance}
 
-    fallback_row = active_rows.get(fallback_instance)
+    fallback_row = active_rows.get(head)
     if fallback_row is None:
-        return {'ok': True, 'skipped': 'fallback_no_active_row', 'fallback_instance': fallback_instance}
+        if tail:
+            requeue_id = _enqueue_delayed_fallback(
+                session,
+                media_type='episode',
+                payload=event_payload,
+                preferred_instance=preferred_instance,
+                fallback_instances=tail,
+                source_instance=payload.get('source_instance'),
+            )
+            return {
+                'ok': True,
+                'skipped': 'fallback_no_active_row',
+                'fallback_instance': head,
+                'fallback_instances': fallback_instances,
+                'requeue_job_id': requeue_id,
+            }
+        return {
+            'ok': True,
+            'skipped': 'fallback_no_active_row',
+            'fallback_instance': head,
+            'fallback_instances': fallback_instances,
+        }
 
     result = _run_episode_search_for_row(session, fallback_row, event_payload)
+    requeue_id = None
+    if result.get('search_triggered') and tail and not _preferred_episode_import_succeeded(session, preferred_row, event_payload):
+        requeue_id = _enqueue_delayed_fallback(
+            session,
+            media_type='episode',
+            payload=event_payload,
+            preferred_instance=preferred_instance,
+            fallback_instances=tail,
+            source_instance=payload.get('source_instance'),
+        )
     return {
         'ok': True,
         'event': 'playback_fallback',
         'media_type': 'episode',
         'preferred_instance': preferred_instance,
-        'fallback_instance': fallback_instance,
+        'fallback_instance': head,
+        'fallback_instances': fallback_instances,
+        'requeue_job_id': requeue_id,
         'result': result,
     }
 
@@ -1663,6 +2940,8 @@ def process_playback_start_event(payload: dict[str, Any], instance: str | None =
             result = {'ok': False, 'reason': 'unresolved_playback_media_type'}
 
         session.commit()
+        # Wake queue monitor only after flags are visible to other connections.
+        _notify_queue_monitor_signal()
         logger.info(
             f"Processed playback_start media_type={media_type} result={result}",
             extra={'emoji_type': 'processing'},
@@ -1708,6 +2987,18 @@ def apply_search_queued_for_playback(session, payload: dict[str, Any]) -> int:
             file_path=context.get('file_path'),
         )
         active_rows = _active_rows_by_instance(movie_rows)
+        plex_key = str(context.get('plex_id') or '').strip()
+        jelly_key = str(context.get('jellyfin_id') or '').strip()
+        gated_kind = str(context.get('playback_kind') or 'unknown')
+        if plex_key or jelly_key:
+            stamp_rows = _movies_for_media_id_stamp(session, list(active_rows.values()), context)
+            _stamp_movie_media_ids(
+                session,
+                stamp_rows,
+                plex_key=plex_key,
+                jelly_key=jelly_key,
+                playback_kind=gated_kind,
+            )
         for row in active_rows.values():
             ph_rows = (
                 session.query(Placeholder)
@@ -1730,6 +3021,7 @@ def apply_search_queued_for_playback(session, payload: dict[str, Any]) -> int:
                 )
     elif media_type == 'episode':
         sonarr_id, _tvdb = _extract_series_ids(payload)
+        path_info = context.get('path_info') if isinstance(context.get('path_info'), dict) else {}
         series_rows = _find_series_rows(
             session,
             sonarr_id=sonarr_id,
@@ -1737,13 +3029,100 @@ def apply_search_queued_for_playback(session, payload: dict[str, Any]) -> int:
             imdb_id=context.get('imdb_id'),
             file_path=context.get('file_path'),
         )
+        # Density stub / Tracearr / episode-level TVDB may only give series_id on path_info.
+        if not series_rows:
+            sid = path_info.get('series_id') or context.get('series_id')
+            if sid is not None:
+                row = session.query(Series).filter(Series.id == int(sid), Series.is_deleted == False).first()  # noqa: E712
+                if row is not None:
+                    series_rows = [row]
         active_rows = _active_rows_by_instance(series_rows)
+        path_series_id = path_info.get('series_id')
+        try:
+            path_series_id_int = int(path_series_id) if path_series_id is not None else None
+        except (TypeError, ValueError):
+            path_series_id_int = None
         for series_row in active_rows.values():
+            season_number = None
+            episode_number = None
             try:
                 season_number, episode_number = _extract_season_episode(payload)
                 targets, _meta = _collect_episode_targets(session, series_row, season_number, episode_number)
             except Exception:
                 targets = []
+            plex_key = str(context.get('plex_id') or '').strip()
+            jelly_key = str(context.get('jellyfin_id') or '').strip()
+            if plex_key or jelly_key:
+                # Only stamp the path-matched series (or path-matched episodes) so sibling
+                # Arr rows do not inherit the played Plex/Jellyfin item id.
+                if path_series_id_int is not None:
+                    if int(getattr(series_row, 'id', 0) or 0) != path_series_id_int:
+                        stamp_targets = []
+                    else:
+                        stamp_targets = _episodes_for_media_id_stamp(
+                            session,
+                            targets,
+                            file_path=context.get('file_path'),
+                            season_number=season_number,
+                            episode_number=episode_number,
+                        )
+                elif _normalize_path(context.get('file_path')):
+                    stamp_targets = _episodes_for_media_id_stamp(
+                        session,
+                        targets,
+                        file_path=context.get('file_path'),
+                        season_number=None,
+                        episode_number=None,
+                    )
+                else:
+                    stamp_targets = []
+                _stamp_episode_media_ids(
+                    session,
+                    stamp_targets,
+                    plex_key=plex_key,
+                    jelly_key=jelly_key,
+                    playback_kind=str(context.get('playback_kind') or 'unknown'),
+                )
+
+            # Season/series density stubs have episode_id null; status the stub row itself.
+            file_path = _normalize_path(context.get('file_path')) or _extract_file_path(payload)
+            season_stub_row = _path_is_season_density_stub(session, series_row, file_path, payload)
+            series_density_stub = (
+                False
+                if season_stub_row
+                else _path_is_series_density_stub(session, series_row, file_path, payload)
+            )
+            density_stub_ph = season_stub_row
+            if density_stub_ph is None and series_density_stub:
+                density_stub_ph = _find_active_series_density_stub(session, int(series_row.id))
+            if density_stub_ph is None:
+                stub_kind = str(path_info.get('density_stub_kind') or '').strip().lower()
+                if stub_kind == 'season' and path_series_id_int == int(getattr(series_row, 'id', 0) or 0):
+                    season_id = path_info.get('season_id')
+                    try:
+                        season_id_int = int(season_id) if season_id is not None else None
+                    except (TypeError, ValueError):
+                        season_id_int = None
+                    if season_id_int is not None:
+                        density_stub_ph = _find_active_season_density_stub(
+                            session, season_id=season_id_int
+                        )
+                elif stub_kind == 'series' and path_series_id_int == int(getattr(series_row, 'id', 0) or 0):
+                    density_stub_ph = _find_active_series_density_stub(session, int(series_row.id))
+
+            if density_stub_ph is not None and getattr(density_stub_ph, 'id', None):
+                intents.append(
+                    StatusIntent(
+                        placeholder_id=int(density_stub_ph.id),
+                        new_status=DisplayStatus.SEARCH_QUEUED.value,
+                        reason='search_queued',
+                        source=StatusSource.EVENT_PLAYBACK_STARTED,
+                        trigger_nfo_refresh=True,
+                        metadata={'gated_playback': True, 'density_stub': True},
+                    )
+                )
+                continue
+
             episode_ids = [int(ep.id) for ep in targets if getattr(ep, 'id', None)]
             if not episode_ids:
                 continue

@@ -24,7 +24,7 @@ except Exception as ex:
         print('\nLikely causes:\n  * The folder locations have not been created\n  * A typo in your .env for MOVIE_LIBRARY_FOLDER / TV_LIBRARY_FOLDER\n ', file=sys.stderr)
         print('\nSuggested actions:', file=sys.stderr)
         print('  1) Ensure folder locations exist and create them if not.', file=sys.stderr)
-        print('  2) Verify the paths in your .env or environment variables (MOVIE_LIBRARY_FOLDER, TV_LIBRARY_FOLDER, MOVIE_LIBRARY_4K_FOLDER, TV_LIBRARY_4K_FOLDER).', file=sys.stderr)
+        print('  2) Verify the paths in your .env or environment variables (LIBRARY_ROOT, MOVIE_LIBRARY_FOLDER, TV_LIBRARY_FOLDER).', file=sys.stderr)
         print('\nOnce fixed, restart Placeholdarr.', file=sys.stderr)
         sys.exit(1)
     else:

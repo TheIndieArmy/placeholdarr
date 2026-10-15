@@ -10,9 +10,24 @@ type StripAccent = { hex: string; text: string; icon: string; hoverHex: string }
 function taskRunProgressSections(progress: ActivityRow["progress"] | undefined): Array<any> {
   if (!progress) return [];
   const inner = (progress as any).progress;
-  if (inner && Array.isArray(inner.sections)) return inner.sections;
-  if (Array.isArray((progress as any).sections)) return (progress as any).sections;
-  return [];
+  let sections: Array<any> = [];
+  if (inner && Array.isArray(inner.sections)) sections = inner.sections;
+  else if (Array.isArray((progress as any).sections)) sections = (progress as any).sections;
+  // Hide follow-up phases that were never requested (legacy full-sync rows).
+  return sections.filter((section) => !isUnrequestedFollowUpSection(section));
+}
+
+function isUnrequestedFollowUpSection(section: any): boolean {
+  const name = String(section?.name || "").trim().toLowerCase();
+  if (name !== "art refresh" && name !== "metadata refresh") return false;
+  const status = String(section?.status || "").trim().toLowerCase();
+  if (status !== "skipped") return false;
+  const metrics = Array.isArray(section?.metrics) ? section.metrics : [];
+  return metrics.some((m: any) => {
+    const label = String(m?.label || "").trim().toLowerCase();
+    const value = String(m?.value ?? "").trim().toLowerCase();
+    return label === "reason" && value === "not_requested";
+  });
 }
 
 function statusClass(status: string | null | undefined, semantic: { success: string; danger: string; accentIce: string; fgMuted: string }) {

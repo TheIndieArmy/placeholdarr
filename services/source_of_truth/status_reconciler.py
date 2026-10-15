@@ -5,6 +5,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 from core.config import settings
@@ -21,6 +22,11 @@ from services.source_of_truth.placeholder_job_enqueue import (
     job_placeholder_ids as _job_placeholder_ids,
     normalize_placeholder_ids as _normalize_placeholder_ids,
     set_job_placeholder_ids as _set_job_placeholder_ids,
+)
+from services.source_of_truth.tv_density import (
+    DENSITY_PLACEHOLDER_TITLE,
+    PLACEHOLDER_KIND_SEASON_STUB,
+    PLACEHOLDER_KIND_SERIES_STUB,
 )
 
 
@@ -103,30 +109,15 @@ def _job_player_metadata_refresh(job: Job) -> bool:
 
 
 def _placeholder_display_status(placeholder: Placeholder) -> str | None:
+    from services.status_projection import resolve_display_status
+
     status = getattr(placeholder, "display_status", None)
     if isinstance(status, str):
         status = status.strip() or None
     reason = getattr(placeholder, "display_reason", None)
     if isinstance(reason, str):
         reason = reason.strip() or None
-
-    if status in {
-        "COMING_SOON",
-        "COMING_SOON_30",
-        "COMING_SOON_14",
-        "COMING_SOON_7",
-        "COMING_SOON_1",
-        "COMING_SOON_TODAY",
-    } and reason:
-        return reason
-
-    if status == "DOWNLOADING" and reason:
-        return reason
-
-    if status == "SEARCHING" and reason and reason.lower() == "queued":
-        return reason
-
-    return status
+    return resolve_display_status(status, reason)
 
 
 def _refresh_movie_nfo(placeholder: Placeholder, movie: Movie) -> bool:
@@ -146,6 +137,62 @@ def _refresh_episode_nfo(session, placeholder: Placeholder, episode: Episode) ->
     target_path = str(getattr(placeholder, "path", "") or getattr(episode, "placeholder_filepath", "") or "").strip()
     if not target_path:
         return False
+
+    status = _placeholder_display_status(placeholder) or "REQUEST"
+    setattr(episode, "placeholder_status", status)
+    setattr(series, "placeholder_status", status)
+    episode_written = ensure_episode_nfo(target_path, episode, season, series)
+    series_written = ensure_series_nfo(series, folder=getattr(series, "placeholder_folder", None))
+    return bool(episode_written or series_written)
+
+
+def _refresh_density_stub_nfo(session, placeholder: Placeholder) -> bool:
+    """Rewrite episode-shaped NFO for series/season density stubs (no episode_id row)."""
+    kind = str(getattr(placeholder, "placeholder_kind", "") or "")
+    if kind not in {PLACEHOLDER_KIND_SERIES_STUB, PLACEHOLDER_KIND_SEASON_STUB}:
+        return False
+    if getattr(placeholder, "movie_id", None) or getattr(placeholder, "episode_id", None):
+        return False
+    if not getattr(placeholder, "series_id", None):
+        return False
+
+    series = session.query(Series).get(int(placeholder.series_id))
+    if series is None:
+        return False
+
+    target_path = str(getattr(placeholder, "path", "") or "").strip()
+    if not target_path:
+        return False
+
+    season = None
+    if getattr(placeholder, "season_id", None):
+        season = session.query(Season).get(int(placeholder.season_id))
+    if season is None and kind == PLACEHOLDER_KIND_SERIES_STUB:
+        season = (
+            session.query(Season)
+            .filter(Season.series_id == int(series.id), Season.season_number == 1)
+            .first()
+        )
+    if season is None:
+        season = SimpleNamespace(
+            id=None,
+            series_id=series.id,
+            season_number=1,
+            title=f"{series.title} Season 01",
+            year=getattr(series, "year", None) or 0,
+        )
+
+    episode = SimpleNamespace(
+        id=None,
+        season_id=getattr(season, "id", None),
+        episode_number=1,
+        title=DENSITY_PLACEHOLDER_TITLE,
+        air_date=None,
+        overview=None,
+        sonarr_episode_overview=None,
+        runtime=getattr(series, "sonarr_runtime", None),
+        absolute_episode_number=None,
+    )
 
     status = _placeholder_display_status(placeholder) or "REQUEST"
     setattr(episode, "placeholder_status", status)
@@ -343,6 +390,12 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
             if episode and _refresh_episode_nfo(session, placeholder, episode):
                 refreshed += 1
                 refreshed_for_player_push.append((placeholder, ("episode", int(episode.id))))
+                continue
+            if _refresh_density_stub_nfo(session, placeholder):
+                refreshed += 1
+                kind = str(getattr(placeholder, "placeholder_kind", "") or "") or "series_stub"
+                entity_id = int(placeholder.season_id or placeholder.series_id or placeholder.id)
+                refreshed_for_player_push.append((placeholder, (kind, entity_id)))
     finally:
         stop_nfo_hb.set()
 
@@ -358,6 +411,11 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
         extra={"emoji_type": "info"},
     )
 
+    try:
+        session.commit()
+    except Exception:
+        pass
+
     if do_player and refreshed_for_player_push:
         # One media-server refresh sequence per underlying movie/episode row, even if several
         # placeholder rows pointed at the same title (rare) or a batch carried duplicates.
@@ -372,6 +430,10 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
             unique_for_projection.append(placeholder)
         try:
             push_placeholder_batch_player_metadata(session, unique_for_projection)
+            try:
+                session.commit()
+            except Exception:
+                pass
             proj_subject = _nfo_refresh_subject_summary(session, unique_for_projection)
             ps = f" · {proj_subject}" if proj_subject else ""
             logger.info(
@@ -384,15 +446,17 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
                 extra={"emoji_type": "warning"},
             )
     elif completion_refresh and run_id:
+        job_id = int(job.id)
+        nfo_payload = dict(payload) if isinstance(payload, dict) else {}
+
         def _after_request_backfill_refresh() -> None:
-            payload = job.payload if isinstance(job.payload, dict) else {}
-            raw_pr = payload.get("placeholder_refresh_task_run_id")
+            raw_pr = nfo_payload.get("placeholder_refresh_task_run_id")
             if raw_pr is None:
                 return
             from services.task_run_phases import finalize_nfo_backfill_phase, try_complete_linked_task_run
 
             finalize_nfo_backfill_phase(int(raw_pr), str(run_id))
-            try_complete_linked_task_run(int(raw_pr), exclude_job_id=int(job.id))
+            try_complete_linked_task_run(int(raw_pr), exclude_job_id=job_id)
 
         _nfo_refresh_completion_scan_if_last_batch(
             session,
@@ -405,19 +469,21 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
     elif template_completion_refresh and template_run_id:
         from services.source_of_truth import template_backfill as template_backfill_mod
 
+        job_id = int(job.id)
+        nfo_payload = dict(payload) if isinstance(payload, dict) else {}
+
         def _after_template_backfill_refresh() -> None:
             _clear_active_template_backfill_run_standalone(template_run_id)
-            payload = job.payload if isinstance(job.payload, dict) else {}
             from services.task_run_phases import finalize_nfo_backfill_phase, try_complete_linked_task_run
 
-            raw_tid = payload.get("full_sync_task_run_id")
-            raw_pr = payload.get("placeholder_refresh_task_run_id")
+            raw_tid = nfo_payload.get("full_sync_task_run_id")
+            raw_pr = nfo_payload.get("placeholder_refresh_task_run_id")
             if raw_tid is not None:
                 finalize_nfo_backfill_phase(int(raw_tid), template_run_id)
-                try_complete_linked_task_run(int(raw_tid), exclude_job_id=int(job.id))
+                try_complete_linked_task_run(int(raw_tid), exclude_job_id=job_id)
             elif raw_pr is not None:
                 finalize_nfo_backfill_phase(int(raw_pr), template_run_id)
-                try_complete_linked_task_run(int(raw_pr), exclude_job_id=int(job.id))
+                try_complete_linked_task_run(int(raw_pr), exclude_job_id=job_id)
 
         _nfo_refresh_completion_scan_if_last_batch(
             session,

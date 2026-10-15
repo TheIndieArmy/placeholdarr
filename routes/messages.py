@@ -367,13 +367,25 @@ def _execute_apply_scope(apply_scope: str) -> dict[str, Any]:
 
 
 @router.get("/templates/apply_estimate")
-def get_apply_estimate() -> JSONResponse:
-    """How many placeholders an immediate ``Apply now`` save would refresh."""
+def get_apply_estimate(media: str | None = None) -> JSONResponse:
+    """How many placeholders an immediate ``Apply now`` save would refresh.
+
+    Optional ``media=tv`` counts only TV placeholders (excludes movies), for settings
+    that rematerialize density stubs and never touch movie files.
+    """
     try:
         from services.source_of_truth.template_backfill import placeholder_count_for_apply_now
         from services.source_of_truth.placeholder_refresh import has_pending_intent
 
-        count = placeholder_count_for_apply_now()
+        media_key = str(media or "").strip().lower()
+        if media_key == "tv":
+            from services.source_of_truth.tv_density_rematerialize import (
+                tv_placeholder_count_for_apply_now,
+            )
+
+            count = tv_placeholder_count_for_apply_now()
+        else:
+            count = placeholder_count_for_apply_now()
         pending = has_pending_intent()
     except Exception as exc:
         logger.warning(f"Apply estimate unavailable: {exc}", extra={"emoji_type": "warning"})

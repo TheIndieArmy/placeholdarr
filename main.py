@@ -598,6 +598,14 @@ app.include_router(messages_router)
 from routes.whats_new import router as whats_new_router
 app.include_router(whats_new_router)
 
+# Placeholder ("dummy") video upload/reset from the Settings UI
+from routes.dummy_media import router as dummy_media_router
+app.include_router(dummy_media_router)
+
+# System actions (restart) from the Settings UI
+from routes.system import router as system_router
+app.include_router(system_router)
+
 app.add_middleware(AuthGateMiddleware)
 _session_https_only = bool(getattr(settings, "AUTH_COOKIE_SECURE", False))
 app.add_middleware(

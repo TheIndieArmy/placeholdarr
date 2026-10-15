@@ -93,39 +93,51 @@ def enqueue_batched_placeholder_job(
         if not ids_remaining:
             break
         existing_ids = job_placeholder_ids(job)
-        if len(existing_ids) >= batch_size:
-            continue
-
-        additions: list[int] = []
         existing_set = set(existing_ids)
-        capacity = batch_size - len(existing_ids)
-        for pid in ids_remaining:
-            if pid in existing_set:
-                continue
-            additions.append(pid)
-            existing_set.add(pid)
-            if len(additions) >= capacity:
-                break
-
-        if not additions:
-            continue
-
-        set_job_placeholder_ids(job, existing_ids + additions)
+        job_modified = False
         payload = dict(job.payload or {}) if isinstance(job.payload, dict) else {}
-        if include_player_metadata_refresh:
-            merged_flag = _job_player_metadata_refresh(job) or _placeholder_player_merge_flag(
-                additions, player_metadata_refresh_by_id
-            )
-            payload["player_metadata_refresh"] = merged_flag
-        if payload_extras:
-            payload.update(payload_extras)
-        job.payload = payload
-        job.updated_at = now
-        session.add(job)
-        touched_job_ids.append(int(job.id))
-        updated_jobs += 1
-        added_set = set(additions)
-        ids_remaining = [pid for pid in ids_remaining if pid not in added_set]
+
+        # 1. Deduplicate: if any requested pid is already in this pending job, mark it as covered
+        already_in_job = [pid for pid in ids_remaining if pid in existing_set]
+        if already_in_job:
+            ids_remaining = [pid for pid in ids_remaining if pid not in existing_set]
+            if include_player_metadata_refresh:
+                needed = _placeholder_player_merge_flag(already_in_job, player_metadata_refresh_by_id)
+                if needed and not _job_player_metadata_refresh(job):
+                    payload["player_metadata_refresh"] = True
+                    job_modified = True
+
+        # 2. Add remaining pids to this job if it has capacity
+        capacity = batch_size - len(existing_ids)
+        if capacity > 0 and ids_remaining:
+            additions: list[int] = []
+            for pid in ids_remaining:
+                additions.append(pid)
+                existing_set.add(pid)
+                if len(additions) >= capacity:
+                    break
+
+            if additions:
+                payload["placeholder_ids"] = existing_ids + additions
+                if include_player_metadata_refresh:
+                    merged_flag = _job_player_metadata_refresh(job) or _placeholder_player_merge_flag(
+                        additions, player_metadata_refresh_by_id
+                    )
+                    payload["player_metadata_refresh"] = merged_flag
+                job_modified = True
+                added_set = set(additions)
+                ids_remaining = [pid for pid in ids_remaining if pid not in added_set]
+
+        if job_modified:
+            if payload_extras:
+                payload.update(payload_extras)
+            job.payload = payload
+            job.updated_at = now
+            session.add(job)
+            touched_job_ids.append(int(job.id))
+            updated_jobs += 1
+        elif already_in_job and int(job.id) not in touched_job_ids:
+            touched_job_ids.append(int(job.id))
 
     from services.source_of_truth.job_priority import default_priority_for
 

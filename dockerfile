@@ -35,6 +35,7 @@ COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
+# Default listen port; overridden at runtime by PLACEHOLDARR_PORT via docker-entrypoint.sh.
 EXPOSE 8000
 
 ENTRYPOINT ["/docker-entrypoint.sh"]

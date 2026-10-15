@@ -74,6 +74,11 @@ export function PlaceholderPolicyCycle(props: {
   lockedReason?: string;
   /** Arr tag policy control (movies/series only). */
   policyTagControl?: PolicyTagControl | null;
+  /**
+   * Extra hover text (e.g. density behavior). Shown when the chip is editable
+   * and not Arr-tag-controlled; appended after the base Auto/Never/Pinned tip.
+   */
+  policyHint?: string | null;
   accentHex: string;
   themeMode: ThemeMode;
   size?: "sm" | "md";
@@ -349,9 +354,15 @@ export function PlaceholderPolicyCycle(props: {
       ? "Controlled by Arr tag. Click to clear."
       : null;
 
+  const hint = String(props.policyHint || "").trim();
+  const baseTip = POLICY_TOOLTIP[displayPolicy];
   const title = locked
     ? props.lockedReason || "Set by series. Change the series chip to unlock."
-    : tagHover || POLICY_TOOLTIP[displayPolicy];
+    : tagHover
+      ? tagHover
+      : hint
+        ? `${baseTip} ${hint}`
+        : baseTip;
 
   const progressLabel = inlineLabel ? (
     <span

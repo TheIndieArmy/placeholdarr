@@ -9,7 +9,8 @@ from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import Session
 
 from services.library_future_semantics import sql_episode_future_outside_lookahead
-from services.postgres.models import Episode, Season, Series
+from services.postgres.models import Episode, Placeholder, Season, Series
+from services.source_of_truth.tv_density import PLACEHOLDER_KIND_SERIES_STUB, PLACEHOLDER_KIND_SEASON_STUB, tv_placeholder_density
 
 SERIES_STAT_KEYS = (
     "episode_total",
@@ -53,6 +54,35 @@ def _stats_row_from_query(
     }
 
 
+def _density_stub_placeholder_count(session: Session, series_id: int) -> int:
+    """When density is season/series, Library counts one stub file per series (or season stubs)."""
+    density = tv_placeholder_density()
+    if density == "episode":
+        return 0
+    if density == "series":
+        return (
+            session.query(Placeholder.id)
+            .filter(
+                Placeholder.series_id == int(series_id),
+                Placeholder.placeholder_kind == PLACEHOLDER_KIND_SERIES_STUB,
+                Placeholder.has_placeholder == True,  # noqa: E712
+                Placeholder.episode_id.is_(None),
+            )
+            .count()
+        )
+    # season density (future): count season stubs
+    return (
+        session.query(Placeholder.id)
+        .filter(
+            Placeholder.series_id == int(series_id),
+            Placeholder.placeholder_kind == PLACEHOLDER_KIND_SEASON_STUB,
+            Placeholder.has_placeholder == True,  # noqa: E712
+            Placeholder.episode_id.is_(None),
+        )
+        .count()
+    )
+
+
 def compute_series_episode_stats(session: Session, series_id: int) -> dict[str, int]:
     """Aggregate episode counts for one series (respects deleted season/episode rows)."""
     row = (
@@ -91,13 +121,17 @@ def compute_series_episode_stats(session: Session, series_id: int) -> dict[str, 
     )
     if not row:
         return series_counts_empty()
-    return _stats_row_from_query(
+    out = _stats_row_from_query(
         row.episode_total,
         row.episode_files,
         row.episode_placeholders,
         row.episode_future,
         row.episode_missing,
     )
+    stub_count = _density_stub_placeholder_count(session, int(series_id))
+    if stub_count:
+        out["episode_placeholders"] = int(stub_count)
+    return out
 
 
 def bulk_compute_series_episode_stats(session: Session, series_ids: Iterable[int]) -> dict[int, dict[str, int]]:
@@ -154,6 +188,11 @@ def bulk_compute_series_episode_stats(session: Session, series_ids: Iterable[int
             row.episode_future,
             row.episode_missing,
         )
+    if tv_placeholder_density() != "episode":
+        for sid in ids:
+            stub_count = _density_stub_placeholder_count(session, int(sid))
+            if stub_count:
+                out[int(sid)]["episode_placeholders"] = int(stub_count)
     return out
 
 

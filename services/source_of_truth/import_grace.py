@@ -35,8 +35,14 @@ def _countdown_lt_1_min_status_text() -> str:
     return render_message("import_grace.countdown_lt_1_min", {})
 
 
-def _all_countdown_status_texts() -> list[str]:
-    """Render all countdown status strings in display order."""
+def _all_countdown_status_texts(step_seconds: int = 60) -> list[str]:
+    """Render all countdown status strings in display order.
+
+    Accelerated cadence still uses the configured 5/4/3/2/1-minute templates so
+    each tick is a distinct projected status. The step interval only changes
+    how quickly those labels advance, not the label text.
+    """
+    del step_seconds  # Cadence is applied in build_import_grace_schedule, not labels.
     return [_countdown_status_text(m) for m in COUNTDOWN_MINUTES_DECREASING] + [_countdown_lt_1_min_status_text()]
 
 
@@ -62,7 +68,7 @@ def build_import_grace_schedule(base_time: datetime | None = None, step_seconds:
     now = base_time or datetime.now(timezone.utc)
     step = max(1, int(step_seconds or _import_grace_step_seconds()))
 
-    countdown_texts = _all_countdown_status_texts()
+    countdown_texts = _all_countdown_status_texts(step)
     scheduled: list[dict[str, Any]] = []
     for step_index, status_text in enumerate(countdown_texts):
         scheduled.append(
@@ -121,6 +127,9 @@ def _set_countdown_status(session, placeholder_ids: list[int], status_text: str)
         row.display_status = status_text
         row.display_reason = IMPORT_GRACE_REASON
         row.display_status_projected = projected_status_display(status_text, reason=IMPORT_GRACE_REASON)
+        # Import grace is past Arr queue tracking; stop RefreshMonitoredDownloads polling.
+        row.queue_monitor_active = False
+        row.queue_monitor_active_set_at = None
         session.add(row)
         active_ids.append(int(row.id))
     return active_ids

@@ -87,6 +87,15 @@ class StaleJobClaimError(Exception):
     """Raised when completing a job row would overwrite state after stale-CLAIMED reaper reset."""
 
 
+class JobDeferredError(Exception):
+    """Handler asks to leave the job PENDING for a later retry without failing it."""
+
+    def __init__(self, reason: str, *, delay_seconds: int = 60):
+        super().__init__(reason)
+        self.reason = str(reason or "deferred")
+        self.delay_seconds = max(5, int(delay_seconds or 60))
+
+
 # ----------------------------------------------------------------
 # NOTIFY/LISTEN-driven worker coordination
 # ----------------------------------------------------------------
@@ -680,6 +689,35 @@ def _try_complete_task_runs_after_job_commit(
             )
 
 
+def _mark_descriptor_deferred(session, descriptor: ClaimedJobDescriptor, *, delay_seconds: int, reason: str) -> None:
+    """Return a CLAIMED job to PENDING with run_after, conditional on claim_token.
+
+    Used when another runner still holds the sync gate so we must not mark DONE.
+    Does not increment attempts.
+    """
+    now = datetime.now(timezone.utc)
+    run_after = now + timedelta(seconds=max(5, int(delay_seconds or 60)))
+    res = session.execute(
+        update(Job)
+        .where(
+            Job.id == descriptor.id,
+            Job.status == 'CLAIMED',
+            Job.claim_token == descriptor.claim_token,
+        )
+        .values(
+            status='PENDING',
+            updated_at=now,
+            claim_token=None,
+            run_after=run_after,
+            error_message=None,
+        )
+    )
+    if res.rowcount == 0:
+        raise StaleJobClaimError(
+            f"job_id={descriptor.id} defer not applied (stale claim); reason={reason}"
+        )
+
+
 def _mark_descriptor_done(session, descriptor: ClaimedJobDescriptor) -> None:
     """Mark a CLAIMED job DONE in a session, conditional on the claim_token.
 
@@ -842,6 +880,12 @@ def _process_claimed_job(session, job: Job):
         result = process_startup_sync_runner_job(session, job)
         if not result.get('ok', False):
             raise ValueError(str(result.get('reason') or 'startup_sync_runner_failed'))
+        if result.get('defer'):
+            # Bubble to finish step: leave PENDING with run_after (do not mark DONE).
+            raise JobDeferredError(
+                str(result.get('skipped') or 'deferred'),
+                delay_seconds=int(result.get('defer_seconds') or 120),
+            )
         return
 
     logger.debug(f'Skipping unhandled job_type={job.job_type}', extra={'emoji_type': 'debug'})
@@ -956,6 +1000,9 @@ def _process_one_descriptor(descriptor: ClaimedJobDescriptor) -> None:
                 handler_outcome = "done"
             else:
                 handler_outcome = "failed"
+        except JobDeferredError as defer_exc:
+            handler_error = defer_exc
+            handler_outcome = "deferred"
         except Exception as exc:
             try:
                 handler_session.rollback()
@@ -972,7 +1019,7 @@ def _process_one_descriptor(descriptor: ClaimedJobDescriptor) -> None:
     # Step 3: mark DONE/FAILED in a fresh finish session. Even if the
     # handler released its session before HTTP, this small transaction is
     # still bounded by lock_timeout and observability is preserved.
-    if handler_outcome in ("done", "failed"):
+    if handler_outcome in ("done", "failed", "deferred"):
         finish_session = get_session()
         try:
             try:
@@ -985,7 +1032,19 @@ def _process_one_descriptor(descriptor: ClaimedJobDescriptor) -> None:
                     except Exception:
                         pass
 
-                if handler_error is None:
+                if handler_outcome == "deferred" and isinstance(handler_error, JobDeferredError):
+                    _mark_descriptor_deferred(
+                        finish_session,
+                        descriptor,
+                        delay_seconds=handler_error.delay_seconds,
+                        reason=handler_error.reason,
+                    )
+                    logger.info(
+                        f"Worker deferred job_id={descriptor.id} job_type={descriptor.job_type} "
+                        f"reason={handler_error.reason} run_after(+{handler_error.delay_seconds}s)",
+                        extra={'emoji_type': 'info'},
+                    )
+                elif handler_error is None:
                     _mark_descriptor_done(finish_session, descriptor)
                 else:
                     _mark_descriptor_failed(finish_session, descriptor, handler_error)
@@ -1001,11 +1060,12 @@ def _process_one_descriptor(descriptor: ClaimedJobDescriptor) -> None:
                     finish_session.commit()
                 finally:
                     hb_fin.set()
-                _try_complete_task_runs_after_job_commit(
-                    descriptor,
-                    failed=handler_error is not None,
-                    error_message=str(handler_error) if handler_error is not None else None,
-                )
+                if handler_outcome in ("done", "failed"):
+                    _try_complete_task_runs_after_job_commit(
+                        descriptor,
+                        failed=handler_error is not None,
+                        error_message=str(handler_error) if handler_error is not None else None,
+                    )
             except StaleJobClaimError as stale:
                 try:
                     finish_session.rollback()
@@ -1036,12 +1096,12 @@ def _process_one_descriptor(descriptor: ClaimedJobDescriptor) -> None:
     # the same row does not see a stale "revoked" flag.
     _clear_claim_revoked(descriptor.id)
     elapsed_s = time.monotonic() - started
-    log_fn = logger.info if handler_outcome == "done" else logger.warning
+    log_fn = logger.info if handler_outcome in ("done", "deferred") else logger.warning
     try:
         log_fn(
             f"job_done job_id={descriptor.id} job_type={descriptor.job_type} "
             f"outcome={handler_outcome} elapsed_s={elapsed_s:.3f}",
-            extra={'emoji_type': 'info' if handler_outcome == 'done' else 'warning'},
+            extra={'emoji_type': 'info' if handler_outcome in ("done", "deferred") else 'warning'},
         )
     except Exception:
         pass

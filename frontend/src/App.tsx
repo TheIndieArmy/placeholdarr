@@ -16,21 +16,35 @@ import { Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } fr
 import { copyTextToClipboard } from "./copyToClipboard";
 import { ARR_WEBHOOK_SERVICES, PLAYBACK_WEBHOOK_SERVICES } from "./webhookConfig";
 import {
+  getHealth,
   getIntegrationsStatus,
   getMovieDetail,
   getSeriesDetail,
   getSettingsCurrent,
   getSettingsStatus,
+  restartApp,
   saveSettings,
   testIntegrationConnection,
   type NfoBackfillApplyScope,
+  ensureDestFolder,
 } from "./api/dashboard";
-import type { IntegrationsStatusResponse } from "./types/api";
+import { getCollectionPlexSections } from "./api/collections";
+import { DestinationMapEditor } from "./settings/DestinationMapEditor";
+import type { IntegrationsStatusResponse, PlexSectionOption } from "./types/api";
 import { postTaskRun } from "./api/tasks";
 import { fetchJson, postJson, setUnauthorizedHandler, getCsrfToken } from "./api/client";
 import { changePassword, getAuthStatus, getWebhookApiKey, logoutAuth, regenerateWebhookApiKey, type AuthStatus } from "./api/auth";
 import { dismissWhatsNew, getWhatsNew, groupWhatsNewByVersion, type WhatsNewNotice } from "./api/whatsNew";
 import { AuthGate } from "./auth/AuthGate";
+import {
+  ONBOARDING_STEP_GUIDES,
+  ONBOARDING_WIZARD_STEPS,
+  DensitySearchIdeasStep,
+  StepGuide,
+  WelcomeStep,
+  type TvDensityChoice,
+  type TvDensityRetireWhen,
+} from "./onboarding";
 import embyIcon from "./assets/services/emby.svg";
 import jellyfinIcon from "./assets/services/jellyfin.svg";
 import plexIcon from "./assets/services/plex.svg";
@@ -41,10 +55,16 @@ import placeholdarrLogoYellow from "./assets/Placeholdarr_yellow.svg";
 import type { Brand, ThemeMode } from "./brandTypes";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { SettingsStringListChips } from "./SettingsStringListChips";
+import {
+  PlaybackDestFilterControls,
+  PLAYBACK_DEST_FILTER_KEYS,
+  isPlaybackDestFilterKey,
+  playbackDestOptionsFromValues,
+} from "./settings/PlaybackDestFilterControls";
+import { UI_SECTION_FRAME_CLASS } from "./uiSectionFrame";
 import { TmdbAttribution } from "./TmdbAttribution";
 import { getBrandSemanticTokens, semanticTokensToCssVars, type BrandSemanticTokens } from "./brandSemanticTheme";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "./brandAccentUi";
-import tautulliIcon from "./assets/services/tautulli.svg";
 import type {
   ActivityRow,
   ActivitySubPage,
@@ -79,6 +99,7 @@ import {
 import { useLibraryShelves } from "./library/useLibraryShelves";
 import { ConfirmModal } from "./ConfirmModal";
 import { CollectionsPanel } from "./collections/CollectionsPanel";
+import DummyMediaSettings from "./DummyMediaSettings";
 import { useActivityTasks } from "./activity/useActivityTasks";
 import { useActivityFeed } from "./activity/useActivityFeed";
 import { PlaceholdersPanel } from "./activity/PlaceholdersPanel";
@@ -185,17 +206,21 @@ function readStoredThemeMode(): ThemeMode {
   return "dark";
 }
 const SETTINGS_SECTION_ORDER = [
-  "Security",
+  "Paths",
   "Media Integrations",
   "ARR Integrations",
   "Optional APIs",
-  "Paths",
+  "Density & Lookahead",
+  "Playback",
   "Library sync",
   "Calendar",
-  "Lookahead",
   "Status Updates",
+  "Poster Overlay",
+  "Dummy Video",
   "Advanced",
+  "Security",
 ];
+
 const SETTINGS_SECTION_ICONS: Record<string, string> = {
   Security: "shield_lock",
   "Media Integrations": "hub",
@@ -204,8 +229,11 @@ const SETTINGS_SECTION_ICONS: Record<string, string> = {
   Paths: "folder",
   "Library sync": "sync",
   Calendar: "calendar_month",
-  Lookahead: "fast_forward",
+  "Density & Lookahead": "fast_forward",
+  Playback: "play_circle",
   "Status Updates": "edit_notifications",
+  "Poster Overlay": "image",
+  "Dummy Video": "movie",
   Advanced: "tune",
 };
 const SETTINGS_SECTION_SLUGS: Record<string, string> = {
@@ -216,15 +244,13 @@ const SETTINGS_SECTION_SLUGS: Record<string, string> = {
   Paths: "paths",
   "Library sync": "library-sync",
   Calendar: "calendar",
-  Lookahead: "lookahead",
+  "Density & Lookahead": "density-lookahead",
+  Playback: "playback",
   "Status Updates": "status-updates",
+  "Poster Overlay": "poster-overlay",
+  "Dummy Video": "dummy-video",
   Advanced: "advanced",
 };
-
-const LOOKAHEAD_FILTER_KEYS = [
-  "PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED",
-  "PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES",
-] as const;
 
 function settingsFieldInteractionDisabled(field: SettingsField, values: Record<string, unknown>): boolean {
   const disabledWhen = field.disabled_when;
@@ -234,6 +260,16 @@ function settingsFieldInteractionDisabled(field: SettingsField, values: Record<s
   const parentKey = field.depends_on;
   if (!parentKey) return false;
   return !Boolean(values[parentKey]);
+}
+
+/** UI checked state for bool settings (honors invert_bool display polarity). */
+function settingsBoolUiChecked(field: Pick<SettingsField, "invert_bool">, stored: unknown): boolean {
+  const on = Boolean(stored);
+  return field.invert_bool ? !on : on;
+}
+
+function settingsBoolStoredFromUi(field: Pick<SettingsField, "invert_bool">, uiChecked: boolean): boolean {
+  return field.invert_bool ? !uiChecked : uiChecked;
 }
 
 function settingsFieldParentDisabled(field: SettingsField, values: Record<string, unknown>): boolean {
@@ -265,104 +301,28 @@ function tmdbApiKeyConfiguredFromSettings(
   return false;
 }
 
-function isLookaheadFilterFieldKey(key: string): boolean {
-  return (LOOKAHEAD_FILTER_KEYS as readonly string[]).includes(key);
-}
-
-function snapshotLookaheadFilters(values: Record<string, unknown>): Record<string, boolean> {
-  return {
-    PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED: Boolean(
-      values.PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED,
-    ),
-    PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES: Boolean(
-      values.PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES,
-    ),
-  };
-}
-
-function settingsFieldDisplayValue(
-  field: SettingsField,
-  values: Record<string, unknown>,
-  lookaheadFilterSnapshot: Record<string, boolean> | null,
-): unknown {
-  if (
-    lookaheadFilterSnapshot &&
-    Boolean(values.PLAYBACK_MONITOR_ONLY_NO_SEARCH) &&
-    isLookaheadFilterFieldKey(field.key)
-  ) {
-    return lookaheadFilterSnapshot[field.key as keyof typeof lookaheadFilterSnapshot];
-  }
-  return values[field.key];
-}
-
-function usePlaybackLookaheadFieldControls(
-  values: Record<string, unknown>,
-  onValueChange: (key: string, value: unknown) => void,
-) {
-  const [lookaheadFilterSnapshot, setLookaheadFilterSnapshot] = useState<Record<string, boolean> | null>(null);
-  const monitorOnlyEnabled = Boolean(values.PLAYBACK_MONITOR_ONLY_NO_SEARCH);
-
-  useEffect(() => {
-    if (!monitorOnlyEnabled) {
-      setLookaheadFilterSnapshot(null);
-      return;
-    }
-    setLookaheadFilterSnapshot((prev) => prev ?? snapshotLookaheadFilters(values));
-  }, [monitorOnlyEnabled]);
-
-  const handleValueChange = useCallback(
-    (key: string, value: unknown) => {
-      if (key === "PLAYBACK_MONITOR_ONLY_NO_SEARCH") {
-        const enabling = Boolean(value);
-        const wasEnabled = Boolean(values.PLAYBACK_MONITOR_ONLY_NO_SEARCH);
-        if (enabling && !wasEnabled) {
-          setLookaheadFilterSnapshot(snapshotLookaheadFilters(values));
-          onValueChange(key, value);
-          return;
-        }
-        if (!enabling && wasEnabled) {
-          const snap = lookaheadFilterSnapshot ?? snapshotLookaheadFilters(values);
-          setLookaheadFilterSnapshot(null);
-          onValueChange(key, false);
-          onValueChange(
-            "PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED",
-            snap.PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED,
-          );
-          onValueChange("PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES", snap.PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES);
-          return;
-        }
-      }
-      onValueChange(key, value);
-    },
-    [values, onValueChange, lookaheadFilterSnapshot],
-  );
-
-  const effectiveSnapshot = monitorOnlyEnabled
-    ? (lookaheadFilterSnapshot ?? snapshotLookaheadFilters(values))
-    : null;
-
-  return { handleValueChange, effectiveSnapshot };
-}
-
 function settingsFieldIsNested(field: SettingsField): boolean {
   return Boolean(field.nested);
 }
 
 /** Virtual settings sections backed by their own API endpoint, not `/api/settings/current`. */
-const VIRTUAL_SETTINGS_SECTIONS = new Set<string>();
+const VIRTUAL_SETTINGS_SECTIONS = new Set<string>(["Dummy Video"]);
 
 function resolveSettingsSectionFromSlug(slug: string): string | undefined {
   if (!slug.trim()) return undefined;
   if (slug === "status-messages") return "Status Updates";
   // Former Collection Sources URL (bookmarks / old CTAs).
   if (slug === "collection-sources") return "Optional APIs";
+  // Former Lookahead settings URL (bookmarks / What's New CTAs).
+  if (slug === "lookahead") return "Density & Lookahead";
   return SETTINGS_SECTION_ORDER.find((name) => SETTINGS_SECTION_SLUGS[name] === slug);
 }
 const BEHAVIOR_WIZARD_SECTIONS = [
   "ARR Integrations",
   "Library sync",
   "Calendar",
-  "Lookahead",
+  "Density & Lookahead",
+  "Playback",
   "Advanced",
 ] as const;
 
@@ -371,11 +331,8 @@ const ONBOARDING_SECTION_TITLE_CLASS =
   "mb-3 pb-2 border-b border-[#424753]/40 text-[18px] font-headline font-bold uppercase tracking-wide text-white";
 
 /**
- * Grouped settings / onboarding section surface: raised slate panel with a brand accent3 rail on all sides.
- * Requires an ancestor that sets CSS vars (e.g. `semanticTokensToCssVars` on `.brand-theme-scope`).
+ * Grouped settings / onboarding section surface: see {@link UI_SECTION_FRAME_CLASS} in uiSectionFrame.ts.
  */
-const UI_SECTION_FRAME_CLASS =
-  "rounded-lg border border-[var(--brand-accent-3)] bg-[color:color-mix(in_srgb,var(--brand-surface-panel)_92%,var(--brand-accent-3)_8%)] shadow-lg shadow-black/15";
 
 /**
  * Media / ARR service tiles (wizard + settings grids): same accent rail and surface fill as
@@ -404,12 +361,29 @@ function IntegrationFailureBadge(props: { title?: string; size?: "sm" | "md" }) 
 const WIZARD_ONBOARDING_SECTION_SURFACE_CLASS = `mb-4 ${UI_SECTION_FRAME_CLASS} px-4 py-4 sm:px-5`;
 
 const WIZARD_STEPS = [
-  { key: "paths", name: "Paths" },
   { key: "media", name: "Media Servers" },
   { key: "arr", name: "ARR Services" },
+  { key: "paths", name: "Paths" },
   { key: "behavior", name: "Behavior" },
   { key: "look_and_feel", name: "Look and feel" },
 ] as const;
+
+/** Density fields chosen on the Profile step; omitted from More when using play-first onboarding. */
+const PLAY_STEP_DENSITY_FIELD_KEYS = new Set([
+  "TV_PLACEHOLDER_DENSITY",
+  "TV_DENSITY_RETIRE_WHEN",
+]);
+/** Playback dest filters saved on the Playback step; omit Playback section from More when using play-first onboarding. */
+const PLAY_STEP_PLAYBACK_MODIFIER_KEYS = new Set<string>([...PLAYBACK_DEST_FILTER_KEYS]);
+/** Keys saved on the Profile (density_search) step. */
+const DENSITY_SEARCH_STEP_KEYS = [
+  "TV_PLACEHOLDER_DENSITY",
+  "TV_PLAY_MODE",
+  "EPISODES_LOOKAHEAD",
+  "TV_DENSITY_RETIRE_WHEN",
+] as const;
+
+type WizardStepDef = { key: string; name: string };
 
 /** Onboarding Look and feel step — status messaging + poster overlay previews. */
 const LOOK_AND_FEEL_FIELD_KEYS = [
@@ -425,8 +399,8 @@ const POSTER_OVERLAY_PREVIEW_TMDB_ID = 1226863;
 const POSTER_OVERLAY_EXAMPLES_BASE = `${import.meta.env.BASE_URL}overlay-examples/`.replace(/(?<!:)\/{2,}/g, "/");
 const POSTER_OVERLAY_EXAMPLE_MODES = [
   { mode: "grayscale", label: "Grayscale poster", image: `${POSTER_OVERLAY_EXAMPLES_BASE}grayscale.jpg` },
-  { mode: "top_banner", label: "Top banner — PLACEHOLDER", image: `${POSTER_OVERLAY_EXAMPLES_BASE}top_banner.jpg` },
-  { mode: "corner_logo", label: "Corner badge — Placeholdarr logo", image: `${POSTER_OVERLAY_EXAMPLES_BASE}corner_logo.jpg` },
+  { mode: "top_banner", label: "Top banner: PLACEHOLDER", image: `${POSTER_OVERLAY_EXAMPLES_BASE}top_banner.jpg` },
+  { mode: "corner_logo", label: "Corner badge: Placeholdarr logo", image: `${POSTER_OVERLAY_EXAMPLES_BASE}corner_logo.jpg` },
 ] as const;
 
 const TMDB_POSTER_IMG_BASE = "https://image.tmdb.org/t/p/w300";
@@ -464,6 +438,8 @@ const ONBOARDING_HERO_LIGHT_CENTER_SLOTS_NARROW = [5, 6, 9, 10] as const;
 const ONBOARDING_HERO_LIGHT_CENTER_SLOTS_WIDE = [3, 4, 11, 12] as const;
 
 const PATH_LIBRARY_ROOT_KEY = "LIBRARY_ROOT";
+const PATH_DESTINATION_MAP_KEY = "LIBRARY_DESTINATION_MAP_JSON";
+const PATH_PLEX_DEFAULT_SECTION_KEYS = ["PLEX_MOVIE_SECTION_ID", "PLEX_TV_SECTION_ID"] as const;
 const PATH_PROFILE_KEYS = [] as const;
 const PATH_PER_LIBRARY_OVERRIDE_KEYS = [] as const;
 
@@ -477,21 +453,35 @@ const SETTINGS_UI_HIDDEN_FIELD_KEYS = new Set<string>([
   "PLEX_PLAYBACK_NOTIFIER",
   "JELLYFIN_PLAYBACK_NOTIFIER",
   "EMBY_PLAYBACK_NOTIFIER",
+  // Legacy multi-instance modes; Play Actions lists own runtime behavior.
+  "MOVIE_PLACEHOLDER_SEARCH_MODE",
+  "TV_PLACEHOLDER_SEARCH_MODE",
+  "MOVIE_PLACEHOLDER_PREFER_PATH_MATCH",
+  "TV_PLACEHOLDER_PREFER_PATH_MATCH",
+  "MOVIE_PLAYBACK_INSTANCE_MODE",
+  "TV_PLAYBACK_INSTANCE_MODE",
+  "MOVIE_PLAYBACK_PREFER_PATH_MATCH",
+  "TV_PLAYBACK_PREFER_PATH_MATCH",
+  "TV_CROSS_INSTANCE_LOOKAHEAD",
+  // Derived from Play Actions "Fallback" selections; not shown as its own toggle.
+  "ENABLE_PLAYBACK_FALLBACK_SEARCH",
+  // Superseded by ALWAYS + FALLBACK lists.
+  "MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES",
+  "TV_PLAY_PLACEHOLDER_ALSO_INSTANCES",
 ]);
 
 const ARR_CONFIGURATION_KEYS = new Set<string>([
   "ARR_INSTANCES_JSON",
 ]);
 
-const ARR_SEARCH_PLAYBACK_KEYS = new Set<string>([
-  "MOVIE_PLACEHOLDER_SEARCH_MODE",
-  "TV_PLACEHOLDER_SEARCH_MODE",
-]);
-
-const ARR_REAL_FILE_PLAYBACK_KEYS = new Set<string>([
-  "MOVIE_PLAYBACK_INSTANCE_MODE",
-  "TV_PLAYBACK_INSTANCE_MODE",
-  "ENABLE_PLAYBACK_FALLBACK_SEARCH",
+/** Play Actions matrix keys (path match is always on). */
+const ARR_PLAY_ACTIONS_KEYS = new Set<string>([
+  "MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES",
+  "MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES",
+  "MOVIE_PLAY_REAL_ALSO_INSTANCES",
+  "TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES",
+  "TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES",
+  "TV_PLAY_REAL_ALSO_INSTANCES",
   "PLAYBACK_FALLBACK_TIMEOUT_MINUTES",
 ]);
 
@@ -501,20 +491,29 @@ const ARR_SHARED_PLACEHOLDER_CLEANUP_KEYS = new Set<string>([
 ]);
 
 const ARR_BEHAVIOR_KEYS = new Set<string>([
-  ...ARR_SEARCH_PLAYBACK_KEYS,
-  ...ARR_REAL_FILE_PLAYBACK_KEYS,
+  ...ARR_PLAY_ACTIONS_KEYS,
   ...ARR_SHARED_PLACEHOLDER_CLEANUP_KEYS,
 ]);
 
 function partitionLibraryPathFields(fields: SettingsField[]) {
   const profileSet = new Set<string>(PATH_PROFILE_KEYS as unknown as string[]);
   const overrideSet = new Set<string>(PATH_PER_LIBRARY_OVERRIDE_KEYS as unknown as string[]);
+  const plexDefaultSet = new Set<string>(PATH_PLEX_DEFAULT_SECTION_KEYS as unknown as string[]);
   const byKey = new Map(fields.map((f) => [f.key, f]));
   const root = byKey.get(PATH_LIBRARY_ROOT_KEY);
+  const destinationMap = byKey.get(PATH_DESTINATION_MAP_KEY);
+  const plexDefaults = PATH_PLEX_DEFAULT_SECTION_KEYS.map((k) => byKey.get(k)).filter(Boolean) as SettingsField[];
   const profiles = PATH_PROFILE_KEYS.map((k) => byKey.get(k)).filter(Boolean) as SettingsField[];
   const overrides = PATH_PER_LIBRARY_OVERRIDE_KEYS.map((k) => byKey.get(k)).filter(Boolean) as SettingsField[];
-  const rest = fields.filter((f) => f.key !== PATH_LIBRARY_ROOT_KEY && !profileSet.has(f.key) && !overrideSet.has(f.key));
-  return { root, profiles, overrides, rest };
+  const rest = fields.filter(
+    (f) =>
+      f.key !== PATH_LIBRARY_ROOT_KEY &&
+      f.key !== PATH_DESTINATION_MAP_KEY &&
+      !plexDefaultSet.has(f.key) &&
+      !profileSet.has(f.key) &&
+      !overrideSet.has(f.key)
+  );
+  return { root, plexDefaults, destinationMap, profiles, overrides, rest };
 }
 
 const URL_TEST_TARGET: Record<string, { service: "plex" | "jellyfin" | "emby" | "radarr" | "sonarr"; credentialKey: string }> = {
@@ -559,37 +558,17 @@ function isActiveSetupPreviewRoute(pathname: string, search: string): boolean {
   return isOnboardingPreviewRoute(pathname, search);
 }
 
-function buildPreviewDummyFieldValues(payload: SettingsPayload): FieldValueMap {
-  const out: FieldValueMap = {};
-  for (const section of payload.sections) {
-    for (const field of section.fields) {
-      switch (field.type) {
-        case "bool":
-          out[field.key] = false;
-          break;
-        case "int":
-          out[field.key] = 0;
-          break;
-        case "choice":
-          out[field.key] = field.options?.[0]?.value ?? "";
-          break;
-        case "string_list":
-          out[field.key] = Array.isArray(field.default) ? [...field.default] : [];
-          break;
-        default:
-          out[field.key] = "";
-      }
-    }
-  }
-  if ("ARR_INSTANCES_JSON" in out && String(out.ARR_INSTANCES_JSON ?? "").trim() === "") {
-    out.ARR_INSTANCES_JSON = "[]";
-  }
-  out.PLACEHOLDER_STATUS_UPDATES = "ALL";
-  out.PLACEHOLDER_STATUS_PROJECTION_MODE = "both";
-  // Real webhook key from the server so preview URLs match Settings (tokenized ?apikey=).
-  out.WEBHOOK_API_KEY = payload.webhook_api_key ?? "";
-  return out;
+function fieldValuesFromSettingsPayload(payload: SettingsPayload): FieldValueMap {
+  const next: FieldValueMap = {};
+  payload.sections.forEach((section) => {
+    section.fields.forEach((field) => {
+      next[field.key] = field.value;
+    });
+  });
+  next.WEBHOOK_API_KEY = payload.webhook_api_key ?? "";
+  return next;
 }
+
 
 type CalendarFilters = {
   mediaTypes: Record<string, boolean>;
@@ -609,7 +588,7 @@ const BRAND: Brand = "placeholdarr";
 
 const BRAND_META: { label: string; tagline: string } = {
   label: "Placeholdarr",
-  tagline: "High fidelity simulation — your library as a living spec sheet.",
+  tagline: "High fidelity simulation: your library as a living spec sheet.",
 };
 
 /** Branded first paint for /setup while settings load (Seerr-style splash: motion masks wait). */
@@ -776,6 +755,8 @@ export function App() {
   const [baselineValues, setBaselineValues] = useState<FieldValueMap>({});
   const [settingsFeedback, setSettingsFeedback] = useState("");
   const [settingsFeedbackKind, setSettingsFeedbackKind] = useState<"" | "success" | "error">("");
+  const [restartAvailable, setRestartAvailable] = useState(false);
+  const [restartPhase, setRestartPhase] = useState<"" | "restarting" | "reconnecting" | "failed">("");
   const [integrationsStatus, setIntegrationsStatus] = useState<IntegrationsStatusResponse | null>(null);
   /** Status message templates (Settings → Status Updates) — separate API from fieldValues. */
   const [statusMessagesMeta, setStatusMessagesMeta] = useState({ dirty: false, hasValidationErrors: false });
@@ -785,6 +766,8 @@ export function App() {
     pending: boolean;
     title: string;
     description: string;
+    /** When set, Apply now copy says "TV placeholders" instead of all placeholders. */
+    countMedia?: "tv";
     resolve: (scope: NfoBackfillApplyScope) => void;
     reject: (reason: unknown) => void;
   }>(null);
@@ -978,8 +961,18 @@ export function App() {
   });
 
   const onboardingPreviewRoute = isActiveSetupPreviewRoute(location.pathname, location.search);
-  const onboardingPreviewRouteRef = useRef(false);
-  onboardingPreviewRouteRef.current = onboardingPreviewRoute;
+  /** Preview is the non-saving mirror of live unfinished `/setup`. */
+  const onboardingTourRoute = onboardingPreviewRoute;
+  const usePlayFirstOnboarding =
+    onboardingPreviewRoute || setupStatus?.setup_complete === false;
+  const onboardingTourRouteRef = useRef(false);
+  onboardingTourRouteRef.current = onboardingTourRoute;
+  const wizardSteps: readonly WizardStepDef[] = useMemo(() => {
+    if (!usePlayFirstOnboarding) return WIZARD_STEPS;
+    // Playback step is always shown (dest filters). Multi-instance Arr actions nest under it when needed.
+    return ONBOARDING_WIZARD_STEPS;
+  }, [usePlayFirstOnboarding]);
+  const onboardingStepKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1093,12 +1086,16 @@ export function App() {
   );
 
   const requestNfoBackfillApplyScopeChoice = useCallback(
-    (copy: { title: string; description: string }) =>
+    (copy: { title: string; description: string; countMedia?: "tv" }) =>
       new Promise<NfoBackfillApplyScope | null>((resolve, reject) => {
         void (async () => {
           let data: { placeholder_count?: number; pending_full_sync_backfill?: boolean };
+          const estimatePath =
+            copy.countMedia === "tv"
+              ? "/api/messages/templates/apply_estimate?media=tv"
+              : "/api/messages/templates/apply_estimate";
           try {
-            data = await fetchJson("/api/messages/templates/apply_estimate", { credentials: "same-origin" });
+            data = await fetchJson(estimatePath, { credentials: "same-origin" });
           } catch {
             data = { placeholder_count: 0, pending_full_sync_backfill: false };
           }
@@ -1107,6 +1104,7 @@ export function App() {
             pending: !!data?.pending_full_sync_backfill,
             title: copy.title,
             description: copy.description,
+            countMedia: copy.countMedia,
             resolve: (scope) => {
               setNfoBackfillScopeModal(null);
               resolve(scope);
@@ -1382,7 +1380,7 @@ export function App() {
     setTitleSearchIndex(0);
   }, [location.pathname]);
 
-  /** Dummy onboarding walk-through at `/setup/preview` — does not persist; refreshes when the route is opened. */
+  /** Non-persisting walk-through at `/setup/preview` (mirrors live setup with current settings). */
   useEffect(() => {
     if (!isActiveSetupPreviewRoute(location.pathname, location.search)) return;
     let cancelled = false;
@@ -1393,9 +1391,9 @@ export function App() {
         if (cancelled) return;
         setSettingsPayload(payload);
         setSetupStatus(payload.status);
-        const dummy = buildPreviewDummyFieldValues(payload);
-        setFieldValues(dummy);
-        setBaselineValues(dummy);
+        const values = fieldValuesFromSettingsPayload(payload);
+        setFieldValues(values);
+        setBaselineValues(values);
         setOnboardingStepIndex(0);
         setErrorMessage(null);
       } catch (e) {
@@ -1418,9 +1416,25 @@ export function App() {
   }, [titleSearchIndex, titleSearchResults.length]);
 
   useEffect(() => {
-    if (!onboardingVisible) return;
-    setOnboardingStepIndex((i) => Math.min(i, WIZARD_STEPS.length - 1));
-  }, [onboardingVisible]);
+    // Track by step key so Arr routing insert/remove can remap index without jumping steps.
+    // Do not depend on wizardSteps here: that would overwrite the key before remapping runs.
+    const step = wizardSteps[onboardingStepIndex];
+    if (step) onboardingStepKeyRef.current = step.key;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- index-driven key only
+  }, [onboardingStepIndex]);
+
+  useEffect(() => {
+    if (!onboardingVisible && !onboardingTourRoute) return;
+    const key = onboardingStepKeyRef.current;
+    if (key) {
+      const idx = wizardSteps.findIndex((step) => step.key === key);
+      if (idx >= 0) {
+        setOnboardingStepIndex((prev) => (prev === idx ? prev : idx));
+        return;
+      }
+    }
+    setOnboardingStepIndex((i) => Math.min(i, Math.max(0, wizardSteps.length - 1)));
+  }, [onboardingVisible, onboardingTourRoute, wizardSteps]);
 
   useEffect(() => {
     if (!authReady) return;
@@ -1529,14 +1543,7 @@ export function App() {
       clearSetupCompleteInSession();
     }
 
-    const nextValues: FieldValueMap = {};
-    payload.sections.forEach((section) => {
-      section.fields.forEach((field) => {
-        nextValues[field.key] = field.value;
-      });
-    });
-    nextValues.WEBHOOK_API_KEY = payload.webhook_api_key ?? "";
-
+    const nextValues = fieldValuesFromSettingsPayload(payload);
     setFieldValues(nextValues);
     setBaselineValues(nextValues);
 
@@ -1544,17 +1551,18 @@ export function App() {
     // Active section follows the URL; invalid slugs are redirected by the settings-route effect.
   }
 
-  const prevPreviewRouteRef = useRef<boolean | null>(null);
-  /** Leaving preview for real `/setup` must reload persisted values (preview uses dummy field state). */
+  const prevTourRouteRef = useRef<boolean | null>(null);
+  /** Leaving preview for real `/setup` must reload persisted values (tour may hold non-persisted edits). */
   useEffect(() => {
-    const prev = prevPreviewRouteRef.current;
-    prevPreviewRouteRef.current = onboardingPreviewRoute;
+    const prev = prevTourRouteRef.current;
+    prevTourRouteRef.current = onboardingTourRoute;
     if (prev === null) return;
-    const leftPreview = prev && !onboardingPreviewRoute;
-    if (!leftPreview) return;
+    const leftTour = prev && !onboardingTourRoute;
+    if (!leftTour) return;
     const realSetup =
       location.pathname === "/setup" ||
-      (location.pathname.startsWith("/setup/") && !isOnboardingPreviewRoute(location.pathname, location.search));
+      (location.pathname.startsWith("/setup/") &&
+        !isOnboardingPreviewRoute(location.pathname, location.search));
     if (!realSetup) return;
     let cancelled = false;
     void loadSettings(cancelled).catch(() => {
@@ -1564,21 +1572,43 @@ export function App() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- loadSettings identity changes each render; pathname transition is the trigger.
-  }, [onboardingPreviewRoute, location.pathname, location.search]);
+  }, [onboardingTourRoute, location.pathname, location.search]);
 
-  /** Load `/api/settings/current` as soon as the Settings tab is opened — do not wait for the next 5s poll tick (avoids a blank main pane when settings were never fetched while on Activity). */
+  /** Load `/api/settings/current` when opening Settings. Re-fetch even if a payload
+   * was already cached so DB restores (e.g. Arr instances) are not stuck behind a
+   * stale empty form state from an earlier session in this tab. */
   useEffect(() => {
     if (currentTab !== "settings") return;
-    if (settingsPayload) return;
-    if (hasUnsavedChangesRef.current) return;
+    if (hasUnsavedChangesRef.current) {
+      // Heal empty Arr form state from the server without discarding other dirty fields.
+      const localArr = String(fieldValues.ARR_INSTANCES_JSON ?? "").trim();
+      if (localArr && localArr !== "[]") return;
+      void (async () => {
+        try {
+          const payload = await getSettingsCurrent();
+          const arrField = payload.sections
+            .flatMap((section) => section.fields)
+            .find((field) => field.key === "ARR_INSTANCES_JSON");
+          if (!arrField) return;
+          const serverArr = String(arrField.value ?? "").trim();
+          if (!serverArr || serverArr === "[]") return;
+          setFieldValues((prev) => ({ ...prev, ARR_INSTANCES_JSON: arrField.value }));
+          setBaselineValues((prev) => ({ ...prev, ARR_INSTANCES_JSON: arrField.value }));
+          setSettingsPayload(payload);
+        } catch {
+          /* ignore; full load path / poll can retry */
+        }
+      })();
+      return;
+    }
     void loadSettings(false).catch(() => {
       /* Errors surface via dashboard refresh / error banner; poll will retry. */
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- loadSettings omitted: new function identity each render would retrigger while payload is null.
-  }, [currentTab, settingsPayload]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- loadSettings omitted: new function identity each render would retrigger.
+  }, [currentTab]);
 
   async function handlePartialSave(result: any, partialValues: Record<string, unknown>) {
-    if (onboardingPreviewRouteRef.current) return;
+    if (onboardingTourRouteRef.current) return;
     if (!result) return;
     if (!result.ok) {
       const first = Object.entries(result.errors || {})[0];
@@ -1593,6 +1623,32 @@ export function App() {
     setSetupStatus(payload.status);
     setSettingsFeedback(formatSettingsSaveSuccessMessage(result.restart_required_keys));
     setSettingsFeedbackKind("success");
+    if (result.restart_required_keys && result.restart_required_keys.length > 0) {
+      setRestartAvailable(true);
+    }
+  }
+
+  async function handleRestartNow() {
+    setRestartPhase("restarting");
+    try {
+      await restartApp();
+    } catch {
+      // The process may terminate before the HTTP response flushes; treat that as expected.
+    }
+    setRestartPhase("reconnecting");
+
+    const deadline = Date.now() + 120_000; // give the container up to 2 minutes to come back
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      try {
+        await getHealth();
+        window.location.reload();
+        return;
+      } catch {
+        /* keep polling until the app answers again */
+      }
+    }
+    setRestartPhase("failed");
   }
 
   function tryNavigate(path: string): boolean {
@@ -1618,6 +1674,27 @@ export function App() {
       setWhatsNewNotices(payload.notices || []);
     } catch {
       whatsNewCatalogOpenRef.current = false;
+    }
+  }
+
+  /** Dismiss all visible notices (Got it). Optional path runs after dismiss so CTAs close the modal too. */
+  async function acknowledgeWhatsNew(ctaPath?: string) {
+    const ids = whatsNewNotices.map((n) => n.id);
+    if (!ids.length) {
+      if (ctaPath) tryNavigate(ctaPath);
+      return;
+    }
+    setWhatsNewBusy(true);
+    try {
+      const next = await dismissWhatsNew(ids);
+      whatsNewDismissedRef.current = (next.notices || []).length === 0;
+      whatsNewCatalogOpenRef.current = false;
+      setWhatsNewNotices(next.notices || []);
+      if (ctaPath) tryNavigate(ctaPath);
+    } catch {
+      /* Keep the dialog so they can retry. */
+    } finally {
+      setWhatsNewBusy(false);
     }
   }
 
@@ -1922,17 +1999,28 @@ export function App() {
           messagesSaveBlocked={statusMessagesMeta.dirty && statusMessagesMeta.hasValidationErrors}
           feedback={settingsFeedback}
           feedbackKind={settingsFeedbackKind}
+          restartAvailable={restartAvailable}
+          restartPhase={restartPhase}
+          onConfirmRestart={handleRestartNow}
           brand={brand}
           themeMode={themeMode}
           authStatus={authStatus}
           integrationsStatus={integrationsStatus}
           onIntegrationsStatusRefresh={refreshIntegrationsStatus}
           onOpenOptionalApis={() => tryNavigate("/settings/optional-apis")}
+          onOpenArrIntegrations={() => tryNavigate("/settings/arr-integrations")}
+          onOpenPlayback={() => tryNavigate("/settings/playback")}
           onLogout={async () => {
             const status = await logoutAuth();
             setAuthStatus(status);
           }}
           onValueChange={(key, value) => setFieldValues((prev) => ({ ...prev, [key]: value }))}
+          onCoerceFieldValues={(partial) => {
+            // Keep draft and baseline in sync for automatic UI corrections so opening
+            // Settings (including Dummy Video) does not trip the leave-without-saving prompt.
+            setFieldValues((prev) => ({ ...prev, ...partial }));
+            setBaselineValues((prev) => ({ ...prev, ...partial }));
+          }}
           onPartialPersist={async (partial) => {
             const result = await saveSettings(partial, true);
             if (!result.ok) {
@@ -1956,13 +2044,36 @@ export function App() {
               hasUnsavedChanges && statusUpdateSettingsChanged(baselineValues, fieldValues);
             const posterLanguageChanged =
               hasUnsavedChanges && posterLanguageSettingsChanged(baselineValues, fieldValues);
+            const destinationChanged =
+              hasUnsavedChanges && destinationRematerializeSettingsChanged(baselineValues, fieldValues);
+            const densityChanged =
+              hasUnsavedChanges && tvDensityRematerializeSettingsChanged(baselineValues, fieldValues);
+            const densityConsolidating =
+              densityChanged && tvDensityChangeIsConsolidating(baselineValues, fieldValues);
             const messagesDirty = statusMessagesMeta.dirty;
-            const needsBackfillPrompt = statusKeysChanged || messagesDirty;
+            const needsBackfillPrompt =
+              statusKeysChanged || messagesDirty || destinationChanged || densityChanged;
             let applyScope: NfoBackfillApplyScope | undefined;
             try {
               if (needsBackfillPrompt) {
-                const modalCopy =
-                  posterLanguageChanged && !messagesDirty
+                const densityOnly =
+              densityChanged && !statusKeysChanged && !messagesDirty && !destinationChanged;
+            const modalCopy =
+              densityOnly
+                    ? {
+                        title: "Apply TV placeholder density to existing files",
+                        description: densityConsolidating
+                          ? "Moving to Season or Series density deletes many per-episode placeholder files and replaces them with fewer season or series placeholders. Choose Apply now or wait for the next full sync."
+                          : "Changing TV placeholder density or retire-when rematerializes existing TV placeholders on disk. Choose Apply now or wait for the next full sync.",
+                        countMedia: "tv" as const,
+                      }
+                  : destinationChanged && !statusKeysChanged && !messagesDirty && !densityChanged
+                    ? {
+                        title: "Apply library destinations to existing placeholders",
+                        description:
+                          "Library Root or destination map changes move placeholders on disk. Choose Apply now or wait for the next full sync.",
+                      }
+                    : posterLanguageChanged && !messagesDirty && !destinationChanged && !densityChanged
                     ? {
                         title: "Apply poster language to existing placeholders",
                         description:
@@ -1981,11 +2092,25 @@ export function App() {
                           description:
                             "Choose when updates to placeholder status visibility, projection targets, or poster overlays should affect existing placeholders.",
                         }
-                      : {
-                          title: "Apply template changes",
-                          description:
-                            "Choose when these template updates should affect existing placeholders. New placeholders always use the saved templates.",
-                        };
+                      : destinationChanged
+                        ? {
+                            title: "Apply library destinations to existing placeholders",
+                            description:
+                              "Library Root or destination map changes move placeholders on disk. Choose Apply now or wait for the next full sync.",
+                          }
+                        : densityChanged
+                          ? {
+                              title: "Apply TV placeholder density to existing files",
+                              description: densityConsolidating
+                                ? "Moving to Season or Series density deletes many per-episode placeholder files and replaces them with fewer season or series placeholders. Choose Apply now or wait for the next full sync."
+                                : "Changing TV placeholder density or retire-when rematerializes existing TV placeholders on disk. Choose Apply now or wait for the next full sync.",
+                              countMedia: "tv" as const,
+                            }
+                          : {
+                              title: "Apply template changes",
+                              description:
+                                "Choose when these template updates should affect existing placeholders. New placeholders always use the saved templates.",
+                            };
                 const chosen = await requestNfoBackfillApplyScopeChoice(modalCopy);
                 if (chosen === null) {
                   setSettingsFeedback("");
@@ -1997,7 +2122,8 @@ export function App() {
 
               /* Persist field-backed settings before saving templates + enqueueing nfo_refresh jobs. */
               if (hasUnsavedChanges) {
-                const settingsBackfillScope = statusKeysChanged ? applyScope : undefined;
+                const settingsBackfillScope =
+                  statusKeysChanged || destinationChanged || densityChanged ? applyScope : undefined;
                 const result = await saveSettings(
                   buildPersistableSettingsValues(fieldValues, settingsPayload),
                   false,
@@ -2015,6 +2141,9 @@ export function App() {
                   applyScope === "now" &&
                   Boolean(result.nfo_backfill?.enqueued || result.art_backfill?.enqueued);
                 const saveMsg = formatSettingsSaveSuccessMessage(result.restart_required_keys);
+                if (result.restart_required_keys && result.restart_required_keys.length > 0) {
+                  setRestartAvailable(true);
+                }
                 if (messagesDirty && statusMessagesSaveRef.current) {
                   await statusMessagesSaveRef.current(applyScope);
                   setSettingsFeedback(saveMsg);
@@ -2030,6 +2159,14 @@ export function App() {
                 setSettingsPayload(payload);
                 setSetupStatus(payload.status);
                 setOnboardingVisible(!payload.status.setup_complete);
+                // Re-apply redacted ARR JSON so per-instance api_key_saved flags match the server.
+                const arrField = payload.sections
+                  .flatMap((section) => section.fields)
+                  .find((field) => field.key === "ARR_INSTANCES_JSON");
+                if (arrField) {
+                  setFieldValues((prev) => ({ ...prev, ARR_INSTANCES_JSON: arrField.value }));
+                  setBaselineValues((prev) => ({ ...prev, ARR_INSTANCES_JSON: arrField.value }));
+                }
               } else if (messagesDirty && statusMessagesSaveRef.current) {
                 await statusMessagesSaveRef.current(applyScope);
                 setSettingsFeedback("Saved");
@@ -2155,7 +2292,7 @@ export function App() {
   const setupRouteActive = location.pathname === "/setup" || location.pathname.startsWith("/setup/");
   if (setupRouteActive) {
     const setupShellClass = `brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} min-h-screen flex items-center justify-center font-brand-body text-[16px] font-headline tracking-wide ${themeMode === "light" ? "text-slate-700" : "text-slate-300"}`;
-    if (setupStatus?.setup_complete && !onboardingPreviewRoute) {
+    if (setupStatus?.setup_complete && !onboardingTourRoute) {
       return <Navigate to={HOME_PATH} replace />;
     }
     const needsSetupWizard = setupStatus != null && !setupStatus.setup_complete;
@@ -2175,19 +2312,24 @@ export function App() {
     return (
       <OnboardingWizard
         payload={settingsPayload}
+        steps={wizardSteps}
         stepIndex={onboardingStepIndex}
         values={fieldValues}
-        hasUnsavedChanges={onboardingPreviewRoute ? false : hasUnsavedChanges}
-        previewMode={onboardingPreviewRoute}
+        hasUnsavedChanges={onboardingTourRoute ? false : hasUnsavedChanges}
+        previewMode={onboardingTourRoute}
+        playFirstMode={usePlayFirstOnboarding}
         brand={brand}
         themeMode={themeMode}
         onBack={() => setOnboardingStepIndex((i) => Math.max(0, i - 1))}
-        onNext={() => setOnboardingStepIndex((i) => Math.min(WIZARD_STEPS.length - 1, i + 1))}
+        onNext={() => setOnboardingStepIndex((i) => Math.min(wizardSteps.length - 1, i + 1))}
         onPartialSave={handlePartialSave}
         onChange={(key, value) => setFieldValues((prev) => ({ ...prev, [key]: value }))}
         onTestConnection={
-          onboardingPreviewRoute
-            ? async () => ({ ok: true, message: "Preview mode — connection not tested." })
+          onboardingTourRoute
+            ? async () => ({
+                ok: true,
+                message: "Preview mode: connection not tested.",
+              })
             : async ({ service, urlKey, credentialKey }) => {
                 const url = String(fieldValues[urlKey] || "").trim();
                 const credential = String(fieldValues[credentialKey] || "").trim();
@@ -2199,9 +2341,9 @@ export function App() {
                 });
               }
         }
-        onExitPreview={onboardingPreviewRoute ? () => navigate(HOME_PATH, { replace: true }) : undefined}
+        onExitPreview={onboardingTourRoute ? () => navigate(HOME_PATH, { replace: true }) : undefined}
         onSave={
-          onboardingPreviewRoute
+          onboardingTourRoute
             ? undefined
             : async () => {
                 setSettingsFeedback("Saving...");
@@ -2216,6 +2358,9 @@ export function App() {
                 setBaselineValues(fieldValues);
                 setSettingsFeedback(formatSettingsSaveSuccessMessage(result.restart_required_keys));
                 setSettingsFeedbackKind("success");
+                if (result.restart_required_keys && result.restart_required_keys.length > 0) {
+                  setRestartAvailable(true);
+                }
                 const payload = await getSettingsCurrent();
                 setSettingsPayload(payload);
                 setSetupStatus(payload.status);
@@ -2382,13 +2527,24 @@ export function App() {
                     { icon: "terminal", label: "Logs", path: "/logs", beta: false },
                     { icon: "settings", label: "Settings", path: "/settings", beta: false },
                   ].map(({ icon, label, path, beta }) => {
-                    const settingsFail = path === "/settings" && Boolean(integrationsStatus?.settings_has_failure);
+                    const settingsFail =
+                      path === "/settings" &&
+                      (Boolean(integrationsStatus?.settings_has_failure) ||
+                        arrInstancesHaveMissingApiKey(fieldValues));
                     return isActive(path) ? (
                       <button key={path} type="button" onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)} className={navActiveClass}>
                         <span className="material-symbols-outlined">{icon}</span>
                         <span className="flex items-center gap-1.5">
                           <span>{label}</span>
-                          {settingsFail ? <IntegrationFailureBadge title="Media or ARR connection problem" /> : null}
+                          {settingsFail ? (
+                            <IntegrationFailureBadge
+                              title={
+                                arrInstancesHaveMissingApiKey(fieldValues)
+                                  ? "ARR API key missing"
+                                  : "Media or ARR connection problem"
+                              }
+                            />
+                          ) : null}
                           {beta ? (
                             <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">
                               Beta
@@ -2401,7 +2557,15 @@ export function App() {
                         <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">{icon}</span>
                         <span className="flex items-center gap-1.5">
                           <span>{label}</span>
-                          {settingsFail ? <IntegrationFailureBadge title="Media or ARR connection problem" /> : null}
+                          {settingsFail ? (
+                            <IntegrationFailureBadge
+                              title={
+                                arrInstancesHaveMissingApiKey(fieldValues)
+                                  ? "ARR API key missing"
+                                  : "Media or ARR connection problem"
+                              }
+                            />
+                          ) : null}
                           {beta ? (
                             <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">
                               Beta
@@ -2421,9 +2585,11 @@ export function App() {
                   const isSubActive = location.pathname === subPath;
                   const sectionFail =
                     (name === "Media Integrations" && Boolean(integrationsStatus?.media_has_failure)) ||
-                    (name === "ARR Integrations" && Boolean(integrationsStatus?.arr_has_failure));
+                    (name === "ARR Integrations" &&
+                      (Boolean(integrationsStatus?.arr_has_failure) ||
+                        arrInstancesHaveMissingApiKey(fieldValues)));
                   const subBase =
-                    "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-[13px] font-headline uppercase tracking-wider transition-colors ";
+                    "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-[13px] font-headline uppercase tracking-wide transition-colors ";
                   const subActiveClass = isStudioGlass
                     ? "bg-[#1e2430] text-slate-100"
                     : "bg-[color:var(--brand-fg)] text-[color:var(--brand-accent)]";
@@ -2436,18 +2602,21 @@ export function App() {
                       type="button"
                       onClick={() => tryNavigate(subPath)}
                       className={`${subBase}${isSubActive ? subActiveClass : subInactiveClass}`}
+                      title={name}
                     >
-                      <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
+                      <span className="material-symbols-outlined shrink-0" style={{ fontSize: 14 }}>
                         {SETTINGS_SECTION_ICONS[name] || "settings"}
                       </span>
-                      <span className="truncate">{name}</span>
+                      <span className="min-w-0 flex-1 leading-snug">{name}</span>
                       {sectionFail ? (
                         <IntegrationFailureBadge
                           size="sm"
                           title={
                             name === "Media Integrations"
                               ? "Media connection problem"
-                              : "ARR connection problem"
+                              : arrInstancesHaveMissingApiKey(fieldValues)
+                                ? "ARR API key missing"
+                                : "ARR connection problem"
                           }
                         />
                       ) : null}
@@ -2738,8 +2907,16 @@ export function App() {
             onCancel={() => setLeaveConfirm(null)}
             onConfirm={() => {
               const path = leaveConfirm.path;
+              const kind = leaveConfirm.kind;
               setLeaveConfirm(null);
-              if (leaveConfirm.kind === "recipe") setCollectionsDraftDirty(false);
+              if (kind === "recipe") {
+                setCollectionsDraftDirty(false);
+              } else {
+                // Discard draft field values back to the last saved baseline so
+                // returning to Settings does not keep removals/edits that were never saved.
+                setFieldValues(baselineValues);
+                setStatusMessagesMeta({ dirty: false, hasValidationErrors: false });
+              }
               navigate(path);
             }}
           />
@@ -2805,6 +2982,7 @@ export function App() {
             saving={false}
             title={nfoBackfillScopeModal.title}
             description={nfoBackfillScopeModal.description}
+            countMedia={nfoBackfillScopeModal.countMedia}
             onCancel={() => {
               nfoBackfillScopeModal.reject(Object.assign(new Error("cancelled"), { code: "MESSAGES_SAVE_CANCELLED" }));
             }}
@@ -2825,20 +3003,7 @@ export function App() {
                   className={`px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
                   style={accentFilledStyle(brandAccent.hex)}
                   onClick={() => {
-                    const ids = whatsNewNotices.map((n) => n.id);
-                    void (async () => {
-                      setWhatsNewBusy(true);
-                      try {
-                        const next = await dismissWhatsNew(ids);
-                        whatsNewDismissedRef.current = (next.notices || []).length === 0;
-                        whatsNewCatalogOpenRef.current = false;
-                        setWhatsNewNotices(next.notices || []);
-                      } catch {
-                        /* Keep the dialog so they can retry. */
-                      } finally {
-                        setWhatsNewBusy(false);
-                      }
-                    })();
+                    void acknowledgeWhatsNew();
                   }}
                 >
                   Got it
@@ -2858,8 +3023,11 @@ export function App() {
                           {notice.cta_path && notice.cta_label ? (
                             <button
                               type="button"
-                              className="text-[14px] font-headline uppercase tracking-wider text-slate-200 underline decoration-slate-500 underline-offset-4 hover:text-white"
-                              onClick={() => tryNavigate(notice.cta_path as string)}
+                              disabled={whatsNewBusy}
+                              className="text-[14px] font-headline uppercase tracking-wider text-slate-200 underline decoration-slate-500 underline-offset-4 hover:text-white disabled:opacity-50"
+                              onClick={() => {
+                                void acknowledgeWhatsNew(notice.cta_path as string);
+                              }}
                             >
                               {notice.cta_label}
                             </button>
@@ -2916,7 +3084,7 @@ function TaskRunConfirmModals(props: {
               <br />
               <br />
               <strong className="text-slate-200">Calendar only</strong> refreshes release dates from ARR calendar APIs and
-              updates placeholder statuses—no full catalog pull.
+              updates placeholder statuses; no full catalog pull.
             </p>
           )}
           {props.error ? <p className="text-[13px] text-red-400 mt-2">{props.error}</p> : null}
@@ -3660,12 +3828,10 @@ type ArrInstanceDraft = {
   url: string;
   api_key: string;
   api_key_saved?: boolean;
-  role: "primary" | "secondary" | "additional";
   priority: number;
-  is_4k: boolean;
 };
 
-const ARR_INSTANCE_LIMIT_PER_TYPE = 2;
+const ARR_INSTANCE_LIMIT_PER_TYPE = 4;
 
 function normalizeInstanceKey(input: string) {
   return String(input || "")
@@ -3675,23 +3841,27 @@ function normalizeInstanceKey(input: string) {
     .replace(/^[_-]+|[_-]+$/g, "");
 }
 
-/** True when `instance_id` embeds a UUID, matching `services.app_config._arr_instance_id_has_uuid`. */
+/** True when `instance_id` is a UUID, matching backend stable-id checks. */
 function arrInstanceIdEmbedsUuid(instanceId: string): boolean {
-  let hyphens = 0;
-  for (const ch of String(instanceId || "")) {
-    if (ch === "-") hyphens += 1;
+  const text = String(instanceId || "").trim();
+  if (!text) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(text);
+}
+
+function newArrInstanceId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
   }
-  return hyphens >= 4;
+  // Fallback for older browsers: RFC4122-ish random id.
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (ch) => {
+    const n = (Math.random() * 16) | 0;
+    const v = ch === "x" ? n : (n & 0x3) | 0x8;
+    return v.toString(16);
+  });
 }
 
-function slotWebhookRoleFromRowRole(role: string): "primary" | "secondary" {
-  const r = String(role || "").trim().toLowerCase();
-  if (r === "secondary" || r === "additional") return "secondary";
-  return "primary";
-}
-
-function stableArrInstanceId(arrType: "radarr" | "sonarr", slotRole: "primary" | "secondary") {
-  return `${arrType}_${slotRole}`;
+function defaultInstanceKeyForSlot(arrType: "radarr" | "sonarr", slotIndex: number) {
+  return `${arrType}${slotIndex + 1}`;
 }
 
 /**
@@ -3746,29 +3916,17 @@ function inferDefaultKey(label: string, arrType: "radarr" | "sonarr") {
   return slug || `${arrType}_instance`;
 }
 
-function normalizeInstanceRole(input: unknown, rank: number): "primary" | "secondary" | "additional" {
-  const role = String(input || "").trim().toLowerCase();
-  if (role === "primary" || role === "secondary" || role === "additional") return role;
-  if (rank <= 0) return "primary";
-  if (rank === 1) return "secondary";
-  return "additional";
-}
-
-function deriveIs4kFromRole(role: string) {
-  return role !== "primary";
-}
-
 function getPlexLibraryIdPathHint(fieldKey: string): string | null {
   if (fieldKey === "PLEX_MOVIE_SECTION_ID") {
-    return "ID of the placeholder Movies library that points at your derived movies path.";
+    return "Pick the placeholder Movies library that points at your Library Root movies path (defaults for unmapped Arr roots).";
   }
   if (fieldKey === "PLEX_TV_SECTION_ID") {
-    return "ID of the placeholder TV library that points at your derived tv path.";
+    return "Pick the placeholder TV library that points at your Library Root tv path (defaults for unmapped Arr roots).";
   }
   return null;
 }
 
-/** Folder / library advice for Plex setup (no em dashes; kept short for in-card / in-modal disclosure). */
+/** Folder / library advice for Plex Paths defaults (no em dashes; kept short for disclosure). */
 function getPlexLibraryTips(fieldKey: string = "setup"): string[] {
   const pathHint = getPlexLibraryIdPathHint(fieldKey);
   const tips: string[] = [];
@@ -3776,7 +3934,7 @@ function getPlexLibraryTips(fieldKey: string = "setup"): string[] {
     tips.push(pathHint);
   } else {
     tips.push(
-      "Before connecting, create separate placeholder Movies and TV libraries in Plex that point at your derived movies and tv paths, then enter those library IDs in Configure.",
+      "Create separate placeholder Movies and TV libraries in Plex that point at your Library Root movies and tv paths.",
     );
   }
   tips.push(
@@ -3815,45 +3973,104 @@ function PlexLibraryTipsDisclosure(props: { fieldKey?: string; className?: strin
   );
 }
 
+function PlexLibraryTipsModal(props: { open: boolean; onClose: () => void; accent: BrandAccent }) {
+  if (!props.open) return null;
+  const tips = getPlexLibraryTips("setup");
+  return (
+    <div className="fixed inset-0 z-[85] flex items-center justify-center bg-[#0f1419]/85 backdrop-blur-sm p-6">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Plex library tips"
+        className="flex w-full max-w-lg max-h-[min(90vh,560px)] flex-col overflow-hidden rounded-2xl border border-[#424753]/40 bg-[#171c22] shadow-2xl"
+      >
+        <div className="flex items-start justify-between gap-3 border-b border-[#424753]/40 px-5 py-4">
+          <h3 className="text-[18px] font-headline font-bold text-white">Plex library tips</h3>
+          <button
+            type="button"
+            onClick={props.onClose}
+            className="rounded-lg p-2 text-slate-400 transition hover:bg-[#252e3a]/80 hover:text-white"
+            aria-label="Close"
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: 22 }}>
+              close
+            </span>
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          <ul className="list-disc space-y-3 pl-5 text-[15px] leading-relaxed text-slate-300">
+            {tips.map((tip) => (
+              <li key={tip}>{tip}</li>
+            ))}
+          </ul>
+        </div>
+        <div className="flex shrink-0 justify-end border-t border-[#424753]/40 px-5 py-4">
+          <button
+            type="button"
+            onClick={props.onClose}
+            className={`rounded-lg px-4 py-2 text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS}`}
+            style={accentFilledStyle(props.accent.hex)}
+          >
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function parseArrInstancesFromValues(values: FieldValueMap): ArrInstanceDraft[] {
   const raw = String(values.ARR_INSTANCES_JSON || "").trim();
   if (raw) {
     try {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
-        const rankByType: Record<"radarr" | "sonarr", number> = { radarr: 0, sonarr: 0 };
-        const items = parsed
+        const rough = parsed
           .filter((item) => item && typeof item === "object")
           .map((item, index) => {
             const obj = item as Record<string, unknown>;
             const arrType = String(obj.arr_type || obj.type || "").toLowerCase() === "sonarr" ? "sonarr" : "radarr";
             const label = String(obj.label || obj.instance_key || obj.key || obj.name || `${arrType} ${index + 1}`);
-            const rank = rankByType[arrType];
-            rankByType[arrType] = rank + 1;
-            const role = normalizeInstanceRole(obj.role, rank);
-            const instanceKey = normalizeInstanceKey(String(obj.instance_key || obj.key || obj.name || inferDefaultKey(label, arrType)));
-            const slotRole = slotWebhookRoleFromRowRole(role);
-            const rawInstanceId = String(obj.instance_id || obj.id || "").trim().toLowerCase();
-            const instanceId = rawInstanceId || stableArrInstanceId(arrType, slotRole);
-            const aliasRaw = Array.isArray(obj.instance_key_aliases) ? obj.instance_key_aliases : [];
-            const instance_key_aliases = aliasRaw
-              .map((a) => normalizeInstanceKey(String(a)))
-              .filter((a) => a && a !== instanceKey);
+            const priorityRaw = Number(obj.priority);
             return {
-              id: instanceId || `json-${arrType}-${index}`,
-              instance_id: instanceId || `json-${arrType}-${index}`,
+              obj,
+              index,
+              arrType,
               label,
-              arr_type: arrType,
-              instance_key: instanceKey,
-              instance_key_aliases,
-              url: String(obj.url || ""),
-              api_key: String(obj.api_key || obj.apikey || ""),
-              api_key_saved: Boolean(obj.api_key_saved) || Boolean(String(obj.api_key || obj.apikey || "").trim()),
-              role,
-              priority: Number.isFinite(Number(obj.priority)) ? Number(obj.priority) : rank,
-              is_4k: deriveIs4kFromRole(role),
-            } satisfies ArrInstanceDraft;
+              priority: Number.isFinite(priorityRaw) ? priorityRaw : index,
+            };
+          })
+          .sort((a, b) => {
+            if (a.arrType !== b.arrType) return a.arrType.localeCompare(b.arrType);
+            if (a.priority !== b.priority) return a.priority - b.priority;
+            return a.index - b.index;
           });
+        const rankByType: Record<"radarr" | "sonarr", number> = { radarr: 0, sonarr: 0 };
+        const items = rough.map(({ obj, index, arrType, label }) => {
+          const rank = rankByType[arrType];
+          rankByType[arrType] = rank + 1;
+          const instanceKey =
+            normalizeInstanceKey(String(obj.instance_key || obj.key || obj.name || "")) ||
+            defaultInstanceKeyForSlot(arrType, rank);
+          const rawInstanceId = String(obj.instance_id || obj.id || "").trim().toLowerCase();
+          const instanceId = rawInstanceId || newArrInstanceId();
+          const aliasRaw = Array.isArray(obj.instance_key_aliases) ? obj.instance_key_aliases : [];
+          const instance_key_aliases = aliasRaw
+            .map((a) => normalizeInstanceKey(String(a)))
+            .filter((a) => a && a !== instanceKey);
+          return {
+            id: instanceId,
+            instance_id: instanceId,
+            label,
+            arr_type: arrType,
+            instance_key: instanceKey,
+            instance_key_aliases,
+            url: String(obj.url || ""),
+            api_key: String(obj.api_key || obj.apikey || ""),
+            api_key_saved: Boolean(obj.api_key_saved) || Boolean(String(obj.api_key || obj.apikey || "").trim()),
+            priority: rank,
+          } satisfies ArrInstanceDraft;
+        });
         if (items.length) return items;
       }
     } catch {
@@ -3867,46 +4084,66 @@ function isPlexSectionIdField(fieldKey: string) {
   return fieldKey === "PLEX_MOVIE_SECTION_ID" || fieldKey === "PLEX_TV_SECTION_ID";
 }
 
+const ARR_MISSING_API_KEY_MESSAGE = "API key missing. Open Configure and paste a key.";
+
+/** URL present but no typed key and no saved-key marker (redacted shell). */
+function arrInstanceMissingApiKey(item: {
+  url?: string;
+  api_key?: string;
+  api_key_saved?: boolean;
+}): boolean {
+  if (!String(item.url || "").trim()) return false;
+  if (String(item.api_key || "").trim()) return false;
+  if (item.api_key_saved) return false;
+  return true;
+}
+
+function arrInstancesHaveMissingApiKey(values: FieldValueMap): boolean {
+  return parseArrInstancesFromValues(values).some((row) => arrInstanceMissingApiKey(row));
+}
+
 function serializeArrInstances(instances: ArrInstanceDraft[]) {
   const rankByType: Record<"radarr" | "sonarr", number> = { radarr: 0, sonarr: 0 };
   const clean = instances
     .map((row) => {
       const label = String(row.label || "").trim();
-      const existingKey = normalizeInstanceKey(String(row.instance_key || ""));
-      const inferredKey = existingKey || normalizeInstanceKey(inferDefaultKey(label, row.arr_type));
       const rank = rankByType[row.arr_type];
       rankByType[row.arr_type] = rank + 1;
-      const role = normalizeInstanceRole(row.role, rank);
-      const slotRole = slotWebhookRoleFromRowRole(role);
+      const existingKey = normalizeInstanceKey(String(row.instance_key || ""));
+      const inferredKey = existingKey || defaultInstanceKeyForSlot(row.arr_type, rank);
       const instanceId =
-        String(row.instance_id || "").trim().toLowerCase() || stableArrInstanceId(row.arr_type, slotRole);
+        String(row.instance_id || "").trim().toLowerCase() || newArrInstanceId();
       const aliasList = (row.instance_key_aliases || [])
         .map((a) => normalizeInstanceKey(String(a)))
         .filter((a) => a && a !== inferredKey);
+      const apiKey = String(row.api_key || "").trim();
       const out: Record<string, unknown> = {
         instance_id: instanceId,
         arr_type: row.arr_type,
         instance_key: inferredKey,
         label,
         url: String(row.url || "").trim(),
-        api_key: String(row.api_key || "").trim(),
-        role,
+        api_key: apiKey,
         priority: rank,
-        is_4k: deriveIs4kFromRole(role),
       };
+      // Keep the client-only redaction flag in form state. Without it, remounting
+      // ArrInstancesEditor (e.g. leaving ARR Integrations and coming back) parses a
+      // blank api_key with no saved marker and forces re-entry before Test/Save.
+      // The server strips this flag on persist; merge still retains the real key.
+      if (!apiKey && row.api_key_saved) {
+        out.api_key_saved = true;
+      }
       if (aliasList.length) {
         out.instance_key_aliases = aliasList;
       }
       return out;
     })
     .filter((row) => {
-      const keyOk = Boolean(row.instance_key && row.url);
-      if (!keyOk) return false;
-      const apiKey = String(row.api_key || "").trim();
-      if (apiKey) return true;
-      // Blank key allowed when the server already has a saved key for this slot.
-      const draft = instances.find((d) => String(d.instance_id || "").toLowerCase() === String(row.instance_id || "").toLowerCase());
-      return Boolean(draft?.api_key_saved);
+      // Keep any fully addressed slot (key + URL). Blank api_key is intentional
+      // after redaction; the server merge retains the saved secret. Requiring
+      // api_key_saved here previously dropped every instance from form state and
+      // a later Settings save wrote [] into the DB.
+      return Boolean(row.instance_key && row.url);
     });
   return JSON.stringify(clean);
 }
@@ -3944,6 +4181,58 @@ function findDuplicateArrInstanceUrl(
   return null;
 }
 
+/** Same-type display name clash (case-insensitive), mirroring URL uniqueness. */
+function findDuplicateArrInstanceLabel(
+  instances: ArrInstanceDraft[],
+  selfId: string,
+  arrType: "radarr" | "sonarr",
+  candidateLabel: string,
+): ArrInstanceDraft | null {
+  const n = String(candidateLabel || "").trim().toLowerCase();
+  if (!n) return null;
+  for (const row of instances) {
+    if (row.id === selfId) continue;
+    if (row.arr_type !== arrType) continue;
+    const other = String(row.label || "").trim().toLowerCase();
+    if (!other) continue;
+    if (other === n) return row;
+  }
+  return null;
+}
+
+/** Key or alias token clash with another row of the same type. */
+function findDuplicateArrInstanceKeyToken(
+  instances: ArrInstanceDraft[],
+  selfId: string,
+  arrType: "radarr" | "sonarr",
+  candidateKey: string,
+  candidateAliases: string[] = [],
+): ArrInstanceDraft | null {
+  const tokens = new Set<string>();
+  const primary = normalizeInstanceKey(candidateKey);
+  if (primary) tokens.add(primary);
+  for (const a of candidateAliases) {
+    const ak = normalizeInstanceKey(a);
+    if (ak) tokens.add(ak);
+  }
+  if (!tokens.size) return null;
+  for (const row of instances) {
+    if (row.id === selfId) continue;
+    if (row.arr_type !== arrType) continue;
+    const otherTokens = new Set<string>();
+    const ok = normalizeInstanceKey(String(row.instance_key || inferDefaultKey(row.label, row.arr_type)));
+    if (ok) otherTokens.add(ok);
+    for (const a of row.instance_key_aliases || []) {
+      const ak = normalizeInstanceKey(String(a || ""));
+      if (ak) otherTokens.add(ak);
+    }
+    for (const t of tokens) {
+      if (otherTokens.has(t)) return row;
+    }
+  }
+  return null;
+}
+
 /** Primary row has URL + API key in persisted settings (e.g. after refresh or step save). */
 function arrPrimaryPersistedWithCredentials(values: FieldValueMap, arrType: "radarr" | "sonarr"): boolean {
   const instances = parseArrInstancesFromValues(values);
@@ -3956,32 +4245,395 @@ function arrPrimaryPersistedWithCredentials(values: FieldValueMap, arrType: "rad
 }
 
 function arrSecondaryPersistedWithCredentials(values: FieldValueMap, arrType: "radarr" | "sonarr"): boolean {
-  const instances = parseArrInstancesFromValues(values).filter((row) => row.arr_type === arrType);
-  const second = instances[1];
-  if (!second) return false;
+  // Two or more instances with a URL count as multi-instance configured (API keys may be redacted client-side).
   return (
-    String(second.url || "").trim().length > 0 &&
-    (String(second.api_key || "").trim().length > 0 || Boolean(second.api_key_saved))
+    parseArrInstancesFromValues(values).filter(
+      (row) => row.arr_type === arrType && String(row.url || "").trim().length > 0,
+    ).length > 1
   );
 }
 
-const PLACEHOLDER_MODE_VALUES = new Set(["primary", "secondary", "both"]);
-const PLAYBACK_MODE_VALUES = new Set(["match", "primary", "secondary", "both"]);
+/** Arr routing step: only when a second Radarr and/or Sonarr is enabled or already configured. */
+function needsArrRoutingStep(values: FieldValueMap): boolean {
+  return (
+    arrSecondaryPersistedWithCredentials(values, "radarr") ||
+    arrSecondaryPersistedWithCredentials(values, "sonarr") ||
+    Boolean(values.WIZARD_RADARR_SECONDARY_ENABLED) ||
+    Boolean(values.WIZARD_SONARR_SECONDARY_ENABLED)
+  );
+}
+
+function arrMultiInstanceBehaviorUnlocked(
+  values: FieldValueMap,
+  arrType: "radarr" | "sonarr",
+  sessionTestOk: boolean,
+): boolean {
+  return sessionTestOk || arrSecondaryPersistedWithCredentials(values, arrType);
+}
+
+function settingBool(value: unknown, defaultValue = false): boolean {
+  if (value === undefined || value === null || value === "") return defaultValue;
+  if (typeof value === "boolean") return value;
+  const text = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(text)) return true;
+  if (["0", "false", "no", "off"].includes(text)) return false;
+  return defaultValue;
+}
+
+function asPlayAlsoInstanceKeyList(value: unknown): string[] {
+  if (typeof value === "boolean" || value == null) return [];
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || "").trim().toLowerCase()).filter(Boolean);
+  }
+  const text = String(value).trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (typeof parsed === "boolean") return [];
+    if (Array.isArray(parsed)) {
+      return parsed.map((item) => String(item || "").trim().toLowerCase()).filter(Boolean);
+    }
+  } catch {
+    /* comma-separated fallback */
+  }
+  return text
+    .split(",")
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function arrInstanceKeys(instances: ArrInstanceDraft[]): string[] {
+  const keys: string[] = [];
+  for (const inst of instances) {
+    const key = normalizeInstanceKey(String(inst.instance_key || ""));
+    if (key && !keys.includes(key)) keys.push(key);
+  }
+  return keys;
+}
+
+function resolveAlsoInstanceKeysForUi(value: unknown, instances: ArrInstanceDraft[]): string[] {
+  const allowed = new Set(arrInstanceKeys(instances));
+  return asPlayAlsoInstanceKeyList(value).filter((key) => allowed.has(key));
+}
+
+function toggleAlsoInstanceKey(keys: string[], key: string, on: boolean): string[] {
+  if (on) {
+    return keys.includes(key) ? keys : [...keys, key];
+  }
+  return keys.filter((item) => item !== key);
+}
+
+type PlaceholderPlayMode = "off" | "fallback" | "always";
+
+const PLACEHOLDER_PLAY_MODE_OPTIONS: { value: PlaceholderPlayMode; label: string }[] = [
+  { value: "off", label: "Off" },
+  { value: "fallback", label: "Fallback" },
+  { value: "always", label: "Always" },
+];
+
+type RealFilePlayMode = "off" | "always";
+
+const REAL_FILE_PLAY_MODE_OPTIONS: { value: RealFilePlayMode; label: string }[] = [
+  { value: "off", label: "Off" },
+  { value: "always", label: "Always" },
+];
+
+function placeholderPlayModeForKey(
+  key: string,
+  alwaysKeys: string[],
+  fallbackKeys: string[],
+): PlaceholderPlayMode {
+  if (alwaysKeys.includes(key)) return "always";
+  if (fallbackKeys.includes(key)) return "fallback";
+  return "off";
+}
+
+function applyPlaceholderPlayMode(
+  key: string,
+  mode: PlaceholderPlayMode,
+  alwaysKeys: string[],
+  fallbackKeys: string[],
+): { alwaysKeys: string[]; fallbackKeys: string[] } {
+  const withoutAlways = alwaysKeys.filter((item) => item !== key);
+  const withoutFallback = fallbackKeys.filter((item) => item !== key);
+  if (mode === "always") {
+    return { alwaysKeys: [...withoutAlways, key], fallbackKeys: withoutFallback };
+  }
+  if (mode === "fallback") {
+    return { alwaysKeys: withoutAlways, fallbackKeys: [...withoutFallback, key] };
+  }
+  return { alwaysKeys: withoutAlways, fallbackKeys: withoutFallback };
+}
+
+/** True when a Play Actions list key is present in form/API values (including an intentional empty list). */
+function isPlayActionsListPresent(raw: unknown): boolean {
+  return raw !== undefined && raw !== null;
+}
+
+/**
+ * Resolve placeholder Always list.
+ *
+ * Once Always or Fallback has been persisted (including `[]`), trust Always so all-Off stays Off.
+ * Only when both keys are still unset, fall back to the legacy ALSO list for pre-migration upgrades.
+ */
+function resolvePlaceholderAlwaysKeysForUi(
+  alwaysRaw: unknown,
+  legacyAlsoRaw: unknown,
+  instances: ArrInstanceDraft[],
+  fallbackRaw?: unknown,
+): string[] {
+  if (isPlayActionsListPresent(alwaysRaw) || isPlayActionsListPresent(fallbackRaw)) {
+    return resolveAlsoInstanceKeysForUi(alwaysRaw, instances);
+  }
+  return resolveAlsoInstanceKeysForUi(legacyAlsoRaw, instances);
+}
+
+function PlayActionsInstanceMatrix(props: {
+  title: string;
+  instances: ArrInstanceDraft[];
+  enabled: boolean;
+  brand: Brand;
+  themeMode: ThemeMode;
+  placeholderAlwaysKeys: string[];
+  placeholderFallbackKeys: string[];
+  realKeys: string[];
+  onPlaceholderModesChange: (next: { alwaysKeys: string[]; fallbackKeys: string[] }) => void;
+  onRealKeysChange: (keys: string[]) => void;
+  realColumnNote?: string;
+}) {
+  const focus = getBrandFocusClass(props.brand, props.themeMode);
+
+  if (!props.enabled || props.instances.length < 2) {
+    return (
+      <div className="min-w-0 flex h-full flex-col gap-2">
+        <h4 className="text-[14px] font-semibold text-slate-300">{props.title}</h4>
+        <p className="ui-field-description-compact">Not applicable, no second instance set up.</p>
+      </div>
+    );
+  }
+
+  const idPrefix = props.title.toLowerCase().includes("movie") ? "movie" : "tv";
+
+  function setMode(key: string, mode: PlaceholderPlayMode) {
+    props.onPlaceholderModesChange(
+      applyPlaceholderPlayMode(key, mode, props.placeholderAlwaysKeys, props.placeholderFallbackKeys),
+    );
+  }
+
+  function setRealMode(key: string, mode: RealFilePlayMode) {
+    props.onRealKeysChange(toggleAlsoInstanceKey(props.realKeys, key, mode === "always"));
+  }
+
+  return (
+    <div className="min-w-0 flex h-full flex-col gap-3">
+      <h4 className="text-[14px] font-semibold text-slate-300">{props.title}</h4>
+      <div className="hidden min-w-0 sm:block">
+        {/* table-fixed + shared header height keep Movies/TV matrices aligned side-by-side */}
+        <table className="w-full table-fixed border-collapse text-[13px]">
+          <colgroup>
+            <col />
+            <col className="w-[7.5rem]" />
+            <col className="w-[7.5rem]" />
+          </colgroup>
+          <thead>
+            <tr className="border-b border-[#424753]/35 text-slate-400">
+              <th scope="col" className="h-12 py-2 pr-3 text-left align-bottom font-semibold">
+                Instance
+              </th>
+              <th scope="col" className="h-12 w-[7.5rem] px-1 py-2 text-center align-bottom font-semibold leading-snug">
+                Placeholder
+                <br />
+                play
+              </th>
+              <th scope="col" className="h-12 w-[7.5rem] px-1 py-2 text-center align-bottom font-semibold leading-snug">
+                Real
+                <br />
+                file
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {props.instances.map((inst) => {
+              const key = normalizeInstanceKey(String(inst.instance_key || ""));
+              if (!key) return null;
+              const label = String(inst.label || key).trim() || key;
+              const phMode = placeholderPlayModeForKey(
+                key,
+                props.placeholderAlwaysKeys,
+                props.placeholderFallbackKeys,
+              );
+              const realMode: RealFilePlayMode = props.realKeys.includes(key) ? "always" : "off";
+              return (
+                <tr key={key} className="border-b border-[#424753]/20 last:border-0">
+                  <td className="min-w-0 truncate py-2.5 pr-3 text-left font-medium text-slate-200" title={label}>
+                    {label}
+                  </td>
+                  <td className="w-[8.25rem] px-1 py-2 text-center">
+                    <select
+                      id={`${idPrefix}-ph-mode-${key}`}
+                      aria-label={`Placeholder play for ${label}`}
+                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-1.5 py-1.5 text-[12px] text-slate-200 outline-none transition-colors ${focus}`}
+                      value={phMode}
+                      onChange={(e) => setMode(key, e.target.value as PlaceholderPlayMode)}
+                    >
+                      {PLACEHOLDER_PLAY_MODE_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td className="w-[8.25rem] px-1 py-2 text-center">
+                    <select
+                      id={`${idPrefix}-real-mode-${key}`}
+                      aria-label={`Real file play for ${label}`}
+                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-1.5 py-1.5 text-[12px] text-slate-200 outline-none transition-colors ${focus}`}
+                      value={realMode}
+                      onChange={(e) => setRealMode(key, e.target.value as RealFilePlayMode)}
+                    >
+                      {REAL_FILE_PLAY_MODE_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <ul className="space-y-2 sm:hidden">
+        {props.instances.map((inst) => {
+          const key = normalizeInstanceKey(String(inst.instance_key || ""));
+          if (!key) return null;
+          const label = String(inst.label || key).trim() || key;
+          const phMode = placeholderPlayModeForKey(
+            key,
+            props.placeholderAlwaysKeys,
+            props.placeholderFallbackKeys,
+          );
+          const realMode: RealFilePlayMode = props.realKeys.includes(key) ? "always" : "off";
+          return (
+            <li
+              key={key}
+              className="rounded-lg border border-[#424753]/35 bg-[#0b111b]/40 px-3 py-2.5 space-y-2"
+            >
+              <div className="text-[14px] font-semibold text-slate-200">{label}</div>
+              <label className="block text-[13px] text-slate-300">
+                <span className="mb-1 block font-semibold text-slate-400">Placeholder play</span>
+                <select
+                  className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-2 py-2 text-[14px] text-slate-200 outline-none transition-colors ${focus}`}
+                  value={phMode}
+                  onChange={(e) => setMode(key, e.target.value as PlaceholderPlayMode)}
+                >
+                  {PLACEHOLDER_PLAY_MODE_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="block text-[13px] text-slate-300">
+                <span className="mb-1 block font-semibold text-slate-400">Real file</span>
+                <select
+                  className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-2 py-2 text-[14px] text-slate-200 outline-none transition-colors ${focus}`}
+                  value={realMode}
+                  onChange={(e) => setRealMode(key, e.target.value as RealFilePlayMode)}
+                >
+                  {REAL_FILE_PLAY_MODE_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </li>
+          );
+        })}
+      </ul>
+      {props.realColumnNote ? (
+        <p className="ui-field-description-compact mt-auto min-h-[3.25rem]">{props.realColumnNote}</p>
+      ) : (
+        <div className="mt-auto min-h-[3.25rem]" aria-hidden />
+      )}
+    </div>
+  );
+}
+
 const SHARED_PLACEHOLDER_CLEANUP_VALUES = new Set(["protect_siblings", "any_instance_has_file"]);
 
 const SHARED_PLACEHOLDER_CLEANUP_HELP_RADARR: Record<string, string> = {
   protect_siblings:
-    "When two Radarr instances share the same movie folder, placeholder files stay until no configured instance still needs them—even if the other Radarr already imported a real file.",
+    "When multiple Radarr instances share the same movie folder, placeholder files stay until every configured instance has a real file (or no longer needs the placeholder).",
   any_instance_has_file:
     "Once any Radarr instance has a real file for this movie, other instances will not recreate placeholders on sync, and stale placeholder files are removed from disk.",
 };
 
 const SHARED_PLACEHOLDER_CLEANUP_HELP_SONARR: Record<string, string> = {
   protect_siblings:
-    "When two Sonarr instances share the same series folder, placeholder files stay until no configured instance still needs them—even if the other Sonarr already imported real episodes.",
+    "When multiple Sonarr instances share the same series folder, placeholder files stay until every configured instance has a real file (or no longer needs the placeholder).",
   any_instance_has_file:
     "Once any Sonarr instance has a real file for this episode, other instances will not recreate placeholders on sync, and stale placeholder files are removed from disk.",
 };
+
+/** Normalize dest paths the same way as destination map uniqueness checks. */
+function normalizeSharedDestPath(path: string): string {
+  let text = String(path || "")
+    .trim()
+    .replace(/\\/g, "/");
+  while (text.includes("//")) {
+    text = text.replace(/\/\//g, "/");
+  }
+  if (text.length > 1 && text.endsWith("/")) {
+    text = text.replace(/\/+$/, "");
+  }
+  return text;
+}
+
+/**
+ * True when shared placeholder cleanup is relevant for this Arr type.
+ * No destination map rows: both instances share Library Root defaults.
+ * With a map: only when two distinct instance keys map to the same dest folder.
+ */
+function arrInstancesSharePlaceholderFolder(values: FieldValueMap, arrType: "radarr" | "sonarr"): boolean {
+  const raw = String(values.LIBRARY_DESTINATION_MAP_JSON || "").trim();
+  let rows: Array<Record<string, unknown>> = [];
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        rows = parsed.filter(
+          (item) =>
+            item &&
+            typeof item === "object" &&
+            String((item as Record<string, unknown>).arr_type || "")
+              .trim()
+              .toLowerCase() === arrType,
+        ) as Array<Record<string, unknown>>;
+      }
+    } catch {
+      rows = [];
+    }
+  }
+  if (!rows.length) return true;
+  const byDest = new Map<string, Set<string>>();
+  for (const row of rows) {
+    const dest = normalizeSharedDestPath(String(row.dest_folder || row.dest || "")).toLowerCase();
+    const key = String(row.instance_key || "")
+      .trim()
+      .toLowerCase();
+    if (!dest || !key) continue;
+    const set = byDest.get(dest) || new Set<string>();
+    set.add(key);
+    byDest.set(dest, set);
+  }
+  for (const keys of byDest.values()) {
+    if (keys.size >= 2) return true;
+  }
+  return false;
+}
 
 function sharedPlaceholderCleanupMode(values: FieldValueMap, key: string): string {
   const raw = String(values[key] ?? "protect_siblings").trim().toLowerCase();
@@ -4012,11 +4664,11 @@ function SharedPlaceholderCleanupColumn(props: {
       >
         {props.enabled ? (
           <>
-            <option value="protect_siblings">Protect until no instance needs placeholder (recommended)</option>
+            <option value="protect_siblings">Remove when all instances have a real file</option>
             <option value="any_instance_has_file">Remove when any instance has a real file</option>
           </>
         ) : (
-          <option value="na">Not applicable, no second instance set up.</option>
+          <option value="na">Not applicable</option>
         )}
       </select>
       <p className="ui-field-description-compact mt-1.5">
@@ -4033,41 +4685,252 @@ function SharedPlaceholderCleanupPanel(props: {
   themeMode: ThemeMode;
   canUseRadarrSecondaryBehavior: boolean;
   canUseSonarrSecondaryBehavior: boolean;
+  /** Onboarding: always stack Movies/TV for readable select labels. Settings keeps side-by-side from sm. */
+  stackColumns?: boolean;
 }) {
+  const columnsClass = props.stackColumns
+    ? "grid grid-cols-1 gap-4"
+    : "grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5";
   return (
     <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
-      <div className="text-center">
-        <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider mb-1">
+      <div className="space-y-2">
+        <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-white">
           Shared Placeholder Cleanup
-        </h3>
-        <p className="ui-field-description mx-auto max-w-2xl">
-          When two instances share the same on-disk folder, choose when placeholder files are removed from disk.
+        </p>
+        <p className="ui-field-description leading-relaxed">
+          When two instances share the same Placeholdarr folder (Library Root, or the same custom Library
+          destination), pick when those placeholders are removed after a real file lands. If each instance has its
+          own Library destination, this setting is unused; each folder is cleaned up on its own.
         </p>
       </div>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5">
+      <div className={columnsClass}>
         <SharedPlaceholderCleanupColumn
           label="Movies (Radarr)"
           settingKey="RADARR_SHARED_PLACEHOLDER_CLEANUP"
-          enabled={props.canUseRadarrSecondaryBehavior}
+          enabled={props.canUseRadarrSecondaryBehavior && arrInstancesSharePlaceholderFolder(props.values, "radarr")}
           values={props.values}
           onChange={props.onChange}
           brand={props.brand}
           themeMode={props.themeMode}
           helpByMode={SHARED_PLACEHOLDER_CLEANUP_HELP_RADARR}
-          disabledHint="Not applicable, no second Radarr instance set up."
+          disabledHint={
+            !props.canUseRadarrSecondaryBehavior
+              ? "Not applicable, no second Radarr instance set up."
+              : "Not applicable. Your Radarr destinations do not share a Placeholdarr folder."
+          }
         />
         <SharedPlaceholderCleanupColumn
           label="TV Shows (Sonarr)"
           settingKey="SONARR_SHARED_PLACEHOLDER_CLEANUP"
-          enabled={props.canUseSonarrSecondaryBehavior}
+          enabled={props.canUseSonarrSecondaryBehavior && arrInstancesSharePlaceholderFolder(props.values, "sonarr")}
           values={props.values}
           onChange={props.onChange}
           brand={props.brand}
           themeMode={props.themeMode}
           helpByMode={SHARED_PLACEHOLDER_CLEANUP_HELP_SONARR}
-          disabledHint="Not applicable, no second Sonarr instance set up."
+          disabledHint={
+            !props.canUseSonarrSecondaryBehavior
+              ? "Not applicable, no second Sonarr instance set up."
+              : "Not applicable. Your Sonarr destinations do not share a Placeholdarr folder."
+          }
         />
       </div>
+    </div>
+  );
+}
+
+
+function ArrMultiInstanceBehaviorStack(props: {
+  values: FieldValueMap;
+  onChange: (key: string, value: unknown) => void;
+  brand: Brand;
+  themeMode: ThemeMode;
+  accent: BrandAccent;
+  canUseRadarrSecondaryBehavior: boolean;
+  canUseSonarrSecondaryBehavior: boolean;
+  canUseAnySecondaryBehavior: boolean;
+  radarrInstances: ArrInstanceDraft[];
+  sonarrInstances: ArrInstanceDraft[];
+  /** Settings only: jump to ARR Integrations to reorder Fallback tries. */
+  onOpenArrIntegrations?: () => void;
+  /** Onboarding: stack Movies/TV columns for readable controls. Settings keeps side-by-side from sm. */
+  stackColumns?: boolean;
+}) {
+  const {
+    canUseRadarrSecondaryBehavior,
+    canUseSonarrSecondaryBehavior,
+    canUseAnySecondaryBehavior,
+    radarrInstances,
+    sonarrInstances,
+  } = props;
+  const matrixColumnsClass = props.stackColumns
+    ? "grid grid-cols-1 items-start gap-4"
+    : "grid grid-cols-1 items-start gap-4 sm:grid-cols-2 sm:items-stretch sm:gap-5";
+  const movieAlwaysKeys = resolvePlaceholderAlwaysKeysForUi(
+    props.values.MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES,
+    props.values.MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES,
+    radarrInstances,
+    props.values.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES,
+  );
+  const movieFallbackKeys = canUseRadarrSecondaryBehavior
+    ? resolveAlsoInstanceKeysForUi(props.values.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES, radarrInstances).filter(
+        (key) => !movieAlwaysKeys.includes(key),
+      )
+    : [];
+  const movieRealKeys = resolveAlsoInstanceKeysForUi(
+    props.values.MOVIE_PLAY_REAL_ALSO_INSTANCES,
+    radarrInstances,
+  );
+  const tvAlwaysKeys = resolvePlaceholderAlwaysKeysForUi(
+    props.values.TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES,
+    props.values.TV_PLAY_PLACEHOLDER_ALSO_INSTANCES,
+    sonarrInstances,
+    props.values.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES,
+  );
+  const tvFallbackKeys = canUseSonarrSecondaryBehavior
+    ? resolveAlsoInstanceKeysForUi(props.values.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES, sonarrInstances).filter(
+        (key) => !tvAlwaysKeys.includes(key),
+      )
+    : [];
+  const tvRealKeys = resolveAlsoInstanceKeysForUi(
+    props.values.TV_PLAY_REAL_ALSO_INSTANCES,
+    sonarrInstances,
+  );
+  const hasFallback =
+    (canUseRadarrSecondaryBehavior && movieFallbackKeys.length > 0) ||
+    (canUseSonarrSecondaryBehavior && tvFallbackKeys.length > 0);
+
+  return (
+    <div className="space-y-6">
+      <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
+        <div className="space-y-2">
+          <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-white">
+            Play Actions
+          </p>
+          <div className="ui-field-description leading-relaxed">
+            <p className="mb-2">
+              When the library path is clear, the path-matched Arr is always included. Each control chooses whether that
+              instance is also actioned (monitor and/or search, per your destination filters). Ambiguous plays follow
+              Placeholder play.
+            </p>
+            <ul className="list-disc space-y-1.5 pl-5">
+              <li>
+                <span className="font-semibold text-slate-300">Off</span>: do not action this instance in addition to the
+                path-matched Arr.
+              </li>
+              <li>
+                <span className="font-semibold text-slate-300">Always</span>: also action this instance in addition to the
+                path-matched Arr.
+              </li>
+              <li>
+                <span className="font-semibold text-slate-300">Fallback</span>: also action this instance only when the
+                path-matched Arr does not have the title, or its action does not resolve within the timeout. Multiple
+                Fallback instances are tried in the order shown in the matrix (same as order set in{" "}
+                {props.onOpenArrIntegrations ? (
+                  <button
+                    type="button"
+                    onClick={props.onOpenArrIntegrations}
+                    className="font-medium text-slate-200 underline underline-offset-2 transition hover:text-white"
+                  >
+                    ARR Integrations
+                  </button>
+                ) : (
+                  "ARR Integrations"
+                )}
+                ).
+              </li>
+            </ul>
+          </div>
+        </div>
+        <div className={matrixColumnsClass}>
+          <PlayActionsInstanceMatrix
+            title="Movies (Radarr)"
+            instances={[...radarrInstances].sort((a, b) => a.priority - b.priority)}
+            enabled={canUseRadarrSecondaryBehavior}
+            brand={props.brand}
+            themeMode={props.themeMode}
+            placeholderAlwaysKeys={movieAlwaysKeys}
+            placeholderFallbackKeys={movieFallbackKeys}
+            realKeys={movieRealKeys}
+            onPlaceholderModesChange={({ alwaysKeys, fallbackKeys }) => {
+              props.onChange("MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES", alwaysKeys);
+              props.onChange("MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES", fallbackKeys);
+            }}
+            onRealKeysChange={(keys) => props.onChange("MOVIE_PLAY_REAL_ALSO_INSTANCES", keys)}
+            realColumnNote="Movies: Real file · Always is only useful when another Radarr still needs the title."
+          />
+          <PlayActionsInstanceMatrix
+            title="TV Shows (Sonarr)"
+            instances={[...sonarrInstances].sort((a, b) => a.priority - b.priority)}
+            enabled={canUseSonarrSecondaryBehavior}
+            brand={props.brand}
+            themeMode={props.themeMode}
+            placeholderAlwaysKeys={tvAlwaysKeys}
+            placeholderFallbackKeys={tvFallbackKeys}
+            realKeys={tvRealKeys}
+            onPlaceholderModesChange={({ alwaysKeys, fallbackKeys }) => {
+              props.onChange("TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES", alwaysKeys);
+              props.onChange("TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES", fallbackKeys);
+            }}
+            onRealKeysChange={(keys) => props.onChange("TV_PLAY_REAL_ALSO_INSTANCES", keys)}
+            realColumnNote="TV: Real file · Always also runs Lookahead on that Sonarr (Search mode and range still apply)."
+          />
+        </div>
+        {canUseAnySecondaryBehavior ? (
+          <div
+            className={`space-y-2 rounded-xl border px-4 py-4 ${
+              hasFallback
+                ? "border-[#424753]/50 bg-[#0b111b]/45"
+                : "border-[#424753]/30 bg-[#0b111b]/40 opacity-60"
+            }`}
+          >
+            <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-white">
+              Fallback timeout
+            </p>
+            <p className="ui-field-description-compact">
+              After actioning the path-matched Arr, wait this long before trying instances set to Fallback. Immediate try
+              still happens when the preferred Arr does not have the title. Adjust this based on how long typical Arr
+              jobs take in your environment for quicker fallback.
+            </p>
+            <label className="block text-[14px] font-semibold text-slate-200" htmlFor="playback-fallback-timeout">
+              Minutes
+              <input
+                id="playback-fallback-timeout"
+                className={`mt-2 block w-24 bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[15px] tabular-nums tracking-tight text-slate-200 outline-none transition-colors disabled:cursor-not-allowed ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                type="text"
+                inputMode="numeric"
+                maxLength={3}
+                autoComplete="off"
+                disabled={!hasFallback}
+                title={
+                  hasFallback
+                    ? undefined
+                    : "Set at least one instance to Fallback to edit this timeout"
+                }
+                value={(() => {
+                  const raw = props.values.PLAYBACK_FALLBACK_TIMEOUT_MINUTES;
+                  const digits = String(raw ?? "").replace(/\D/g, "").slice(0, 3);
+                  if (digits.length > 0) return digits;
+                  return raw === undefined || raw === null || String(raw).trim() === "" ? "30" : "";
+                })()}
+                onChange={(e) => {
+                  const d = e.target.value.replace(/\D/g, "").slice(0, 3);
+                  props.onChange("PLAYBACK_FALLBACK_TIMEOUT_MINUTES", d);
+                }}
+              />
+            </label>
+          </div>
+        ) : null}
+      </div>
+      <SharedPlaceholderCleanupPanel
+        values={props.values}
+        onChange={props.onChange}
+        brand={props.brand}
+        themeMode={props.themeMode}
+        canUseRadarrSecondaryBehavior={canUseRadarrSecondaryBehavior}
+        canUseSonarrSecondaryBehavior={canUseSonarrSecondaryBehavior}
+        stackColumns={props.stackColumns}
+      />
     </div>
   );
 }
@@ -4085,31 +4948,77 @@ function buildPersistableSettingsValues(values: FieldValueMap, payload: Settings
   });
 
   const instances = parseArrInstancesFromValues(cleaned);
-  const hasRadarrSecondary = instances.filter((item) => item.arr_type === "radarr").length > 1;
-  const hasSonarrSecondary = instances.filter((item) => item.arr_type === "sonarr").length > 1;
+  const radarrInstances = instances.filter((item) => item.arr_type === "radarr");
+  const sonarrInstances = instances.filter((item) => item.arr_type === "sonarr");
+  const hasRadarrSecondary = radarrInstances.length > 1;
+  const hasSonarrSecondary = sonarrInstances.length > 1;
 
-  const moviePlaceholderMode = String(cleaned.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "primary").trim().toLowerCase();
-  const tvPlaceholderMode = String(cleaned.TV_PLACEHOLDER_SEARCH_MODE ?? "primary").trim().toLowerCase();
-  const moviePlaybackMode = String(cleaned.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match").trim().toLowerCase();
-  const tvPlaybackMode = String(cleaned.TV_PLAYBACK_INSTANCE_MODE ?? "match").trim().toLowerCase();
-
-  cleaned.MOVIE_PLACEHOLDER_SEARCH_MODE = hasRadarrSecondary
-    ? (PLACEHOLDER_MODE_VALUES.has(moviePlaceholderMode) ? moviePlaceholderMode : "primary")
-    : "primary";
-  cleaned.TV_PLACEHOLDER_SEARCH_MODE = hasSonarrSecondary
-    ? (PLACEHOLDER_MODE_VALUES.has(tvPlaceholderMode) ? tvPlaceholderMode : "primary")
-    : "primary";
-  cleaned.MOVIE_PLAYBACK_INSTANCE_MODE = hasRadarrSecondary
-    ? (PLAYBACK_MODE_VALUES.has(moviePlaybackMode) ? moviePlaybackMode : "match")
-    : "match";
-  cleaned.TV_PLAYBACK_INSTANCE_MODE = hasSonarrSecondary
-    ? (PLAYBACK_MODE_VALUES.has(tvPlaybackMode) ? tvPlaybackMode : "match")
-    : "match";
-
-  if (!hasRadarrSecondary && !hasSonarrSecondary) {
-    cleaned.ENABLE_PLAYBACK_FALLBACK_SEARCH = false;
+  // Only normalize Play Actions when multi-instance applies. Single-instance saves must not
+  // persist empty lists (or flip ENABLE off), or adding a second Arr later looks intentionally Off.
+  let movieFallbackForEnable: string[] | null = null;
+  let tvFallbackForEnable: string[] | null = null;
+  if (hasRadarrSecondary) {
+    const movieAlways = resolvePlaceholderAlwaysKeysForUi(
+      cleaned.MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES,
+      cleaned.MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES,
+      radarrInstances,
+      cleaned.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES,
+    );
+    const movieFallback = resolveAlsoInstanceKeysForUi(
+      cleaned.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES,
+      radarrInstances,
+    ).filter((key) => !movieAlways.includes(key));
+    const movieRealAlso = resolveAlsoInstanceKeysForUi(
+      cleaned.MOVIE_PLAY_REAL_ALSO_INSTANCES,
+      radarrInstances,
+    );
+    cleaned.MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES = movieAlways;
+    cleaned.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES = movieFallback;
+    cleaned.MOVIE_PLAY_REAL_ALSO_INSTANCES = movieRealAlso;
+    cleaned.MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES = movieAlways;
+    movieFallbackForEnable = movieFallback;
+  } else {
+    delete cleaned.MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES;
+    delete cleaned.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES;
+    delete cleaned.MOVIE_PLAY_REAL_ALSO_INSTANCES;
+    delete cleaned.MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES;
   }
-
+  if (hasSonarrSecondary) {
+    const tvAlways = resolvePlaceholderAlwaysKeysForUi(
+      cleaned.TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES,
+      cleaned.TV_PLAY_PLACEHOLDER_ALSO_INSTANCES,
+      sonarrInstances,
+      cleaned.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES,
+    );
+    const tvFallback = resolveAlsoInstanceKeysForUi(
+      cleaned.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES,
+      sonarrInstances,
+    ).filter((key) => !tvAlways.includes(key));
+    const tvRealAlso = resolveAlsoInstanceKeysForUi(cleaned.TV_PLAY_REAL_ALSO_INSTANCES, sonarrInstances);
+    cleaned.TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES = tvAlways;
+    cleaned.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES = tvFallback;
+    cleaned.TV_PLAY_REAL_ALSO_INSTANCES = tvRealAlso;
+    cleaned.TV_PLAY_PLACEHOLDER_ALSO_INSTANCES = tvAlways;
+    cleaned.TV_CROSS_INSTANCE_LOOKAHEAD = tvRealAlso;
+    tvFallbackForEnable = tvFallback;
+  } else {
+    delete cleaned.TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES;
+    delete cleaned.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES;
+    delete cleaned.TV_PLAY_REAL_ALSO_INSTANCES;
+    delete cleaned.TV_PLAY_PLACEHOLDER_ALSO_INSTANCES;
+    delete cleaned.TV_CROSS_INSTANCE_LOOKAHEAD;
+  }
+  if (hasRadarrSecondary || hasSonarrSecondary) {
+    const movieFb =
+      movieFallbackForEnable ??
+      resolveAlsoInstanceKeysForUi(values.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES, radarrInstances);
+    const tvFb =
+      tvFallbackForEnable ??
+      resolveAlsoInstanceKeysForUi(values.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES, sonarrInstances);
+    cleaned.ENABLE_PLAYBACK_FALLBACK_SEARCH = movieFb.length > 0 || tvFb.length > 0;
+  } else {
+    delete cleaned.ENABLE_PLAYBACK_FALLBACK_SEARCH;
+  }
   const radarrSharedCleanupMode = String(cleaned.RADARR_SHARED_PLACEHOLDER_CLEANUP ?? "protect_siblings")
     .trim()
     .toLowerCase();
@@ -4189,6 +5098,7 @@ function ArrInstancesEditor(props: {
       sonarr: parsed.filter((item) => item.arr_type === "sonarr").length > 1,
     };
   });
+
   const [primaryConnectionOk, setPrimaryConnectionOk] = useState<{ radarr: boolean; sonarr: boolean }>({
     radarr: false,
     sonarr: false,
@@ -4200,12 +5110,20 @@ function ArrInstancesEditor(props: {
     }),
     [primaryConnectionOk.radarr, primaryConnectionOk.sonarr, props.values],
   );
-  const [slotPanel, setSlotPanel] = useState<{ arrType: "radarr" | "sonarr"; slotIndex: 0 | 1; isNew?: boolean } | null>(null);
+  const [slotPanel, setSlotPanel] = useState<{ arrType: "radarr" | "sonarr"; slotIndex: number; isNew?: boolean } | null>(null);
   const [disconnectDialog, setDisconnectDialog] = useState<{
     arrType: "radarr" | "sonarr";
-    slotIndex: 0 | 1;
+    slotIndex: number;
     label: string;
   } | null>(null);
+  const [slotMotion, setSlotMotion] = useState<null | {
+    arrType: "radarr" | "sonarr";
+    phase: "exiting" | "promoting";
+    exitingSlot: number;
+    promotedId: string;
+    promotedLabel: string;
+  }>(null);
+  const slotMotionTimersRef = useRef<number[]>([]);
   const [webhookSetupDialog, setWebhookSetupDialog] = useState<{
     arrType: "radarr" | "sonarr";
     instance_key: string;
@@ -4216,6 +5134,41 @@ function ArrInstancesEditor(props: {
   const slotPanelCaptureKeyRef = useRef<string>("");
   const [slotFooterTestBusy, setSlotFooterTestBusy] = useState(false);
   const [slotPanelTestPassed, setSlotPanelTestPassed] = useState(false);
+
+  useEffect(() => {
+    return () => {
+      for (const id of slotMotionTimersRef.current) window.clearTimeout(id);
+      slotMotionTimersRef.current = [];
+    };
+  }, []);
+
+  // Keep editor slots in sync with form/server JSON whenever it changes and the
+  // slide-over is closed. Stale primaryEnabled=false with empty local instances
+  // was showing "Connect" even when ARR_INSTANCES_JSON still had saved rows.
+  useEffect(() => {
+    if (slotPanel) return;
+    if (slotMotion) return;
+    const parsed = parseArrInstancesFromValues(props.values);
+    const radRows = parsed.filter((item) => item.arr_type === "radarr");
+    const sonRows = parsed.filter((item) => item.arr_type === "sonarr");
+    setInstances(parsed);
+    setPrimaryEnabled({
+      radarr: radRows.length > 0,
+      sonarr: sonRows.length > 0,
+    });
+    setSecondaryEnabled({
+      radarr: radRows.length > 1,
+      sonarr: sonRows.length > 1,
+    });
+    setPrimaryCache((prev) => ({
+      radarr: radRows[0] || prev.radarr,
+      sonarr: sonRows[0] || prev.sonarr,
+    }));
+    setSecondaryCache((prev) => ({
+      radarr: radRows[1] || prev.radarr,
+      sonarr: sonRows[1] || prev.sonarr,
+    }));
+  }, [props.values.ARR_INSTANCES_JSON, slotPanel, slotMotion]);
 
   useEffect(() => {
     const rad = Boolean(secondaryEnabled.radarr);
@@ -4242,42 +5195,60 @@ function ArrInstancesEditor(props: {
     const sonarr = next.filter((item) => item.arr_type === "sonarr").slice(0, ARR_INSTANCE_LIMIT_PER_TYPE);
     const trimmed = [...radarr, ...sonarr];
 
-    const keysOf = (rows: ArrInstanceDraft[]) =>
-      rows.map((r) => normalizeInstanceKey(String(r.instance_key || inferDefaultKey(r.label, r.arr_type))));
-    const radKeys = keysOf(radarr);
-    const sonKeys = keysOf(sonarr);
-    if (radarr.length > 1 && new Set(radKeys).size !== radKeys.length) {
-      setInstanceKeyConflict("Two Radarr rows cannot share the same instance key (derived from the name/key). Give each instance a distinct name.");
-      return;
-    }
-    if (sonarr.length > 1 && new Set(sonKeys).size !== sonKeys.length) {
-      setInstanceKeyConflict("Two Sonarr rows cannot share the same instance key (derived from the name/key). Give each instance a distinct name.");
-      return;
-    }
-    setInstanceKeyConflict(null);
+    const labelClash = (rows: ArrInstanceDraft[], typeLabel: string) => {
+      const seen = new Set<string>();
+      for (const row of rows) {
+        const label = String(row.label || "").trim().toLowerCase();
+        if (!label) continue;
+        if (seen.has(label)) {
+          return `Two ${typeLabel} rows cannot share the same name. Give each instance a distinct name.`;
+        }
+        seen.add(label);
+      }
+      return null;
+    };
+    const tokenClash = (rows: ArrInstanceDraft[], typeLabel: string) => {
+      const seen = new Set<string>();
+      for (const row of rows) {
+        const tokens = [
+          normalizeInstanceKey(String(row.instance_key || inferDefaultKey(row.label, row.arr_type))),
+          ...(row.instance_key_aliases || []).map((a) => normalizeInstanceKey(String(a || ""))),
+        ].filter(Boolean);
+        for (const t of tokens) {
+          if (seen.has(t)) {
+            return `Two ${typeLabel} rows cannot share the same instance key or alias (derived from the name). Give each instance a distinct name.`;
+          }
+          seen.add(t);
+        }
+      }
+      return null;
+    };
+
+    const conflict =
+      labelClash(radarr, "Radarr") ||
+      labelClash(sonarr, "Sonarr") ||
+      tokenClash(radarr, "Radarr") ||
+      tokenClash(sonarr, "Sonarr");
+    setInstanceKeyConflict(conflict);
 
     setInstances(trimmed);
     props.onValueChange("ARR_INSTANCES_JSON", serializeArrInstances(trimmed));
   }
 
-  function defaultSlot(arrType: "radarr" | "sonarr", slotIndex: 0 | 1): ArrInstanceDraft {
-    const label = arrType === "radarr"
-      ? (slotIndex === 0 ? "Radarr Primary" : "Radarr Secondary")
-      : (slotIndex === 0 ? "Sonarr Primary" : "Sonarr Secondary");
-    const instanceKey = inferDefaultKey(label, arrType);
-    const role = slotIndex === 0 ? "primary" : "secondary";
+  function defaultSlot(arrType: "radarr" | "sonarr", slotIndex: number): ArrInstanceDraft {
+    const serviceName = arrType === "radarr" ? "Radarr" : "Sonarr";
+    const label = slotIndex === 0 ? serviceName : `${serviceName} ${slotIndex + 1}`;
+    const instanceKey = defaultInstanceKeyForSlot(arrType, slotIndex);
     return {
       id: `slot-${arrType}-${slotIndex}`,
-      instance_id: stableArrInstanceId(arrType, role),
+      instance_id: newArrInstanceId(),
       label,
       arr_type: arrType,
       instance_key: instanceKey,
       url: "",
       api_key: "",
       api_key_saved: false,
-      role,
       priority: slotIndex,
-      is_4k: deriveIs4kFromRole(role),
     };
   }
 
@@ -4285,14 +5256,29 @@ function ArrInstancesEditor(props: {
     return instances.filter((item) => item.arr_type === arrType).slice(0, ARR_INSTANCE_LIMIT_PER_TYPE);
   }
 
-  function upsertSlot(arrType: "radarr" | "sonarr", slotIndex: 0 | 1, patch: Partial<ArrInstanceDraft>) {
+  function upsertSlot(arrType: "radarr" | "sonarr", slotIndex: number, patch: Partial<ArrInstanceDraft>) {
     const typeRows = getTypeRows(arrType);
     const otherRows = instances.filter((item) => item.arr_type !== arrType);
     while (typeRows.length <= slotIndex) {
-      typeRows.push(defaultSlot(arrType, typeRows.length === 0 ? 0 : 1));
+      typeRows.push(defaultSlot(arrType, typeRows.length));
     }
     const target = typeRows[slotIndex] || defaultSlot(arrType, slotIndex);
     const merged = { ...target, ...patch };
+    if (Object.prototype.hasOwnProperty.call(patch, "label") || Object.prototype.hasOwnProperty.call(patch, "instance_key")) {
+      // Label edits must re-slug the key (do not keep the prior key via `old || fromLabel`).
+      // Explicit instance_key edits win when both are present.
+      const keySource = Object.prototype.hasOwnProperty.call(patch, "instance_key")
+        ? String(patch.instance_key || merged.label || "")
+        : String(inferDefaultKey(merged.label, arrType) || "");
+      const key =
+        normalizeInstanceKey(keySource) ||
+        defaultInstanceKeyForSlot(arrType, slotIndex);
+      merged.instance_key = key;
+      // Keep instance_id forever once assigned; rename must not mint a new identity.
+      if (!String(merged.instance_id || "").trim()) {
+        merged.instance_id = newArrInstanceId();
+      }
+    }
     typeRows[slotIndex] = merged;
     if (Object.prototype.hasOwnProperty.call(patch, "url") || Object.prototype.hasOwnProperty.call(patch, "api_key")) {
       setTestState((prev) => {
@@ -4316,18 +5302,30 @@ function ArrInstancesEditor(props: {
     const typeRows = getTypeRows(arrType);
     const otherRows = instances.filter((item) => item.arr_type !== arrType);
     if (!enabled) {
+      // Removing Slot 1 must not wipe Slot 2+. Promote remaining rows upward so
+      // disconnecting primary leaves the other servers intact (still unsaved until Save).
       setPrimaryCache((prev) => ({ ...prev, [arrType]: typeRows[0] || prev[arrType] }));
-      setSecondaryCache((prev) => ({ ...prev, [arrType]: typeRows[1] || prev[arrType] }));
-      setPrimaryEnabled((prev) => ({ ...prev, [arrType]: false }));
-      setSecondaryEnabled((prev) => ({ ...prev, [arrType]: false }));
+      const remaining = typeRows.slice(1).map((row, idx) => ({
+        ...row,
+        priority: idx,
+        id: `slot-${arrType}-${idx}`,
+      }));
+      setSecondaryCache((prev) => ({ ...prev, [arrType]: remaining[1] || typeRows[1] || prev[arrType] }));
+      setPrimaryEnabled((prev) => ({ ...prev, [arrType]: remaining.length > 0 }));
+      setSecondaryEnabled((prev) => ({ ...prev, [arrType]: remaining.length > 1 }));
       setPrimaryConnectionOk((prev) => ({ ...prev, [arrType]: false }));
       props.onPrimaryTestStatusChange?.(arrType, false);
-      props.onSecondaryTestStatusChange?.(arrType, false);
-      update(otherRows);
+      if (remaining.length <= 1) {
+        props.onSecondaryTestStatusChange?.(arrType, false);
+      }
+      update([...otherRows, ...remaining]);
       return;
     }
 
-    const primary = typeRows[0] ?? primaryCache[arrType] ?? defaultSlot(arrType, 0);
+    const primary = withFreshInstanceIdIfNeeded(
+      typeRows[0] ?? primaryCache[arrType] ?? defaultSlot(arrType, 0),
+      typeRows,
+    );
     setPrimaryEnabled((prev) => ({ ...prev, [arrType]: true }));
     update([...otherRows, { ...primary }]);
   }
@@ -4337,20 +5335,164 @@ function ArrInstancesEditor(props: {
     const typeRows = getTypeRows(arrType);
     const otherRows = instances.filter((item) => item.arr_type !== arrType);
     if (!enabled) {
+      // Removing Slot 2 keeps Slot 3+ and shifts them up (do not wipe overflow seats).
       setSecondaryCache((prev) => ({ ...prev, [arrType]: typeRows[1] || prev[arrType] }));
-      setSecondaryEnabled((prev) => ({ ...prev, [arrType]: false }));
+      const kept = [typeRows[0], ...typeRows.slice(2)]
+        .filter(Boolean)
+        .map((row, idx) => ({
+          ...row!,
+          priority: idx,
+          id: `slot-${arrType}-${idx}`,
+        }));
+      setSecondaryEnabled((prev) => ({ ...prev, [arrType]: kept.length > 1 }));
       props.onSecondaryTestStatusChange?.(arrType, false);
-      update([...otherRows, ...typeRows.slice(0, 1)]);
+      update([...otherRows, ...kept]);
       return;
     }
     // Ensure primary exists before adding secondary
     const primary = typeRows[0] ?? defaultSlot(arrType, 0);
-    const secondary = typeRows[1] ?? secondaryCache[arrType] ?? defaultSlot(arrType, 1);
+    // Prefer a fresh UUID when cache still holds a removed row whose instance_id
+    // was later adopted by the surviving slot (URL transplant / remove+re-add).
+    const secondary = withFreshInstanceIdIfNeeded(
+      typeRows[1] ?? secondaryCache[arrType] ?? defaultSlot(arrType, 1),
+      [primary, ...typeRows],
+    );
     setSecondaryEnabled((prev) => ({ ...prev, [arrType]: true }));
     update([...otherRows, primary, { ...secondary }]);
   }
 
-  async function runTest(item: ArrInstanceDraft, arrType: "radarr" | "sonarr", slotIndex: 0 | 1) {
+  /** If a restored draft reuses an instance_id already on another row, mint a new UUID. */
+  function withFreshInstanceIdIfNeeded(
+    draft: ArrInstanceDraft,
+    occupied: ArrInstanceDraft[],
+  ): ArrInstanceDraft {
+    const id = String(draft.instance_id || "").trim().toLowerCase();
+    if (!id) {
+      return { ...draft, instance_id: newArrInstanceId() };
+    }
+    const clash = occupied.some(
+      (row) =>
+        row !== draft &&
+        String(row.instance_id || "").trim().toLowerCase() === id &&
+        String(row.id || "") !== String(draft.id || ""),
+    );
+    if (!clash) return draft;
+    return {
+      ...draft,
+      instance_id: newArrInstanceId(),
+      instance_key_aliases: [],
+    };
+  }
+
+  function beginAddAtSlot(arrType: "radarr" | "sonarr", slotIndex: number) {
+    if (slotMotion) return;
+    const existing = getTypeRows(arrType);
+    if (slotIndex !== existing.length || slotIndex >= ARR_INSTANCE_LIMIT_PER_TYPE) return;
+    if (slotIndex >= 1 && (!primaryEnabled[arrType] || !primaryGateOk[arrType])) return;
+    if (slotIndex === 0) {
+      setPrimary(arrType, true);
+      openSlotPanel({ arrType, slotIndex: 0, isNew: true });
+      return;
+    }
+    if (slotIndex === 1) {
+      setSecondary(arrType, true);
+      openSlotPanel({ arrType, slotIndex: 1, isNew: true });
+      return;
+    }
+    const draft = withFreshInstanceIdIfNeeded(defaultSlot(arrType, slotIndex), existing);
+    setInstances([...instances.filter((item) => item.arr_type !== arrType), ...existing, draft]);
+    openSlotPanel({ arrType, slotIndex, isNew: true });
+  }
+
+  function gridShiftClass(fromIndex: number): string {
+    // Vertical rails: every lower occupied seat steps up one row.
+    if (fromIndex >= 1) return "arr-slot-shift-up";
+    return "";
+  }
+
+  function moveInstanceSlot(arrType: "radarr" | "sonarr", fromIndex: number, direction: -1 | 1) {
+    const typeRows = [...getTypeRows(arrType)];
+    const toIndex = fromIndex + direction;
+    if (fromIndex < 0 || toIndex < 0 || toIndex >= typeRows.length || fromIndex >= typeRows.length) return;
+    const [moved] = typeRows.splice(fromIndex, 1);
+    typeRows.splice(toIndex, 0, moved);
+    const remapped = typeRows.map((row, idx) => ({
+      ...row,
+      priority: idx,
+    }));
+    setPrimaryEnabled((prev) => ({ ...prev, [arrType]: remapped.length >= 1 }));
+    setSecondaryEnabled((prev) => ({ ...prev, [arrType]: remapped.length >= 2 }));
+    setSlotPanel((panel) => {
+      if (!panel || panel.arrType !== arrType) return panel;
+      if (panel.slotIndex === fromIndex) return { ...panel, slotIndex: toIndex, isNew: false };
+      if (panel.slotIndex === toIndex) return { ...panel, slotIndex: fromIndex, isNew: false };
+      return panel;
+    });
+    update([...instances.filter((item) => item.arr_type !== arrType), ...remapped]);
+  }
+
+  function instanceReorderControls(arrType: "radarr" | "sonarr", slotIndex: number, connectedCount: number) {
+    // Always render the control column so filled cards keep a stable width/height
+    // whether one or many instances are connected.
+    const canReorder = connectedCount >= 2;
+    const canUp = canReorder && slotIndex > 0;
+    const canDown = canReorder && slotIndex < connectedCount - 1;
+    return (
+      <div className="flex shrink-0 flex-col justify-center gap-1" role="group" aria-label="Change search priority">
+        <button
+          type="button"
+          disabled={!canUp}
+          onClick={() => moveInstanceSlot(arrType, slotIndex, -1)}
+          className={`relative z-10 inline-flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-md border transition ${
+            canUp
+              ? "border-white/15 bg-white/[0.05] text-slate-200 hover:border-white/25 hover:bg-white/[0.09]"
+              : "cursor-not-allowed border-white/[0.06] bg-transparent text-slate-600"
+          }`}
+          title={canReorder ? "Move earlier in search/fallback order" : "Connect another instance to reorder"}
+          aria-label="Move earlier in search priority"
+        >
+          <span className="material-symbols-outlined leading-none" style={{ fontSize: 18 }}>
+            keyboard_arrow_up
+          </span>
+        </button>
+        <button
+          type="button"
+          disabled={!canDown}
+          onClick={() => moveInstanceSlot(arrType, slotIndex, 1)}
+          className={`relative z-10 inline-flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-md border transition ${
+            canDown
+              ? "border-white/15 bg-white/[0.05] text-slate-200 hover:border-white/25 hover:bg-white/[0.09]"
+              : "cursor-not-allowed border-white/[0.06] bg-transparent text-slate-600"
+          }`}
+          title={canReorder ? "Move later in search/fallback order" : "Connect another instance to reorder"}
+          aria-label="Move later in search priority"
+        >
+          <span className="material-symbols-outlined leading-none" style={{ fontSize: 18 }}>
+            keyboard_arrow_down
+          </span>
+        </button>
+      </div>
+    );
+  }
+
+  function arrSlotWarning(item: ArrInstanceDraft): { title: string; message: string } | null {
+    if (arrInstanceMissingApiKey(item)) {
+      return { title: ARR_MISSING_API_KEY_MESSAGE, message: ARR_MISSING_API_KEY_MESSAGE };
+    }
+    const statusId = String(item.instance_id || item.id || "").toLowerCase();
+    const remote = props.integrationsStatus?.arr?.[statusId];
+    if (remote?.ok === false) {
+      const message = remote.message || "Connection failed. Open Configure and Test to clear.";
+      return { title: message, message };
+    }
+    const local = testState[item.id];
+    if (local && !local.ok && local.message !== "Testing...") {
+      return { title: local.message, message: local.message };
+    }
+    return null;
+  }
+
+  async function runTest(item: ArrInstanceDraft, arrType: "radarr" | "sonarr", slotIndex: number) {
     setTestState((prev) => ({ ...prev, [item.id]: { ok: true, message: "Testing..." } }));
     let result: { ok: boolean; message: string };
     try {
@@ -4384,11 +5526,11 @@ function ArrInstancesEditor(props: {
     sonarr: getTypeRows("sonarr"),
   };
 
-  function slotFor(arrType: "radarr" | "sonarr", slotIndex: 0 | 1): ArrInstanceDraft {
+  function slotFor(arrType: "radarr" | "sonarr", slotIndex: number): ArrInstanceDraft {
     return byType[arrType][slotIndex] || defaultSlot(arrType, slotIndex);
   }
 
-  function openSlotPanel(next: { arrType: "radarr" | "sonarr"; slotIndex: 0 | 1; isNew?: boolean }) {
+  function openSlotPanel(next: { arrType: "radarr" | "sonarr"; slotIndex: number; isNew?: boolean }) {
     setSlotPanelTestPassed(false);
     setSlotFooterTestBusy(false);
     const item = slotFor(next.arrType, next.slotIndex);
@@ -4441,13 +5583,29 @@ function ArrInstancesEditor(props: {
     }
   }
 
-  function confirmDisconnectInstance() {
-    if (!disconnectDialog) return;
-    const { arrType, slotIndex } = disconnectDialog;
+  function clearSlotMotionTimers() {
+    for (const id of slotMotionTimersRef.current) window.clearTimeout(id);
+    slotMotionTimersRef.current = [];
+  }
+
+  function applyDisconnectInstance(arrType: "radarr" | "sonarr", slotIndex: number) {
     if (slotIndex === 0) {
       setPrimary(arrType, false);
     } else {
-      setSecondary(arrType, false);
+      const previous = getTypeRows(arrType);
+      const typeRows = previous
+        .filter((_, idx) => idx !== slotIndex)
+        .map((row, idx) => ({
+          ...row,
+          priority: idx,
+          id: `slot-${arrType}-${idx}`,
+        }));
+      if (slotIndex === 1) {
+        setSecondaryCache((prev) => ({ ...prev, [arrType]: previous[1] || prev[arrType] }));
+        props.onSecondaryTestStatusChange?.(arrType, false);
+      }
+      setSecondaryEnabled((prev) => ({ ...prev, [arrType]: typeRows.length > 1 }));
+      update([...instances.filter((item) => item.arr_type !== arrType), ...typeRows]);
     }
     setSlotPanel((p) => {
       if (p?.arrType === arrType && p.slotIndex === slotIndex) {
@@ -4458,7 +5616,48 @@ function ArrInstancesEditor(props: {
       }
       return p;
     });
+  }
+
+  function confirmDisconnectInstance() {
+    if (!disconnectDialog || slotMotion) return;
+    const { arrType, slotIndex } = disconnectDialog;
+    const typeRows = getTypeRows(arrType);
+    const willPromote = slotIndex === 0 && typeRows.length > 1;
+    const promoted = willPromote ? typeRows[1] : null;
     setDisconnectDialog(null);
+
+    if (willPromote && promoted) {
+      const promotedId = String(promoted.instance_id || promoted.id || "");
+      const promotedLabel = String(promoted.label || "Slot 2").trim() || "Slot 2";
+      clearSlotMotionTimers();
+      setSlotMotion({
+        arrType,
+        phase: "exiting",
+        exitingSlot: 0,
+        promotedId,
+        promotedLabel,
+      });
+      const exitMs = 380;
+      const settleMs = 900;
+      const t1 = window.setTimeout(() => {
+        applyDisconnectInstance(arrType, 0);
+        setSlotMotion({
+          arrType,
+          phase: "promoting",
+          exitingSlot: 0,
+          promotedId,
+          promotedLabel,
+        });
+        const t2 = window.setTimeout(() => {
+          setSlotMotion(null);
+        }, settleMs);
+        slotMotionTimersRef.current.push(t2);
+      }, exitMs);
+      slotMotionTimersRef.current.push(t1);
+      return;
+    }
+
+    applyDisconnectInstance(arrType, slotIndex);
   }
 
   function restoreSlotPanelSnapshot() {
@@ -4483,14 +5682,23 @@ function ArrInstancesEditor(props: {
     setSlotPanel(null);
     // "Connect …" enables primary/secondary and opens the editor with `isNew`. Closing without Save should
     // return to the dashed Connect card, not a half-added slot shell. Do not run `restoreSlotPanelSnapshot`
-    // here: the captured JSON can still include the empty primary row, which would fight `setPrimary(false)`.
+    // here for primary/secondary: the captured JSON can still include the empty row, which would fight
+    // setPrimary(false) / setSecondary(false).
     if (panel?.isNew) {
       slotPanelSnapshotRef.current = null;
       if (panel.slotIndex === 0) {
         setPrimary(panel.arrType, false);
-      } else {
-        setSecondary(panel.arrType, false);
+        return;
       }
+      if (panel.slotIndex === 1) {
+        setSecondary(panel.arrType, false);
+        return;
+      }
+      // New additional instance: remove only that draft. Never call setSecondary(false) here; that used
+      // to wipe an existing secondary when cancelling "Add another … instance".
+      const typeRows = getTypeRows(panel.arrType).filter((_, idx) => idx !== panel.slotIndex);
+      const otherRows = instances.filter((item) => item.arr_type !== panel.arrType);
+      update([...otherRows, ...typeRows]);
       return;
     }
     restoreSlotPanelSnapshot();
@@ -4506,7 +5714,7 @@ function ArrInstancesEditor(props: {
   function card(
     item: ArrInstanceDraft,
     arrType: "radarr" | "sonarr",
-    slotIndex: 0 | 1,
+    slotIndex: number,
     required: boolean,
     opts?: {
       showToggle?: boolean;
@@ -4521,6 +5729,20 @@ function ArrInstancesEditor(props: {
     const isEnabled = opts?.enabled ?? true;
     const isDisabled = !isEnabled;
     const dupPeer = findDuplicateArrInstanceUrl(instances, item.id, String(item.url || ""));
+    const namePeer = findDuplicateArrInstanceLabel(
+      instances,
+      item.id,
+      arrType,
+      String(item.label || ""),
+    );
+    const keyPeer = findDuplicateArrInstanceKeyToken(
+      instances,
+      item.id,
+      arrType,
+      String(item.instance_key || inferDefaultKey(item.label, arrType)),
+      item.instance_key_aliases || [],
+    );
+    const identityBlocks = Boolean(dupPeer || namePeer || keyPeer);
     return (
       <div
         key={item.id}
@@ -4528,19 +5750,24 @@ function ArrInstancesEditor(props: {
       >
         <div className="p-4 space-y-3">
           <div className="flex items-center justify-between gap-2">
-            <div className="flex-1">
-              <input
-                className="bg-transparent text-[16px] font-semibold text-white font-headline outline-none w-full"
-                value={item.label}
-                onChange={(e) => {
-                  const value = e.target.value;
-                  upsertSlot(arrType, slotIndex, { label: value });
-                }}
-                placeholder="Instance name (e.g. Sonarr, Sonarr 4K)"
-                disabled={isDisabled}
-              />
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-2">
+                <input
+                  className="bg-transparent text-[16px] font-semibold text-white font-headline outline-none w-full min-w-0"
+                  value={item.label}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    upsertSlot(arrType, slotIndex, { label: value });
+                  }}
+                  placeholder="Instance name (e.g. Sonarr, Sonarr 2)"
+                  disabled={isDisabled}
+                />
+                {(namePeer || keyPeer) && !isDisabled ? (
+                  <span className="shrink-0 text-[12px] font-medium text-red-400">Name already in use</span>
+                ) : null}
+              </div>
               <div className="text-[13px] text-slate-400 mt-1">
-                {item.arr_type.toUpperCase()} {required ? "• Primary" : "• Secondary"}
+                {item.arr_type.toUpperCase()} · Slot {slotIndex + 1}
               </div>
               {opts?.statusHint ? <div className="ui-field-description-compact mt-1">{opts.statusHint}</div> : null}
             </div>
@@ -4560,7 +5787,12 @@ function ArrInstancesEditor(props: {
           </div>
           {opts?.toggleHint && opts.toggleDisabled ? <div className="ui-field-description-compact">{opts.toggleHint}</div> : null}
           <div>
-            <label className="block text-[13px] font-semibold text-slate-400 mb-1">URL &amp; port</label>
+            <div className="mb-1 flex items-baseline justify-between gap-2">
+              <label className="block text-[13px] font-semibold text-slate-400">URL &amp; port</label>
+              {dupPeer && !isDisabled ? (
+                <span className="shrink-0 text-[12px] font-medium text-red-400">URL already in use</span>
+              ) : null}
+            </div>
             <input
               className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
               value={item.url}
@@ -4568,11 +5800,6 @@ function ArrInstancesEditor(props: {
               placeholder={arrType === "sonarr" ? "https://host:8989" : "https://host:7878"}
               disabled={isDisabled}
             />
-            {dupPeer && !isDisabled ? (
-              <p className="mt-1.5 text-[14px] text-red-400">
-                Same address as &quot;{dupPeer.label}&quot; ({dupPeer.arr_type}). Use a distinct URL for each instance.
-              </p>
-            ) : null}
           </div>
           <input
             className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
@@ -4587,7 +5814,7 @@ function ArrInstancesEditor(props: {
               type="button"
               onClick={() => void runTest(item, arrType, slotIndex)}
               className="px-3 py-1.5 rounded-md text-[14px] bg-[#252e3a] border border-[#424753]/40 text-slate-300"
-              disabled={isDisabled || Boolean(dupPeer)}
+              disabled={isDisabled || identityBlocks}
             >
               Test
             </button>
@@ -4611,6 +5838,29 @@ function ArrInstancesEditor(props: {
     if (!slotPanel) return null;
     const it = slotFor(slotPanel.arrType, slotPanel.slotIndex);
     return findDuplicateArrInstanceUrl(instances, it.id, String(it.url || ""));
+  }, [instances, slotPanel]);
+
+  const slotPanelNamePeer = useMemo(() => {
+    if (!slotPanel) return null;
+    const it = slotFor(slotPanel.arrType, slotPanel.slotIndex);
+    return findDuplicateArrInstanceLabel(
+      instances,
+      it.id,
+      slotPanel.arrType,
+      String(it.label || ""),
+    );
+  }, [instances, slotPanel]);
+
+  const slotPanelKeyPeer = useMemo(() => {
+    if (!slotPanel) return null;
+    const it = slotFor(slotPanel.arrType, slotPanel.slotIndex);
+    return findDuplicateArrInstanceKeyToken(
+      instances,
+      it.id,
+      slotPanel.arrType,
+      String(it.instance_key || inferDefaultKey(it.label, it.arr_type)),
+      it.instance_key_aliases || [],
+    );
   }, [instances, slotPanel]);
 
   const slotPanelItemForEffect = slotPanel ? slotFor(slotPanel.arrType, slotPanel.slotIndex) : null;
@@ -4655,6 +5905,12 @@ function ArrInstancesEditor(props: {
             <p className="text-[16px] text-slate-300 leading-relaxed">
               This removes &quot;{disconnectDialog.label}&quot; from Placeholdarr. When you save settings, movies or
               shows that were tracked only on this instance will be marked removed and their placeholders cleaned up.
+              {disconnectDialog.slotIndex === 0 && getTypeRows(disconnectDialog.arrType).length > 1 ? (
+                <>
+                  {" "}
+                  Later slots will move up to fill Slot 1 (you will see that shift after you confirm).
+                </>
+              ) : null}
               {String(
                 props.values[
                   disconnectDialog.arrType === "radarr"
@@ -4670,13 +5926,15 @@ function ArrInstancesEditor(props: {
                 type="button"
                 className="px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider border border-[#424753]/50 text-slate-300 hover:bg-[#252e3a]"
                 onClick={() => setDisconnectDialog(null)}
+                disabled={Boolean(slotMotion)}
               >
                 Cancel
               </button>
               <button
                 type="button"
-                className="px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider bg-red-600 text-white hover:bg-red-500 border border-red-500/80"
+                className="px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider bg-red-600 text-white hover:bg-red-500 border border-red-500/80 disabled:opacity-50"
                 onClick={confirmDisconnectInstance}
+                disabled={Boolean(slotMotion)}
               >
                 Disconnect
               </button>
@@ -4733,8 +5991,6 @@ function ArrInstancesEditor(props: {
         <div className="space-y-5">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:items-stretch sm:gap-5">
           {(["radarr", "sonarr"] as const).map((arrType) => {
-            const primaryItem = slotFor(arrType, 0);
-            const secondaryItem = slotFor(arrType, 1);
             const secondaryAddLocked = !primaryEnabled[arrType] || !primaryGateOk[arrType];
             const av = ONBOARDING_ARR_VISUAL[arrType];
             const serviceName = arrType === "radarr" ? "Radarr" : "Sonarr";
@@ -4750,188 +6006,156 @@ function ArrInstancesEditor(props: {
                   </div>
                   <h3 className="text-[20px] font-bold tracking-tight text-white font-headline">{serviceName}</h3>
                 </div>
-                <div className="flex min-h-0 flex-col gap-3">
-                  <div className="flex min-h-0 flex-col">
-                    <div className="mb-2 text-[12px] font-headline uppercase tracking-[0.14em] text-slate-500">Slot 1 · Primary</div>
-                    {!primaryEnabled[arrType] ? (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setPrimary(arrType, true);
-                          openSlotPanel({ arrType, slotIndex: 0, isNew: true });
-                        }}
-                        className="flex min-h-[132px] flex-1 flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-white/15 bg-black/25 px-3 py-4 text-center text-slate-300 transition hover:border-white/30 hover:bg-white/[0.04]"
-                      >
-                        <span className="material-symbols-outlined" style={{ fontSize: 28 }}>add</span>
-                        <span className="text-[16px] font-headline tracking-wide">Connect {serviceName}</span>
-                      </button>
-                    ) : (
-                      <div className="flex min-h-[132px] flex-1 flex-col justify-between rounded-xl border border-white/[0.08] bg-[#0a0f18]/95 px-4 py-3">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2 min-w-0">
-                            <div className="text-[16px] font-semibold text-white font-headline truncate">{primaryItem.label}</div>
-                            {props.integrationsStatus?.arr?.[String(primaryItem.instance_id || primaryItem.id || "").toLowerCase()]?.ok === false ? (
-                              <IntegrationFailureBadge
-                                size="sm"
-                                title={
-                                  props.integrationsStatus.arr[String(primaryItem.instance_id || primaryItem.id || "").toLowerCase()]?.message ||
-                                  "Connection failed. Open Configure and Test to clear."
-                                }
-                              />
-                            ) : null}
+                <div className="mb-3 flex min-h-[1.5rem] items-center justify-center">
+                  {slotMotion?.arrType === arrType && slotMotion.phase === "promoting" ? (
+                    <span className="arr-slot-promote-chip rounded-md border border-[color:color-mix(in_srgb,var(--brand-accent-3)_45%,transparent)] bg-[color:color-mix(in_srgb,var(--brand-accent-3)_16%,transparent)] px-2 py-0.5 text-[11px] font-semibold normal-case tracking-wide text-slate-200">
+                      {slotMotion.promotedLabel} moved into Slot 1
+                    </span>
+                  ) : null}
+                </div>
+                <div className="flex flex-col gap-3">
+                  {[0, 1, 2, 3].map((slotIndex) => {
+                    const typeRows = getTypeRows(arrType);
+                    const item = typeRows[slotIndex] || null;
+                    const connectedCount = typeRows.length;
+                    const busy = Boolean(slotMotion && slotMotion.arrType === arrType);
+                    const isNextEmpty = !item && slotIndex === connectedCount;
+                    const gateBlocks = slotIndex >= 1 && secondaryAddLocked;
+                    const canFill = isNextEmpty && !gateBlocks && !busy;
+                    const motionExiting =
+                      slotMotion?.arrType === arrType &&
+                      slotMotion.phase === "exiting" &&
+                      slotMotion.exitingSlot === 0;
+                    const motionClass = item
+                      ? motionExiting && slotIndex === 0
+                        ? "arr-slot-exit-fade"
+                        : motionExiting && slotIndex > 0
+                          ? gridShiftClass(slotIndex)
+                          : slotMotion?.arrType === arrType &&
+                              slotMotion.phase === "promoting" &&
+                              slotIndex === 0 &&
+                              String(item.instance_id || item.id || "") === slotMotion.promotedId
+                            ? "arr-slot-promote-settle"
+                            : ""
+                      : "";
+
+                    if (item) {
+                      const warn = arrSlotWarning(item);
+                      return (
+                        <div key={`${arrType}-seat-${slotIndex}`} className="flex min-h-0 flex-col">
+                          <div className="mb-2 text-[12px] font-headline uppercase tracking-[0.14em] text-slate-500">
+                            Slot {slotIndex + 1}
                           </div>
-                          <div className="truncate font-mono text-[13px] text-slate-500">{String(primaryItem.url || "").trim() || "—"}</div>
-                          {props.integrationsStatus?.arr?.[String(primaryItem.instance_id || primaryItem.id || "").toLowerCase()]?.ok === false ? (
-                            <div className="mt-1 text-[14px] text-red-300">
-                              {props.integrationsStatus.arr[String(primaryItem.instance_id || primaryItem.id || "").toLowerCase()]?.message ||
-                                "Connection failed. Open Configure and Test to clear."}
+                          <div
+                            className={`flex h-[8.25rem] items-stretch gap-2 overflow-hidden rounded-xl border border-white/[0.08] bg-[#0a0f18]/95 px-4 py-2.5 ${motionClass}`}
+                          >
+                            <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-2">
+                              <div className="min-w-0">
+                                <div className="flex min-w-0 items-center gap-2">
+                                  <div className="truncate text-[15px] font-semibold text-white font-headline">{item.label}</div>
+                                  {warn ? <IntegrationFailureBadge size="sm" title={warn.title} /> : null}
+                                </div>
+                                <div className="truncate font-mono text-[12px] text-slate-500">{String(item.url || "").trim() || "—"}</div>
+                                <div
+                                  className={`mt-0.5 min-h-[1rem] truncate text-[12px] ${warn ? "text-red-300" : "text-transparent"}`}
+                                  title={warn?.message || undefined}
+                                >
+                                  {warn?.message || "—"}
+                                </div>
+                              </div>
+                              <div className="mt-auto flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => openSlotPanel({ arrType, slotIndex, isNew: false })}
+                                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-white/15 bg-white/[0.05] text-slate-200 transition hover:border-white/25 hover:bg-white/[0.09] disabled:opacity-40"
+                                  disabled={busy}
+                                  title="Configure"
+                                  aria-label="Configure"
+                                >
+                                  <span className="material-symbols-outlined leading-none" style={{ fontSize: 18 }}>
+                                    settings
+                                  </span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setWebhookSetupDialog({
+                                      arrType,
+                                      instance_key: normalizeInstanceKey(String(item.instance_key || "")),
+                                      instance_id: String(item.instance_id || ""),
+                                      label: String(item.label || ""),
+                                    });
+                                  }}
+                                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-white/10 bg-transparent text-slate-400 transition hover:border-white/20 hover:text-slate-200 disabled:opacity-40"
+                                  disabled={busy}
+                                  title="Webhook"
+                                  aria-label="Webhook"
+                                >
+                                  <span className="material-symbols-outlined leading-none" style={{ fontSize: 18 }}>
+                                    webhook
+                                  </span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setDisconnectDialog({
+                                      arrType,
+                                      slotIndex,
+                                      label: String(item.label || arrType),
+                                    })
+                                  }
+                                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-red-400/20 bg-transparent text-red-400 transition hover:border-red-400/35 hover:bg-red-500/10 hover:text-red-300 disabled:opacity-40"
+                                  disabled={busy}
+                                  title="Remove"
+                                  aria-label="Remove"
+                                >
+                                  <span className="material-symbols-outlined leading-none" style={{ fontSize: 18 }}>
+                                    delete
+                                  </span>
+                                </button>
+                              </div>
                             </div>
-                          ) : testState[primaryItem.id] && !testState[primaryItem.id].ok ? (
-                            <div className="mt-1 text-[14px] text-red-400">{testState[primaryItem.id].message}</div>
-                          ) : null}
-                        </div>
-                        <div className="mt-3 flex flex-wrap items-center gap-2">
-                          <div className="flex min-w-0 flex-1 flex-wrap gap-2">
-                            <button
-                              type="button"
-                              onClick={() => openSlotPanel({ arrType, slotIndex: 0, isNew: false })}
-                              className="rounded-lg border border-white/15 bg-white/[0.05] px-3 py-1.5 text-[13px] font-headline font-semibold uppercase tracking-wider text-slate-200 transition hover:border-white/25 hover:bg-white/[0.09]"
-                            >
-                              Configure
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setWebhookSetupDialog({
-                                  arrType,
-                                  instance_key: normalizeInstanceKey(String(primaryItem.instance_key || "")),
-                                  instance_id: String(primaryItem.instance_id || ""),
-                                  label: String(primaryItem.label || ""),
-                                });
-                              }}
-                              className="rounded-lg border border-white/10 bg-transparent px-3 py-1.5 text-[13px] font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
-                            >
-                              Webhook URL
-                            </button>
+                            {instanceReorderControls(arrType, slotIndex, connectedCount)}
                           </div>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setDisconnectDialog({
-                                arrType,
-                                slotIndex: 0,
-                                label: String(primaryItem.label || arrType),
-                              })
-                            }
-                            className="ml-auto shrink-0 rounded-lg px-3 py-1.5 text-[13px] font-medium text-red-400 transition hover:text-red-300"
-                          >
-                            Remove
-                          </button>
                         </div>
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex min-h-0 flex-col">
-                    <div className="mb-2 text-[12px] font-headline uppercase tracking-[0.14em] text-slate-500">Slot 2 · Secondary</div>
-                    {!secondaryEnabled[arrType] ? (
-                      <div
-                        className={`flex min-h-[132px] flex-1 flex-col items-center justify-center rounded-xl border border-dashed px-3 py-4 text-center transition-colors ${
-                          secondaryAddLocked
-                            ? "border-white/[0.07] bg-black/20 text-slate-600"
-                            : "border-white/15 bg-black/25 text-slate-300 hover:border-white/30 hover:bg-white/[0.04]"
-                        }`}
-                      >
-                        {secondaryAddLocked ? (
-                          <>
-                            <span className="material-symbols-outlined opacity-35" style={{ fontSize: 24 }}>
-                              lock
-                            </span>
-                            <p className="ui-field-description-compact mt-2 text-center">
-                              {!primaryEnabled[arrType]
-                                ? "Connect primary first."
-                                : "Pass a primary connection test to unlock this slot."}
-                            </p>
-                          </>
-                        ) : (
+                      );
+                    }
+
+                    return (
+                      <div key={`${arrType}-seat-${slotIndex}`} className="flex min-h-0 flex-col">
+                        <div className="mb-2 text-[12px] font-headline uppercase tracking-[0.14em] text-slate-500">
+                          Slot {slotIndex + 1}
+                        </div>
+                        {canFill ? (
                           <button
                             type="button"
-                            onClick={() => {
-                              setSecondary(arrType, true);
-                              openSlotPanel({ arrType, slotIndex: 1, isNew: true });
-                            }}
-                            className="flex w-full flex-col items-center justify-center gap-2 py-2"
+                            onClick={() => beginAddAtSlot(arrType, slotIndex)}
+                            className="flex h-[8.25rem] w-full flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-white/15 bg-black/25 px-3 py-3 text-center text-slate-300 transition hover:border-white/30 hover:bg-white/[0.04]"
                           >
-                            <span className="material-symbols-outlined" style={{ fontSize: 26 }}>add</span>
-                            <span className="text-[16px] font-headline tracking-wide">Secondary instance</span>
+                            <span className="material-symbols-outlined" style={{ fontSize: 24 }}>add</span>
+                            <span className="text-[14px] font-headline tracking-wide">
+                              {slotIndex === 0 ? `Connect ${serviceName}` : `Add Slot ${slotIndex + 1}`}
+                            </span>
                           </button>
+                        ) : (
+                          <div className="flex h-[8.25rem] flex-col items-center justify-center rounded-xl border border-dashed border-white/[0.07] bg-black/20 px-3 py-3 text-center text-slate-600">
+                            {isNextEmpty && gateBlocks ? (
+                              <>
+                                <span className="material-symbols-outlined opacity-35" style={{ fontSize: 22 }}>
+                                  lock
+                                </span>
+                                <p className="ui-field-description-compact mt-2 text-center text-slate-600">
+                                  Pass a Slot 1 connection test to unlock.
+                                </p>
+                              </>
+                            ) : (
+                              <p className="ui-field-description-compact text-center text-slate-600">Reserved</p>
+                            )}
+                          </div>
                         )}
                       </div>
-                    ) : (
-                      <div className="flex min-h-[132px] flex-1 flex-col justify-between rounded-xl border border-white/[0.08] bg-[#0a0f18]/95 px-4 py-3">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2 min-w-0">
-                            <div className="text-[16px] font-semibold text-white font-headline truncate">{secondaryItem.label}</div>
-                            {props.integrationsStatus?.arr?.[String(secondaryItem.instance_id || secondaryItem.id || "").toLowerCase()]?.ok === false ? (
-                              <IntegrationFailureBadge
-                                size="sm"
-                                title={
-                                  props.integrationsStatus.arr[String(secondaryItem.instance_id || secondaryItem.id || "").toLowerCase()]?.message ||
-                                  "Connection failed. Open Configure and Test to clear."
-                                }
-                              />
-                            ) : null}
-                          </div>
-                          <div className="truncate font-mono text-[13px] text-slate-500">{String(secondaryItem.url || "").trim() || "—"}</div>
-                          {props.integrationsStatus?.arr?.[String(secondaryItem.instance_id || secondaryItem.id || "").toLowerCase()]?.ok === false ? (
-                            <div className="mt-1 text-[14px] text-red-300">
-                              {props.integrationsStatus.arr[String(secondaryItem.instance_id || secondaryItem.id || "").toLowerCase()]?.message ||
-                                "Connection failed. Open Configure and Test to clear."}
-                            </div>
-                          ) : testState[secondaryItem.id] && !testState[secondaryItem.id].ok ? (
-                            <div className="mt-1 text-[14px] text-red-400">{testState[secondaryItem.id].message}</div>
-                          ) : null}
-                        </div>
-                        <div className="mt-3 flex flex-wrap items-center gap-2">
-                          <div className="flex min-w-0 flex-1 flex-wrap gap-2">
-                            <button
-                              type="button"
-                              onClick={() => openSlotPanel({ arrType, slotIndex: 1, isNew: false })}
-                              className="rounded-lg border border-white/15 bg-white/[0.05] px-3 py-1.5 text-[13px] font-headline font-semibold uppercase tracking-wider text-slate-200 transition hover:border-white/25 hover:bg-white/[0.09]"
-                            >
-                              Configure
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setWebhookSetupDialog({
-                                  arrType,
-                                  instance_key: normalizeInstanceKey(String(secondaryItem.instance_key || "")),
-                                  instance_id: String(secondaryItem.instance_id || ""),
-                                  label: String(secondaryItem.label || ""),
-                                });
-                              }}
-                              className="rounded-lg border border-white/10 bg-transparent px-3 py-1.5 text-[13px] font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
-                            >
-                              Webhook URL
-                            </button>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setDisconnectDialog({
-                                arrType,
-                                slotIndex: 1,
-                                label: String(secondaryItem.label || arrType),
-                              })
-                            }
-                            className="ml-auto shrink-0 rounded-lg px-3 py-1.5 text-[13px] font-medium text-red-400 transition hover:text-red-300"
-                          >
-                            Remove
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
+                    );
+                  })}
                 </div>
               </div>
             );
@@ -4941,13 +6165,13 @@ function ArrInstancesEditor(props: {
             const { arrType, slotIndex, isNew } = slotPanel;
             const item = slotFor(arrType, slotIndex);
             const status = testState[item.id];
-            const roleLabel = slotIndex === 0 ? "Primary" : "Secondary";
             const serviceLabel = arrType === "radarr" ? "Radarr" : "Sonarr";
+            const slotTitle = `Slot ${slotIndex + 1}`;
             const slotCommitLabel = isNew ? `Add ${serviceLabel}` : `Save ${serviceLabel}`;
             const detailsComplete =
               String(item.url || "").trim().length > 0 &&
               (String(item.api_key || "").trim().length > 0 || Boolean(item.api_key_saved));
-            const dupBlocks = Boolean(slotPanelDupPeer);
+            const dupBlocks = Boolean(slotPanelDupPeer || slotPanelNamePeer || slotPanelKeyPeer);
             const testDisabled = !detailsComplete || dupBlocks || slotFooterTestBusy;
             const retainedKeyOk = Boolean(!isNew && item.api_key_saved && detailsComplete);
             const saveDisabled = (!(slotPanelTestPassed || retainedKeyOk)) || dupBlocks || slotFooterTestBusy;
@@ -4962,14 +6186,14 @@ function ArrInstancesEditor(props: {
                 <div
                   role="dialog"
                   aria-modal="true"
-                  aria-label={`${serviceLabel} ${roleLabel} server`}
+                  aria-label={`${serviceLabel} ${slotTitle}`}
                   className="relative z-10 my-auto flex w-full max-w-lg max-h-[min(90vh,720px)] flex-col overflow-hidden rounded-2xl border border-[#424753]/50 bg-[#171c22] shadow-2xl"
                 >
                   <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-[#424753]/40 shrink-0">
                     <div>
-                      <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500">ARR server</div>
+                      <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500">{slotTitle}</div>
                       <h2 className="text-[20px] font-headline font-bold text-white mt-0.5" style={{ color: props.accent.text }}>
-                        {serviceLabel} · {roleLabel}
+                        {String(item.label || serviceLabel).trim() || serviceLabel}
                       </h2>
                     </div>
                     <button
@@ -4983,27 +6207,32 @@ function ArrInstancesEditor(props: {
                   </div>
                   <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
                     <div>
-                      <label className="block text-[14px] font-semibold text-slate-300 mb-1">Server name</label>
+                      <div className="mb-1 flex items-baseline justify-between gap-2">
+                        <label className="block text-[14px] font-semibold text-slate-300">Server name</label>
+                        {slotPanelNamePeer || slotPanelKeyPeer ? (
+                          <span className="shrink-0 text-[12px] font-medium text-red-400">Name already in use</span>
+                        ) : null}
+                      </div>
                       <input
                         className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none focus:ring-2 focus:ring-offset-0 focus:ring-[color:color-mix(in_srgb,var(--brand-accent-tertiary)_42%,transparent)]"
                         value={item.label}
                         onChange={(e) => upsertSlot(arrType, slotIndex, { label: e.target.value })}
-                        placeholder="Instance name (e.g. Radarr 4K)"
+                        placeholder="Instance name (e.g. Radarr 2)"
                       />
                     </div>
                     <div>
-                      <label className="block text-[14px] font-semibold text-slate-300 mb-1">URL &amp; port</label>
+                      <div className="mb-1 flex items-baseline justify-between gap-2">
+                        <label className="block text-[14px] font-semibold text-slate-300">URL &amp; port</label>
+                        {slotPanelDupPeer ? (
+                          <span className="shrink-0 text-[12px] font-medium text-red-400">URL already in use</span>
+                        ) : null}
+                      </div>
                       <input
                         className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none focus:ring-2 focus:ring-offset-0 focus:ring-[color:color-mix(in_srgb,var(--brand-accent-tertiary)_42%,transparent)]"
                         value={item.url}
                         onChange={(e) => upsertSlot(arrType, slotIndex, { url: e.target.value })}
                         placeholder={arrType === "sonarr" ? "https://host:8989" : "https://host:7878"}
                       />
-                      {slotPanelDupPeer ? (
-                        <p className="mt-2 text-[14px] text-red-400">
-                          Same address as &quot;{slotPanelDupPeer.label}&quot; ({slotPanelDupPeer.arr_type}). Each instance must use a distinct URL and port.
-                        </p>
-                      ) : null}
                     </div>
                     <div>
                       <label className="block text-[14px] font-semibold text-slate-300 mb-1">API key</label>
@@ -5113,8 +6342,8 @@ function ArrInstancesEditor(props: {
                 statusHint: primaryConnectionOk[arrType]
                   ? "Connection test confirmed."
                   : primaryGateOk[arrType]
-                    ? "Primary is saved with URL and API key. Run Test again if you change either."
-                    : "Run a successful primary connection test to unlock the secondary instance toggle.",
+                    ? "Slot 1 is saved with URL and API key. Run Test again if you change either."
+                    : "Run a successful Slot 1 connection test to unlock Slot 2.",
               })}
               {card(slotFor(arrType, 1), arrType, 1, false, {
                 showToggle: true,
@@ -5122,8 +6351,8 @@ function ArrInstancesEditor(props: {
                 onToggle: (enabled) => setSecondary(arrType, enabled),
                 toggleDisabled: !primaryEnabled[arrType] || !primaryGateOk[arrType],
                 toggleHint: !primaryEnabled[arrType]
-                  ? "Enable and configure the primary instance first."
-                  : (!primaryGateOk[arrType] ? "Run a successful primary connection test first." : undefined),
+                  ? "Enable and configure Slot 1 first."
+                  : (!primaryGateOk[arrType] ? "Run a successful Slot 1 connection test first." : undefined),
               })}
             </div>
 
@@ -5142,41 +6371,90 @@ function LibraryPathsForm(props: {
   themeMode: ThemeMode;
   accent: BrandAccent;
   layout: "settings" | "wizard";
+  /** When true, skip the wizard "Library paths" heading (step guide already titles the step). */
+  hideSectionTitle?: boolean;
   onValueChange: (key: string, value: unknown) => void;
   runTest?: (field: SettingsField) => void;
   testResults?: Record<string, { ok: boolean; message: string }>;
 }) {
-  const { root, profiles, overrides, rest } = useMemo(() => partitionLibraryPathFields(props.fields), [props.fields]);
+  const { root, plexDefaults, destinationMap, profiles, overrides, rest } = useMemo(
+    () => partitionLibraryPathFields(props.fields),
+    [props.fields],
+  );
+  const plexActive = Boolean(props.values.ENABLE_PLEX);
+  const [plexSections, setPlexSections] = useState<PlexSectionOption[]>([]);
+  const [plexSectionsLoading, setPlexSectionsLoading] = useState(false);
+  const [plexSectionsError, setPlexSectionsError] = useState<string | null>(null);
   const [overridesOpen, setOverridesOpen] = useState(() => {
     if (props.layout === "wizard") return false;
     return overrides.some((f) => String(props.values[f.key] ?? "").trim() !== "");
   });
+  const [libraryRootFolderBusy, setLibraryRootFolderBusy] = useState(false);
+  const [libraryRootFolderStatus, setLibraryRootFolderStatus] = useState<null | {
+    kind: "created" | "exists" | "error";
+    message: string;
+  }>(null);
+  const [plexTipsOpen, setPlexTipsOpen] = useState(false);
   const focus = getBrandFocusClass(props.brand, props.themeMode);
 
+  const loadPlexSections = useCallback(() => {
+    if (!plexActive || plexDefaults.length === 0) {
+      setPlexSections([]);
+      setPlexSectionsError(null);
+      setPlexSectionsLoading(false);
+      return;
+    }
+    setPlexSectionsLoading(true);
+    getCollectionPlexSections()
+      .then((payload) => {
+        setPlexSections(payload.sections || []);
+        setPlexSectionsError(null);
+      })
+      .catch((err) => {
+        setPlexSections([]);
+        setPlexSectionsError(err instanceof Error ? err.message : "Could not load Plex libraries");
+      })
+      .finally(() => {
+        setPlexSectionsLoading(false);
+      });
+  }, [plexActive, plexDefaults.length]);
+
+  useEffect(() => {
+    loadPlexSections();
+  }, [loadPlexSections]);
+
+  useEffect(() => {
+    if (!plexActive || plexDefaults.length === 0) return;
+    const onFocus = () => loadPlexSections();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [plexActive, plexDefaults.length, loadPlexSections]);
+
   function renderBool(field: SettingsField, compact?: boolean) {
-    const v = Boolean(props.values[field.key]);
+    const uiChecked = settingsBoolUiChecked(field, props.values[field.key]);
     return (
       <label className="flex items-center gap-3 cursor-pointer select-none w-fit">
         <ToggleSwitch
-          checked={v}
-          onChange={() => props.onValueChange(field.key, !v)}
+          checked={uiChecked}
+          onChange={() => props.onValueChange(field.key, settingsBoolStoredFromUi(field, !uiChecked))}
           accentHex={props.accent.hex}
           ariaLabel={field.label}
         />
-        <span className={compact ? "text-[14px] text-slate-400" : "text-[16px] text-slate-300"}>{v ? "Enabled" : "Disabled"}</span>
+        <span className={compact ? "text-[14px] text-slate-400" : "text-[16px] text-slate-300"}>{uiChecked ? "Enabled" : "Disabled"}</span>
       </label>
     );
   }
 
-  function renderTextInput(field: SettingsField, opts?: { compact?: boolean; muted?: boolean }) {
-    const border = opts?.muted ? "border-[#424753]/25" : "border-[#424753]/40";
+  function renderTextInput(field: SettingsField, opts?: { compact?: boolean; muted?: boolean; disabled?: boolean }) {
+    const border = opts?.muted || opts?.disabled ? "border-[#424753]/25" : "border-[#424753]/40";
     const ph = field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`;
     return (
       <input
-        className={`w-full bg-[#0f1419] border ${border} rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus} ${opts?.compact ? "text-[14px] py-1.5" : ""}`}
+        className={`w-full bg-[#0f1419] border ${border} rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus} ${opts?.compact ? "text-[14px] py-1.5" : ""} ${opts?.disabled ? "opacity-50 cursor-not-allowed text-slate-500" : ""}`}
         type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
         value={String(props.values[field.key] ?? "")}
         placeholder={ph}
+        disabled={opts?.disabled}
         onChange={(e) => props.onValueChange(field.key, e.target.value)}
       />
     );
@@ -5192,6 +6470,55 @@ function LibraryPathsForm(props: {
       >
         {(field.options || []).map((opt) => (
           <option key={opt.value} value={opt.value}>{opt.label}</option>
+        ))}
+      </select>
+    );
+  }
+
+  function renderPlexSectionSelect(field: SettingsField) {
+    if (!plexActive) {
+      return renderTextInput(field, { disabled: true });
+    }
+    const wantType: "movie" | "show" = field.key === "PLEX_MOVIE_SECTION_ID" ? "movie" : "show";
+    const options = plexSections.filter((s) => s.type === wantType);
+    const raw = String(props.values[field.key] ?? "").trim();
+    const currentInList = options.some((s) => String(s.id) === raw);
+    if (plexSectionsLoading) {
+      return (
+        <p className="flex min-h-[2.5rem] items-center gap-1.5 text-[14px] text-slate-400" aria-live="polite">
+          <span className="material-symbols-outlined shrink-0 animate-spin" style={{ fontSize: 16 }}>
+            progress_activity
+          </span>
+          Loading libraries…
+        </p>
+      );
+    }
+    if (!options.length) {
+      return (
+        <div>
+          {plexSectionsError ? (
+            <p className="ui-field-description-compact mb-1.5 text-amber-300/90">{plexSectionsError}</p>
+          ) : (
+            <p className="ui-field-description-compact mb-1.5">
+              No {wantType === "movie" ? "movie" : "TV"} libraries found. Create one in Plex, or enter a section ID.
+            </p>
+          )}
+          {renderTextInput(field)}
+        </div>
+      );
+    }
+    return (
+      <select
+        className={`w-full bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${focus}`}
+        value={raw}
+        onChange={(e) => props.onValueChange(field.key, e.target.value)}
+      >
+        <option value="">Select a library…</option>
+        {!currentInList && raw ? <option value={raw}>Current ID #{raw}</option> : null}
+        {options.map((s) => (
+          <option key={s.id} value={String(s.id)}>
+            {s.title} (#{s.id})
+          </option>
         ))}
       </select>
     );
@@ -5213,10 +6540,7 @@ function LibraryPathsForm(props: {
               {field.secret && <span className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-[#252e3a] text-slate-400">Secret</span>}
               {field.restart_required && <span className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">Restart Required</span>}
             </div>
-            {isPlexSectionIdField(field.key) ? <PlexLibraryTipsDisclosure fieldKey={field.key} className="mt-1" /> : null}
-            {field.description && !isPlexSectionIdField(field.key) ? (
-              <p className="ui-field-description mt-1">{field.description}</p>
-            ) : null}
+            {field.description ? <p className="ui-field-description mt-1">{field.description}</p> : null}
           </div>
         </div>
         {field.type === "bool" ? (
@@ -5282,6 +6606,42 @@ function LibraryPathsForm(props: {
           backgroundColor: alphaColor(props.accent.hex, 0.07),
         };
 
+  async function createLibraryRootFolders() {
+    const rootPath = String(props.values.LIBRARY_ROOT ?? "").trim().replace(/[\\/]+$/, "");
+    if (!rootPath) return;
+    setLibraryRootFolderBusy(true);
+    setLibraryRootFolderStatus(null);
+    try {
+      const moviePath = `${rootPath}/movies`;
+      const tvPath = `${rootPath}/tv`;
+      const results = await Promise.all([ensureDestFolder(moviePath), ensureDestFolder(tvPath)]);
+      const failed = results.find((r) => !r.ok);
+      if (failed) {
+        setLibraryRootFolderStatus({
+          kind: "error",
+          message: failed.message || "Could not create folders",
+        });
+        return;
+      }
+      const createdAny = results.some((r) => r.created);
+      setLibraryRootFolderStatus({
+        kind: createdAny ? "created" : "exists",
+        message: createdAny
+          ? "Created movies and tv folders under Library Root."
+          : "Movies and tv folders already exist under Library Root.",
+      });
+    } catch (err) {
+      setLibraryRootFolderStatus({
+        kind: "error",
+        message: err instanceof Error ? err.message : "Could not create folders",
+      });
+    } finally {
+      setLibraryRootFolderBusy(false);
+    }
+  }
+
+  const libraryRootValue = String(props.values.LIBRARY_ROOT ?? "").trim();
+
   const rootBlock = root ? (
     <div
       className={props.layout === "wizard" ? undefined : rootCardClass}
@@ -5289,7 +6649,135 @@ function LibraryPathsForm(props: {
     >
       <label className="block text-[16px] font-semibold text-white font-headline mb-1">{root.label}</label>
       {root.description && <p className="ui-field-description mb-3 leading-relaxed">{root.description}</p>}
-      {root.type === "bool" ? renderBool(root) : renderTextInput(root)}
+      {root.type === "bool" ? (
+        renderBool(root)
+      ) : (
+        <div className="space-y-2">
+          <div
+            className={`flex min-h-[1.25rem] items-start gap-1.5 text-[13px] ${
+              libraryRootFolderStatus
+                ? libraryRootFolderStatus.kind === "error"
+                  ? "text-red-400"
+                  : "text-emerald-300/90"
+                : "text-transparent"
+            }`}
+            aria-live="polite"
+            aria-hidden={!libraryRootFolderStatus}
+          >
+            {libraryRootFolderStatus ? (
+              <>
+                <span className="material-symbols-outlined shrink-0" style={{ fontSize: 16 }}>
+                  {libraryRootFolderStatus.kind === "error"
+                    ? "error"
+                    : libraryRootFolderStatus.kind === "exists"
+                      ? "folder"
+                      : "check_circle"}
+                </span>
+                <span className="leading-snug">{libraryRootFolderStatus.message}</span>
+              </>
+            ) : (
+              <span>Folders created</span>
+            )}
+          </div>
+          <div className="flex gap-2">
+            <div className="min-w-0 flex-1">{renderTextInput(root)}</div>
+            <button
+              type="button"
+              disabled={libraryRootFolderBusy || !libraryRootValue}
+              onClick={() => void createLibraryRootFolders()}
+              className="shrink-0 rounded-lg border border-[#424753]/55 bg-[#0f1419] px-3 py-2 text-[13px] font-headline uppercase tracking-wider text-slate-200 transition hover:bg-[#151b24] disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {libraryRootFolderBusy ? "Creating…" : "Create folders"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  ) : null;
+
+  const plexDefaultsBlock =
+    plexDefaults.length > 0 ? (
+      <div
+        className={
+          props.layout === "wizard"
+            ? undefined
+            : `${UI_SECTION_FRAME_CLASS} px-4 py-4 ${plexActive ? "" : "opacity-60"}`
+        }
+      >
+        <div className="flex items-center gap-2 flex-wrap mb-1">
+          <label className="block text-[16px] font-semibold text-white font-headline">Default Plex libraries</label>
+          {plexActive ? (
+            <span
+              className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase"
+              style={{ backgroundColor: alphaColor(props.accent.hex, 0.3), color: props.accent.text }}
+            >
+              Required for Plex
+            </span>
+          ) : (
+            <span className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-[#252e3a] text-slate-500">
+              Plex only
+            </span>
+          )}
+          {plexActive ? (
+            <button
+              type="button"
+              disabled={plexSectionsLoading}
+              onClick={() => loadPlexSections()}
+              className="ml-auto inline-flex items-center gap-1 rounded-lg border border-[#424753]/55 bg-[#0f1419] px-2.5 py-1 text-[12px] font-headline uppercase tracking-wider text-slate-300 transition hover:bg-[#151b24] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <span
+                className={`material-symbols-outlined ${plexSectionsLoading ? "animate-spin" : ""}`}
+                style={{ fontSize: 16 }}
+                aria-hidden
+              >
+                {plexSectionsLoading ? "progress_activity" : "refresh"}
+              </span>
+              Rescan libraries
+            </button>
+          ) : null}
+        </div>
+        <p className="ui-field-description mb-3 leading-relaxed">
+          {plexActive ? (
+            <>
+              After creating movies and tv folders under Library Root, create matching placeholder libraries in Plex that
+              point at those paths (please see{" "}
+              <button
+                type="button"
+                onClick={() => setPlexTipsOpen(true)}
+                className="font-medium text-slate-200 underline decoration-slate-500 underline-offset-2 transition hover:text-white hover:decoration-slate-300"
+              >
+                these tips
+              </button>{" "}
+              for the best experience with Plex libraries). Come back here, use Rescan libraries to pick up what Plex
+              added, and select them from the list. Jellyfin and Emby ignore these fields and refresh by folder path.
+            </>
+          ) : (
+            "Enable Plex under Media Integrations to edit these. Jellyfin and Emby do not use library IDs; they refresh by folder path."
+          )}
+        </p>
+        <div className={`grid grid-cols-1 sm:grid-cols-2 gap-4 ${plexActive ? "" : "pointer-events-none"}`}>
+          {plexDefaults.map((field) => (
+            <div key={field.key}>
+              <label className="mb-1 block text-[14px] font-medium text-slate-300">{field.label}</label>
+              {renderPlexSectionSelect(field)}
+            </div>
+          ))}
+        </div>
+        <PlexLibraryTipsModal open={plexTipsOpen} onClose={() => setPlexTipsOpen(false)} accent={props.accent} />
+      </div>
+    ) : null;
+
+  const destinationMapBlock = destinationMap ? (
+    <div className={props.layout === "settings" ? `${UI_SECTION_FRAME_CLASS} px-4 py-4` : undefined}>
+      <label className="block text-[16px] font-semibold text-white font-headline mb-1">Library destinations</label>
+      <DestinationMapEditor
+        value={String(props.values[destinationMap.key] ?? "")}
+        onChange={(json) => props.onValueChange(destinationMap.key, json)}
+        focusClass={focus}
+        layout={props.layout}
+        plexActive={plexActive}
+        libraryRoot={String(props.values.LIBRARY_ROOT ?? "")}
+      />
     </div>
   ) : null;
 
@@ -5348,10 +6836,12 @@ function LibraryPathsForm(props: {
   if (props.layout === "wizard") {
     return (
       <div className="space-y-6">
-        <h2 className={ONBOARDING_SECTION_TITLE_CLASS}>Library paths</h2>
+        {props.hideSectionTitle ? null : <h2 className={ONBOARDING_SECTION_TITLE_CLASS}>Library paths</h2>}
         <div className={WIZARD_ONBOARDING_SECTION_SURFACE_CLASS}>
           <div className="space-y-5">
             {rootBlock}
+            {plexDefaultsBlock}
+            {destinationMapBlock}
             {profileBlock}
             {overridesBlock}
             {rest.map((field) => (
@@ -5372,6 +6862,10 @@ function LibraryPathsForm(props: {
       {root ? (
         <div className="px-6 py-5">{rootBlock}</div>
       ) : null}
+      {plexDefaults.length ? <div className="px-6 py-5">{plexDefaultsBlock}</div> : null}
+      {destinationMap ? (
+        <div className="px-6 py-5">{destinationMapBlock}</div>
+      ) : null}
       {profiles.length ? <div className="px-6 py-5">{profileBlock}</div> : null}
       {overrides.length ? <div className="px-6 py-5">{overridesBlock}</div> : null}
       {rest.map((field) => renderSettingsRestField(field))}
@@ -5379,55 +6873,65 @@ function LibraryPathsForm(props: {
   );
 }
 
-type LookaheadIntroVariant = "settings" | "onboarding";
 
-function LookaheadSectionIntro(props: { variant: LookaheadIntroVariant; embedded?: boolean }) {
+function lookaheadDensityFromValues(values: FieldValueMap): TvDensityChoice {
+  const raw = String(values.TV_PLACEHOLDER_DENSITY ?? "episode").trim().toLowerCase();
+  return (["episode", "season", "series"].includes(raw) ? raw : "episode") as TvDensityChoice;
+}
+
+function lookaheadSearchFromValues(values: FieldValueMap): TvDensityChoice {
+  const raw = String(values.TV_PLAY_MODE ?? "episode").trim().toLowerCase();
+  return (["episode", "season", "series"].includes(raw) ? raw : "episode") as TvDensityChoice;
+}
+
+function lookaheadRetireFromValues(values: FieldValueMap): TvDensityRetireWhen {
+  return String(values.TV_DENSITY_RETIRE_WHEN ?? "") === "when_any_episode_has_file"
+    ? "when_any_episode_has_file"
+    : "when_no_episode_needs_placeholder";
+}
+
+function LookaheadDensityPanel(props: {
+  variant: "wizard" | "settings";
+  values: FieldValueMap;
+  onChange: (key: string, value: unknown) => void;
+  guide?: ReactNode;
+  accentHex?: string;
+}) {
+  void props.accentHex;
+  return (
+    <DensitySearchIdeasStep
+      variant={props.variant}
+      guide={props.guide}
+      density={lookaheadDensityFromValues(props.values)}
+      searchMode={lookaheadSearchFromValues(props.values)}
+      lookahead={Math.max(1, Number(props.values.EPISODES_LOOKAHEAD) || 3)}
+      retireWhen={lookaheadRetireFromValues(props.values)}
+      onDensityChange={(value) => props.onChange("TV_PLACEHOLDER_DENSITY", value)}
+      onSearchModeChange={(value) => props.onChange("TV_PLAY_MODE", value)}
+      onLookaheadChange={(value) => props.onChange("EPISODES_LOOKAHEAD", value)}
+      onRetireWhenChange={(value) => props.onChange("TV_DENSITY_RETIRE_WHEN", value)}
+    />
+  );
+}
+
+type PlaybackIntroVariant = "settings" | "onboarding";
+
+function PlaybackSectionIntro(props: { variant: PlaybackIntroVariant; embedded?: boolean }) {
   const wrapClass =
     props.variant === "settings"
-      ? "px-6 py-5 border-b border-[#424753]/20"
+      ? "px-6 py-5 border-b border-[#424753]/20 space-y-2"
       : props.embedded
-        ? "space-y-3"
-        : WIZARD_ONBOARDING_SECTION_SURFACE_CLASS;
+        ? "space-y-2"
+        : `${WIZARD_ONBOARDING_SECTION_SURFACE_CLASS} space-y-2`;
   return (
     <div className={wrapClass}>
-      <p className="ui-field-description text-slate-300 leading-relaxed">
-        Lookahead keeps your storage usage minimized by only monitoring and searching for episodes in Sonarr as you progress
-        watching a series.
+      <p className="text-[12px] font-headline font-semibold uppercase tracking-wider text-white">
+        Playback monitoring and searching
       </p>
-      <p className="ui-field-description mt-3 text-slate-300 leading-relaxed">
-        When an episode plays, Placeholdarr identifies what was watched, checks Sonarr for what&apos;s already on disk,
-        monitors the appropriate content, and triggers a search when needed.
-      </p>
-      <p className="ui-field-description mt-3 text-slate-400 leading-relaxed">
-        <span className="font-medium text-slate-200">Search Mode</span> determines the scope of what gets monitored and
-        searched each time you play something:
-      </p>
-      <ul className="mt-3 list-disc space-y-2 pl-5 text-[14px] text-slate-400 leading-relaxed">
-        <li>
-          <span className="font-medium text-slate-200">Series</span>
-          {" — "}The entire series is monitored and searched. This mirrors default Sonarr behavior.
-        </li>
-        <li>
-          <span className="font-medium text-slate-200">Season</span>
-          {" — "}Missing episodes in the played season are always monitored and searched. When the first episode of the
-          next season enters your configured{" "}
-          <span className="font-medium text-slate-200">Lookahead Range</span>, Placeholdarr monitors and searches that
-          next season too.
-        </li>
-        <li>
-          <span className="font-medium text-slate-200">Episode</span>
-          {" — "}Only the played episode and the next few episodes, up to your configured{" "}
-          <span className="font-medium text-slate-200">Lookahead Range</span>, are monitored and searched.
-        </li>
-      </ul>
-      <p className="ui-field-description mt-3 text-slate-400 leading-relaxed">
-        Regardless of which mode you choose, Placeholdarr will monitor the full series once your lookahead window reaches
-        the end of available content, ensuring Sonarr can pick up new episodes as they air.
-      </p>
-      <p className="ui-field-description mt-3 text-slate-400 leading-relaxed">
-        <span className="font-medium text-slate-200">Lookahead Range</span> applies to Episode and Season modes. In
-        Episode mode it sets how many episodes forward from the one you played are included. In Season mode it sets how
-        many episodes ahead before the next season is included.
+      <p className="ui-field-description leading-relaxed text-slate-300">
+        When a placeholder or real file is played, choose which library destinations each filter applies to. Use them to
+        monitor only, allow re-searching already-monitored titles, or search titles that are not released yet (TV air
+        dates; movie preferred release date from Calendar). Destinations are listed under Movies and TV by folder path.
       </p>
     </div>
   );
@@ -5452,6 +6956,42 @@ function StatusUpdatesSectionIntro(props: { variant: StatusUpdatesIntroVariant; 
   );
 }
 
+type CalendarIntroVariant = "settings" | "onboarding";
+
+function CalendarSectionIntro(props: { variant: CalendarIntroVariant; embedded?: boolean }) {
+  const wrapClass =
+    props.variant === "settings"
+      ? "px-6 py-5 border-b border-[#424753]/20"
+      : props.embedded
+        ? "space-y-3"
+        : WIZARD_ONBOARDING_SECTION_SURFACE_CLASS;
+  return (
+    <div className={wrapClass}>
+      <p className="ui-field-description text-slate-300 leading-relaxed">
+        Calendar controls Coming Soon placeholders for titles that are not available yet. Choose how far ahead to show
+        them, which movie release date Radarr should use, and whether placeholders show a countdown to release.
+      </p>
+      <p className="ui-field-description mt-3 text-slate-400 leading-relaxed">
+        Defaults are fine for most setups. Set the Coming Soon window to 0 if you do not want future titles in the
+        library until they are eligible.
+      </p>
+    </div>
+  );
+}
+
+/** Status Updates projection target; copy lives here (schema description left empty). */
+function ProjectStatusIntoDescription(props: { spacing: "settings" | "wizard" }) {
+  const top = props.spacing === "settings" ? "mt-1" : "mb-2";
+  return (
+    <p className={`ui-field-description leading-relaxed ${top}`}>
+      Choose where bracketed placeholder status appears in media library metadata.
+      {props.spacing === "settings"
+        ? " Changing this can trigger a metadata placeholder refresh (now or next full sync)."
+        : ""}
+    </p>
+  );
+}
+
 /** Status Updates choice: copy lives here; `PLACEHOLDER_STATUS_UPDATES.description` in app_config is intentionally empty. */
 function PlaceholderStatusUpdatesDescription(props: { spacing: "settings" | "wizard" }) {
   const top = props.spacing === "settings" ? "mt-1" : "mb-2";
@@ -5459,15 +6999,15 @@ function PlaceholderStatusUpdatesDescription(props: { spacing: "settings" | "wiz
     <ul className={`list-disc space-y-2 pl-5 text-[14px] text-slate-400 leading-relaxed ${top}`}>
       <li>
         <span className="font-medium text-slate-200">All</span>
-        {" — "}When a placeholder plays, show search and download progress in the player.
+        {": "}When a placeholder plays, show search and download progress in the player.
       </li>
       <li>
         <span className="font-medium text-slate-200">Request only</span>
-        {" — "}Keep player text simple; show &quot;Request&quot; so placeholders are easy to spot.
+        {": "}Keep player text simple; show &quot;Request&quot; so placeholders are easy to spot.
       </li>
       <li>
         <span className="font-medium text-slate-200">Off</span>
-        {" — "}Do not show placeholder status in media players.
+        {": "}Do not show placeholder status in media players.
       </li>
     </ul>
   );
@@ -5479,7 +7019,7 @@ function LookAndFeelSectionIntro(props: { embedded?: boolean }) {
     <div className={wrapClass}>
       <p className="ui-field-description text-slate-300 leading-relaxed">
         Choose how placeholders look in Plex, Jellyfin, and Emby: status text in the player and optional poster overlays on
-        library art. Changes to poster overlays apply on the next NFO refresh — use the previews below to compare styles
+        library art. Changes to poster overlays apply on the next NFO refresh. Use the previews below to compare styles
         without refreshing your whole library.
       </p>
     </div>
@@ -5494,12 +7034,14 @@ function PosterLanguageSettingsDescription(props: { spacing: "settings" | "wizar
       <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500">Poster language</div>
       <p className={`ui-field-description leading-relaxed ${props.spacing === "settings" ? "mt-1" : "mt-1 mb-0"}`}>
         By default (disabled), Placeholdarr uses poster data already captured during Radarr/Sonarr syncs. Enable Fetch
-        from TMDB to look up posters by language; sync and art refresh take longer.
+        from TMDB to look up posters by language; syncs and art refreshes will take longer.
       </p>
       <p className={`ui-field-description leading-relaxed mt-2 ${props.spacing === "wizard" ? "mb-0" : ""}`}>
-        Lookup order: each title&apos;s original language (if Original language first is on), then Language below, then
-        the Arr poster if neither is available. Placeholdarr checks again on every full sync or art refresh. When
-        saving, you can refresh now or wait for the next full sync.
+        Lookup order: each title&apos;s original language (if Original language first is enabled), then Language below,
+        then the Arr poster if neither is available. Placeholdarr checks again on every full sync or art refresh.
+        {props.spacing === "settings"
+          ? " When saving, you can refresh now or wait for the next full sync."
+          : ""}
       </p>
     </div>
   );
@@ -5511,19 +7053,19 @@ function PlaceholderPosterOverlayDescription(props: { spacing: "settings" | "wiz
     <ul className={`list-disc space-y-2 pl-5 text-[14px] text-slate-400 leading-relaxed ${top}`}>
       <li>
         <span className="font-medium text-slate-200">Off</span>
-        {" — "}Use remote poster URLs only (no composited local art).
+        {": "}Use remote poster URLs only (no composited local art).
       </li>
       <li>
         <span className="font-medium text-slate-200">Grayscale</span>
-        {" — "}Dimmed grayscale poster so placeholders stand out in the library grid.
+        {": "}Dimmed grayscale poster so placeholders stand out in the library grid.
       </li>
       <li>
         <span className="font-medium text-slate-200">Top banner</span>
-        {" — "}Original poster with a PLACEHOLDER banner across the top.
+        {": "}Original poster with a PLACEHOLDER banner across the top.
       </li>
       <li>
         <span className="font-medium text-slate-200">Corner badge</span>
-        {" — "}Placeholdarr logo badge in the bottom-right corner.
+        {": "}Placeholdarr logo badge in the bottom-right corner.
       </li>
     </ul>
   );
@@ -5582,29 +7124,21 @@ function PosterOverlayExamples(props: { selectedMode: string; compact?: boolean 
   );
 }
 
-/** Lookahead range: copy lives here; `EPISODES_LOOKAHEAD.description` in app_config is intentionally empty. */
-function EpisodesLookaheadDescription(props: { spacing: "settings" | "wizard"; tvPlayMode: string }) {
-  const top = props.spacing === "settings" ? "mt-1" : "mb-2";
-  const mode = String(props.tvPlayMode ?? "episode").trim().toLowerCase();
-  if (mode === "season") {
-    return (
-      <p className={`ui-field-description leading-relaxed ${top}`}>
-        In Season mode, how many episodes ahead of the one you played before Placeholdarr monitors and searches the next
-        season. Missing episodes in the current season are always included.
-      </p>
-    );
-  }
-  if (mode === "series") {
-    return (
-      <p className={`ui-field-description leading-relaxed ${top}`}>
-        Lookahead range applies to Episode and Season search modes. Series mode monitors the full show.
-      </p>
-    );
-  }
+/** Shared intro for Arr tag policy settings (Settings + onboarding). */
+function TagPoliciesIntro(props: { spacing: "settings" | "wizard" }) {
+  const wrap =
+    props.spacing === "settings"
+      ? "space-y-2 px-6 py-5"
+      : "space-y-2 border-t border-[#424753]/25 pt-4 first:border-t-0 first:pt-0";
   return (
-    <p className={`ui-field-description leading-relaxed ${top}`}>
-      In Episode mode, how many upcoming episodes without files to include forward from the played episode.
-    </p>
+    <div className={wrap}>
+      <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider">Tag policies</h3>
+      <p className="ui-field-description leading-relaxed">
+        Use Radarr movie tags or Sonarr series tags to control placeholders on sync: never create them for a title, or
+        always keep them. Matching tags override every other create or delete rule for that title. Defaults are included
+        below; you can add any tags you already use in Arr.
+      </p>
+    </div>
   );
 }
 
@@ -5615,11 +7149,11 @@ function ComingSoonCountdownDescription(props: { spacing: "settings" | "wizard" 
     <ul className={`list-disc space-y-2 pl-5 text-[14px] text-slate-400 leading-relaxed ${top}`}>
       <li>
         <span className="font-medium text-slate-200">Enabled</span>
-        {" — "}Placeholders show a countdown until release (for example, &quot;Airing in 12 days&quot;).
+        {": "}Placeholders show a countdown until release (for example, &quot;Airing in 12 days&quot;).
       </li>
       <li>
         <span className="font-medium text-slate-200">Disabled</span>
-        {" — "}Future placeholders always show &quot;Coming soon&quot;.
+        {": "}Future placeholders always show &quot;Coming soon&quot;.
       </li>
     </ul>
   );
@@ -5719,7 +7253,7 @@ function SecurityAccountControls(props: {
           <p className="text-[13px] font-semibold text-slate-400 mb-1">Webhook API key</p>
           <p className="text-[14px] text-slate-400 leading-relaxed">
             Required as <span className="font-mono text-slate-300">?apikey=</span> on every Radarr/Sonarr/Tautulli/Jellyfin/Emby
-            webhook URL — those services are not browser sessions and cannot log in. Setup screens include it automatically and
+            webhook URL; those services are not browser sessions and cannot log in. Setup screens include it automatically and
             hide it until you reveal.
           </p>
           <div className="flex flex-wrap items-center gap-2">
@@ -5903,14 +7437,11 @@ function StartupSyncModeDescription(props: { spacing: "settings" | "wizard" }) {
   return (
     <div className={`${top} space-y-3`}>
       <p className="ui-field-description text-slate-300 leading-relaxed">
-        One input to the single boot sync decision, together with overdue scheduled lite and full tasks. At most one sync runs at startup.
+        When Placeholdarr starts, it can run one Arr sync to catch up with your libraries. Your choice here is weighed
+        with any overdue scheduled lite or full sync. If a full sync is already due, Placeholdarr runs full instead of
+        lite.
       </p>
       <ul className="list-disc space-y-2 pl-5 text-[14px] text-slate-400 leading-relaxed">
-        <li>
-          <span className="font-medium text-slate-200">Full demand wins</span>
-          {" "}
-          when a full sync is overdue, Full mode is selected, or Auto still needs a first full for an Arr instance.
-        </li>
         <li>
           <span className="font-medium text-slate-200">Full sync</span>
           {" "}
@@ -5919,7 +7450,8 @@ function StartupSyncModeDescription(props: { spacing: "settings" | "wizard" }) {
         <li>
           <span className="font-medium text-slate-200">Lite sync</span>
           {" "}
-          diffs live catalogs to the database, syncs changed titles, then scoped placeholder work (no full filesystem scan).
+          compares live Arr catalogs to Placeholdarr&apos;s database, syncs only titles that changed, then updates
+          placeholders for those titles (no full filesystem scan).
         </li>
         <li>
           <span className="font-medium text-slate-200">Off</span>
@@ -5928,7 +7460,7 @@ function StartupSyncModeDescription(props: { spacing: "settings" | "wizard" }) {
         </li>
       </ul>
       <p className="ui-field-description text-slate-400 leading-relaxed">
-        Placeholdarr work is relatively quick; media players may still take time to rescan large library changes.
+        Media players still need to rescan before new or removed placeholders show up in your libraries.
       </p>
       <p className="ui-field-description ui-field-description-accent3 leading-relaxed">
         A full sync will automatically start in the background at the completion of this setup.
@@ -5946,6 +7478,9 @@ function SettingsPanel(props: {
   messagesSaveBlocked: boolean;
   feedback: string;
   feedbackKind: "" | "success" | "error";
+  restartAvailable: boolean;
+  restartPhase: "" | "restarting" | "reconnecting" | "failed";
+  onConfirmRestart: () => void | Promise<void>;
   brand: Brand;
   themeMode: ThemeMode;
   authStatus: AuthStatus | null;
@@ -5953,14 +7488,19 @@ function SettingsPanel(props: {
   onIntegrationsStatusRefresh?: () => Promise<void> | void;
   onLogout: () => Promise<void>;
   onValueChange: (key: string, value: unknown) => void;
+  /** Apply values to draft + baseline together (auto-heal; does not mark unsaved). */
+  onCoerceFieldValues?: (partial: Record<string, unknown>) => void;
   onSave: () => Promise<void>;
   onStatusMessagesMetaChange: (meta: { dirty: boolean; hasValidationErrors: boolean }) => void;
   registerStatusMessagesSaveFlow: (fn: ((preselectedScope?: ApplyScope) => Promise<void>) | null) => void;
   onTestConnection: (input: { service: "plex" | "jellyfin" | "emby" | "radarr" | "sonarr"; urlKey: string; credentialKey: string }) => Promise<{ ok: boolean; message: string }>;
   onPartialPersist?: (partial: Record<string, unknown>) => Promise<void>;
   onOpenOptionalApis?: () => void;
+  onOpenArrIntegrations?: () => void;
+  onOpenPlayback?: () => void;
 }) {
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
+  const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
   const [arrSecondaryTestStatus, setArrSecondaryTestStatus] = useState<{ radarr: boolean; sonarr: boolean }>({ radarr: false, sonarr: false });
   const [mediaPanel, setMediaPanel] = useState<null | (typeof ONBOARDING_MEDIA_CARDS)[number]["id"]>(null);
   const [mediaPanelTestPassed, setMediaPanelTestPassed] = useState(false);
@@ -5970,8 +7510,7 @@ function SettingsPanel(props: {
   const mediaPanelOpenedViaAddRef = useRef(false);
   const mediaPanelSnapshotRef = useRef<Record<string, unknown>>({});
   const mediaPanelCancelRef = useRef<() => void>(() => {});
-  const { handleValueChange: handleSettingsValueChange, effectiveSnapshot: lookaheadEffectiveSnapshot } =
-    usePlaybackLookaheadFieldControls(props.values, props.onValueChange);
+  const handleSettingsValueChange = props.onValueChange;
   const accent = getBrandAccent(props.brand, props.themeMode);
 
   useEffect(() => {
@@ -5981,29 +7520,18 @@ function SettingsPanel(props: {
   }, [props.activeSection]);
 
   const arrInstances = parseArrInstancesFromValues(props.values);
-  const hasRadarrSecondaryConfigured = arrInstances.filter((item) => item.arr_type === "radarr").length > 1;
-  const hasSonarrSecondaryConfigured = arrInstances.filter((item) => item.arr_type === "sonarr").length > 1;
-  const canUseRadarrSecondaryBehavior =
-    hasRadarrSecondaryConfigured &&
-    (arrSecondaryTestStatus.radarr || arrSecondaryPersistedWithCredentials(props.values, "radarr"));
-  const canUseSonarrSecondaryBehavior =
-    hasSonarrSecondaryConfigured &&
-    (arrSecondaryTestStatus.sonarr || arrSecondaryPersistedWithCredentials(props.values, "sonarr"));
-  const unlockedSettingsSearchBehavior = [
-    canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both") : null,
-    canUseSonarrSecondaryBehavior ? String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both") : null,
-    canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match") : null,
-    canUseSonarrSecondaryBehavior ? String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match") : null,
-  ].filter((value): value is string => Boolean(value));
-  const fallbackUnnecessaryBecauseAllBoth = unlockedSettingsSearchBehavior.length > 0 && unlockedSettingsSearchBehavior.every((value) => value === "both");
-
-  useEffect(() => {
-    if (!props.payload) return;
-    if (fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH)) {
-      props.onValueChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", false);
-    }
-  }, [fallbackUnnecessaryBecauseAllBoth, props.payload, props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH, props.onValueChange]);
-
+  const radarrInstances = arrInstances.filter((item) => item.arr_type === "radarr");
+  const sonarrInstances = arrInstances.filter((item) => item.arr_type === "sonarr");
+  const canUseRadarrSecondaryBehavior = arrMultiInstanceBehaviorUnlocked(
+    props.values,
+    "radarr",
+    arrSecondaryTestStatus.radarr,
+  );
+  const canUseSonarrSecondaryBehavior = arrMultiInstanceBehaviorUnlocked(
+    props.values,
+    "sonarr",
+    arrSecondaryTestStatus.sonarr,
+  );
   /** Must run before any conditional return — hook order must match when payload transitions null → loaded. */
   const allSettingsFieldsByKey = useMemo(() => {
     const m = new Map<string, SettingsField>();
@@ -6134,22 +7662,26 @@ function SettingsPanel(props: {
 
   function renderStandardField(field: SettingsField) {
     if (HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) || SETTINGS_UI_HIDDEN_FIELD_KEYS.has(field.key)) return null;
-    const value = settingsFieldDisplayValue(field, props.values, lookaheadEffectiveSnapshot);
+    const value = props.values[field.key];
     const test = testResults[field.key];
     const testTarget = URL_TEST_TARGET[field.key];
     const statusUpdatesOff = String(props.values.PLACEHOLDER_STATUS_UPDATES ?? "").toUpperCase() === "OFF";
     const projectionFieldLocked = field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && statusUpdatesOff;
     const tvPlayMode = String(props.values.TV_PLAY_MODE ?? "episode").trim().toLowerCase();
+    const tvDensity = String(props.values.TV_PLACEHOLDER_DENSITY ?? "episode").trim().toLowerCase();
     const lookaheadRangeLocked = field.key === "EPISODES_LOOKAHEAD" && tvPlayMode === "series";
+    const densityRetireLocked = field.key === "TV_DENSITY_RETIRE_WHEN" && tvDensity === "episode";
     const parentDisabled = settingsFieldParentDisabled(field, props.values);
     const tmdbConfigured = tmdbApiKeyConfiguredFromSettings(props.payload, props.values);
     const posterLangFeatureOn = Boolean(props.values.ENABLE_PREFERRED_POSTER_LANGUAGE);
     const tmdbKeyMissing =
       (isPosterLanguageGateKey(field.key) || (isPosterLanguageDetailKey(field.key) && posterLangFeatureOn)) &&
       !tmdbConfigured;
-    const rowMuted = projectionFieldLocked || lookaheadRangeLocked || parentDisabled || tmdbKeyMissing;
+    const rowMuted =
+      projectionFieldLocked || lookaheadRangeLocked || densityRetireLocked || parentDisabled || tmdbKeyMissing;
     const isNested = settingsFieldIsNested(field);
-    const interactionLocked = projectionFieldLocked || lookaheadRangeLocked || parentDisabled || tmdbKeyMissing;
+    const interactionLocked =
+      projectionFieldLocked || lookaheadRangeLocked || densityRetireLocked || parentDisabled || tmdbKeyMissing;
 
     return (
       <div
@@ -6197,22 +7729,12 @@ function SettingsPanel(props: {
                 <StartupSyncModeDescription spacing="settings" />
               ) : field.key === "PLACEHOLDER_STATUS_UPDATES" ? (
                 <PlaceholderStatusUpdatesDescription spacing="settings" />
+              ) : field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" ? (
+                <ProjectStatusIntoDescription spacing="settings" />
               ) : field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
                 <PlaceholderPosterOverlayDescription spacing="settings" />
               ) : field.key === "ENABLE_COMING_SOON_COUNTDOWN" ? (
                 <ComingSoonCountdownDescription spacing="settings" />
-              ) : field.key === "EPISODES_LOOKAHEAD" ? (
-                <EpisodesLookaheadDescription spacing="settings" tvPlayMode={tvPlayMode} />
-              ) : field.key === "PLACEHOLDER_POLICY_NEVER_TAGS" ? (
-                <>
-                  <div className="mt-2 text-[12px] font-headline uppercase tracking-widest text-slate-500">Tag policies</div>
-                  <p className="ui-field-description mt-1">
-                    Match Radarr movie tags and Sonarr series tags during sync. Off-style ignore maps to Never;
-                    always-keep maps to Pinned. When both match, Placeholdarr defaults to Never. Matching Arr tags
-                    always override library chips; clear the tags in Arr (or via the chip modal) to manage policy here.
-                  </p>
-                  {field.description ? <p className="ui-field-description mt-1">{field.description}</p> : null}
-                </>
               ) : field.description && !isPlexSectionIdField(field.key) && !isPosterLanguageFieldKey(field.key) ? (
                 <p className="ui-field-description mt-1">{field.description}</p>
               ) : null)}
@@ -6227,13 +7749,15 @@ function SettingsPanel(props: {
         {field.type === "bool" ? (
           <label className={`flex items-center gap-3 select-none w-fit ${interactionLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
             <ToggleSwitch
-              checked={Boolean(value)}
-              onChange={(v) => handleSettingsValueChange(field.key, v)}
+              checked={settingsBoolUiChecked(field, value)}
+              onChange={(v) => handleSettingsValueChange(field.key, settingsBoolStoredFromUi(field, v))}
               accentHex={accent.hex}
               disabled={interactionLocked}
               ariaLabel={field.label}
             />
-            <span className={`text-[16px] ${interactionLocked ? "text-slate-500" : "text-slate-300"}`}>{Boolean(value) ? "Enabled" : "Disabled"}</span>
+            <span className={`text-[16px] ${interactionLocked ? "text-slate-500" : "text-slate-300"}`}>
+              {settingsBoolUiChecked(field, value) ? "Enabled" : "Disabled"}
+            </span>
           </label>
         ) : field.type === "choice" && field.options?.length ? (
           <select
@@ -6310,11 +7834,19 @@ function SettingsPanel(props: {
   }
 
   function renderOnboardingStyleSectionRows(fields: SettingsField[], opts?: { intro?: ReactNode }) {
+    const hasTagPolicies = fields.some((field) => field.key === "PLACEHOLDER_POLICY_NEVER_TAGS");
     return (
       <div className="px-6 py-5">
         <div className={`${UI_SECTION_FRAME_CLASS} overflow-hidden divide-y divide-[#424753]/20`}>
           {opts?.intro ? <div className="px-6 py-5">{opts.intro}</div> : null}
-          {fields.map((field) => renderStandardField(field))}
+          {fields.map((field) => (
+            <Fragment key={field.key}>
+              {hasTagPolicies && field.key === "PLACEHOLDER_POLICY_NEVER_TAGS" ? (
+                <TagPoliciesIntro spacing="settings" />
+              ) : null}
+              {renderStandardField(field)}
+            </Fragment>
+          ))}
         </div>
       </div>
     );
@@ -6345,6 +7877,26 @@ function SettingsPanel(props: {
             <span className={`text-[14px] font-headline uppercase tracking-wider ${props.feedbackKind === "success" ? "text-green-400" : "text-red-400"}`}>
               {props.feedback}
             </span>
+          )}
+          {props.restartAvailable && !isVirtualActive && !props.hasUnsavedChanges && (
+            <button
+              type="button"
+              onClick={() => setRestartConfirmOpen(true)}
+              disabled={props.restartPhase === "restarting" || props.restartPhase === "reconnecting"}
+              className="flex items-center gap-1.5 rounded-lg border border-orange-500/50 bg-orange-500/15 px-3 py-1.5 text-[13px] font-headline uppercase tracking-wider text-orange-300 hover:bg-orange-500/25 disabled:cursor-not-allowed disabled:opacity-70"
+              title="Some changed settings require a restart to take effect"
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
+                {props.restartPhase === "restarting" || props.restartPhase === "reconnecting" ? "sync" : "restart_alt"}
+              </span>
+              {props.restartPhase === "restarting"
+                ? "Restarting…"
+                : props.restartPhase === "reconnecting"
+                ? "Reconnecting…"
+                : props.restartPhase === "failed"
+                ? "Restart failed; retry"
+                : "Restart Placeholdarr"}
+            </button>
           )}
           {!isVirtualActive && (
             <button
@@ -6383,7 +7935,13 @@ function SettingsPanel(props: {
               ) : null}
               {active.name === "Paths" ? (
                 <LibraryPathsForm
-                  fields={active.fields}
+                  fields={[
+                    ...active.fields,
+                    ...PATH_PLEX_DEFAULT_SECTION_KEYS.map((key) => allSettingsFieldsByKey.get(key)).filter(
+                      (field): field is SettingsField =>
+                        Boolean(field) && !active.fields.some((existing) => existing.key === field!.key),
+                    ),
+                  ]}
                   values={props.values}
                   brand={props.brand}
                   themeMode={props.themeMode}
@@ -6407,8 +7965,6 @@ function SettingsPanel(props: {
                           const urlTest = urlField ? testResults[urlField.key] : undefined;
                           const vis = ONBOARDING_MEDIA_VISUAL[card.id];
                           const address = urlField ? String(props.values[urlField.key] ?? "").trim() : "";
-                          const movieLib = card.id === "plex" ? String(props.values.PLEX_MOVIE_SECTION_ID ?? "").trim() : "";
-                          const tvLib = card.id === "plex" ? String(props.values.PLEX_TV_SECTION_ID ?? "").trim() : "";
                           const mediaDetailsComplete = mediaCardConnectionDetailsComplete(card, props.values, allSettingsFieldsByKey);
                           return (
                             <div
@@ -6416,21 +7972,22 @@ function SettingsPanel(props: {
                               className={`group relative flex min-h-[250px] flex-col ${UI_INTEGRATION_CARD_SURFACE_CLASS} p-6 duration-200 ${hasConnection && !enabled ? "opacity-75" : ""}`}
                             >
                               <div className="flex h-[5.25rem] w-full shrink-0 items-center justify-center" aria-hidden>
-                                {card.id === "plex" ? (
-                                  <div className="flex max-w-full items-center justify-center gap-2 px-2 sm:px-3">
-                                    <div className={`${MEDIA_PLEX_PAIR_WELL_FRAME} h-16 w-fit shrink-0 ${MEDIA_PLEX_PAIR_LOGO_INSET}`} style={vis.well}>
-                                      <img src={plexIcon} alt="" decoding="async" className="h-8 w-auto max-h-8 shrink-0 object-contain" aria-hidden />
-                                    </div>
-                                    <span className="select-none text-[22px] font-extralight leading-none text-white/85" aria-hidden>×</span>
-                                    <div className={`${MEDIA_PLEX_PAIR_WELL_FRAME} h-16 w-16 shrink-0`} style={vis.well}>
-                                      <img src={tautulliIcon} alt="" decoding="async" className="h-8 w-8 shrink-0 object-contain" aria-hidden />
-                                    </div>
-                                  </div>
-                                ) : (
-                                  <div className="flex h-[5.25rem] w-[5.25rem] items-center justify-center rounded-2xl" style={vis.well}>
-                                    <img src={vis.iconSrc} alt="" decoding="async" className="h-10 w-10 object-contain" aria-hidden />
-                                  </div>
-                                )}
+                                <div
+                                  className="flex h-[5.25rem] w-[5.25rem] items-center justify-center rounded-2xl px-2"
+                                  style={vis.well}
+                                >
+                                  <img
+                                    src={vis.iconSrc}
+                                    alt=""
+                                    decoding="async"
+                                    className={
+                                      card.id === "plex"
+                                        ? "h-8 w-auto max-h-8 max-w-full object-contain"
+                                        : "h-10 w-10 object-contain"
+                                    }
+                                    aria-hidden
+                                  />
+                                </div>
                               </div>
                               <h4 className="mt-5 flex w-full items-center justify-center gap-2 text-center text-[20px] font-bold tracking-tight text-white font-headline">
                                 <span>{card.title}</span>
@@ -6444,12 +8001,11 @@ function SettingsPanel(props: {
                                   />
                                 ) : null}
                               </h4>
-                              {card.id === "plex" ? (
-                                <PlexLibraryTipsDisclosure
-                                  className="mt-3 w-full"
-                                  defaultOpen={!hasConnection}
-                                />
-                              ) : null}
+                              <div className="mt-2 flex min-h-[2.75rem] items-start justify-center">
+                                {"note" in card && card.note ? (
+                                  <p className="text-center text-[13px] leading-snug text-slate-400">{card.note}</p>
+                                ) : null}
+                              </div>
                               {!hasConnection ? (
                                 <button
                                   type="button"
@@ -6478,28 +8034,14 @@ function SettingsPanel(props: {
                                       ariaLabel={`${card.title} ${enabled ? "enabled" : "paused"}`}
                                     />
                                   </label>
-                                  {card.id === "plex" && "note" in card && card.note ? <p className="ui-field-description-compact mb-2">{card.note}</p> : null}
-                                  <dl className="space-y-1.5 rounded-xl border border-white/[0.06] bg-black/20 p-3 text-[13px] leading-snug">
-                                    <div className="flex min-w-0 gap-2">
-                                      <dt className="w-[4.75rem] shrink-0 font-medium text-slate-500">Address</dt>
-                                      <dd className="truncate font-mono text-slate-200" title={address || undefined}>{address || "—"}</dd>
-                                    </div>
-                                    {card.id === "plex" ? (
-                                      <>
-                                        <div className="flex min-w-0 gap-2">
-                                          <dt className="w-[4.75rem] shrink-0 font-medium text-slate-500">Movie lib.</dt>
-                                          <dd className="truncate font-mono text-slate-200" title={movieLib || undefined}>{movieLib || "—"}</dd>
-                                        </div>
-                                        <div className="flex min-w-0 gap-2">
-                                          <dt className="w-[4.75rem] shrink-0 font-medium text-slate-500">TV lib.</dt>
-                                          <dd className="truncate font-mono text-slate-200" title={tvLib || undefined}>{tvLib || "—"}</dd>
-                                        </div>
-                                      </>
-                                    ) : null}
-                                  </dl>
+                                  <div className="min-w-0 rounded-xl border border-white/[0.06] bg-black/20 p-3 text-[13px] leading-snug">
+                                    <p className="truncate font-mono text-slate-200" title={address || undefined}>
+                                      {address || "—"}
+                                    </p>
+                                  </div>
                                   <div className="mt-2 flex min-h-[2.5rem] flex-col justify-center text-[14px]">
                                     {!enabled ? (
-                                      <p className="ui-field-description">Integration paused — Placeholdarr will not sync to {card.title} until re-enabled.</p>
+                                      <p className="ui-field-description">Integration paused. Placeholdarr will not sync to {card.title} until re-enabled.</p>
                                     ) : (props.integrationsStatus?.media?.[card.id]?.ok === false) ? (
                                       <p className="text-red-300">
                                         {props.integrationsStatus?.media?.[card.id]?.message || "Connection failed. Open Configure and Test to clear."}
@@ -6564,6 +8106,7 @@ function SettingsPanel(props: {
                           (field) =>
                             !SETTINGS_UI_HIDDEN_FIELD_KEYS.has(field.key) &&
                             !HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) &&
+                            !isPlexSectionIdField(field.key) &&
                             !ONBOARDING_MEDIA_CARDS.some((card) =>
                               [card.enabledKey, ...card.keys].includes(field.key),
                             ),
@@ -6586,7 +8129,22 @@ function SettingsPanel(props: {
                   <div className="px-6 py-5">
                     <div className="mb-3">
                       <h3 className="text-[18px] font-bold text-white font-headline">ARR Instances</h3>
-                      <p className="ui-field-description mt-1">Configure up to 2 Radarr and 2 Sonarr instances. These entries power webhook labels and instance-aware routing.</p>
+                      <p className="ui-field-description mt-1">
+                        Configure up to 4 Radarr and 4 Sonarr instances. Use the arrows to set list order. On{" "}
+                        {props.onOpenPlayback ? (
+                          <button
+                            type="button"
+                            onClick={props.onOpenPlayback}
+                            className="font-medium text-slate-200 underline underline-offset-2 transition hover:text-white"
+                          >
+                            Playback
+                          </button>
+                        ) : (
+                          "Playback"
+                        )}
+                        , instances set to Fallback are tried in this order when the path-matched Arr does not resolve
+                        in time. These entries also power webhook labels and instance-aware routing.
+                      </p>
                     </div>
                     <ArrInstancesEditor
                       layout="slots"
@@ -6601,218 +8159,61 @@ function SettingsPanel(props: {
                     />
                   </div>
 
-                  <div className="px-6 pb-5 space-y-4">
-                    <SharedPlaceholderCleanupPanel
+                </>
+              ) : active.name === "Density & Lookahead" ? (
+                <div className="px-6 py-5">
+                  <LookaheadDensityPanel
+                    variant="settings"
+                    values={props.values}
+                    onChange={props.onValueChange}
+                    accentHex={accent.hex}
+                  />
+                  {(() => {
+                    const remaining = active.fields.filter(
+                      (field) => !(DENSITY_SEARCH_STEP_KEYS as readonly string[]).includes(field.key),
+                    );
+                    return remaining.length ? (
+                      <div className="mt-6 border-t border-[#424753]/25 pt-4">
+                        {renderOnboardingStyleSectionRows(remaining)}
+                      </div>
+                    ) : null;
+                  })()}
+                </div>
+              ) : active.name === "Playback" ? (
+                <div className="px-6 py-5 space-y-6">
+                  <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
+                    <PlaybackSectionIntro variant="onboarding" embedded />
+                    <PlaybackDestFilterControls
+                      values={props.values}
+                      options={
+                        props.payload?.playback_dest_options ||
+                        playbackDestOptionsFromValues(props.values)
+                      }
+                      onChange={(key, next) => props.onValueChange(key, next)}
+                      hideHeading
+                    />
+                    {active.fields
+                      .filter((field) => !isPlaybackDestFilterKey(field.key))
+                      .map((field) => (
+                        <Fragment key={field.key}>{renderStandardField(field)}</Fragment>
+                      ))}
+                  </div>
+                  {canUseAnySecondaryBehavior ? (
+                    <ArrMultiInstanceBehaviorStack
                       values={props.values}
                       onChange={props.onValueChange}
                       brand={props.brand}
                       themeMode={props.themeMode}
+                      accent={accent}
                       canUseRadarrSecondaryBehavior={canUseRadarrSecondaryBehavior}
                       canUseSonarrSecondaryBehavior={canUseSonarrSecondaryBehavior}
+                      canUseAnySecondaryBehavior={canUseAnySecondaryBehavior}
+                      radarrInstances={radarrInstances}
+                      sonarrInstances={sonarrInstances}
+                      onOpenArrIntegrations={props.onOpenArrIntegrations}
                     />
-                    <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
-                      <div className="text-center">
-                        <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider mb-1">Placeholder Search Behavior</h3>
-                        <p className="ui-field-description mx-auto max-w-2xl">When a placeholder plays, Placeholdarr triggers a search in the corresponding ARR app. Choose which instance to search.</p>
-                      </div>
-                      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5">
-                        <div className="min-w-0">
-                          <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
-                          <select
-                            className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
-                            value={canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both") : "na"}
-                            onChange={(e) => props.onValueChange("MOVIE_PLACEHOLDER_SEARCH_MODE", e.target.value)}
-                            disabled={!canUseRadarrSecondaryBehavior}
-                          >
-                            {canUseRadarrSecondaryBehavior ? (
-                              <>
-                                <option value="primary">Primary instance</option>
-                                <option value="secondary">Secondary instance</option>
-                                <option value="both">Both instances</option>
-                              </>
-                            ) : (
-                              <option value="na">Not applicable, no second instance set up.</option>
-                            )}
-                          </select>
-                          <p className="ui-field-description-compact mt-1.5">
-                            {canUseRadarrSecondaryBehavior
-                              ? (({ primary: "Searches your primary (standard) Radarr instance.", secondary: "Searches your secondary (4K) Radarr instance.", both: "Searches both Radarr instances — ensures full coverage." } as Record<string, string>)[String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both")] ?? "Searches both Radarr instances.")
-                              : "Not applicable, no second instance set up."}
-                          </p>
-                        </div>
-                        <div className="min-w-0">
-                          <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
-                          <select
-                            className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
-                            value={canUseSonarrSecondaryBehavior ? String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both") : "na"}
-                            onChange={(e) => props.onValueChange("TV_PLACEHOLDER_SEARCH_MODE", e.target.value)}
-                            disabled={!canUseSonarrSecondaryBehavior}
-                          >
-                            {canUseSonarrSecondaryBehavior ? (
-                              <>
-                                <option value="primary">Primary instance</option>
-                                <option value="secondary">Secondary instance</option>
-                                <option value="both">Both instances</option>
-                              </>
-                            ) : (
-                              <option value="na">Not applicable, no second instance set up.</option>
-                            )}
-                          </select>
-                          <p className="ui-field-description-compact mt-1.5">
-                            {canUseSonarrSecondaryBehavior
-                              ? (({ primary: "Searches your primary (standard) Sonarr instance.", secondary: "Searches your secondary (4K) Sonarr instance.", both: "Searches both Sonarr instances — ensures full coverage." } as Record<string, string>)[String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both")] ?? "Searches both Sonarr instances.")
-                              : "Not applicable, no second instance set up."}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                    <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
-                      <div className="text-center">
-                        <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider mb-1">Real-File Search Behavior</h3>
-                        <p className="ui-field-description mx-auto max-w-2xl">When an actual media file is played, choose how Placeholdarr routes the playback-triggered ARR search.</p>
-                      </div>
-                      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5">
-                        <div className="min-w-0">
-                          <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
-                          <select
-                            className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
-                            value={canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match") : "na"}
-                            onChange={(e) => props.onValueChange("MOVIE_PLAYBACK_INSTANCE_MODE", e.target.value)}
-                            disabled={!canUseRadarrSecondaryBehavior}
-                          >
-                            {canUseRadarrSecondaryBehavior ? (
-                              <>
-                                <option value="match">Match by library path</option>
-                                <option value="primary">Primary instance</option>
-                                <option value="secondary">Secondary instance</option>
-                                <option value="both">Both instances</option>
-                              </>
-                            ) : (
-                              <option value="na">Not applicable, no second instance set up.</option>
-                            )}
-                          </select>
-                          <p className="ui-field-description-compact mt-1.5">
-                            {canUseRadarrSecondaryBehavior
-                              ? (({ match: "Uses the movie file path to determine which Radarr instance should be searched.", primary: "Always searches your primary (standard) Radarr instance.", secondary: "Always searches your secondary (4K) Radarr instance.", both: "Searches both Radarr instances." } as Record<string, string>)[String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match")] ?? "Uses the movie file path to determine which Radarr instance should be searched.")
-                              : "Not applicable, no second instance set up."}
-                          </p>
-                        </div>
-                        <div className="min-w-0">
-                          <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
-                          <select
-                            className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
-                            value={canUseSonarrSecondaryBehavior ? String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match") : "na"}
-                            onChange={(e) => props.onValueChange("TV_PLAYBACK_INSTANCE_MODE", e.target.value)}
-                            disabled={!canUseSonarrSecondaryBehavior}
-                          >
-                            {canUseSonarrSecondaryBehavior ? (
-                              <>
-                                <option value="match">Match by library path</option>
-                                <option value="primary">Primary instance</option>
-                                <option value="secondary">Secondary instance</option>
-                                <option value="both">Both instances</option>
-                              </>
-                            ) : (
-                              <option value="na">Not applicable, no second instance set up.</option>
-                            )}
-                          </select>
-                          <p className="ui-field-description-compact mt-1.5">
-                            {canUseSonarrSecondaryBehavior
-                              ? (({ match: "Uses the TV file path to determine which Sonarr instance should be searched.", primary: "Always searches your primary (standard) Sonarr instance.", secondary: "Always searches your secondary (4K) Sonarr instance.", both: "Searches both Sonarr instances." } as Record<string, string>)[String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match")] ?? "Uses the TV file path to determine which Sonarr instance should be searched.")
-                              : "Not applicable, no second instance set up."}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="border-t border-[#424753]/20 pt-4">
-                        <div className="mx-auto flex max-w-lg flex-col items-center gap-4 text-center">
-                          <div>
-                            <div className="text-[14px] font-semibold text-slate-300">Fallback search</div>
-                            <div className="ui-field-description mt-1">
-                              {fallbackUnnecessaryBecauseAllBoth ? (
-                                "Fallback is not needed because every unlocked search behavior already searches both instances."
-                              ) : canUseAnySecondaryBehavior ? (
-                                <div className="mx-auto w-full max-w-md text-left">
-                                  <p>When enabled, the non-selected instance is searched automatically if:</p>
-                                  <ul className="mt-2 list-disc space-y-1.5 pl-4">
-                                    <li>The selected instance doesn&apos;t have the content added (immediate fallback search), or</li>
-                                    <li>
-                                      The content isn&apos;t imported before the fallback timeout (e.g. content not found, indexer/download errors, etc.)
-                                    </li>
-                                  </ul>
-                                </div>
-                              ) : (
-                                "Not applicable, no second instance set up."
-                              )}
-                            </div>
-                          </div>
-                          <label className="flex cursor-pointer select-none items-center justify-center gap-3">
-                            <ToggleSwitch
-                              checked={Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH)}
-                              onChange={(v) => props.onValueChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", v)}
-                              accentHex={accent.hex}
-                              disabled={!canUseAnySecondaryBehavior || fallbackUnnecessaryBecauseAllBoth}
-                              ariaLabel="Playback fallback search"
-                            />
-                            <span className="text-[16px] text-slate-300">
-                              {fallbackUnnecessaryBecauseAllBoth
-                                ? "Not needed"
-                                : canUseAnySecondaryBehavior
-                                ? (Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "Enabled" : "Disabled")
-                                : "Not applicable, no second instance set up."}
-                            </span>
-                          </label>
-                          <div className="text-center">
-                            <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">Fallback timeout (minutes)</label>
-                            {canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? (
-                              <input
-                                className={`mx-auto mt-0.5 block w-[4.25rem] bg-[#0b111b] border border-[#424753]/40 rounded-lg px-2 py-2 text-center text-[16px] tabular-nums tracking-tight text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
-                                type="text"
-                                inputMode="numeric"
-                                maxLength={3}
-                                autoComplete="off"
-                                value={(() => {
-                                  const raw = props.values.PLAYBACK_FALLBACK_TIMEOUT_MINUTES;
-                                  const digits = String(raw ?? "").replace(/\D/g, "").slice(0, 3);
-                                  if (digits.length > 0) return digits;
-                                  return raw === undefined || raw === null || String(raw).trim() === "" ? "30" : "";
-                                })()}
-                                onChange={(e) => {
-                                  const d = e.target.value.replace(/\D/g, "").slice(0, 3);
-                                  props.onValueChange("PLAYBACK_FALLBACK_TIMEOUT_MINUTES", d);
-                                }}
-                              />
-                            ) : fallbackUnnecessaryBecauseAllBoth ? (
-                              <input
-                                className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-500 opacity-60 cursor-not-allowed"
-                                type="text"
-                                value="Not needed because all unlocked behaviors already search both instances."
-                                disabled
-                              />
-                            ) : canUseAnySecondaryBehavior ? (
-                              <input
-                                className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-500 opacity-60 cursor-not-allowed"
-                                type="text"
-                                value="Enable fallback search."
-                                disabled
-                              />
-                            ) : (
-                              <input
-                                className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-500 opacity-60 cursor-not-allowed"
-                                type="text"
-                                value="Not applicable, no second instance set up."
-                                disabled
-                              />
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </>
-              ) : active.name === "Lookahead" ? (
-                renderOnboardingStyleSectionRows(active.fields, {
-                  intro: <LookaheadSectionIntro variant="onboarding" embedded />,
-                })
+                  ) : null}
+                </div>
               ) : active.name === "Status Updates" ? (
                 <>
                   {renderOnboardingStyleSectionRows(active.fields, {
@@ -6831,8 +8232,27 @@ function SettingsPanel(props: {
                     embedded
                   />
                 </>
+              ) : active.name === "Poster Overlay" ? (
+                renderOnboardingStyleSectionRows(active.fields, {
+                  intro: (
+                    <div className="space-y-3">
+                      <p className="ui-field-description text-slate-300 leading-relaxed">
+                        Choose how placeholder posters look in your library, including optional overlays and TMDB language
+                        lookup.
+                      </p>
+                    </div>
+                  ),
+                })
+              ) : active.name === "Dummy Video" ? (
+                <div className="px-6 py-5">
+                  <DummyMediaSettings accentHex={accent.hex} />
+                </div>
               ) : active.name === "Library sync" ? (
                 renderOnboardingStyleSectionRows(active.fields)
+              ) : active.name === "Calendar" ? (
+                renderOnboardingStyleSectionRows(active.fields, {
+                  intro: <CalendarSectionIntro variant="onboarding" embedded />,
+                })
               ) : active.name === "Optional APIs" ? (
                 (() => {
                   const fieldByKey = new Map(active.fields.map((f) => [f.key, f]));
@@ -6954,6 +8374,21 @@ function SettingsPanel(props: {
         }}
       />
     ) : null}
+    {restartConfirmOpen ? (
+      <ConfirmModal
+        title="Restart Placeholdarr?"
+        message="Some settings you changed only take effect after a restart. The app will be unreachable for a few seconds while it comes back up."
+        confirmLabel="Restart now"
+        cancelLabel="Not now"
+        accentHex={accent.hex}
+        themeMode={props.themeMode}
+        onCancel={() => setRestartConfirmOpen(false)}
+        onConfirm={() => {
+          setRestartConfirmOpen(false);
+          props.onConfirmRestart();
+        }}
+      />
+    ) : null}
     </>
   );
 }
@@ -7024,6 +8459,28 @@ function statusUpdateSettingsChanged(baseline: FieldValueMap, current: FieldValu
 
 function posterLanguageSettingsChanged(baseline: FieldValueMap, current: FieldValueMap): boolean {
   return POSTER_LANGUAGE_SETTING_KEYS.some((key) => String(baseline[key] ?? "") !== String(current[key] ?? ""));
+}
+
+function destinationRematerializeSettingsChanged(baseline: FieldValueMap, current: FieldValueMap): boolean {
+  return [PATH_LIBRARY_ROOT_KEY, PATH_DESTINATION_MAP_KEY].some(
+    (key) => String(baseline[key] ?? "") !== String(current[key] ?? "")
+  );
+}
+
+const TV_DENSITY_REMATERIALIZE_SETTING_KEYS = ["TV_PLACEHOLDER_DENSITY", "TV_DENSITY_RETIRE_WHEN"] as const;
+
+const TV_DENSITY_RANK: Record<string, number> = { episode: 0, season: 1, series: 2 };
+
+function tvDensityRematerializeSettingsChanged(baseline: FieldValueMap, current: FieldValueMap): boolean {
+  return TV_DENSITY_REMATERIALIZE_SETTING_KEYS.some(
+    (key) => String(baseline[key] ?? "") !== String(current[key] ?? ""),
+  );
+}
+
+function tvDensityChangeIsConsolidating(baseline: FieldValueMap, current: FieldValueMap): boolean {
+  const before = String(baseline.TV_PLACEHOLDER_DENSITY ?? "episode").trim().toLowerCase();
+  const after = String(current.TV_PLACEHOLDER_DENSITY ?? "episode").trim().toLowerCase();
+  return (TV_DENSITY_RANK[after] ?? 0) > (TV_DENSITY_RANK[before] ?? 0);
 }
 
 const STATUS_MESSAGE_GROUP_ORDER = [
@@ -7233,7 +8690,7 @@ function LineRequestLivePreview(props: {
         {data ? (
           <>
             {data.projection_blocked && (
-              <p className="text-amber-300/90 text-[12px] mb-2">Status updates Off — placeholders would not decorate text.</p>
+              <p className="text-amber-300/90 text-[12px] mb-2">Status updates Off. Placeholders would not decorate text.</p>
             )}
             <p className={`text-slate-300 ${!data.projection_title_enabled ? "opacity-50" : ""}`}>
               <span className="text-slate-500">Title:</span> {data.title_line}
@@ -7884,7 +9341,7 @@ function StatusMessagesPanel(props: {
           >
             chevron_right
           </span>
-          Advanced — message templates
+          Advanced: message templates
         </summary>
         <div className="px-0 pb-2 border-t border-[#424753]/30">{panelInner}</div>
       </details>
@@ -7900,6 +9357,8 @@ function NfoBackfillApplyScopeModal(props: {
   saving: boolean;
   title?: string;
   description?: string;
+  /** TV density apply: count (and copy) exclude movies. */
+  countMedia?: "tv";
   onCancel: () => void;
   onConfirm: (scope: ApplyScope) => void;
   brand: Brand;
@@ -7908,7 +9367,8 @@ function NfoBackfillApplyScopeModal(props: {
   const accent = getBrandAccent(props.brand, props.themeMode);
   const [scope, setScope] = useState<ApplyScope>("next_full_sync");
   const count = props.placeholderCount;
-  const countLabel = count === 1 ? "1 placeholder" : `${count.toLocaleString()} placeholders`;
+  const entity = props.countMedia === "tv" ? "TV placeholder" : "placeholder";
+  const countLabel = count === 1 ? `1 ${entity}` : `${count.toLocaleString()} ${entity}s`;
   const options: Array<{ value: ApplyScope; title: string; body: string }> = [
     {
       value: "now",
@@ -8224,8 +9684,8 @@ const ONBOARDING_MEDIA_CARDS = [
     id: "plex" as const,
     title: "Plex",
     enabledKey: "ENABLE_PLEX",
-    note: "Playback needs Tautulli or Tracearr so Placeholdarr hears when someone hits play.",
-    keys: ["PLEX_URL", "PLEX_TOKEN", "PLEX_MOVIE_SECTION_ID", "PLEX_TV_SECTION_ID", "TAUTULLI_INSTANCE_KEY"],
+    note: "Requires Tautulli or Tracearr.",
+    keys: ["PLEX_URL", "PLEX_TOKEN", "TAUTULLI_INSTANCE_KEY"],
     notifierKey: "PLEX_PLAYBACK_NOTIFIER",
     nativeNotifier: "tautulli" as const,
   },
@@ -8447,10 +9907,6 @@ function collectWebhookDestinations(values: FieldValueMap): { id: string; label:
   return rows;
 }
 
-/** Plex × Tautulli on the media step card: smaller wells + `h-8` marks so the row fits the panel with side padding. */
-const MEDIA_PLEX_PAIR_WELL_FRAME = "flex items-center justify-center rounded-2xl";
-const MEDIA_PLEX_PAIR_LOGO_INSET = "p-[calc((4rem-2rem)/2)]";
-
 function mediaCardConnectionKeys(card: (typeof ONBOARDING_MEDIA_CARDS)[number]): { urlKey: string; credentialKey: string } | null {
   const urlKey = card.keys.find((k) => Boolean(URL_TEST_TARGET[k]));
   if (!urlKey) return null;
@@ -8470,7 +9926,7 @@ function WebhookStepCopyButton(props: { text: string; ariaLabel: string; variant
     };
   }, []);
   const title =
-    copyHint === "ok" ? "Copied" : copyHint === "err" ? "Copy failed — select URL text or use HTTPS" : "Copy to clipboard";
+    copyHint === "ok" ? "Copied" : copyHint === "err" ? "Copy failed; select URL text or use HTTPS" : "Copy to clipboard";
   const icon = copyHint === "ok" ? "check" : copyHint === "err" ? "error" : "content_copy";
   const ariaLabel = copyHint === "ok" ? "Copied" : copyHint === "err" ? "Copy failed" : props.ariaLabel;
   return (
@@ -8722,7 +10178,7 @@ function PlaybackWebhookSetupModal(props: {
         <h3 className="text-[20px] font-headline font-bold text-white">Playback setup · {cardTitle}</h3>
         <p className="text-[16px] text-slate-300">
           Placeholders only become real media when Placeholdarr knows someone started playback. A playback
-          webhook tells us that moment so we can ask Radarr or Sonarr to search, based on your settings.
+          webhook tells us that moment so we can ask Radarr or Sonarr to action, based on your settings.
           Pick how we should get that signal from {cardTitle} playbacks.
         </p>
 
@@ -9030,12 +10486,14 @@ function MediaServerConfigModal(props: {
                 {field.type === "bool" ? (
                   <label className="flex w-fit cursor-pointer select-none items-center gap-3">
                     <ToggleSwitch
-                      checked={Boolean(value)}
-                      onChange={(v) => props.onFieldChange(field.key, v)}
+                      checked={settingsBoolUiChecked(field, value)}
+                      onChange={(v) => props.onFieldChange(field.key, settingsBoolStoredFromUi(field, v))}
                       accentHex={props.accent.hex}
                       ariaLabel={field.label}
                     />
-                    <span className="text-[14px] text-slate-300">{Boolean(value) ? "Enabled" : "Disabled"}</span>
+                    <span className="text-[14px] text-slate-300">
+                      {settingsBoolUiChecked(field, value) ? "Enabled" : "Disabled"}
+                    </span>
                   </label>
                 ) : (
                   <input
@@ -9315,11 +10773,14 @@ function OnboardingWizardHeroBanner(props: { footerBlendHex: string }) {
 
 function OnboardingWizard(props: {
   payload: SettingsPayload;
+  steps?: readonly WizardStepDef[];
   stepIndex: number;
   values: FieldValueMap;
   hasUnsavedChanges: boolean;
-  /** When true, Continue skips API saves and Finish exits without persisting (dummy tour). */
+  /** When true, Continue skips API saves and Finish exits without persisting. */
   previewMode?: boolean;
+  /** Play-first onboarding chrome (live unfinished `/setup` or `/setup/preview`). */
+  playFirstMode?: boolean;
   brand: Brand;
   themeMode: ThemeMode;
   onBack: () => void;
@@ -9334,7 +10795,10 @@ function OnboardingWizard(props: {
   const [arrPrimaryTestStatus, setArrPrimaryTestStatus] = useState<{ radarr: boolean; sonarr: boolean }>({ radarr: false, sonarr: false });
   const [arrSecondaryTestStatus, setArrSecondaryTestStatus] = useState<{ radarr: boolean; sonarr: boolean }>({ radarr: false, sonarr: false });
   const stepContentRef = useRef<HTMLDivElement | null>(null);
-  const step = WIZARD_STEPS[props.stepIndex];
+  const wizardSteps = props.steps ?? WIZARD_STEPS;
+  const step = wizardSteps[props.stepIndex] ?? wizardSteps[0];
+  const playFirstMode = Boolean(props.playFirstMode);
+  const stepGuides = ONBOARDING_STEP_GUIDES;
   /** Setup runs before theme toggle is exposed — keep wizard chrome and tokens on dark. */
   const wizardUiTheme: ThemeMode = "dark";
   const accent = getBrandAccent(props.brand, wizardUiTheme);
@@ -9344,16 +10808,22 @@ function OnboardingWizard(props: {
     backgroundImage: getStudioDarkBackdrop(props.brand, accent, wizardSemantic),
   } as CSSProperties;
   const arrInstances = parseArrInstancesFromValues(props.values);
-  const hasRadarrSecondary = arrInstances.filter((item) => item.arr_type === "radarr").length > 1;
-  const hasSonarrSecondary = arrInstances.filter((item) => item.arr_type === "sonarr").length > 1;
+  const radarrInstances = arrInstances.filter((item) => item.arr_type === "radarr");
+  const sonarrInstances = arrInstances.filter((item) => item.arr_type === "sonarr");
+  const hasRadarrSecondary = radarrInstances.length > 1;
+  const hasSonarrSecondary = sonarrInstances.length > 1;
   const uiHasRadarrSecondary = hasRadarrSecondary || Boolean(props.values.WIZARD_RADARR_SECONDARY_ENABLED);
   const uiHasSonarrSecondary = hasSonarrSecondary || Boolean(props.values.WIZARD_SONARR_SECONDARY_ENABLED);
-  const canUseRadarrSecondaryBehavior =
-    uiHasRadarrSecondary &&
-    (arrSecondaryTestStatus.radarr || arrSecondaryPersistedWithCredentials(props.values, "radarr"));
-  const canUseSonarrSecondaryBehavior =
-    uiHasSonarrSecondary &&
-    (arrSecondaryTestStatus.sonarr || arrSecondaryPersistedWithCredentials(props.values, "sonarr"));
+  const canUseRadarrSecondaryBehavior = arrMultiInstanceBehaviorUnlocked(
+    props.values,
+    "radarr",
+    arrSecondaryTestStatus.radarr,
+  );
+  const canUseSonarrSecondaryBehavior = arrMultiInstanceBehaviorUnlocked(
+    props.values,
+    "sonarr",
+    arrSecondaryTestStatus.sonarr,
+  );
   const canUseAnySecondaryBehavior = canUseRadarrSecondaryBehavior || canUseSonarrSecondaryBehavior;
   const hasLibraryRoot = String(props.values.LIBRARY_ROOT ?? "").trim().length > 0;
   const allSettingsFieldsByKey = useMemo(() => {
@@ -9387,31 +10857,18 @@ function OnboardingWizard(props: {
   const [mediaRemoveConfirmId, setMediaRemoveConfirmId] = useState<MediaCardId | null>(null);
   const mediaPanelOpenedViaAddRef = useRef(false);
   const mediaPanelSnapshotRef = useRef<Record<string, unknown>>({});
-  const { handleValueChange: handleWizardValueChange, effectiveSnapshot: wizardLookaheadSnapshot } =
-    usePlaybackLookaheadFieldControls(props.values, props.onChange);
+  const handleWizardValueChange = props.onChange;
 
-  const hasUnlockedSearchBehavior = [
-    canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "primary") : null,
-    canUseSonarrSecondaryBehavior ? String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "primary") : null,
-    canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match") : null,
-    canUseSonarrSecondaryBehavior ? String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match") : null,
-  ].filter((value): value is string => Boolean(value));
-  const fallbackUnnecessaryBecauseAllBoth = hasUnlockedSearchBehavior.length > 0 && hasUnlockedSearchBehavior.every((value) => value === "both");
   const previewMode = Boolean(props.previewMode);
   const canProceed = previewMode
     ? true
     : (() => {
+        if (step.key === "welcome" || step.key === "density_search" || step.key === "arr_routing") return true;
         if (step.key === "paths") return hasLibraryRoot;
         if (step.key === "media") return hasConfirmedMediaConnection;
         if (step.key === "arr") return hasConfirmedArrConnection;
         return true;
       })();
-
-  useEffect(() => {
-    if (fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH)) {
-      props.onChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", false);
-    }
-  }, [fallbackUnnecessaryBecauseAllBoth, props, props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH]);
 
   useEffect(() => {
     if (step.key !== "media") {
@@ -9424,6 +10881,8 @@ function OnboardingWizard(props: {
     const container = stepContentRef.current;
     if (container) {
       container.scrollTop = 0;
+      const inner = container.querySelector("[data-step-scroll]");
+      if (inner instanceof HTMLElement) inner.scrollTop = 0;
     }
     window.scrollTo(0, 0);
     document.documentElement.scrollTop = 0;
@@ -9497,22 +10956,74 @@ function OnboardingWizard(props: {
     const partial: Record<string, unknown> = {};
     for (const key of stepKeys) partial[key] = props.values[key];
 
-    if (step.key === "arr") {
-      partial.MOVIE_PLACEHOLDER_SEARCH_MODE = canUseRadarrSecondaryBehavior
-        ? String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "primary")
-        : "primary";
-      partial.TV_PLACEHOLDER_SEARCH_MODE = canUseSonarrSecondaryBehavior
-        ? String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "primary")
-        : "primary";
-      partial.MOVIE_PLAYBACK_INSTANCE_MODE = canUseRadarrSecondaryBehavior
-        ? String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match")
-        : "match";
-      partial.TV_PLAYBACK_INSTANCE_MODE = canUseSonarrSecondaryBehavior
-        ? String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match")
-        : "match";
-      partial.ENABLE_PLAYBACK_FALLBACK_SEARCH = canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth
-        ? Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH)
-        : false;
+    if (step.key === "arr" || step.key === "arr_routing") {
+      let movieFallbackForEnable: string[] | null = null;
+      let tvFallbackForEnable: string[] | null = null;
+      if (canUseRadarrSecondaryBehavior) {
+        const movieAlways = resolvePlaceholderAlwaysKeysForUi(
+          props.values.MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES,
+          props.values.MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES,
+          radarrInstances,
+          props.values.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES,
+        );
+        const movieFallback = resolveAlsoInstanceKeysForUi(
+          props.values.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES,
+          radarrInstances,
+        ).filter((key) => !movieAlways.includes(key));
+        const movieRealAlso = resolveAlsoInstanceKeysForUi(
+          props.values.MOVIE_PLAY_REAL_ALSO_INSTANCES,
+          radarrInstances,
+        );
+        partial.MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES = movieAlways;
+        partial.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES = movieFallback;
+        partial.MOVIE_PLAY_REAL_ALSO_INSTANCES = movieRealAlso;
+        partial.MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES = movieAlways;
+        movieFallbackForEnable = movieFallback;
+      } else {
+        delete partial.MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES;
+        delete partial.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES;
+        delete partial.MOVIE_PLAY_REAL_ALSO_INSTANCES;
+        delete partial.MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES;
+      }
+      if (canUseSonarrSecondaryBehavior) {
+        const tvAlways = resolvePlaceholderAlwaysKeysForUi(
+          props.values.TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES,
+          props.values.TV_PLAY_PLACEHOLDER_ALSO_INSTANCES,
+          sonarrInstances,
+          props.values.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES,
+        );
+        const tvFallback = resolveAlsoInstanceKeysForUi(
+          props.values.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES,
+          sonarrInstances,
+        ).filter((key) => !tvAlways.includes(key));
+        const tvRealAlso = resolveAlsoInstanceKeysForUi(
+          props.values.TV_PLAY_REAL_ALSO_INSTANCES,
+          sonarrInstances,
+        );
+        partial.TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES = tvAlways;
+        partial.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES = tvFallback;
+        partial.TV_PLAY_REAL_ALSO_INSTANCES = tvRealAlso;
+        partial.TV_PLAY_PLACEHOLDER_ALSO_INSTANCES = tvAlways;
+        partial.TV_CROSS_INSTANCE_LOOKAHEAD = tvRealAlso;
+        tvFallbackForEnable = tvFallback;
+      } else {
+        delete partial.TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES;
+        delete partial.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES;
+        delete partial.TV_PLAY_REAL_ALSO_INSTANCES;
+        delete partial.TV_PLAY_PLACEHOLDER_ALSO_INSTANCES;
+        delete partial.TV_CROSS_INSTANCE_LOOKAHEAD;
+      }
+      if (canUseRadarrSecondaryBehavior || canUseSonarrSecondaryBehavior) {
+        const movieFb =
+          movieFallbackForEnable ??
+          resolveAlsoInstanceKeysForUi(props.values.MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES, radarrInstances);
+        const tvFb =
+          tvFallbackForEnable ??
+          resolveAlsoInstanceKeysForUi(props.values.TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES, sonarrInstances);
+        partial.ENABLE_PLAYBACK_FALLBACK_SEARCH = movieFb.length > 0 || tvFb.length > 0;
+      } else {
+        delete partial.ENABLE_PLAYBACK_FALLBACK_SEARCH;
+      }
       partial.PLAYBACK_FALLBACK_TIMEOUT_MINUTES = String(props.values.PLAYBACK_FALLBACK_TIMEOUT_MINUTES ?? "").trim() || 30;
       partial.RADARR_SHARED_PLACEHOLDER_CLEANUP = canUseRadarrSecondaryBehavior
         ? sharedPlaceholderCleanupMode(props.values, "RADARR_SHARED_PLACEHOLDER_CLEANUP")
@@ -9527,23 +11038,27 @@ function OnboardingWizard(props: {
 
   function wizardFieldRow(field: SettingsField) {
     if (HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) || SETTINGS_UI_HIDDEN_FIELD_KEYS.has(field.key)) return null;
-    const displayValue = settingsFieldDisplayValue(field, props.values, wizardLookaheadSnapshot);
+    const displayValue = props.values[field.key];
     const test = testResults[field.key];
     const testTarget = URL_TEST_TARGET[field.key];
     const focus = getBrandFocusClass(props.brand, wizardUiTheme);
     const statusUpdatesOff = String(props.values.PLACEHOLDER_STATUS_UPDATES ?? "").toUpperCase() === "OFF";
     const projectionFieldLocked = field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && statusUpdatesOff;
     const tvPlayMode = String(props.values.TV_PLAY_MODE ?? "episode").trim().toLowerCase();
+    const tvDensity = String(props.values.TV_PLACEHOLDER_DENSITY ?? "episode").trim().toLowerCase();
     const lookaheadRangeLocked = field.key === "EPISODES_LOOKAHEAD" && tvPlayMode === "series";
+    const densityRetireLocked = field.key === "TV_DENSITY_RETIRE_WHEN" && tvDensity === "episode";
     const parentDisabled = settingsFieldParentDisabled(field, props.values);
     const tmdbConfigured = tmdbApiKeyConfiguredFromSettings(props.payload, props.values);
     const posterLangFeatureOn = Boolean(props.values.ENABLE_PREFERRED_POSTER_LANGUAGE);
     const tmdbKeyMissing =
       (isPosterLanguageGateKey(field.key) || (isPosterLanguageDetailKey(field.key) && posterLangFeatureOn)) &&
       !tmdbConfigured;
-    const rowMuted = projectionFieldLocked || lookaheadRangeLocked || parentDisabled || tmdbKeyMissing;
+    const rowMuted =
+      projectionFieldLocked || lookaheadRangeLocked || densityRetireLocked || parentDisabled || tmdbKeyMissing;
     const isNested = settingsFieldIsNested(field);
-    const interactionLocked = projectionFieldLocked || lookaheadRangeLocked || parentDisabled || tmdbKeyMissing;
+    const interactionLocked =
+      projectionFieldLocked || lookaheadRangeLocked || densityRetireLocked || parentDisabled || tmdbKeyMissing;
     return (
       <div
         key={field.key}
@@ -9570,22 +11085,12 @@ function OnboardingWizard(props: {
             <StartupSyncModeDescription spacing="wizard" />
           ) : field.key === "PLACEHOLDER_STATUS_UPDATES" ? (
             <PlaceholderStatusUpdatesDescription spacing="wizard" />
+          ) : field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" ? (
+            <ProjectStatusIntoDescription spacing="wizard" />
           ) : field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
             <PlaceholderPosterOverlayDescription spacing="wizard" />
           ) : field.key === "ENABLE_COMING_SOON_COUNTDOWN" ? (
             <ComingSoonCountdownDescription spacing="wizard" />
-          ) : field.key === "EPISODES_LOOKAHEAD" ? (
-            <EpisodesLookaheadDescription spacing="wizard" tvPlayMode={tvPlayMode} />
-          ) : field.key === "PLACEHOLDER_POLICY_NEVER_TAGS" ? (
-            <>
-              <div className="mb-1 text-[12px] font-headline uppercase tracking-widest text-slate-500">Tag policies</div>
-              <p className="ui-field-description mb-2 leading-relaxed">
-                Match Radarr movie tags and Sonarr series tags during sync. Off-style ignore maps to Never;
-                always-keep maps to Pinned. When both match, Placeholdarr defaults to Never. Matching Arr tags
-                always override library chips; clear the tags in Arr (or via the chip modal) to manage policy here.
-              </p>
-              {field.description ? <p className="ui-field-description mb-2 leading-relaxed">{field.description}</p> : null}
-            </>
           ) : field.description && !isPosterLanguageFieldKey(field.key) ? (
             <p className="ui-field-description mb-2 leading-relaxed">{field.description}</p>
           ) : null)}
@@ -9597,13 +11102,15 @@ function OnboardingWizard(props: {
         {field.type === "bool" ? (
           <label className={`flex items-center gap-3 select-none w-fit ${interactionLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
             <ToggleSwitch
-              checked={Boolean(displayValue)}
-              onChange={(v) => handleWizardValueChange(field.key, v)}
+              checked={settingsBoolUiChecked(field, displayValue)}
+              onChange={(v) => handleWizardValueChange(field.key, settingsBoolStoredFromUi(field, v))}
               accentHex={accent.hex}
               disabled={interactionLocked}
               ariaLabel={field.label}
             />
-            <span className={`text-[16px] ${interactionLocked ? "text-slate-500" : "text-slate-300"}`}>{Boolean(displayValue) ? "Enabled" : "Disabled"}</span>
+            <span className={`text-[16px] ${interactionLocked ? "text-slate-500" : "text-slate-300"}`}>
+              {settingsBoolUiChecked(field, displayValue) ? "Enabled" : "Disabled"}
+            </span>
           </label>
         ) : field.type === "choice" && field.options?.length ? (
           <select
@@ -9686,25 +11193,58 @@ function OnboardingWizard(props: {
         <div className="px-6 sm:px-8 py-4 sm:py-5 border-b border-[#424753]/30 shrink-0">
           {previewMode ? (
             <div className="mb-4 rounded-lg border border-amber-500/35 bg-amber-500/10 px-3 py-2 text-[13px] leading-snug text-amber-100/95">
-              Preview mode — nothing is saved. Use this to explore steps without changing your configuration.
+              Preview mode: nothing is saved. Same steps as live setup; your configuration is unchanged.
             </div>
           ) : null}
-          <div className="flex items-center gap-0">
-            {WIZARD_STEPS.map((s, i) => {
+          <div className="flex w-full items-start">
+            {wizardSteps.map((s, i) => {
               const done = i < props.stepIndex;
               const active = i === props.stepIndex;
               return (
-                <div key={s.key} className="flex items-center flex-1 last:flex-none">
-                  <div className={`flex flex-col items-center gap-1 min-w-max ${active ? "" : done ? "text-green-400" : "text-slate-600"}`} style={active ? { color: accent.icon } : undefined}>
-                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[14px] font-bold font-headline border-2 transition-colors ${active ? FG_ON_ACCENT_TEXT_CLASS : done ? "bg-green-600/20 border-green-500 text-green-400" : "bg-[#252e3a] border-[#424753]/40 text-slate-600"}`}
-                      style={active ? { ...accentFilledStyle(accent.hex), borderColor: accent.hex } : undefined}>
-                      {done ? <span className="material-symbols-outlined" style={{ fontSize: 14 }}>check</span> : i + 1}
+                <div key={s.key} className="flex min-w-0 flex-1 items-center">
+                  <div
+                    className={`flex w-full min-w-0 flex-col items-center gap-1 ${
+                      active ? "text-slate-200" : done ? "text-slate-400" : "text-slate-600"
+                    }`}
+                  >
+                    <div
+                      className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-[13px] font-bold font-headline transition-colors sm:h-8 sm:w-8 sm:text-[14px] ${
+                        active
+                          ? `${FG_ON_ACCENT_TEXT_CLASS} border-[color:color-mix(in_srgb,var(--brand-accent)_55%,#424753)]`
+                          : done
+                            ? "border-[#424753]/70 bg-[#252e3a] text-slate-300"
+                            : "border-[#424753]/40 bg-[#1a2030] text-slate-600"
+                      }`}
+                      style={
+                        active
+                          ? {
+                              backgroundColor:
+                                "color-mix(in srgb, var(--brand-accent) 78%, #121722)",
+                              color: "var(--brand-fg-on-accent)",
+                            }
+                          : undefined
+                      }
+                    >
+                      {done ? (
+                        <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
+                          check
+                        </span>
+                      ) : (
+                        i + 1
+                      )}
                     </div>
-                    <span className="text-[12px] font-headline uppercase tracking-wider">{s.name}</span>
+                    <span className="w-full px-0.5 text-center text-[10px] font-headline uppercase leading-tight tracking-wide sm:text-[11px]">
+                      {s.name}
+                    </span>
                   </div>
-                  {i < WIZARD_STEPS.length - 1 && (
-                    <div className={`flex-1 h-0.5 mx-3 mb-4 rounded-full transition-colors ${done ? "bg-green-500" : "bg-[#252e3a]"}`} />
-                  )}
+                  {i < wizardSteps.length - 1 ? (
+                    <div
+                      className={`mx-1 mb-5 h-px min-w-[0.35rem] flex-1 rounded-full transition-colors sm:mx-2 ${
+                        done ? "bg-[#424753]/80" : "bg-[#252e3a]"
+                      }`}
+                      aria-hidden
+                    />
+                  ) : null}
                 </div>
               );
             })}
@@ -9712,17 +11252,84 @@ function OnboardingWizard(props: {
         </div>
 
         {/* Fields */}
-        <div ref={stepContentRef} className="px-6 sm:px-8 py-6 overflow-y-auto flex-1 min-h-0">
-          {step.key === "paths" ? (
-            <LibraryPathsForm
-              fields={fields}
+        <div
+          ref={stepContentRef}
+          className={
+            step.key === "density_search"
+              ? "flex flex-1 min-h-0 flex-col overflow-hidden px-6 pt-6 sm:px-8"
+              : "px-6 sm:px-8 py-6 overflow-y-auto flex-1 min-h-0"
+          }
+        >
+          {step.key === "density_search" ? (
+            <LookaheadDensityPanel
+              variant="wizard"
               values={props.values}
-              brand={props.brand}
-              themeMode={wizardUiTheme}
-              accent={accent}
-              layout="wizard"
-              onValueChange={props.onChange}
+              onChange={props.onChange}
+              accentHex={accent.hex}
+              guide={
+                playFirstMode && stepGuides.density_search ? (
+                  <StepGuide guide={stepGuides.density_search} />
+                ) : null
+              }
             />
+          ) : (
+            <>
+          {playFirstMode && step.key !== "welcome" && stepGuides[step.key as keyof typeof stepGuides] ? (
+            <StepGuide guide={stepGuides[step.key as keyof typeof stepGuides]} />
+          ) : null}
+          {step.key === "welcome" ? (
+            <WelcomeStep />
+          ) : step.key === "paths" ? (
+            playFirstMode ? (
+              <LibraryPathsForm
+                fields={fields}
+                values={props.values}
+                brand={props.brand}
+                themeMode={wizardUiTheme}
+                accent={accent}
+                layout="wizard"
+                hideSectionTitle
+                onValueChange={props.onChange}
+              />
+            ) : (
+              <LibraryPathsForm
+                fields={fields}
+                values={props.values}
+                brand={props.brand}
+                themeMode={wizardUiTheme}
+                accent={accent}
+                layout="wizard"
+                onValueChange={props.onChange}
+              />
+            )
+          ) : step.key === "arr_routing" ? (
+            <div className="space-y-6">
+              <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
+                <PlaybackDestFilterControls
+                  values={props.values}
+                  options={
+                    props.payload.playback_dest_options ||
+                    playbackDestOptionsFromValues(props.values)
+                  }
+                  onChange={(key, next) => props.onChange(key, next)}
+                />
+              </div>
+              {needsArrRoutingStep(props.values) ? (
+                <ArrMultiInstanceBehaviorStack
+                  values={props.values}
+                  onChange={props.onChange}
+                  brand={props.brand}
+                  themeMode={wizardUiTheme}
+                  accent={accent}
+                  canUseRadarrSecondaryBehavior={canUseRadarrSecondaryBehavior}
+                  canUseSonarrSecondaryBehavior={canUseSonarrSecondaryBehavior}
+                  canUseAnySecondaryBehavior={canUseAnySecondaryBehavior}
+                  radarrInstances={radarrInstances}
+                  sonarrInstances={sonarrInstances}
+                  stackColumns
+                />
+              ) : null}
+            </div>
           ) : step.key === "media" ? (() => {
             const fieldByKey = new Map(fields.map((f) => [f.key, f]));
 
@@ -9738,8 +11345,6 @@ function OnboardingWizard(props: {
                     const urlTest = urlField ? testResults[urlField.key] : undefined;
                     const vis = ONBOARDING_MEDIA_VISUAL[card.id];
                     const address = urlField ? String(props.values[urlField.key] ?? "").trim() : "";
-                    const movieLib = card.id === "plex" ? String(props.values.PLEX_MOVIE_SECTION_ID ?? "").trim() : "";
-                    const tvLib = card.id === "plex" ? String(props.values.PLEX_TV_SECTION_ID ?? "").trim() : "";
                     const mediaDetailsComplete = mediaCardConnectionDetailsComplete(card, props.values, allSettingsFieldsByKey);
 
                     return (
@@ -9748,40 +11353,29 @@ function OnboardingWizard(props: {
                         className={`group relative flex min-h-[260px] flex-col ${UI_INTEGRATION_CARD_SURFACE_CLASS} p-6 duration-200 ${hasConnection && !enabled ? "opacity-75" : ""}`}
                       >
                         <div className="flex h-[5.25rem] w-full shrink-0 items-center justify-center" aria-hidden>
-                          {card.id === "plex" ? (
-                            <div className="flex max-w-full items-center justify-center gap-2 px-2 sm:px-3">
-                              <div
-                                className={`${MEDIA_PLEX_PAIR_WELL_FRAME} h-16 w-fit shrink-0 ${MEDIA_PLEX_PAIR_LOGO_INSET}`}
-                                style={vis.well}
-                              >
-                                <img src={plexIcon} alt="" decoding="async" className="h-8 w-auto max-h-8 shrink-0 object-contain" aria-hidden />
-                              </div>
-                              <span className="select-none text-[22px] font-extralight leading-none text-white/85" aria-hidden>
-                                ×
-                              </span>
-                              <div
-                                className={`${MEDIA_PLEX_PAIR_WELL_FRAME} h-16 w-16 shrink-0`}
-                                style={vis.well}
-                              >
-                                <img src={tautulliIcon} alt="" decoding="async" className="h-8 w-8 shrink-0 object-contain" aria-hidden />
-                              </div>
-                            </div>
-                          ) : (
-                            <div
-                              className="flex h-[5.25rem] w-[5.25rem] items-center justify-center rounded-2xl"
-                              style={vis.well}
-                            >
-                              <img src={vis.iconSrc} alt="" decoding="async" className="h-10 w-10 object-contain" aria-hidden />
-                            </div>
-                          )}
+                          <div
+                            className="flex h-[5.25rem] w-[5.25rem] items-center justify-center rounded-2xl px-2"
+                            style={vis.well}
+                          >
+                            <img
+                              src={vis.iconSrc}
+                              alt=""
+                              decoding="async"
+                              className={
+                                card.id === "plex"
+                                  ? "h-8 w-auto max-h-8 max-w-full object-contain"
+                                  : "h-10 w-10 object-contain"
+                              }
+                              aria-hidden
+                            />
+                          </div>
                         </div>
                         <h4 className="mt-5 w-full text-center text-[20px] font-bold tracking-tight text-white font-headline">{card.title}</h4>
-                        {card.id === "plex" ? (
-                          <PlexLibraryTipsDisclosure
-                            className="mt-3 w-full"
-                            defaultOpen={!hasConnection}
-                          />
-                        ) : null}
+                        <div className="mt-2 flex min-h-[2.75rem] items-start justify-center">
+                          {"note" in card && card.note ? (
+                            <p className="text-center text-[13px] leading-snug text-slate-400">{card.note}</p>
+                          ) : null}
+                        </div>
 
                         {!hasConnection ? (
                           <button
@@ -9800,48 +11394,28 @@ function OnboardingWizard(props: {
                           </button>
                         ) : (
                           <div className="mt-5 flex min-h-0 flex-1 flex-col text-left">
-                            <label className="mb-3 flex items-center justify-between gap-3 select-none">
-                              <span className="text-[14px] font-semibold text-slate-300">
-                                {enabled ? "Enabled" : "Paused"}
-                              </span>
-                              <ToggleSwitch
-                                checked={enabled}
-                                onChange={(v) => props.onChange(card.enabledKey, v)}
-                                accentHex={accent.hex}
-                                size="sm"
-                                ariaLabel={`${card.title} ${enabled ? "enabled" : "paused"}`}
-                              />
-                            </label>
-                            {card.id === "plex" && "note" in card && card.note ? (
-                              <p className="ui-field-description-compact mb-2">{card.note}</p>
-                            ) : null}
-                            <dl className="space-y-1.5 rounded-xl border border-white/[0.06] bg-black/20 p-3 text-[13px] leading-snug">
-                              <div className="flex min-w-0 gap-2">
-                                <dt className="w-[4.75rem] shrink-0 font-medium text-slate-500">Address</dt>
-                                <dd className="truncate font-mono text-slate-200" title={address || undefined}>
-                                  {address || "—"}
-                                </dd>
-                              </div>
-                              {card.id === "plex" ? (
-                                <>
-                                  <div className="flex min-w-0 gap-2">
-                                    <dt className="w-[4.75rem] shrink-0 font-medium text-slate-500">Movie lib.</dt>
-                                    <dd className="truncate font-mono text-slate-200" title={movieLib || undefined}>
-                                      {movieLib || "—"}
-                                    </dd>
-                                  </div>
-                                  <div className="flex min-w-0 gap-2">
-                                    <dt className="w-[4.75rem] shrink-0 font-medium text-slate-500">TV lib.</dt>
-                                    <dd className="truncate font-mono text-slate-200" title={tvLib || undefined}>
-                                      {tvLib || "—"}
-                                    </dd>
-                                  </div>
-                                </>
-                              ) : null}
-                            </dl>
+                            {playFirstMode ? null : (
+                              <label className="mb-3 flex items-center justify-between gap-3 select-none">
+                                <span className="text-[14px] font-semibold text-slate-300">
+                                  {enabled ? "Enabled" : "Paused"}
+                                </span>
+                                <ToggleSwitch
+                                  checked={enabled}
+                                  onChange={(v) => props.onChange(card.enabledKey, v)}
+                                  accentHex={accent.hex}
+                                  size="sm"
+                                  ariaLabel={`${card.title} ${enabled ? "enabled" : "paused"}`}
+                                />
+                              </label>
+                            )}
+                            <div className="min-w-0 rounded-xl border border-white/[0.06] bg-black/20 p-3 text-[13px] leading-snug">
+                              <p className="truncate font-mono text-slate-200" title={address || undefined}>
+                                {address || "—"}
+                              </p>
+                            </div>
                             <div className="mt-2 flex min-h-[2.5rem] flex-col justify-center text-[14px]">
-                              {!enabled ? (
-                                <p className="ui-field-description">Integration paused — Placeholdarr will not sync to {card.title} until re-enabled.</p>
+                              {!playFirstMode && !enabled ? (
+                                <p className="ui-field-description">Integration paused. Placeholdarr will not sync to {card.title} until re-enabled.</p>
                               ) : urlTest && !urlTest.ok ? (
                                 <p className="text-red-400">{urlTest.message}</p>
                               ) : !mediaDetailsComplete ? (
@@ -9899,6 +11473,20 @@ function OnboardingWizard(props: {
               </div>
             );
           })() : step.key === "arr" ? (
+            playFirstMode ? (
+                <ArrInstancesEditor
+                  layout="slots"
+                  values={props.values}
+                  onValueChange={props.onChange}
+                  accent={accent}
+                  onPrimaryTestStatusChange={(arrType, ok) => {
+                    setArrPrimaryTestStatus((prev) => ({ ...prev, [arrType]: ok }));
+                  }}
+                  onSecondaryTestStatusChange={(arrType, ok) => {
+                    setArrSecondaryTestStatus((prev) => ({ ...prev, [arrType]: ok }));
+                  }}
+                />
+            ) : (
             <div className="space-y-6">
               <ArrInstancesEditor
                 layout="slots"
@@ -9912,192 +11500,21 @@ function OnboardingWizard(props: {
                   setArrSecondaryTestStatus((prev) => ({ ...prev, [arrType]: ok }));
                 }}
               />
-              <SharedPlaceholderCleanupPanel
+              <ArrMultiInstanceBehaviorStack
                 values={props.values}
                 onChange={props.onChange}
                 brand={props.brand}
                 themeMode={wizardUiTheme}
+                accent={accent}
                 canUseRadarrSecondaryBehavior={canUseRadarrSecondaryBehavior}
                 canUseSonarrSecondaryBehavior={canUseSonarrSecondaryBehavior}
+                canUseAnySecondaryBehavior={canUseAnySecondaryBehavior}
+                radarrInstances={radarrInstances}
+                sonarrInstances={sonarrInstances}
+                stackColumns
               />
-              <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
-                <div className="text-center">
-                  <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider mb-1">Placeholder Search Behavior</h3>
-                  <p className="mx-auto max-w-2xl text-[14px] text-slate-400">Choose which ARR instance to search when a placeholder is played.</p>
-                </div>
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5">
-                  <div className="min-w-0">
-                    <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
-                    <select
-                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
-                      value={canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "primary") : "na"}
-                      onChange={(e) => props.onChange("MOVIE_PLACEHOLDER_SEARCH_MODE", e.target.value)}
-                      disabled={!canUseRadarrSecondaryBehavior}
-                    >
-                      {canUseRadarrSecondaryBehavior ? (
-                        <>
-                          <option value="primary">Primary instance</option>
-                          <option value="secondary">Secondary instance</option>
-                          <option value="both">Both instances</option>
-                        </>
-                      ) : (
-                        <option value="na">Not applicable, no second instance set up.</option>
-                      )}
-                    </select>
-                  </div>
-                  <div className="min-w-0">
-                    <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
-                    <select
-                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
-                      value={canUseSonarrSecondaryBehavior ? String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "primary") : "na"}
-                      onChange={(e) => props.onChange("TV_PLACEHOLDER_SEARCH_MODE", e.target.value)}
-                      disabled={!canUseSonarrSecondaryBehavior}
-                    >
-                      {canUseSonarrSecondaryBehavior ? (
-                        <>
-                          <option value="primary">Primary instance</option>
-                          <option value="secondary">Secondary instance</option>
-                          <option value="both">Both instances</option>
-                        </>
-                      ) : (
-                        <option value="na">Not applicable, no second instance set up.</option>
-                      )}
-                    </select>
-                  </div>
-                </div>
-              </div>
-              <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
-                <div className="text-center">
-                  <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider mb-1">Real-File Search Behavior</h3>
-                  <p className="mx-auto max-w-2xl text-[14px] text-slate-400">When a real media file is played, choose how Placeholdarr routes ARR searches.</p>
-                </div>
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5">
-                  <div className="min-w-0">
-                    <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
-                    <select
-                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
-                      value={canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match") : "na"}
-                      onChange={(e) => props.onChange("MOVIE_PLAYBACK_INSTANCE_MODE", e.target.value)}
-                      disabled={!canUseRadarrSecondaryBehavior}
-                    >
-                      {canUseRadarrSecondaryBehavior ? (
-                        <>
-                          <option value="match">Match by library path</option>
-                          <option value="primary">Primary instance</option>
-                          <option value="secondary">Secondary instance</option>
-                          <option value="both">Both instances</option>
-                        </>
-                      ) : (
-                        <option value="na">Not applicable, no second instance set up.</option>
-                      )}
-                    </select>
-                  </div>
-                  <div className="min-w-0">
-                    <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
-                    <select
-                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
-                      value={canUseSonarrSecondaryBehavior ? String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match") : "na"}
-                      onChange={(e) => props.onChange("TV_PLAYBACK_INSTANCE_MODE", e.target.value)}
-                      disabled={!canUseSonarrSecondaryBehavior}
-                    >
-                      {canUseSonarrSecondaryBehavior ? (
-                        <>
-                          <option value="match">Match by library path</option>
-                          <option value="primary">Primary instance</option>
-                          <option value="secondary">Secondary instance</option>
-                          <option value="both">Both instances</option>
-                        </>
-                      ) : (
-                        <option value="na">Not applicable, no second instance set up.</option>
-                      )}
-                    </select>
-                  </div>
-                </div>
-                <div className="border-t border-[#424753]/20 pt-4">
-                  <div className="mx-auto flex max-w-lg flex-col items-center gap-4 text-center">
-                    <div>
-                      <div className="text-[14px] font-semibold text-slate-300">Fallback search</div>
-                      <div className="ui-field-description mt-1">
-                        {fallbackUnnecessaryBecauseAllBoth ? (
-                          "Fallback is not needed because every unlocked search behavior already searches both instances."
-                        ) : canUseAnySecondaryBehavior ? (
-                          <div className="mx-auto w-full max-w-md text-left">
-                            <p>When enabled, the non-selected source is searched automatically if:</p>
-                            <ul className="mt-2 list-disc space-y-1.5 pl-4">
-                              <li>The selected source doesn&apos;t have the content added (immediate fallback search), or</li>
-                              <li>
-                                The content isn&apos;t imported before the fallback timeout (e.g. content not found, indexer/download errors, etc.)
-                              </li>
-                            </ul>
-                          </div>
-                        ) : (
-                          "Not applicable, no second instance set up."
-                        )}
-                      </div>
-                    </div>
-                    <label className="flex cursor-pointer select-none items-center justify-center gap-3">
-                      <ToggleSwitch
-                        checked={Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH)}
-                        onChange={(v) => props.onChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", v)}
-                        accentHex={accent.hex}
-                        disabled={!canUseAnySecondaryBehavior || fallbackUnnecessaryBecauseAllBoth}
-                        ariaLabel="Playback fallback search"
-                      />
-                      <span className="text-[16px] text-slate-300">
-                        {fallbackUnnecessaryBecauseAllBoth
-                          ? "Not needed"
-                          : canUseAnySecondaryBehavior
-                          ? (Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "Enabled" : "Disabled")
-                          : "Not applicable, no second instance set up."}
-                      </span>
-                    </label>
-                    <div className="text-center">
-                      <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">Fallback timeout (minutes)</label>
-                      {canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? (
-                        <input
-                          className={`mx-auto mt-0.5 block w-[4.25rem] bg-[#0b111b] border border-[#424753]/40 rounded-lg px-2 py-2 text-center text-[16px] tabular-nums tracking-tight text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)}`}
-                          type="text"
-                          inputMode="numeric"
-                          maxLength={3}
-                          autoComplete="off"
-                          value={(() => {
-                            const raw = props.values.PLAYBACK_FALLBACK_TIMEOUT_MINUTES;
-                            const digits = String(raw ?? "").replace(/\D/g, "").slice(0, 3);
-                            if (digits.length > 0) return digits;
-                            return raw === undefined || raw === null ? "30" : "";
-                          })()}
-                          onChange={(e) => {
-                            const d = e.target.value.replace(/\D/g, "").slice(0, 3);
-                            props.onChange("PLAYBACK_FALLBACK_TIMEOUT_MINUTES", d);
-                          }}
-                        />
-                      ) : fallbackUnnecessaryBecauseAllBoth ? (
-                        <input
-                          className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-500 opacity-60 cursor-not-allowed"
-                          type="text"
-                          value="Not needed because all unlocked behaviors already search both instances."
-                          disabled
-                        />
-                      ) : canUseAnySecondaryBehavior ? (
-                        <input
-                          className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-500 opacity-60 cursor-not-allowed"
-                          type="text"
-                          value="Enable fallback search."
-                          disabled
-                        />
-                      ) : (
-                        <input
-                          className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-500 opacity-60 cursor-not-allowed"
-                          type="text"
-                          value="Not applicable, no second instance set up."
-                          disabled
-                        />
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
             </div>
+            )
           ) : !fields.length ? (
             <div className="text-center text-slate-500 text-[16px] py-8">No fields for this step.</div>
           ) : step.key === "look_and_feel" ? (
@@ -10112,16 +11529,67 @@ function OnboardingWizard(props: {
           ) : step.key === "behavior" ? (
             <div className="space-y-6">
               {BEHAVIOR_WIZARD_SECTIONS.map((sectionName) => {
-                const secFields = fields.filter((f) => f.section === sectionName);
+                // Play & search already covers density, search mode, lookahead range, and playback search toggles.
+                if (playFirstMode && sectionName === "Density & Lookahead") return null;
+                if (playFirstMode && sectionName === "Playback") return null;
+                const secFields = fields.filter((f) => {
+                  if (f.section !== sectionName) return false;
+                  if (playFirstMode && PLAY_STEP_DENSITY_FIELD_KEYS.has(f.key)) return false;
+                  if (playFirstMode && PLAY_STEP_PLAYBACK_MODIFIER_KEYS.has(f.key)) return false;
+                  return true;
+                });
                 if (!secFields.length) return null;
-                const fieldsBlock = <div className="space-y-5">{secFields.map((field) => wizardFieldRow(field))}</div>;
                 const surfaceClass = WIZARD_ONBOARDING_SECTION_SURFACE_CLASS;
+                const fieldsBlock =
+                  sectionName === "Library sync" ? (
+                    <div className="space-y-5">
+                      {secFields.map((field) => (
+                        <Fragment key={field.key}>
+                          {field.key === "PLACEHOLDER_POLICY_NEVER_TAGS" ? (
+                            <TagPoliciesIntro spacing="wizard" />
+                          ) : null}
+                          {wizardFieldRow(field)}
+                        </Fragment>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="space-y-5">{secFields.map((field) => wizardFieldRow(field))}</div>
+                  );
                 return (
                   <div key={sectionName}>
                     <h2 className={ONBOARDING_SECTION_TITLE_CLASS}>{sectionName}</h2>
-                    {sectionName === "Lookahead" ? (
+                    {sectionName === "Density & Lookahead" ? (
                       <div className={surfaceClass}>
-                        <LookaheadSectionIntro variant="onboarding" embedded />
+                        <LookaheadDensityPanel
+                          variant="settings"
+                          values={props.values}
+                          onChange={props.onChange}
+                          accentHex={accent.hex}
+                        />
+                      </div>
+                    ) : sectionName === "Playback" ? (
+                      <div className={surfaceClass}>
+                        <PlaybackSectionIntro variant="onboarding" embedded />
+                        <div className="mt-4 border-t border-[#424753]/25 pt-4">
+                          <PlaybackDestFilterControls
+                            values={props.values}
+                            options={
+                              props.payload.playback_dest_options ||
+                              playbackDestOptionsFromValues(props.values)
+                            }
+                            onChange={(key, next) => props.onChange(key, next)}
+                            hideHeading
+                          />
+                          <div className="mt-4 space-y-5">
+                            {secFields
+                              .filter((field) => !isPlaybackDestFilterKey(field.key))
+                              .map((field) => wizardFieldRow(field))}
+                          </div>
+                        </div>
+                      </div>
+                    ) : sectionName === "Calendar" ? (
+                      <div className={surfaceClass}>
+                        <CalendarSectionIntro variant="onboarding" embedded />
                         <div className="mt-4 border-t border-[#424753]/25 pt-4">{fieldsBlock}</div>
                       </div>
                     ) : (
@@ -10133,6 +11601,8 @@ function OnboardingWizard(props: {
             </div>
           ) : (
             <div className="space-y-5">{fields.map((field) => wizardFieldRow(field))}</div>
+          )}
+            </>
           )}
         </div>
 
@@ -10148,7 +11618,7 @@ function OnboardingWizard(props: {
           </button>
           <div className="flex items-center gap-3">
             {props.hasUnsavedChanges && <span className="text-[14px] text-yellow-400 font-headline uppercase tracking-wider">Unsaved changes</span>}
-            {props.stepIndex < WIZARD_STEPS.length - 1 ? (
+            {props.stepIndex < wizardSteps.length - 1 ? (
               <button
                 type="button"
                 disabled={!canProceed || stepSaving}
@@ -10491,14 +11961,40 @@ function formatCalendarItemMeta(item: CalendarDay["items"][number]) {
   return bits;
 }
 
-function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sections: { name: string; fields: SettingsField[] }[]) {
+function fieldsForWizardStep(stepKey: string, sections: { name: string; fields: SettingsField[] }[]) {
+  if (stepKey === "welcome") {
+    return [];
+  }
+  if (stepKey === "arr_routing") {
+    const allKeys = new Set(sections.flatMap((section) => section.fields.map((f) => f.key)));
+    const destKeys = PLAYBACK_DEST_FILTER_KEYS.filter((key) => allKeys.has(key));
+    // When multi-instance routing UI is shown, persist those keys with this step too.
+    const routingKeys = [...allKeys].filter((k) => ARR_BEHAVIOR_KEYS.has(k));
+    return [...destKeys, ...routingKeys];
+  }
+  if (stepKey === "density_search") {
+    const allKeys = new Set(sections.flatMap((section) => section.fields.map((f) => f.key)));
+    return DENSITY_SEARCH_STEP_KEYS.filter((key) => allKeys.has(key));
+  }
   const map: Record<string, string[]> = {};
   sections.forEach((section) => {
     map[section.name] = section.fields.map((f) => f.key);
   });
 
   const integrations = new Set(map.Integrations || []);
-  const mediaIntegrations = new Set([...(map["Media Integrations"] || []), ...[...integrations].filter((k) => k.startsWith("PLEX") || k.startsWith("JELLYFIN") || k.startsWith("EMBY") || k === "ENABLE_PLEX" || k === "ENABLE_JELLYFIN" || k === "ENABLE_EMBY")]);
+  const mediaIntegrations = new Set([
+    ...(map["Media Integrations"] || []),
+    ...[...integrations].filter(
+      (k) =>
+        !isPlexSectionIdField(k) &&
+        (k.startsWith("PLEX") ||
+          k.startsWith("JELLYFIN") ||
+          k.startsWith("EMBY") ||
+          k === "ENABLE_PLEX" ||
+          k === "ENABLE_JELLYFIN" ||
+          k === "ENABLE_EMBY"),
+    ),
+  ]);
   const arrIntegrations = new Set([
     ...(map["ARR Integrations"] || []),
     ...[...integrations].filter(
@@ -10510,7 +12006,8 @@ function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sect
   const paths = map.Paths || [];
   const librarySync = map["Library sync"] || [];
   const calendar = map.Calendar || [];
-  const lookahead = map.Lookahead || [];
+  const lookahead = map["Density & Lookahead"] || [];
+  const playback = map.Playback || [];
   const statusUpdates = map["Status Updates"] || [];
   const advanced = map.Advanced || [];
   const arrBehaviorFromArrIntegrations = [...arrIntegrations].filter((k) => ARR_BEHAVIOR_KEYS.has(k));
@@ -10518,7 +12015,14 @@ function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sect
   const arrBehavior = arrBehaviorFromArrIntegrations.length ? arrBehaviorFromArrIntegrations : arrBehaviorFromLookahead;
   const lookaheadNonArr = lookahead.filter((k) => !ARR_BEHAVIOR_KEYS.has(k));
 
-  if (stepKey === "paths") return [...paths];
+  if (stepKey === "paths") {
+    const pathKeys = [...paths];
+    const allKeys = new Set(sections.flatMap((section) => section.fields.map((f) => f.key)));
+    for (const key of PATH_PLEX_DEFAULT_SECTION_KEYS) {
+      if (allKeys.has(key) && !pathKeys.includes(key)) pathKeys.push(key);
+    }
+    return pathKeys;
+  }
   if (stepKey === "arr") {
     return [
       ...[...arrIntegrations].filter((k) => k.startsWith("RADARR") || k.startsWith("SONARR") || k === "ARR_INSTANCES_JSON"),
@@ -10526,7 +12030,7 @@ function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sect
     ];
   }
   if (stepKey === "media") {
-    return [...mediaIntegrations];
+    return [...mediaIntegrations].filter((k) => !isPlexSectionIdField(k));
   }
   if (stepKey === "look_and_feel") {
     return [...LOOK_AND_FEEL_FIELD_KEYS];
@@ -10536,6 +12040,7 @@ function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sect
     ...librarySync,
     ...calendar,
     ...lookaheadNonArr,
+    ...playback,
     ...statusUpdates.filter((k) => !lookAndFeelKeys.has(k)),
     ...advanced.filter((k) => !SETTINGS_UI_HIDDEN_FIELD_KEYS.has(k) && !lookAndFeelKeys.has(k)),
   ];

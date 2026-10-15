@@ -83,7 +83,9 @@ def _prune_empty_tree(root_dir: str | None) -> int:
 
 
 def _series_has_active_episode_placeholders(session, *, series_id: int) -> bool:
-	count = (
+	from services.source_of_truth.tv_density import PLACEHOLDER_KIND_SERIES_STUB, PLACEHOLDER_KIND_SEASON_STUB
+
+	ep_count = (
 		session.query(Placeholder.id)
 		.join(Episode, Placeholder.episode_id == Episode.id)
 		.join(Season, Episode.season_id == Season.id)
@@ -91,7 +93,19 @@ def _series_has_active_episode_placeholders(session, *, series_id: int) -> bool:
 		.filter(Placeholder.has_placeholder == True)  # noqa: E712
 		.count()
 	)
-	return bool(count)
+	if ep_count:
+		return True
+	stub_count = (
+		session.query(Placeholder.id)
+		.filter(
+			Placeholder.series_id == int(series_id),
+			Placeholder.placeholder_kind.in_([PLACEHOLDER_KIND_SERIES_STUB, PLACEHOLDER_KIND_SEASON_STUB]),
+			Placeholder.has_placeholder == True,  # noqa: E712
+			Placeholder.episode_id.is_(None),
+		)
+		.count()
+	)
+	return bool(stub_count)
 
 
 def _derive_series_folder(series: Any, season: Any, candidate_paths: list[str]) -> str | None:

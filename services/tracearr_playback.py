@@ -96,6 +96,13 @@ def flatten_tracearr_stream_started(payload: dict[str, Any]) -> dict[str, Any]:
         ids["tvdb"] = tvdb
     if isinstance(imdb, str) and imdb.strip():
         ids["imdb"] = imdb.strip()
+    # Plex ratingKey: Tracearr keeps it on data.media; expose it for playback resolve.
+    rating_key = media_in.get("ratingKey") or media_in.get("rating_key")
+    if rating_key is not None:
+        rk = str(rating_key).strip()
+        if rk and rk != "0":
+            ids["plex"] = rk
+            ids["ratingKey"] = rk
 
     media_out: dict[str, Any] = {
         "type": media_type or "",
@@ -110,6 +117,8 @@ def flatten_tracearr_stream_started(payload: dict[str, Any]) -> dict[str, Any]:
         media_out["episode_number"] = episode_num
     if isinstance(media_in.get("subtitle"), str):
         media_out["subtitle"] = media_in["subtitle"]
+    if ids.get("plex"):
+        media_out["ratingKey"] = ids["plex"]
 
     out = dict(payload)
     out["event"] = "playback.start"

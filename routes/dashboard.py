@@ -203,10 +203,6 @@ def _arr_instance_meta(instance_key: str | None = None, instance_id: str | None 
     }
 
 
-def _legacy_is_4k(instance_meta: dict[str, Any]) -> bool:
-    return str(instance_meta.get("role") or "").strip().lower() != "primary"
-
-
 def _arr_endpoint_fingerprint() -> dict[str, tuple[str, str]]:
     fingerprint: dict[str, tuple[str, str]] = {}
     for item in (getattr(settings, "configured_arr_instances", []) or []):
@@ -547,11 +543,17 @@ def _dashboard_not_built_response() -> PlainTextResponse:
 _SETUP_PREVIEW_SNIPPET = "<script>window.__PLACEHOLDARR_SETUP_PREVIEW__=!0</script>"
 
 
-def _serve_dashboard_index(inject_setup_preview: bool = False) -> FileResponse | PlainTextResponse | HTMLResponse:
+def _serve_dashboard_index(
+    *,
+    inject_setup_preview: bool = False,
+) -> FileResponse | PlainTextResponse | HTMLResponse:
     index_path = _dashboard_dist_index_path()
     if not os.path.isfile(index_path):
         return _dashboard_not_built_response()
-    if not inject_setup_preview:
+    inject_snippet = ""
+    if inject_setup_preview:
+        inject_snippet = _SETUP_PREVIEW_SNIPPET
+    if not inject_snippet:
         return FileResponse(index_path, media_type="text/html", headers=_HTML_NO_STORE_HEADERS)
     try:
         with open(index_path, encoding="utf-8") as handle:
@@ -559,9 +561,9 @@ def _serve_dashboard_index(inject_setup_preview: bool = False) -> FileResponse |
     except OSError:
         return FileResponse(index_path, media_type="text/html", headers=_HTML_NO_STORE_HEADERS)
     if "<head>" in html:
-        html = html.replace("<head>", "<head>" + _SETUP_PREVIEW_SNIPPET, 1)
+        html = html.replace("<head>", "<head>" + inject_snippet, 1)
     else:
-        html = _SETUP_PREVIEW_SNIPPET + html
+        html = inject_snippet + html
     return HTMLResponse(content=html, media_type="text/html", headers=_HTML_NO_STORE_HEADERS)
 
 
@@ -630,15 +632,15 @@ async def dashboard_settings_nested(path: str):
 @router.get("/setup", response_class=HTMLResponse)
 async def dashboard_setup_page(request: Request):
     """Serve SPA for onboarding wizard (client-side /setup route)."""
-    inject = request.query_params.get("preview") == "1"
-    return _serve_dashboard_index(inject_setup_preview=inject)
+    inject_preview = request.query_params.get("preview") == "1"
+    return _serve_dashboard_index(inject_setup_preview=inject_preview)
 
 
 @router.get("/setup/{path:path}", response_class=HTMLResponse)
 async def dashboard_setup_nested(path: str):
     """Deep links under /setup still load the SPA shell."""
-    inject = path == "preview" or path.startswith("preview/")
-    return _serve_dashboard_index(inject_setup_preview=inject)
+    inject_preview = path == "preview" or path.startswith("preview/")
+    return _serve_dashboard_index(inject_setup_preview=inject_preview)
 
 
 @router.get("/dashboard-next", response_class=HTMLResponse)
@@ -1169,6 +1171,10 @@ def _humanize_activity_reason(reason: str | None) -> str:
         "import completed": "Import completed",
         "event materialization": "Event processing",
         "materialization run": "Materialization",
+        "series_placeholder_retired": "Series placeholder retired",
+        "season_placeholder_retired": "Season placeholder retired",
+        "series_stub_retired": "Series placeholder retired",
+        "season_stub_retired": "Season placeholder retired",
     }
     raw = str(reason or "").strip()
     if not raw:
@@ -3130,15 +3136,24 @@ async def activity_placeholders(
         session.close()
 
 
-def _arr_secondary_instance(instance_id: str | None, instance_key: str | None) -> bool:
-    iid = str(instance_id or "").lower()
-    key = str(instance_key or "").lower()
-    return "secondary" in iid or iid.endswith(":secondary") or key.endswith("_secondary") or "secondary" in key
+def _arr_non_primary_instance(instance_key: str | None, *, arr_type: str) -> bool:
+    key = str(instance_key or "").strip().lower()
+    if not key:
+        return False
+    ranking = (
+        settings.movie_instance_ranking
+        if str(arr_type or "").strip().lower() == "radarr"
+        else settings.tv_instance_ranking
+    )
+    if not ranking:
+        return False
+    primary = str(ranking[0] or "").strip().lower()
+    return key != primary
 
 
 def _movie_merge_priority(movie: Movie) -> tuple[int, int, int]:
-    """Lower tuple = preferred canonical row (primary instance, then rows with media)."""
-    secondary = 1 if _arr_secondary_instance(getattr(movie, "instance_id", None), movie.instance_key) else 0
+    """Lower tuple = preferred canonical row (first ranked instance, then rows with media)."""
+    secondary = 1 if _arr_non_primary_instance(movie.instance_key, arr_type="radarr") else 0
     has_media = 0 if (bool(movie.has_file) or bool(movie.has_placeholder)) else 1
     return (secondary, has_media, movie.id)
 
@@ -3211,7 +3226,7 @@ def _merge_movie_library_rows(entries: list[tuple[Movie, dict]]) -> list[dict]:
 
 
 def _series_merge_priority(series: Series) -> tuple[int, int, int]:
-    secondary = 1 if _arr_secondary_instance(getattr(series, "instance_id", None), series.instance_key) else 0
+    secondary = 1 if _arr_non_primary_instance(series.instance_key, arr_type="sonarr") else 0
     has_media = 0 if bool(series.has_files) else 1
     return (secondary, has_media, series.id)
 
@@ -3251,46 +3266,14 @@ def _ordered_radarr_instances(session) -> list[dict[str, Any]]:
     """Configured Radarr slots from effective ARR_INSTANCES_JSON (DB first)."""
     raw_str = _arr_instances_json_effective(session)
     inst = parse_configured_arr_instances_json(raw_str)
-    rad = [x for x in inst if str(x.get("arr_type") or "").strip().lower() == "radarr"]
-    if not rad:
-        return []
-    role_rank = {"primary": 0, "secondary": 1, "additional": 2}
-
-    def _slot_sort_key(item: dict[str, Any]) -> tuple[int, int, str]:
-        pri = item.get("priority")
-        try:
-            p_int = int(pri) if pri is not None else -1
-        except (TypeError, ValueError):
-            p_int = -1
-        role = str(item.get("role") or "").strip().lower()
-        rr = role_rank.get(role, 5)
-        ikey = str(item.get("instance_key") or "")
-        return (p_int, rr, ikey)
-
-    return sorted(rad, key=_slot_sort_key)
+    return [x for x in inst if str(x.get("arr_type") or "").strip().lower() == "radarr"]
 
 
 def _ordered_sonarr_instances(session) -> list[dict[str, Any]]:
     """Configured Sonarr slots from effective ARR_INSTANCES_JSON (DB first)."""
     raw_str = _arr_instances_json_effective(session)
     inst = parse_configured_arr_instances_json(raw_str)
-    son = [x for x in inst if str(x.get("arr_type") or "").strip().lower() == "sonarr"]
-    if not son:
-        return []
-    role_rank = {"primary": 0, "secondary": 1, "additional": 2}
-
-    def _slot_sort_key(item: dict[str, Any]) -> tuple[int, int, str]:
-        pri = item.get("priority")
-        try:
-            p_int = int(pri) if pri is not None else -1
-        except (TypeError, ValueError):
-            p_int = -1
-        role = str(item.get("role") or "").strip().lower()
-        rr = role_rank.get(role, 5)
-        ikey = str(item.get("instance_key") or "")
-        return (p_int, rr, ikey)
-
-    return sorted(son, key=_slot_sort_key)
+    return [x for x in inst if str(x.get("arr_type") or "").strip().lower() == "sonarr"]
 
 
 def _append_local_rows_missing_from_slot_merge(
@@ -3826,7 +3809,6 @@ def _build_library_payload(
                     use_local_poster_api=bool(movie.has_placeholder),
                 ),
                 "backdrop_url": movie.remote_fanart,
-                "is_4k": _legacy_is_4k(instance_meta),
                 "instance_key": movie.instance_key,
                 "instance_id": (getattr(movie, "instance_id", None) or instance_meta.get("instance_id") or None),
                 "instance_label": instance_meta.get("label") or movie.instance_key,
@@ -3913,7 +3895,6 @@ def _build_library_payload(
                     use_local_poster_api=bool(series_folder),
                 ),
                 "backdrop_url": series.remote_fanart or series.remote_banner,
-                "is_4k": _legacy_is_4k(instance_meta),
                 "instance_key": series.instance_key,
                 "instance_id": (getattr(series, "instance_id", None) or instance_meta.get("instance_id") or None),
                 "instance_label": instance_meta.get("label") or series.instance_key,
@@ -4403,7 +4384,6 @@ async def movie_detail(movie_id: int):
             "actors": _people_display(movie.radarr_actors, cap=8),
             "directors": _people_display(movie.radarr_directors, cap=4),
             "trailer_url": _youtube_trailer_url(movie.radarr_trailer),
-            "is_4k": _legacy_is_4k(instance_meta),
             "instance_key": movie.instance_key,
             "instance_id": (getattr(movie, "instance_id", None) or instance_meta.get("instance_id") or None),
             "instance_label": instance_meta.get("label") or movie.instance_key,
@@ -4442,6 +4422,7 @@ async def movie_detail(movie_id: int):
             "file_path": movie.radarr_filepath,
             "file_size_bytes": movie.moviefile_size,
             "library_path": movie.radarrpath,
+            "placeholder_folder": movie.placeholder_folder,
             "radarr_id": movie.radarrid,
             "last_found_in_arr": _iso(movie.last_found_in_radarr),
             "radarr_quality": movie.radarr_quality,
@@ -4484,9 +4465,11 @@ async def series_detail(series_id: int):
         )
         instance_meta = _arr_instance_meta(series.instance_key, getattr(series, "instance_id", None))
         from services.source_of_truth.placeholder_policy import policy_from_entity, series_gate_active
+        from services.source_of_truth.tv_density import PLACEHOLDER_KIND_SEASON_STUB, tv_placeholder_density
 
         series_policy = policy_from_entity(series)
         series_gate = series_gate_active(series)
+        density = tv_placeholder_density()
         tag_control = resolve_policy_tag_control(
             instance_key=series.instance_key,
             arr_type="sonarr",
@@ -4512,15 +4495,40 @@ async def series_detail(series_id: int):
             all_episode_ids.extend(int(e.id) for e in episodes_raw)
         ep_display = _episode_display_status_map(session, all_episode_ids)
 
+        # Season/series density stubs are Placeholder rows (not episode.has_placeholder).
+        season_stub_ids: set[int] = set()
+        if density == "season":
+            stub_rows = (
+                session.query(Placeholder.season_id)
+                .filter(
+                    Placeholder.series_id == int(series_id),
+                    Placeholder.placeholder_kind == PLACEHOLDER_KIND_SEASON_STUB,
+                    Placeholder.has_placeholder == True,  # noqa: E712
+                    Placeholder.episode_id.is_(None),
+                    Placeholder.season_id.isnot(None),
+                )
+                .all()
+            )
+            season_stub_ids = {int(sid) for (sid,) in stub_rows if sid is not None}
+
         seasons_out = []
         for season, episodes_raw in season_episode_lists:
             ep_total = len(episodes_raw)
             ep_files = sum(1 for e in episodes_raw if e.has_file)
-            ep_placeholders = sum(1 for e in episodes_raw if e.has_placeholder)
+            if density == "season":
+                ep_placeholders = 1 if int(season.id) in season_stub_ids else 0
+            elif density == "series":
+                # One series-level stub; seasons do not own it for per-season PH counts.
+                ep_placeholders = 0
+            else:
+                ep_placeholders = sum(1 for e in episodes_raw if e.has_placeholder)
             ep_future = 0
             ep_missing = 0
             for e in episodes_raw:
                 if bool(e.has_file) or bool(e.has_placeholder):
+                    continue
+                # Season stub covers missing episodes for that season in the season header counts.
+                if density == "season" and int(season.id) in season_stub_ids:
                     continue
                 if episode_row_is_future_outside_lookahead(e, int(season.season_number or 0)):
                     ep_future += 1
@@ -4604,7 +4612,6 @@ async def series_detail(series_id: int):
             "ratings": series.sonarr_ratings or {},
             "ratings_display": _ratings_display(series.sonarr_ratings),
             "actors": _people_display(series.sonarr_actors, cap=8),
-            "is_4k": _legacy_is_4k(instance_meta),
             "instance_key": series.instance_key,
             "instance_id": (getattr(series, "instance_id", None) or instance_meta.get("instance_id") or None),
             "instance_label": instance_meta.get("label") or series.instance_key,
@@ -4623,6 +4630,7 @@ async def series_detail(series_id: int):
             "placeholder_policy": series_policy,
             "force_placeholder": bool(getattr(series, "force_placeholder", False)),
             "block_placeholder": bool(getattr(series, "block_placeholder", False)),
+            "tv_placeholder_density": density,
             "placeholder_policy_source": (
                 str(getattr(series, "placeholder_policy_source", None) or "").strip().lower() or None
             ),
@@ -5141,7 +5149,6 @@ async def calendar_view(month: str = Query("")):
                 title=movie.title,
                 payload=movie.radarr_payload_raw if isinstance(movie.radarr_payload_raw, dict) else None,
             )
-            movie_instance_meta = _arr_instance_meta(movie.instance_key, getattr(movie, "instance_id", None))
             items_by_date.setdefault(release_date.isoformat(), []).append(
                 {
                     "id": f"movie-{movie.id}",
@@ -5156,7 +5163,6 @@ async def calendar_view(month: str = Query("")):
                     "reason": decision.reason,
                     "has_file": bool(movie.has_file),
                     "has_placeholder": bool(movie.has_placeholder),
-                    "is_4k": _legacy_is_4k(movie_instance_meta),
                     "instance_key": movie.instance_key,
                     "arr_link": arr_link,
                     "release_type": release_type,
@@ -5217,7 +5223,6 @@ async def calendar_view(month: str = Query("")):
                 title=episode.series_title,
                 payload=episode.sonarr_payload_raw if isinstance(episode.sonarr_payload_raw, dict) else None,
             )
-            episode_instance_meta = _arr_instance_meta(episode.instance_key, episode.instance_id)
             ep_code = _episode_calendar_episode_code(episode.season_number, episode.episode_number)
             items_by_date.setdefault(air_date.isoformat(), []).append(
                 {
@@ -5236,7 +5241,6 @@ async def calendar_view(month: str = Query("")):
                     "reason": decision.reason,
                     "has_file": bool(episode.has_file),
                     "has_placeholder": bool(episode.has_placeholder),
-                    "is_4k": _legacy_is_4k(episode_instance_meta),
                     "instance_key": episode.instance_key,
                     "arr_link": arr_link,
                 }
@@ -5307,6 +5311,38 @@ async def settings_status():
 @router.get("/api/settings/current")
 async def settings_current():
     return JSONResponse(content=get_settings_payload())
+
+
+@router.get("/api/settings/arr-root-folders")
+async def settings_arr_root_folders():
+    """Live Arr root folders per configured instance (for destination map UX)."""
+    from routes.collections import _arr_instances_for_media, _fetch_instance_root_folders
+
+    out: list[dict] = []
+    for media_type, arr_type in (("movie", "radarr"), ("show", "sonarr")):
+        for item in _arr_instances_for_media(media_type):
+            folders = _fetch_instance_root_folders(item)
+            out.append(
+                {
+                    "instance_key": item.get("instance_key"),
+                    "instance_id": item.get("instance_id"),
+                    "label": item.get("label") or item.get("instance_key"),
+                    "arr_type": arr_type,
+                    "root_folders": folders,
+                }
+            )
+    return JSONResponse(content={"ok": True, "instances": out})
+
+
+@router.post("/api/settings/ensure-dest-folder")
+async def settings_ensure_dest_folder(request: Request):
+    """Create a Placeholdarr destination folder on disk (for Paths destination setup)."""
+    from services.library_destinations import ensure_single_dest_folder
+
+    payload = await request.json()
+    path = payload.get("path") if isinstance(payload, dict) else None
+    result = ensure_single_dest_folder(str(path or ""))
+    return JSONResponse(content=result)
 
 
 @router.post("/api/settings/save")

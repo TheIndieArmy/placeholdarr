@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import os
 from pathlib import Path
 import re
+import uuid
 from urllib.parse import urlparse
 from typing import Any
 
@@ -18,6 +19,18 @@ from services.postgres.models import AppConfig
 
 
 SETUP_COMPLETED_KEY = "APP_SETUP_COMPLETED_AT"
+
+# Choice fields that also accept a concrete Arr instance_key (from the instance name).
+_INSTANCE_SEARCH_MODE_KEYS = frozenset(
+    {
+        "MOVIE_PLACEHOLDER_SEARCH_MODE",
+        "TV_PLACEHOLDER_SEARCH_MODE",
+        "MOVIE_PLAYBACK_INSTANCE_MODE",
+        "TV_PLAYBACK_INSTANCE_MODE",
+    }
+)
+_INSTANCE_SEARCH_MODE_RESERVED = frozenset({"match", "both", "primary", "secondary"})
+_INSTANCE_KEY_MODE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 # Settings that rewrite existing placeholder NFO text when changed.
 NFO_BACKFILL_SETTING_KEYS = frozenset(
@@ -34,6 +47,22 @@ ART_BACKFILL_SETTING_KEYS = frozenset(
         "ENABLE_PREFERRED_POSTER_LANGUAGE",
         "PREFERRED_POSTER_LANGUAGE",
         "PREFER_ORIGINAL_POSTER_LANGUAGE",
+    }
+)
+
+# Settings that relocate placeholder folders on disk (destination map / library root).
+DESTINATION_REMATERIALIZE_SETTING_KEYS = frozenset(
+    {
+        "LIBRARY_ROOT",
+        "LIBRARY_DESTINATION_MAP_JSON",
+    }
+)
+
+# Settings that rematerialize TV stub density on disk (Apply now or next full sync).
+TV_DENSITY_REMATERIALIZE_SETTING_KEYS = frozenset(
+    {
+        "TV_PLACEHOLDER_DENSITY",
+        "TV_DENSITY_RETIRE_WHEN",
     }
 )
 
@@ -71,6 +100,10 @@ REMOVED_SETTINGS_KEYS_IGNORED_ON_SAVE = frozenset(
         "QUEUE_MONITOR_REFRESH_STAGGER_SECONDS",
         "LOG_LEVEL",
         "MULTI_INSTANCE_SHARED_PLACEHOLDER_CLEANUP",
+        "MOVIE_LIBRARY_4K_FOLDER",
+        "TV_LIBRARY_4K_FOLDER",
+        "PLEX_MOVIE_4K_SECTION_ID",
+        "PLEX_TV_4K_SECTION_ID",
     }
 )
 
@@ -89,12 +122,12 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 ),
                 "type": "choice",
                 "options": [
-                    {"value": "builtin", "label": "Builtin — Placeholdarr username/password (default)"},
+                    {"value": "builtin", "label": "Builtin: Placeholdarr username/password (default)"},
                     {
                         "value": "forward_auth",
-                        "label": "Forward auth — trust Remote-User / X-Forwarded-User from trusted proxies",
+                        "label": "Forward auth: trust Remote-User / X-Forwarded-User from trusted proxies",
                     },
-                    {"value": "disabled", "label": "Disabled — no login checks (unsafe if the port is reachable)"},
+                    {"value": "disabled", "label": "Disabled: no login checks (unsafe if the port is reachable)"},
                 ],
                 "required": True,
                 "restart_required": False,
@@ -144,30 +177,6 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "type": "string",
                 "required": False,
                 "secret": True,
-                "restart_required": False,
-            },
-        ),
-        (
-            "PLEX_MOVIE_SECTION_ID",
-            {
-                "section": "Media Integrations",
-                "label": "Plex Movie Section ID",
-                "description": "Numeric Plex library section ID for movie refresh calls. Required when Plex is enabled.",
-                "type": "int",
-                "required": False,
-                "min": 1,
-                "restart_required": False,
-            },
-        ),
-        (
-            "PLEX_TV_SECTION_ID",
-            {
-                "section": "Media Integrations",
-                "label": "Plex TV Section ID",
-                "description": "Numeric Plex library section ID for TV refresh calls. Required when Plex is enabled.",
-                "type": "int",
-                "required": False,
-                "min": 1,
                 "restart_required": False,
             },
         ),
@@ -349,7 +358,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "ARR Integrations",
                 "label": "ARR Instances JSON (Advanced)",
-                "description": "Optional JSON array for named ARR instances. By default, Placeholdarr supports up to 2 Radarr and 2 Sonarr instances per deployment. Changing an instance URL or API key triggers a full resync; label-only changes do not.",
+                "description": "Optional JSON array for named ARR instances. By default, Placeholdarr supports up to 4 Radarr and 4 Sonarr instances per deployment (override with ARR_MAX_INSTANCES_PER_TYPE). Changing an instance URL or API key triggers a full resync; label-only changes do not.",
                 "type": "string",
                 "required": False,
                 "restart_required": False,
@@ -361,12 +370,62 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "section": "Paths",
                 "label": "Library Root",
                 "description": (
-                    "Base path where Placeholdarr writes placeholders. Placeholdarr derives `movies` and `tv` folders under this root. "
-                    "Use a path separate from Radarr/Sonarr library roots to avoid potential issues with library management."
+                    "Creates the default Placeholdarr destinations, `movies` and `tv` under this root. "
+                    "Unmapped Arr roots use those folders and the default Plex libraries below. "
+                    "Use Library destinations only when an Arr root needs a different folder or Plex library. "
+                    "Keep this path separate from Radarr/Sonarr library roots to avoid library-management conflicts."
                 ),
                 "type": "path",
                 "required": False,
                 "restart_required": False,
+            },
+        ),
+        (
+            "PLEX_MOVIE_SECTION_ID",
+            {
+                "section": "Paths",
+                "label": "Default Plex Movies library",
+                "description": (
+                    "Plex section ID for the default Movies destination (Library Root / movies). Required when Plex is "
+                    "enabled; ignored for Jellyfin/Emby (they refresh by folder path). Mapped destinations can pick a "
+                    "different library."
+                ),
+                "type": "int",
+                "required": False,
+                "min": 1,
+                "restart_required": False,
+            },
+        ),
+        (
+            "PLEX_TV_SECTION_ID",
+            {
+                "section": "Paths",
+                "label": "Default Plex TV library",
+                "description": (
+                    "Plex section ID for the default TV destination (Library Root / tv). Required when Plex is enabled; "
+                    "ignored for Jellyfin/Emby (they refresh by folder path). Mapped destinations can pick a different library."
+                ),
+                "type": "int",
+                "required": False,
+                "min": 1,
+                "restart_required": False,
+            },
+        ),
+        (
+            "LIBRARY_DESTINATION_MAP_JSON",
+            {
+                "section": "Paths",
+                "label": "Library destinations",
+                "description": (
+                    "Optional map of Arr root folders to Placeholdarr destination folders and Plex libraries. "
+                    "Unmapped roots keep the default destinations from Library Root (movies/tv) and the Plex libraries "
+                    "above. Jellyfin and Emby do not need library IDs; they refresh by path. "
+                    "Changing destinations rematerializes placeholders (Apply now or next full sync)."
+                ),
+                "type": "string",
+                "required": False,
+                "restart_required": False,
+                "default": "",
             },
         ),
         (
@@ -376,22 +435,31 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "label": "Startup ARR sync mode",
                 # Intro copy is also structured in `frontend/src/App.tsx` (`StartupSyncModeDescription`); update both together.
                 "description": (
-                    "One input to the single boot sync decision, together with overdue scheduled lite/full tasks. "
-                    "At most one sync runs at startup: any full demand wins (overdue full, Full mode, or Auto when a first full is still needed); "
-                    "otherwise lite when overdue or when Lite/Auto requests it. "
+                    "When Placeholdarr starts, it can run one Arr sync to catch up with your libraries. "
+                    "Your choice here is weighed with any overdue scheduled lite or full sync. "
+                    "If a full sync is already due, Placeholdarr runs full instead of lite. "
                     "Off means do not request a sync only because the process started; overdue schedules can still promote a full or lite run. "
                     "Full sync scans *arr catalogs and Placeholdarr roots, then add/delete placeholders as needed. "
-                    "Lite sync diffs live catalogs to the database, syncs changed titles, then scoped determination and materialization (no full filesystem scan). "
-                    "Placeholdarr work is relatively quick; media players may still take time to rescan large library changes. "
+                    "Lite sync compares live Arr catalogs to Placeholdarr's database, syncs only titles that changed, then updates placeholders for those titles (no full filesystem scan). "
+                    "Media players still need to rescan before new or removed placeholders show up in your libraries. "
                     "A full sync will automatically start in the background at the completion of this setup."
                 ),
                 "type": "choice",
                 "restart_required": True,
                 "options": [
-                    {"value": "auto", "label": "Auto: Full when first full is needed; otherwise request lite (overdue full still wins)"},
-                    {"value": "full", "label": "Full: always request full on every startup"},
-                    {"value": "lite", "label": "Lite: request lite (overdue full still wins)"},
-                    {"value": "off", "label": "Off: no startup request; overdue schedules still run"},
+                    {
+                        "value": "auto",
+                        "label": "Auto: full when the scheduled full sync is overdue; otherwise lite",
+                    },
+                    {"value": "full", "label": "Full: always run full on every startup"},
+                    {
+                        "value": "lite",
+                        "label": "Lite: run lite on startup (full still runs if the scheduled full sync is overdue)",
+                    },
+                    {
+                        "value": "off",
+                        "label": "Off: no startup sync; overdue schedules can still run",
+                    },
                 ],
             },
         ),
@@ -439,9 +507,10 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "PLACEHOLDER_POLICY_NEVER_TAGS",
             {
                 "section": "Library sync",
-                "label": "Never placeholder tags",
+                "label": "Never create placeholders",
                 "description": (
-                    "Movies/series with any of these Arr tags get Never on sync. Default: placeholdarr-never."
+                    "Titles with any of these Arr tags will not get placeholders on sync. "
+                    "Default: placeholdarr-never. Add your own existing Arr tags if you prefer."
                 ),
                 "type": "string_list",
                 "restart_required": False,
@@ -452,10 +521,10 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "PLACEHOLDER_POLICY_PINNED_TAGS",
             {
                 "section": "Library sync",
-                "label": "Pinned placeholder tags",
+                "label": "Always keep placeholders",
                 "description": (
-                    "Movies/series with any of these Arr tags get Pinned on sync (unless a Never tag also matches). "
-                    "Default: placeholdarr-pinned."
+                    "Titles with any of these Arr tags always keep placeholders on sync. "
+                    "Default: placeholdarr-pinned. If a Never-create tag also matches, Never wins."
                 ),
                 "type": "string_list",
                 "restart_required": False,
@@ -479,9 +548,9 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "label": "Skip placeholders for monitored titles",
                 "description": (
                     "When enabled, do not create placeholder files for movies or episodes that are monitored in "
-                    "Radarr or Sonarr (and have no real file). Existing placeholders are removed on the next ARR sync "
-                    "after monitoring is detected. Import still removes placeholders when a real file arrives. "
-                    "Manual monitor toggles in Radarr/Sonarr may take until the next full sync to apply."
+                    "Radarr or Sonarr (even ones that have no real file yet). Import still removes placeholders when "
+                    "a real file arrives. Manual monitor toggles in Radarr/Sonarr may take until the next full sync "
+                    "to apply."
                 ),
                 "type": "bool",
                 "restart_required": False,
@@ -493,8 +562,8 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "section": "Library sync",
                 "label": "TV: skip when series is monitored (Sonarr)",
                 "description": (
-                    "When the series is monitored in Sonarr, do not create placeholders for any episode in that show—even "
-                    "when individual seasons or episodes are unmonitored. Movies are unchanged."
+                    "When the series is monitored in Sonarr, do not create placeholders for any episode in that show, "
+                    "even when individual seasons or episodes are unmonitored. Movies are unchanged."
                 ),
                 "type": "bool",
                 "restart_required": False,
@@ -520,7 +589,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "CALENDAR_SYNC_INTERVAL_HOURS",
             {
                 "section": "Calendar",
-                "label": "Calendar sync interval (hours, legacy)",
+                "label": "Calendar sync interval (hours)",
                 "description": (
                     "Only used when lite sync interval is 0. When lite sync is enabled, calendar date refresh and "
                     "status updates run as part of lite sync instead. Set to 0 to disable."
@@ -558,12 +627,59 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "TV_PLACEHOLDER_DENSITY",
+            {
+                "section": "Density & Lookahead",
+                "label": "TV placeholder density",
+                "description": (
+                    "How many TV placeholder files Placeholdarr writes on disk (library detail). "
+                    "Separate from Search mode below, which controls how wide Sonarr searches on play. "
+                    "Episode density is mostly informational when Search mode is Season or Series; "
+                    "most flexible requesting pairs Episode density with Episode search. "
+                    "Changing this rematerializes existing TV placeholders (Apply now or next full sync). "
+                    "Moving to Season or Series deletes per-episode placeholder files."
+                ),
+                "type": "choice",
+                "restart_required": False,
+                "options": [
+                    {"value": "episode", "label": "Episode (one placeholder per missing episode)"},
+                    {"value": "season", "label": "Season (one season placeholder per season that still needs content)"},
+                    {"value": "series", "label": "Series (one series placeholder per show that still needs content)"},
+                ],
+            },
+        ),
+        (
+            "TV_DENSITY_RETIRE_WHEN",
+            {
+                "section": "Density & Lookahead",
+                "label": "Remove season/series placeholder when",
+                "description": (
+                    "Only applies when TV placeholder density is Season or Series. "
+                    "Episode density still removes each episode placeholder when that episode no longer needs one."
+                ),
+                "type": "choice",
+                "restart_required": False,
+                "options": [
+                    {
+                        "value": "when_no_episode_needs_placeholder",
+                        "label": "No episode still needs a placeholder (recommended)",
+                    },
+                    {
+                        "value": "when_any_episode_has_file",
+                        "label": "Any episode in the show (or season) has a real file",
+                    },
+                ],
+            },
+        ),
+        (
             "TV_PLAY_MODE",
             {
-                "section": "Lookahead",
+                "section": "Density & Lookahead",
                 "label": "Search mode",
-                "description": "How wide the Sonarr search is from the episode you played.",
-                "type": "choice",
+                "description": (
+                    "How wide the Sonarr search is when you play a placeholder "
+                    "(search targets come from catalog state, not the placeholder filename)."
+                ),                "type": "choice",
                 "restart_required": False,
                 "options": [
                     {"value": "episode", "label": "Episode"},
@@ -575,7 +691,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "EPISODES_LOOKAHEAD",
             {
-                "section": "Lookahead",
+                "section": "Density & Lookahead",
                 "label": "Lookahead range",
                 "description": "",
                 "type": "int",
@@ -584,48 +700,52 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
-            "PLAYBACK_MONITOR_ONLY_NO_SEARCH",
+            "PLAYBACK_MONITOR_ONLY_DESTS",
             {
-                "section": "Lookahead",
+                "section": "Playback",
                 "label": "Monitor only on playback (no search)",
                 "description": (
-                    "When enabled, playback marks unmonitored target episodes monitored in Sonarr but never runs "
-                    "a search or SEARCHING placeholder updates. While this is on, the two search filters below "
-                    "have no effect."
+                    "Pick library destinations where play only marks titles monitored in Radarr/Sonarr, without "
+                    "searching. Leave empty to search on play everywhere (the default). On destinations listed "
+                    "here, the two filters below do not apply."
                 ),
-                "type": "bool",
+                "type": "string_list",
                 "restart_required": False,
+                "default": [],
+                "playback_dest_filter": True,
             },
         ),
         (
-            "PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED",
+            "PLAYBACK_SEARCH_ALREADY_MONITORED_DESTS",
             {
-                "section": "Lookahead",
-                "label": "Do not search already-monitored episodes",
+                "section": "Playback",
+                "label": "Search already-monitored titles on playback",
                 "description": (
-                    "When enabled, target episodes already monitored in Sonarr are excluded from playback searches. "
-                    "Episodes not yet monitored are marked monitored in Sonarr and searched. When disabled, every "
-                    "target episode in your search mode can be searched, including those already monitored."
+                    "Pick destinations where titles already monitored in Radarr/Sonarr can be searched again on "
+                    "play. Destinations not listed skip search for already-monitored titles (unmonitored targets "
+                    "are still monitored, then searched). Useful when indexers have stricter limits."
                 ),
-                "type": "bool",
+                "type": "string_list",
                 "restart_required": False,
-                "disabled_when": "PLAYBACK_MONITOR_ONLY_NO_SEARCH",
+                "default": [],
+                "playback_dest_filter": True,
             },
         ),
         (
-            "PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES",
+            "PLAYBACK_SEARCH_FUTURE_DESTS",
             {
-                "section": "Lookahead",
-                "label": "Do not search future episodes on playback",
+                "section": "Playback",
+                "label": "Search future titles on playback",
                 "description": (
-                    "When enabled, target episodes that have not aired yet (or unknown air dates treated as future) "
-                    "are marked monitored in Sonarr if needed but are not searched. When disabled, future episodes "
-                    "in the target list can be searched like any other. Applies to Episode, Season, and Series "
-                    "search modes."
+                    "Pick destinations where not-yet-released titles are searched on play like any other. "
+                    "Destinations not listed still monitor those titles when needed but do not search them on "
+                    "this play. For TV this uses episode air dates; for movies it uses your preferred Calendar "
+                    "release date."
                 ),
-                "type": "bool",
+                "type": "string_list",
                 "restart_required": False,
-                "disabled_when": "PLAYBACK_MONITOR_ONLY_NO_SEARCH",
+                "default": [],
+                "playback_dest_filter": True,
             },
         ),
         (
@@ -652,10 +772,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Status Updates",
                 "label": "Project status into",
-                "description": (
-                    "Choose where bracketed placeholder status appears in media library metadata. "
-                    "Changing this can trigger a metadata placeholder refresh (now or next full sync)."
-                ),
+                "description": "",
                 "type": "choice",
                 "restart_required": True,
                 "options": [
@@ -668,7 +785,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "PLACEHOLDER_POSTER_OVERLAY_MODE",
             {
-                "section": "Status Updates",
+                "section": "Poster Overlay",
                 "label": "Placeholder poster overlay",
                 "description": (
                     "How placeholder posters appear in Plex, Jellyfin, and Emby. Always writes local poster.jpg, "
@@ -682,15 +799,15 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "options": [
                     {"value": "off", "label": "Off (raw download, no overlay)"},
                     {"value": "grayscale", "label": "Grayscale poster"},
-                    {"value": "top_banner", "label": "Top banner — PLACEHOLDER"},
-                    {"value": "corner_logo", "label": "Corner badge — Placeholdarr logo"},
+                    {"value": "top_banner", "label": "Top banner: PLACEHOLDER"},
+                    {"value": "corner_logo", "label": "Corner badge: Placeholdarr logo"},
                 ],
             },
         ),
         (
             "ENABLE_PREFERRED_POSTER_LANGUAGE",
             {
-                "section": "Status Updates",
+                "section": "Poster Overlay",
                 "label": "Fetch from TMDB",
                 "description": "",
                 "type": "bool",
@@ -701,7 +818,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "PREFER_ORIGINAL_POSTER_LANGUAGE",
             {
-                "section": "Status Updates",
+                "section": "Poster Overlay",
                 "label": "Original language first",
                 "description": "",
                 "type": "bool",
@@ -714,7 +831,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "PREFERRED_POSTER_LANGUAGE",
             {
-                "section": "Status Updates",
+                "section": "Poster Overlay",
                 "label": "Language",
                 "description": "",
                 "type": "choice",
@@ -726,73 +843,246 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES",
+            {
+                "section": "ARR Integrations",
+                "label": "Always also search these Radarrs on placeholder play",
+                "description": (
+                    "Path-matched Radarr is tried first when the library path is clear. "
+                    "Additional Radarr instance keys to always search with it on movie placeholder play."
+                ),
+                "type": "string_list",
+                "restart_required": False,
+                "default": [],
+            },
+        ),
+        (
+            "MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES",
+            {
+                "section": "ARR Integrations",
+                "label": "Fallback: also try these Radarrs on placeholder play",
+                "description": (
+                    "Additional Radarr instance keys to try only when the preferred Arr does not have the title "
+                    "or the search does not resolve within the Fallback timeout."
+                ),
+                "type": "string_list",
+                "restart_required": False,
+                "default": [],
+            },
+        ),
+        (
+            "MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES",
+            {
+                "section": "ARR Integrations",
+                "label": "Also search these Radarrs on placeholder play (legacy)",
+                "description": "Legacy list synced from MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES.",
+                "type": "string_list",
+                "restart_required": False,
+                "default": [],
+            },
+        ),
+        (
+            "MOVIE_PLAY_REAL_ALSO_INSTANCES",
+            {
+                "section": "ARR Integrations",
+                "label": "Also search these Radarrs on real play",
+                "description": (
+                    "Additional Radarr instance keys to always search when a real movie file is played. "
+                    "Empty = no cross-instance search on real movie play (path-matched already has the file)."
+                ),
+                "type": "string_list",
+                "restart_required": False,
+                "default": [],
+            },
+        ),
+        (
+            "TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES",
+            {
+                "section": "ARR Integrations",
+                "label": "Always also search these Sonarrs on placeholder play",
+                "description": (
+                    "Path-matched Sonarr is tried first when the library path is clear. "
+                    "Additional Sonarr instance keys to always search with it on TV placeholder play."
+                ),
+                "type": "string_list",
+                "restart_required": False,
+                "default": [],
+            },
+        ),
+        (
+            "TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES",
+            {
+                "section": "ARR Integrations",
+                "label": "Fallback: also try these Sonarrs on placeholder play",
+                "description": (
+                    "Additional Sonarr instance keys to try only when the preferred Arr does not have the title "
+                    "or the search does not resolve within the Fallback timeout."
+                ),
+                "type": "string_list",
+                "restart_required": False,
+                "default": [],
+            },
+        ),
+        (
+            "TV_PLAY_PLACEHOLDER_ALSO_INSTANCES",
+            {
+                "section": "ARR Integrations",
+                "label": "Also search these Sonarrs on placeholder play (legacy)",
+                "description": "Legacy list synced from TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES.",
+                "type": "string_list",
+                "restart_required": False,
+                "default": [],
+            },
+        ),
+        (
+            "TV_PLAY_REAL_ALSO_INSTANCES",
+            {
+                "section": "ARR Integrations",
+                "label": "Also search these Sonarrs on real play",
+                "description": (
+                    "Additional Sonarr instance keys to always search (including Lookahead targets) when a real "
+                    "episode is played. Empty = path-matched only."
+                ),
+                "type": "string_list",
+                "restart_required": False,
+                "default": [],
+            },
+        ),
+        (
             "MOVIE_PLACEHOLDER_SEARCH_MODE",
             {
                 "section": "ARR Integrations",
-                "label": "Movie placeholder search instance",
-                "description": "When a movie placeholder plays, which Radarr instance should be searched. Primary = first configured instance. Secondary = second configured instance. Both = search all configured instances.",
+                "label": "Movie placeholder search preference (legacy)",
+                "description": "Legacy preference synced from Play Actions. Prefer MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES.",
                 "type": "choice",
                 "restart_required": False,
+                "default": "both",
                 "options": [
-                    {"value": "primary", "label": "Primary instance only"},
-                    {"value": "secondary", "label": "Secondary instance only"},
-                    {"value": "both", "label": "Both instances"},
+                    {"value": "both", "label": "All instances"},
+                    {"value": "match", "label": "Matched by library path (legacy)"},
+                    {"value": "primary", "label": "First instance only (legacy)"},
+                    {"value": "secondary", "label": "Second instance only (legacy)"},
                 ],
+            },
+        ),
+        (
+            "MOVIE_PLACEHOLDER_PREFER_PATH_MATCH",
+            {
+                "section": "ARR Integrations",
+                "label": "Movie placeholder prefer path match (legacy)",
+                "description": "Legacy toggle; Play Actions always path-matches when the path is clear.",
+                "type": "bool",
+                "restart_required": False,
+                "default": True,
             },
         ),
         (
             "TV_PLACEHOLDER_SEARCH_MODE",
             {
                 "section": "ARR Integrations",
-                "label": "TV placeholder search instance",
-                "description": "When a TV placeholder plays, which Sonarr instance should be searched. Primary = first configured instance. Secondary = second configured instance. Both = search all configured instances.",
+                "label": "TV placeholder search preference (legacy)",
+                "description": "Legacy preference synced from Play Actions. Prefer TV_PLAY_PLACEHOLDER_ALSO_INSTANCES.",
                 "type": "choice",
                 "restart_required": False,
+                "default": "both",
                 "options": [
-                    {"value": "primary", "label": "Primary instance only"},
-                    {"value": "secondary", "label": "Secondary instance only"},
-                    {"value": "both", "label": "Both instances"},
+                    {"value": "both", "label": "All instances"},
+                    {"value": "match", "label": "Matched by library path (legacy)"},
+                    {"value": "primary", "label": "First instance only (legacy)"},
+                    {"value": "secondary", "label": "Second instance only (legacy)"},
                 ],
+            },
+        ),
+        (
+            "TV_PLACEHOLDER_PREFER_PATH_MATCH",
+            {
+                "section": "ARR Integrations",
+                "label": "TV placeholder prefer path match (legacy)",
+                "description": "Legacy toggle; Play Actions always path-matches when the path is clear.",
+                "type": "bool",
+                "restart_required": False,
+                "default": True,
             },
         ),
         (
             "MOVIE_PLAYBACK_INSTANCE_MODE",
             {
                 "section": "ARR Integrations",
-                "label": "Movie real-file playback mode",
-                "description": "Applies when a real movie file is played. Match routes to the instance whose library path contains the file. Primary always searches the first configured instance. Secondary always searches the second configured instance. Both searches all configured instances.",
+                "label": "Movie ambiguous play instance (legacy)",
+                "description": "Legacy preference; ambiguous plays follow MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES.",
                 "type": "choice",
                 "restart_required": False,
+                "default": "both",
                 "options": [
-                    {"value": "match", "label": "Match by library path (recommended)"},
-                    {"value": "primary", "label": "Primary instance only"},
-                    {"value": "secondary", "label": "Secondary instance only"},
-                    {"value": "both", "label": "Both instances"},
+                    {"value": "both", "label": "All instances"},
+                    {"value": "match", "label": "Matched by library path (legacy)"},
+                    {"value": "primary", "label": "First instance only (legacy)"},
+                    {"value": "secondary", "label": "Second instance only (legacy)"},
                 ],
+            },
+        ),
+        (
+            "MOVIE_PLAYBACK_PREFER_PATH_MATCH",
+            {
+                "section": "ARR Integrations",
+                "label": "Movie ambiguous prefer path match (legacy)",
+                "description": "Legacy toggle; Play Actions always path-matches when the path is clear.",
+                "type": "bool",
+                "restart_required": False,
+                "default": True,
             },
         ),
         (
             "TV_PLAYBACK_INSTANCE_MODE",
             {
                 "section": "ARR Integrations",
-                "label": "TV real-file playback mode",
-                "description": "Applies when a real TV file is played. Match routes to the instance whose library path contains the file. Primary always searches the first configured instance. Secondary always searches the second configured instance. Both searches all configured instances.",
+                "label": "TV ambiguous play instance (legacy)",
+                "description": "Legacy preference; ambiguous plays follow TV_PLAY_PLACEHOLDER_ALSO_INSTANCES.",
                 "type": "choice",
                 "restart_required": False,
+                "default": "both",
                 "options": [
-                    {"value": "match", "label": "Match by library path (recommended)"},
-                    {"value": "primary", "label": "Primary instance only"},
-                    {"value": "secondary", "label": "Secondary instance only"},
-                    {"value": "both", "label": "Both instances"},
+                    {"value": "both", "label": "All instances"},
+                    {"value": "match", "label": "Matched by library path (legacy)"},
+                    {"value": "primary", "label": "First instance only (legacy)"},
+                    {"value": "secondary", "label": "Second instance only (legacy)"},
                 ],
+            },
+        ),
+        (
+            "TV_PLAYBACK_PREFER_PATH_MATCH",
+            {
+                "section": "ARR Integrations",
+                "label": "TV ambiguous prefer path match (legacy)",
+                "description": "Legacy toggle; Play Actions always path-matches when the path is clear.",
+                "type": "bool",
+                "restart_required": False,
+                "default": True,
+            },
+        ),
+        (
+            "TV_CROSS_INSTANCE_LOOKAHEAD",
+            {
+                "section": "Density & Lookahead",
+                "label": "Also search these Sonarr instances on real TV play (legacy)",
+                "description": (
+                    "Legacy list synced from TV_PLAY_REAL_ALSO_INSTANCES (Play Actions). Empty = path-matched only."
+                ),
+                "type": "string_list",
+                "restart_required": False,
+                "default": [],
             },
         ),
         (
             "ENABLE_PLAYBACK_FALLBACK_SEARCH",
             {
                 "section": "ARR Integrations",
-                "label": "Enable playback fallback search",
-                "description": "When instance mode is set to Primary or Secondary, content that is not present in the selected ARR instance falls back immediately, including missing rows and rows marked deleted. This setting controls delayed fallback only after a search was actually attempted first but did not resolve, such as no found releases or a failed download path.",
+                "label": "Enable playback Fallback search (derived)",
+                "description": (
+                    "Derived from Play Actions Placeholder Fallback selections. When true (or when Fallback "
+                    "instance lists are non-empty), remaining Fallback instances are tried if the preferred Arr "
+                    "does not have the title or the search does not resolve."
+                ),
                 "type": "bool",
                 "restart_required": False,
             },
@@ -801,8 +1091,13 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "PLAYBACK_FALLBACK_TIMEOUT_MINUTES",
             {
                 "section": "ARR Integrations",
-                "label": "Playback fallback timeout (minutes)",
-                "description": "Minutes to wait before delayed fallback runs on the other instance after an initial search attempt did not resolve. Content that is not present in the selected ARR instance still falls back immediately, including missing rows and rows marked deleted.",
+                "label": "Fallback timeout (minutes)",
+                "description": (
+                    "Minutes to wait before trying Placeholder Fallback instances in ARR Integrations list order "
+                    "(same order as the Play Actions matrix) after an initial search attempt did not resolve. "
+                    "Content missing on the preferred Arr still tries the next instance immediately. Adjust this "
+                    "based on how long typical indexer searches take in your environment for quicker fallback."
+                ),
                 "type": "int",
                 "min": 1,
                 "restart_required": False,
@@ -813,22 +1108,13 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "ARR Integrations",
                 "label": "Radarr shared placeholder cleanup",
-                "description": (
-                    "When two Radarr instances track the same movie (same TMDB id), controls shared placeholder "
-                    "behavior: keep placeholders until no instance still needs them, or stop creating/recreating "
-                    "placeholders on other instances once any instance has a real file (and remove stale on-disk files)."
-                ),
+                "description": "When two Radarr instances share the same Placeholdarr folder (Library Root, or the same custom Library destination), pick when those placeholders are removed after a real file lands. If each instance has its own Library destination, this setting is unused; each folder is cleaned up on its own.",
                 "type": "choice",
                 "restart_required": False,
+                "default": "protect_siblings",
                 "options": [
-                    {
-                        "value": "protect_siblings",
-                        "label": "Protect until no instance needs placeholder (recommended)",
-                    },
-                    {
-                        "value": "any_instance_has_file",
-                        "label": "Remove when any instance has a real file",
-                    },
+                    {"value": "protect_siblings", "label": "Remove when all instances have a real file"},
+                    {"value": "any_instance_has_file", "label": "Remove when any instance has a real file"},
                 ],
             },
         ),
@@ -837,22 +1123,13 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "ARR Integrations",
                 "label": "Sonarr shared placeholder cleanup",
-                "description": (
-                    "When two Sonarr instances track the same episode (same TVDB id and season/episode), controls "
-                    "shared placeholder behavior: keep placeholders until no instance still needs them, or stop "
-                    "creating/recreating placeholders on other instances once any instance has a real file."
-                ),
+                "description": "When two Sonarr instances share the same Placeholdarr folder (Library Root, or the same custom Library destination), pick when those placeholders are removed after a real file lands. If each instance has its own Library destination, this setting is unused; each folder is cleaned up on its own.",
                 "type": "choice",
                 "restart_required": False,
+                "default": "protect_siblings",
                 "options": [
-                    {
-                        "value": "protect_siblings",
-                        "label": "Protect until no instance needs placeholder (recommended)",
-                    },
-                    {
-                        "value": "any_instance_has_file",
-                        "label": "Remove when any instance has a real file",
-                    },
+                    {"value": "protect_siblings", "label": "Remove when all instances have a real file"},
+                    {"value": "any_instance_has_file", "label": "Remove when any instance has a real file"},
                 ],
             },
         ),
@@ -865,9 +1142,9 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                     "Optional. The URL that ARR, Tautulli, Jellyfin, and Emby should use to call "
                     "Placeholdarr. When set, this replaces the dashboard origin in the webhook "
                     "setup instructions. Use this when the address those services should reach "
-                    "Placeholdarr at is different from the URL you use to view the dashboard — "
-                    "for example, an internal Docker/Kubernetes service name when the dashboard "
-                    "is reached through a public reverse proxy. Leave blank to use the dashboard's "
+                    "Placeholdarr at is different from the URL you use to view the dashboard "
+                    "(for example, an internal Docker/Kubernetes service name when the dashboard "
+                    "is reached through a public reverse proxy). Leave blank to use the dashboard's "
                     "own URL. Format: http(s)://host[:port] (no trailing slash)."
                 ),
                 "type": "url",
@@ -987,36 +1264,54 @@ def _normalize_instance_key(value: Any) -> str:
 
 
 def _arr_instance_id_has_uuid(instance_id: str) -> bool:
-    """True when instance_id embeds a UUID (stable webhook id), not the legacy ``radarr:slug`` fallback."""
-    text = str(instance_id or "")
-    return text.count("-") >= 4
+    """True when instance_id is a UUID (stable webhook identity)."""
+    text = str(instance_id or "").strip()
+    if not text:
+        return False
+    try:
+        uuid.UUID(text)
+        return True
+    except Exception:
+        return False
+
+
+def _new_arr_instance_id() -> str:
+    return str(uuid.uuid4())
 
 
 def _stable_default_instance_id(arr_type: str, item: dict[str, Any]) -> str:
-    """Default webhook row id: ``radarr_primary``, ``sonarr_secondary``, etc.
-
-    One Placeholdarr deployment uses a single origin; two deployments never share a URL, so these
-    predictable ids are safe for local / single-tenant installs. Existing UUID ids are preserved
-    by merge logic when already saved.
-    """
-    r = str(item.get("role") or "").strip().lower()
-    if r not in ("primary", "secondary"):
-        try:
-            r = "primary" if int(item.get("priority", 0) or 0) == 0 else "secondary"
-        except Exception:
-            r = "primary"
-    return f"{arr_type}_{r}"
+    """Assign a new stable webhook id for a brand-new Arr slot (UUID)."""
+    return _new_arr_instance_id()
 
 
 def _normalize_arr_instance_url(value: Any) -> str:
     return str(value or "").strip().rstrip("/")
 
 
-def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: str) -> str:
-    """Normalize instance_id values and carry forward prior instance_key values as webhook aliases.
+_RESERVED_ARR_INSTANCE_KEYS = frozenset(
+    {
+        "primary",
+        "secondary",
+        "additional",
+        "standard",
+        "4k",
+        "match",
+        "both",
+    }
+)
 
-    New rows get deterministic ids (``radarr_primary``, …). Rows that already use UUID-based ids keep them.
-    Blank ``api_key`` values on matched rows are retained from the previous JSON (secret redaction UX).
+
+def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: str) -> str:
+    """Preserve stable instance_id values and carry renamed keys as aliases.
+
+    Matched slots always keep their prior ``instance_id`` (UUID or legacy slug).
+    Brand-new slots receive a UUID. Blank ``api_key`` values are retained from the
+    previous row when the client sent a redacted value.
+
+    URL transplant: when a surviving drawer still sends identity A but its URL
+    matches removed peer B, adopt B's ``instance_id`` (and B's key aliases). Do
+    not keep A's id on B's server, and do not alias A's key onto B (A must
+    tombstone).
     """
     try:
         incoming = json.loads(incoming_json)
@@ -1030,6 +1325,18 @@ def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: 
             previous = []
     except Exception:
         previous = []
+
+    from services.source_of_truth.arr_instance_key_rewrite import detect_url_transplants
+
+    transplants = detect_url_transplants(previous_json, incoming_json)
+    transplant_by_displaced_id = {
+        str(row.get("displaced_instance_id") or "").strip().lower(): row for row in transplants
+    }
+    displaced_keys = {
+        str(row.get("displaced_key") or "").strip().lower()
+        for row in transplants
+        if str(row.get("displaced_key") or "").strip()
+    }
 
     def fp(item: dict[str, Any]) -> tuple[str, str, str]:
         return (
@@ -1075,20 +1382,24 @@ def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: 
         new_key = _normalize_instance_key(item.get("instance_key") or item.get("key") or item.get("name") or "")
         nid = str(item.get("instance_id") or "").strip().lower()
         matched: dict[str, Any] | None = None
-        if nid and nid in old_by_id:
+        transplant = transplant_by_displaced_id.get(nid) if nid else None
+        if transplant:
+            adopted_id = str(transplant.get("adopted_instance_id") or "").strip().lower()
+            matched = old_by_id.get(adopted_id) if adopted_id else None
+        elif nid and nid in old_by_id:
             matched = old_by_id[nid]
         else:
             try:
                 matched = old_by_fp.get(fp(item))
             except Exception:
                 matched = None
-        if matched is None and new_key:
-            matched = old_by_key.get((arr_type, new_key))
-        if matched is None:
-            try:
-                matched = old_by_url.get(fp_url(item))
-            except Exception:
-                matched = None
+            if matched is None and new_key:
+                matched = old_by_key.get((arr_type, new_key))
+            if matched is None:
+                try:
+                    matched = old_by_url.get(fp_url(item))
+                except Exception:
+                    matched = None
 
         # Retain previous API key when the client sends a blank (redacted) value.
         incoming_key = str(item.get("api_key") or item.get("apikey") or "").strip()
@@ -1107,12 +1418,14 @@ def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: 
         if matched:
             old_key = _normalize_instance_key(matched.get("instance_key") or matched.get("key") or matched.get("name") or "")
             mid = str(matched.get("instance_id") or "").strip().lower()
-            if _arr_instance_id_has_uuid(mid):
+            # Identity is immutable once assigned: never rewrite id on rename.
+            # URL transplant rebinds to the adopted (URL owner) id above.
+            if mid:
                 item["instance_id"] = mid
             elif _arr_instance_id_has_uuid(nid):
                 item["instance_id"] = nid
             else:
-                item["instance_id"] = _stable_default_instance_id(arr_type, item)
+                item["instance_id"] = _new_arr_instance_id()
             old_aliases = matched.get("instance_key_aliases") if isinstance(matched.get("instance_key_aliases"), list) else []
             for a in old_aliases:
                 k = _normalize_instance_key(a)
@@ -1123,12 +1436,13 @@ def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: 
         else:
             if _arr_instance_id_has_uuid(nid):
                 item["instance_id"] = nid
-            elif str(nid or "").strip():
-                item["instance_id"] = str(nid).strip().lower()
+            elif nid:
+                # Keep legacy non-UUID ids the UI already shows (webhook continuity).
+                item["instance_id"] = nid
             else:
-                item["instance_id"] = _stable_default_instance_id(arr_type, item)
+                item["instance_id"] = _new_arr_instance_id()
 
-        aliases = [a for a in aliases if a and a != new_key]
+        aliases = [a for a in aliases if a and a != new_key and a not in displaced_keys]
         seen: set[str] = set()
         deduped: list[str] = []
         for a in aliases:
@@ -1136,8 +1450,59 @@ def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: 
                 deduped.append(a)
                 seen.add(a)
         item["instance_key_aliases"] = deduped[:alias_cap]
-        # Never persist client-only redaction flags.
+        # Never persist client-only redaction flags or retired routing fields.
         item.pop("api_key_saved", None)
+        item.pop("role", None)
+        item.pop("is_4k", None)
+
+    # Safety net: never emit two slots with the same instance_id (e.g. UI restored a
+    # cached draft whose id was later adopted by the surviving slot after transplant).
+    seen_out_ids: set[str] = set()
+    for item in incoming:
+        if not isinstance(item, dict):
+            continue
+        arr_type = str(item.get("arr_type") or item.get("type") or "").strip().lower()
+        if arr_type not in {"radarr", "sonarr"}:
+            continue
+        oid = str(item.get("instance_id") or "").strip().lower()
+        if not oid:
+            item["instance_id"] = _new_arr_instance_id()
+            oid = str(item.get("instance_id") or "").strip().lower()
+        if oid in seen_out_ids:
+            item["instance_id"] = _new_arr_instance_id()
+            item["instance_key_aliases"] = []
+            oid = str(item.get("instance_id") or "").strip().lower()
+        seen_out_ids.add(oid)
+
+    # Safety net: primary keys and aliases must be unique across rows. Prefer keeping
+    # earlier rows' tokens; remint later keys and drop colliding aliases.
+    taken_tokens: set[str] = set()
+    for item in incoming:
+        if not isinstance(item, dict):
+            continue
+        arr_type = str(item.get("arr_type") or item.get("type") or "").strip().lower()
+        if arr_type not in {"radarr", "sonarr"}:
+            continue
+        key = _normalize_instance_key(item.get("instance_key") or item.get("key") or item.get("name") or "")
+        if not key or key in taken_tokens or key in _RESERVED_ARR_INSTANCE_KEYS:
+            base = arr_type or "arr"
+            n = 1
+            candidate = f"{base}{n}"
+            while candidate in taken_tokens or candidate in _RESERVED_ARR_INSTANCE_KEYS:
+                n += 1
+                candidate = f"{base}{n}"
+            item["instance_key"] = candidate
+            item["instance_key_aliases"] = []
+            key = candidate
+        taken_tokens.add(key)
+        cleaned_aliases: list[str] = []
+        for a in item.get("instance_key_aliases") or []:
+            ak = _normalize_instance_key(a)
+            if not ak or ak == key or ak in taken_tokens or ak in _RESERVED_ARR_INSTANCE_KEYS:
+                continue
+            cleaned_aliases.append(ak)
+            taken_tokens.add(ak)
+        item["instance_key_aliases"] = cleaned_aliases
 
     return json.dumps(incoming)
 
@@ -1173,7 +1538,10 @@ def _redact_arr_instances_json_for_payload(raw: Any) -> tuple[str, bool]:
 
 def _coerce_string_list(raw_value: Any) -> str:
     """Normalize a string-list setting to a canonical JSON array string for storage."""
-    if isinstance(raw_value, list):
+    if isinstance(raw_value, bool):
+        # Legacy TV_CROSS_INSTANCE_LOOKAHEAD was a bool; empty list = path-matched only.
+        items = []
+    elif isinstance(raw_value, list):
         items = raw_value
     elif isinstance(raw_value, str):
         text = raw_value.strip()
@@ -1184,6 +1552,8 @@ def _coerce_string_list(raw_value: Any) -> str:
                 parsed = json.loads(text)
                 if isinstance(parsed, list):
                     items = parsed
+                elif isinstance(parsed, bool):
+                    items = []
                 else:
                     items = [p.strip() for p in text.split(",") if p.strip()]
             except Exception:
@@ -1212,6 +1582,8 @@ def _parse_string_list_value(raw_value: Any, *, default: list[str] | None = None
     fallback = list(default or [])
     if raw_value is None:
         return fallback
+    if isinstance(raw_value, bool):
+        return fallback
     if isinstance(raw_value, list):
         items = raw_value
     elif isinstance(raw_value, str):
@@ -1222,6 +1594,8 @@ def _parse_string_list_value(raw_value: Any, *, default: list[str] | None = None
             parsed = json.loads(text)
             if isinstance(parsed, list):
                 items = parsed
+            elif isinstance(parsed, bool):
+                return fallback
             else:
                 items = [p.strip() for p in text.split(",") if p.strip()]
         except Exception:
@@ -1259,11 +1633,22 @@ def _validate_value(key: str, raw_value: Any) -> Any:
         value = str(raw_value or "").strip()
         if key == "PLACEHOLDER_STATUS_PROJECTION_MODE" and value.lower() == "off":
             value = "both"
-        allowed = [str(o["value"]) for o in meta.get("options", [])]
-        if not allowed:
-            raise ValueError("choice field missing options")
-        if value not in allowed:
-            raise ValueError(f"must be one of: {', '.join(allowed)}")
+        if key in _INSTANCE_SEARCH_MODE_KEYS:
+            value = value.lower() or "match"
+            if value in _INSTANCE_SEARCH_MODE_RESERVED:
+                pass
+            elif _INSTANCE_KEY_MODE_RE.fullmatch(value):
+                pass
+            else:
+                raise ValueError(
+                    "must be match, both, primary, secondary, or a configured instance key"
+                )
+        else:
+            allowed = [str(o["value"]) for o in meta.get("options", [])]
+            if not allowed:
+                raise ValueError("choice field missing options")
+            if value not in allowed:
+                raise ValueError(f"must be one of: {', '.join(allowed)}")
     elif value_type == "string_list":
         value = _coerce_string_list(raw_value)
     else:
@@ -1376,7 +1761,7 @@ def _set_runtime_value(key: str, value: Any) -> None:
 
 
 def _apply_runtime_library_defaults() -> None:
-    """Derive internal runtime folders from LIBRARY_ROOT in simplified mode."""
+    """Derive default movie/TV destination folders from LIBRARY_ROOT."""
     root = str(getattr(settings, "LIBRARY_ROOT", "") or "").strip()
     if not root:
         return
@@ -1384,9 +1769,345 @@ def _apply_runtime_library_defaults() -> None:
     tv = os.path.join(root, "tv")
     _set_runtime_value("MOVIE_LIBRARY_FOLDER", movie)
     _set_runtime_value("TV_LIBRARY_FOLDER", tv)
-    # Keep 4K folders aligned to simplified layout so legacy call sites keep working.
-    _set_runtime_value("MOVIE_LIBRARY_4K_FOLDER", movie)
-    _set_runtime_value("TV_LIBRARY_4K_FOLDER", tv)
+
+
+_LEGACY_4K_FOLDER_KEYS = ("MOVIE_LIBRARY_4K_FOLDER", "TV_LIBRARY_4K_FOLDER")
+_LEGACY_4K_PLEX_SECTION_KEYS = ("PLEX_MOVIE_4K_SECTION_ID", "PLEX_TV_4K_SECTION_ID")
+_RETIRED_ARR_INSTANCE_FIELDS = ("role", "is_4k")
+_PLAYBACK_FUTURE_SEARCH_SUPPRESS_KEY = "PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES"
+_PLAYBACK_LEGACY_MONITOR_ONLY_KEY = "PLAYBACK_MONITOR_ONLY_NO_SEARCH"
+_PLAYBACK_LEGACY_SUPPRESS_MONITORED_KEY = "PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED"
+_PLAYBACK_DEST_FILTER_KEYS = (
+    "PLAYBACK_MONITOR_ONLY_DESTS",
+    "PLAYBACK_SEARCH_ALREADY_MONITORED_DESTS",
+    "PLAYBACK_SEARCH_FUTURE_DESTS",
+)
+
+
+def migrate_playback_future_search_suppress_default(session=None) -> dict[str, Any]:
+    """Freeze the old default for finished installs that never saved this key.
+
+    The runtime default flipped to suppress=True (do not search future episodes).
+    Anyone who already completed setup without a persisted row previously behaved
+    as False (search futures). Persist False once so upgrades do not change them.
+    Idempotent when a row already exists or setup is incomplete.
+
+    Writes the legacy bool key; :func:`migrate_playback_filters_to_dest_lists` converts
+    it into ``PLAYBACK_SEARCH_FUTURE_DESTS``.
+    """
+    owns_session = session is None
+    session = session or get_session()
+    try:
+        setup_row = _get_row(session, SETUP_COMPLETED_KEY)
+        if not (setup_row and setup_row.value):
+            return {"ok": True, "grandfathered": False, "reason": "setup_incomplete"}
+        if _get_row(session, "PLAYBACK_SEARCH_FUTURE_DESTS") is not None:
+            return {"ok": True, "grandfathered": False, "reason": "dest_lists_present"}
+        existing = _get_row(session, _PLAYBACK_FUTURE_SEARCH_SUPPRESS_KEY)
+        if existing is not None:
+            return {"ok": True, "grandfathered": False, "reason": "already_persisted"}
+        session.add(
+            AppConfig(
+                key=_PLAYBACK_FUTURE_SEARCH_SUPPRESS_KEY,
+                value=False,
+                value_type="bool",
+                restart_required=False,
+                description="Legacy playback future-search suppress (migrated to dest lists).",
+            )
+        )
+        session.commit()
+        logger.info(
+            "Grandfathered PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES=false for finished setup",
+            extra={"emoji_type": "update"},
+        )
+        return {"ok": True, "grandfathered": True}
+    except Exception as exc:
+        session.rollback()
+        logger.warning(
+            f"Playback future-search suppress default migration failed: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+        return {"ok": False, "grandfathered": False, "error": str(exc)}
+    finally:
+        if owns_session:
+            session.close()
+
+
+def _delete_legacy_playback_filter_bools(session) -> list[str]:
+    legacy_keys = (
+        _PLAYBACK_LEGACY_MONITOR_ONLY_KEY,
+        _PLAYBACK_LEGACY_SUPPRESS_MONITORED_KEY,
+        _PLAYBACK_FUTURE_SEARCH_SUPPRESS_KEY,
+    )
+    deleted: list[str] = []
+    rows = session.query(AppConfig).filter(AppConfig.key.in_(legacy_keys)).all()
+    for row in rows:
+        deleted.append(str(row.key))
+        session.delete(row)
+    return deleted
+
+
+def _playback_dest_list_from_row(row) -> list[str]:
+    if row is None or row.value is None:
+        return []
+    from services.playback_dest_filters import parse_playback_dest_list
+
+    return parse_playback_dest_list(row.value)
+
+
+def _upsert_playback_dest_list(session, key: str, value: str) -> None:
+    meta = SETTINGS_SCHEMA.get(key) or {}
+    row = _get_row(session, key)
+    if not row:
+        session.add(
+            AppConfig(
+                key=key,
+                value=value,
+                value_type=str(meta.get("type") or "string_list"),
+                restart_required=bool(meta.get("restart_required", False)),
+                description=str(meta.get("description") or ""),
+            )
+        )
+    else:
+        row.value = value
+        row.value_type = str(meta.get("type") or "string_list")
+        row.restart_required = bool(meta.get("restart_required", False))
+        row.description = str(meta.get("description") or "")
+        session.add(row)
+    _set_runtime_value(key, value)
+
+
+def migrate_playback_filters_to_dest_lists(session=None) -> dict[str, Any]:
+    """Convert legacy playback filter booleans into per-destination string lists.
+
+    Affirmative list membership = behavior on for that dest_folder.
+    - monitor-only true → all selectable dests; false → []
+    - suppress already-monitored false → all dests (search monitored on); true → []
+    - suppress future false → all dests; true → []
+    Fresh installs with no legacy rows: monitor=[], search-monitored=all, search-future=[].
+
+    Defers writing when selectable dests are still empty so a first-boot migrate does not
+    persist search-monitored=[] forever. Re-runs after library paths exist (startup preload
+    or path settings save). While setup is incomplete, repairs the empty-seed signature
+    (all three lists empty) by seeding search-monitored to all current dests.
+    Deletes legacy bool rows after a successful convert.
+    """
+    owns_session = session is None
+    session = session or get_session()
+    try:
+        from services.playback_dest_filters import all_selectable_dest_folders
+
+        existing_dest = {key: _get_row(session, key) for key in _PLAYBACK_DEST_FILTER_KEYS}
+        all_dests = all_selectable_dest_folders()
+        all_dests_json = json.dumps(all_dests)
+        empty_json = "[]"
+        setup_row = _get_row(session, SETUP_COMPLETED_KEY)
+        setup_complete = bool(setup_row and setup_row.value)
+
+        if all(row is not None for row in existing_dest.values()):
+            deleted = _delete_legacy_playback_filter_bools(session)
+            repaired = False
+            # Empty-seed from first boot before folders existed: all three lists [].
+            # Only auto-fix while setup is still in progress so intentional all-off
+            # after finish is preserved.
+            if (
+                not setup_complete
+                and all_dests
+                and not _playback_dest_list_from_row(existing_dest["PLAYBACK_MONITOR_ONLY_DESTS"])
+                and not _playback_dest_list_from_row(
+                    existing_dest["PLAYBACK_SEARCH_ALREADY_MONITORED_DESTS"]
+                )
+                and not _playback_dest_list_from_row(existing_dest["PLAYBACK_SEARCH_FUTURE_DESTS"])
+            ):
+                _upsert_playback_dest_list(
+                    session, "PLAYBACK_SEARCH_ALREADY_MONITORED_DESTS", all_dests_json
+                )
+                repaired = True
+                logger.info(
+                    "Seeded PLAYBACK_SEARCH_ALREADY_MONITORED_DESTS to all destinations "
+                    f"after empty first-boot migrate ({len(all_dests)} dests)",
+                    extra={"emoji_type": "update"},
+                )
+            if deleted or repaired:
+                session.commit()
+            return {
+                "ok": True,
+                "migrated": False,
+                "reason": "seeded_search_monitored" if repaired else "already_dest_lists",
+                "deleted_legacy": deleted,
+                "dest_count": len(all_dests),
+            }
+
+        def _legacy_bool(key: str, default: bool) -> bool:
+            row = _get_row(session, key)
+            if row is None or row.value is None:
+                return default
+            return _coerce_bool(row.value)
+
+        has_legacy = any(
+            _get_row(session, key) is not None
+            for key in (
+                _PLAYBACK_LEGACY_MONITOR_ONLY_KEY,
+                _PLAYBACK_LEGACY_SUPPRESS_MONITORED_KEY,
+                _PLAYBACK_FUTURE_SEARCH_SUPPRESS_KEY,
+            )
+        )
+        monitor_only = _legacy_bool(_PLAYBACK_LEGACY_MONITOR_ONLY_KEY, False)
+        suppress_monitored = _legacy_bool(_PLAYBACK_LEGACY_SUPPRESS_MONITORED_KEY, False)
+        suppress_future = _legacy_bool(_PLAYBACK_FUTURE_SEARCH_SUPPRESS_KEY, True)
+
+        needs_all_dests = monitor_only or (not suppress_monitored) or (not suppress_future)
+        if not all_dests and (not has_legacy or needs_all_dests):
+            # Fresh install or upgrade that still needs "all dests" membership: wait until
+            # library paths exist so we do not freeze search-monitored as [].
+            return {
+                "ok": True,
+                "migrated": False,
+                "reason": "deferred_no_dests",
+                "dest_count": 0,
+            }
+
+        values = {
+            "PLAYBACK_MONITOR_ONLY_DESTS": all_dests_json if monitor_only else empty_json,
+            "PLAYBACK_SEARCH_ALREADY_MONITORED_DESTS": (
+                empty_json if suppress_monitored else all_dests_json
+            ),
+            "PLAYBACK_SEARCH_FUTURE_DESTS": empty_json if suppress_future else all_dests_json,
+        }
+
+        for key, value in values.items():
+            if existing_dest.get(key) is not None:
+                continue
+            _upsert_playback_dest_list(session, key, value)
+
+        deleted = _delete_legacy_playback_filter_bools(session)
+        session.commit()
+        logger.info(
+            "Migrated playback filters to destination lists "
+            f"(monitor_only={monitor_only}, suppress_monitored={suppress_monitored}, "
+            f"suppress_future={suppress_future}, dests={len(all_dests)}, deleted_legacy={deleted})",
+            extra={"emoji_type": "update"},
+        )
+        return {
+            "ok": True,
+            "migrated": True,
+            "dest_count": len(all_dests),
+            "deleted_legacy": deleted,
+        }
+    except Exception as exc:
+        session.rollback()
+        logger.warning(
+            f"Playback dest-filter migration failed: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+        return {"ok": False, "migrated": False, "error": str(exc)}
+    finally:
+        if owns_session:
+            session.close()
+
+
+def migrate_legacy_library_4k_folders(session=None) -> dict[str, Any]:
+    """Drop removed 4K folder and 4K Plex section settings.
+
+    Idempotent. Default destinations come from LIBRARY_ROOT; extra trees use the
+    dest map. Mapped destinations carry their own Plex section IDs.
+    """
+    owns_session = session is None
+    session = session or get_session()
+    deleted_keys: list[str] = []
+    try:
+        target_keys = _LEGACY_4K_FOLDER_KEYS + _LEGACY_4K_PLEX_SECTION_KEYS
+        rows = (
+            session.query(AppConfig)
+            .filter(AppConfig.key.in_(target_keys))
+            .all()
+        )
+        for row in rows:
+            deleted_keys.append(str(row.key))
+            session.delete(row)
+        if deleted_keys:
+            session.commit()
+            logger.info(
+                f"Removed legacy 4K path/section settings: {', '.join(deleted_keys)}",
+                extra={"emoji_type": "update"},
+            )
+        _apply_runtime_library_defaults()
+        return {"ok": True, "deleted_keys": deleted_keys}
+    except Exception as exc:
+        session.rollback()
+        logger.warning(
+            f"Legacy library 4K settings migration failed: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+        return {"ok": False, "deleted_keys": [], "error": str(exc)}
+    finally:
+        if owns_session:
+            session.close()
+
+
+def migrate_arr_instances_drop_role_is_4k(session=None) -> dict[str, Any]:
+    """Rewrite saved ARR_INSTANCES_JSON without retired role/is_4k routing fields.
+
+    Idempotent. Identity stays instance_key + instance_id; list order / priority
+    remains rank. Does not change URLs or API keys.
+    """
+    owns_session = session is None
+    session = session or get_session()
+    try:
+        row = _get_row(session, "ARR_INSTANCES_JSON")
+        if row is None or _is_blank(row.value):
+            return {"ok": True, "rewritten": False, "stripped_fields": 0}
+        raw = str(row.value or "").strip()
+        try:
+            payload = json.loads(raw)
+        except Exception as exc:
+            logger.warning(
+                f"ARR instance role/is_4k cleanup skipped (invalid JSON): {exc}",
+                extra={"emoji_type": "warning"},
+            )
+            return {"ok": False, "rewritten": False, "stripped_fields": 0, "error": str(exc)}
+        if not isinstance(payload, list):
+            return {"ok": True, "rewritten": False, "stripped_fields": 0}
+
+        stripped = 0
+        cleaned: list[Any] = []
+        changed = False
+        for item in payload:
+            if not isinstance(item, dict):
+                cleaned.append(item)
+                continue
+            row_out = dict(item)
+            for field in _RETIRED_ARR_INSTANCE_FIELDS:
+                if field in row_out:
+                    row_out.pop(field, None)
+                    stripped += 1
+                    changed = True
+            cleaned.append(row_out)
+
+        if not changed:
+            return {"ok": True, "rewritten": False, "stripped_fields": 0}
+
+        new_raw = json.dumps(cleaned)
+        row.value = new_raw
+        if hasattr(row, "value_type") and not row.value_type:
+            row.value_type = "string"
+        session.commit()
+        _set_runtime_value("ARR_INSTANCES_JSON", new_raw)
+        logger.info(
+            f"Cleaned ARR_INSTANCES_JSON: removed {stripped} retired role/is_4k field(s)",
+            extra={"emoji_type": "update"},
+        )
+        return {"ok": True, "rewritten": True, "stripped_fields": stripped}
+    except Exception as exc:
+        session.rollback()
+        logger.warning(
+            f"ARR instance role/is_4k cleanup failed: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+        return {"ok": False, "rewritten": False, "stripped_fields": 0, "error": str(exc)}
+    finally:
+        if owns_session:
+            session.close()
 
 
 def _parse_octal_mode(raw: Any, default: int = 0o777) -> int:
@@ -1426,11 +2147,274 @@ def _ensure_library_root_folders(root: str, dir_mode: int) -> list[str]:
     return created
 
 
+def _arr_instance_keys_for_type(session, arr_type: str) -> list[str]:
+    row = _get_row(session, "ARR_INSTANCES_JSON")
+    raw = str(row.value or "").strip() if row else ""
+    if not raw:
+        return []
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(payload, list):
+        return []
+    want = str(arr_type or "").strip().lower()
+    keys: list[str] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("arr_type") or "").strip().lower() != want:
+            continue
+        key = _normalize_instance_key(item.get("instance_key") or item.get("key") or item.get("name") or "")
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+
+def _also_keys_from_legacy_mode(mode: str, instance_keys: list[str]) -> list[str]:
+    normalized = str(mode or "both").strip().lower() or "both"
+    if not instance_keys:
+        return []
+    # Legacy "match" was path-first only; empty also-list = path-matched only.
+    if normalized == "match":
+        return []
+    if normalized in {"", "both"}:
+        return list(instance_keys)
+    if normalized == "primary":
+        return [instance_keys[0]] if instance_keys else []
+    if normalized == "secondary":
+        return [instance_keys[1]] if len(instance_keys) > 1 else list(instance_keys)
+    if normalized in instance_keys:
+        return [normalized]
+    return list(instance_keys)
+
+
+_PLAY_ACTIONS_FALLBACK_MARKER = "PLAY_ACTIONS_FALLBACK_LEGACY_V1"
+_PLAY_ACTIONS_FALLBACK_MARKER_LEGACY = "PLAY_ACTIONS_IF_NEEDED_LEGACY_FALLBACK_V1"
+_PLAY_ACTIONS_FALLBACK_KEY_RENAMES = (
+    ("MOVIE_PLAY_PLACEHOLDER_IF_NEEDED_INSTANCES", "MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES"),
+    ("TV_PLAY_PLACEHOLDER_IF_NEEDED_INSTANCES", "TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES"),
+)
+
+
+def _keys_from_legacy_cross_instance(raw_value: Any, instance_keys: list[str]) -> list[str]:
+    """Map legacy TV_CROSS_INSTANCE_LOOKAHEAD (bool or list) to instance keys.
+
+    Bool true / truthy string meant "also search other Sonarrs" → all configured keys.
+    Bool false → none. JSON/list values pass through as instance keys.
+    """
+    if raw_value is None:
+        return []
+    if isinstance(raw_value, bool):
+        return list(instance_keys) if raw_value else []
+    if isinstance(raw_value, list):
+        return _parse_string_list_value(raw_value, default=[])
+    text = str(raw_value).strip()
+    if not text:
+        return []
+    lowered = text.lower()
+    if lowered in {"1", "true", "yes", "on"}:
+        return list(instance_keys)
+    if lowered in {"0", "false", "no", "off"}:
+        return []
+    return _parse_string_list_value(raw_value, default=[])
+
+
+def migrate_play_also_instances_from_legacy(session=None) -> dict[str, Any]:
+    """One-shot: seed Play Actions lists from legacy modes / fallback / cross-instance.
+
+    Always / Real / legacy ALSO rows seed only when missing so intentional empties after
+    save are preserved. Fallback also repairs a prior empty seed while
+    ENABLE_PLAYBACK_FALLBACK_SEARCH is still on (marker-gated once).
+    """
+    owns_session = session is None
+    session = session or get_session()
+    wrote: list[str] = []
+    try:
+        radarr_keys = _arr_instance_keys_for_type(session, "radarr")
+        sonarr_keys = _arr_instance_keys_for_type(session, "sonarr")
+
+        def _legacy_mode(key: str, default: str = "both") -> str:
+            row = _get_row(session, key)
+            if row is None or row.value is None or str(row.value).strip() == "":
+                return default
+            return str(row.value).strip()
+
+        def _legacy_bool(key: str, *, default: bool) -> bool:
+            row = _get_row(session, key)
+            if row is None or row.value is None or str(row.value).strip() == "":
+                return default
+            try:
+                return _coerce_bool(row.value)
+            except ValueError:
+                return default
+
+        def _clean_keys(items: list[str], allowed: set[str]) -> list[str]:
+            out: list[str] = []
+            seen: set[str] = set()
+            for item in items:
+                key = str(item or "").strip().lower()
+                if not key or key not in allowed or key in seen:
+                    continue
+                seen.add(key)
+                out.append(key)
+            return out
+
+        def _rename_key(old_key: str, new_key: str) -> None:
+            old_row = _get_row(session, old_key)
+            if old_row is None:
+                return
+            new_row = _get_row(session, new_key)
+            if new_row is None:
+                old_row.key = new_key
+                session.add(old_row)
+                wrote.append(f"{old_key}->{new_key}")
+                return
+            session.delete(old_row)
+            wrote.append(f"drop:{old_key}")
+
+        def _seed_list(key: str, items: list[str], allowed: set[str]) -> None:
+            if _get_row(session, key) is not None:
+                return
+            cleaned = _clean_keys(items, allowed)
+            _upsert_playback_dest_list(session, key, json.dumps(cleaned))
+            wrote.append(key)
+
+        def _seed_or_repair_fallback(key: str, items: list[str], allowed: set[str], *, repair: bool) -> None:
+            cleaned = _clean_keys(items, allowed)
+            row = _get_row(session, key)
+            if row is None:
+                _upsert_playback_dest_list(session, key, json.dumps(cleaned))
+                wrote.append(key)
+                return
+            if not repair:
+                return
+            current = _parse_string_list_value(row.value, default=[])
+            if current:
+                return
+            # Prior migration wrote [] while fallback was still enabled; restore once.
+            if cleaned:
+                _upsert_playback_dest_list(session, key, json.dumps(cleaned))
+                wrote.append(key)
+
+        # Pre-release rename: IF_NEEDED list keys → FALLBACK (no public release yet).
+        for old_key, new_key in _PLAY_ACTIONS_FALLBACK_KEY_RENAMES:
+            _rename_key(old_key, new_key)
+        legacy_marker = _get_row(session, _PLAY_ACTIONS_FALLBACK_MARKER_LEGACY)
+        if legacy_marker is not None and _get_row(session, _PLAY_ACTIONS_FALLBACK_MARKER) is None:
+            legacy_marker.key = _PLAY_ACTIONS_FALLBACK_MARKER
+            session.add(legacy_marker)
+            wrote.append(f"{_PLAY_ACTIONS_FALLBACK_MARKER_LEGACY}->{_PLAY_ACTIONS_FALLBACK_MARKER}")
+        elif legacy_marker is not None:
+            session.delete(legacy_marker)
+            wrote.append(f"drop:{_PLAY_ACTIONS_FALLBACK_MARKER_LEGACY}")
+
+        movie_also_row = _get_row(session, "MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES")
+        tv_also_row = _get_row(session, "TV_PLAY_PLACEHOLDER_ALSO_INSTANCES")
+        movie_from_also = _parse_string_list_value(movie_also_row.value if movie_also_row else None, default=[])
+        tv_from_also = _parse_string_list_value(tv_also_row.value if tv_also_row else None, default=[])
+        movie_from_mode = _also_keys_from_legacy_mode(_legacy_mode("MOVIE_PLACEHOLDER_SEARCH_MODE"), radarr_keys)
+        tv_from_mode = _also_keys_from_legacy_mode(_legacy_mode("TV_PLACEHOLDER_SEARCH_MODE"), sonarr_keys)
+        # Match runtime default (True) when the row was never saved.
+        fallback_enabled = _legacy_bool("ENABLE_PLAYBACK_FALLBACK_SEARCH", default=True)
+        fallback_movie = list(radarr_keys) if fallback_enabled else []
+        fallback_tv = list(sonarr_keys) if fallback_enabled else []
+        repair_fallback = _get_row(session, _PLAY_ACTIONS_FALLBACK_MARKER) is None
+
+        # Prefer prior ALSO list when present; otherwise legacy search mode.
+        _seed_list(
+            "MOVIE_PLAY_PLACEHOLDER_ALWAYS_INSTANCES",
+            movie_from_also or movie_from_mode,
+            set(radarr_keys),
+        )
+        _seed_list(
+            "TV_PLAY_PLACEHOLDER_ALWAYS_INSTANCES",
+            tv_from_also or tv_from_mode,
+            set(sonarr_keys),
+        )
+        _seed_or_repair_fallback(
+            "MOVIE_PLAY_PLACEHOLDER_FALLBACK_INSTANCES",
+            fallback_movie,
+            set(radarr_keys),
+            repair=repair_fallback,
+        )
+        _seed_or_repair_fallback(
+            "TV_PLAY_PLACEHOLDER_FALLBACK_INSTANCES",
+            fallback_tv,
+            set(sonarr_keys),
+            repair=repair_fallback,
+        )
+        _seed_list("MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES", movie_from_mode, set(radarr_keys))
+        _seed_list("TV_PLAY_PLACEHOLDER_ALSO_INSTANCES", tv_from_mode, set(sonarr_keys))
+        # Real movie play was historically a noop; keep Real · Always empty (do not use
+        # MOVIE_PLAYBACK_INSTANCE_MODE, which was for ambiguous/placeholder-style routing).
+        _seed_list("MOVIE_PLAY_REAL_ALSO_INSTANCES", [], set(radarr_keys))
+        # One-shot undo for pre-release seeds that copied MOVIE_PLAYBACK_INSTANCE_MODE.
+        movie_real_noop_marker = "PLAY_ACTIONS_MOVIE_REAL_NOOP_V1"
+        if _get_row(session, movie_real_noop_marker) is None:
+            real_row = _get_row(session, "MOVIE_PLAY_REAL_ALSO_INSTANCES")
+            if real_row is not None:
+                current = _clean_keys(
+                    _parse_string_list_value(real_row.value, default=[]),
+                    set(radarr_keys),
+                )
+                mode_keys = _clean_keys(
+                    _also_keys_from_legacy_mode(_legacy_mode("MOVIE_PLAYBACK_INSTANCE_MODE"), radarr_keys),
+                    set(radarr_keys),
+                )
+                if current and set(current) == set(mode_keys):
+                    _upsert_playback_dest_list(session, "MOVIE_PLAY_REAL_ALSO_INSTANCES", "[]")
+                    wrote.append("MOVIE_PLAY_REAL_ALSO_INSTANCES")
+            _upsert_playback_dest_list(session, movie_real_noop_marker, "1")
+            wrote.append(movie_real_noop_marker)
+        cross_row = _get_row(session, "TV_CROSS_INSTANCE_LOOKAHEAD")
+        if cross_row is not None:
+            tv_real_keys = _keys_from_legacy_cross_instance(cross_row.value, sonarr_keys)
+        else:
+            tv_real_keys = _also_keys_from_legacy_mode(
+                _legacy_mode("TV_PLAYBACK_INSTANCE_MODE"),
+                sonarr_keys,
+            )
+        _seed_list("TV_PLAY_REAL_ALSO_INSTANCES", tv_real_keys, set(sonarr_keys))
+
+        if repair_fallback and _get_row(session, _PLAY_ACTIONS_FALLBACK_MARKER) is None:
+            _upsert_playback_dest_list(session, _PLAY_ACTIONS_FALLBACK_MARKER, "1")
+            wrote.append(_PLAY_ACTIONS_FALLBACK_MARKER)
+
+        if wrote:
+            session.commit()
+            logger.info(
+                "Migrated Play Actions also-instance lists from legacy modes",
+                extra={"emoji_type": "update", "keys": wrote},
+            )
+        return {"ok": True, "wrote": wrote}
+    except Exception as exc:
+        session.rollback()
+        logger.warning(
+            f"Play Actions also-instance migration failed: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+        return {"ok": False, "wrote": wrote, "error": str(exc)}
+    finally:
+        if owns_session:
+            session.close()
+
+
 def apply_persisted_settings(session=None) -> dict[str, Any]:
     owns_session = session is None
     session = session or get_session()
     applied: list[str] = []
     try:
+        # Own sessions so delete/rewrite commits do not share the read session below.
+        migrate_legacy_library_4k_folders()
+        migrate_arr_instances_drop_role_is_4k()
+        # Apply path/dest settings before playback dest-list migration so "all dests"
+        # is not empty when LIBRARY_ROOT / folders / map already exist in the DB.
+        _preload_library_path_settings_for_migration(session)
+        _apply_runtime_library_defaults()
+        migrate_playback_future_search_suppress_default()
+        migrate_playback_filters_to_dest_lists()
+        migrate_play_also_instances_from_legacy()
         rows = session.query(AppConfig).filter(AppConfig.key.in_(tuple(SETTINGS_SCHEMA.keys()))).all()
         for row in rows:
             if row.key not in SETTINGS_SCHEMA:
@@ -1443,6 +2427,20 @@ def apply_persisted_settings(session=None) -> dict[str, Any]:
     finally:
         if owns_session:
             session.close()
+
+
+def _preload_library_path_settings_for_migration(session) -> None:
+    """Load dest-related keys into runtime settings before dest-list migration."""
+    path_keys = (
+        "LIBRARY_ROOT",
+        "MOVIE_LIBRARY_FOLDER",
+        "TV_LIBRARY_FOLDER",
+        "LIBRARY_DESTINATION_MAP_JSON",
+    )
+    for key in path_keys:
+        row = _get_row(session, key)
+        if row is not None and not _is_blank(row.value):
+            _set_runtime_value(key, row.value)
 
 
 def get_onboarding_status(session=None) -> dict[str, Any]:
@@ -1526,8 +2524,12 @@ def get_settings_payload(session=None) -> dict[str, Any]:
                 entry["depends_on"] = str(meta["depends_on"])
             if meta.get("disabled_when"):
                 entry["disabled_when"] = str(meta["disabled_when"])
+            if meta.get("invert_bool"):
+                entry["invert_bool"] = True
             if meta.get("nested"):
                 entry["nested"] = True
+            if meta.get("playback_dest_filter"):
+                entry["playback_dest_filter"] = True
             if key == "ARR_INSTANCES_JSON":
                 redacted_value, any_saved = _redact_arr_instances_json_for_payload(effective_value)
                 entry["value"] = redacted_value
@@ -1536,12 +2538,14 @@ def get_settings_payload(session=None) -> dict[str, Any]:
             grouped[meta["section"]].append(entry)
 
         from services.auth import ensure_webhook_api_key
+        from services.library_destinations import selectable_playback_dests
 
         return {
             "status": get_onboarding_status(session=session),
             "sections": [{"name": name, "fields": fields} for name, fields in grouped.items()],
             # Own session: do not commit the settings-read transaction.
             "webhook_api_key": ensure_webhook_api_key(),
+            "playback_dest_options": selectable_playback_dests(),
         }
     finally:
         if owns_session:
@@ -1564,6 +2568,12 @@ def save_settings(
     derived_library_paths: list[str] = []
     specials_before: bool | None = None
     specials_after: bool | None = None
+    arr_transplant_movie_ids: list[int] = []
+    arr_transplant_episode_ids: list[int] = []
+    arr_instances_previous_json: str | None = None
+    arr_rewrite_prev: str | None = None
+    arr_rewrite_incoming: str | None = None
+    arr_rewrite_merged: str | None = None
     try:
         for key, raw_value in values.items():
             if key not in SETTINGS_SCHEMA:
@@ -1589,7 +2599,7 @@ def save_settings(
             except Exception as exc:
                 errors[key] = str(exc)
 
-        # Simplified path model: derive runtime folders from LIBRARY_ROOT.
+        # Default destinations: derive movie/tv folders from LIBRARY_ROOT.
         if "LIBRARY_ROOT" in validated:
             root = str(validated.get("LIBRARY_ROOT") or "").strip()
             if root:
@@ -1600,8 +2610,6 @@ def save_settings(
                 derived_library_paths = [movie_path, tv_path]
                 _set_runtime_value("MOVIE_LIBRARY_FOLDER", movie_path)
                 _set_runtime_value("TV_LIBRARY_FOLDER", tv_path)
-                _set_runtime_value("MOVIE_LIBRARY_4K_FOLDER", movie_path)
-                _set_runtime_value("TV_LIBRARY_4K_FOLDER", tv_path)
 
         enable_plex = bool(validated.get("ENABLE_PLEX", getattr(settings, "ENABLE_PLEX", False)))
         if enable_plex:
@@ -1646,14 +2654,96 @@ def save_settings(
             if prev_val != new_val:
                 art_backfill_keys_changed.append(key)
 
+        destination_rematerialize_keys_changed: list[str] = []
+        for key in DESTINATION_REMATERIALIZE_SETTING_KEYS:
+            if key not in validated:
+                continue
+            prev_row = _get_row(session, key)
+            prev_val = "" if not prev_row or prev_row.value is None else str(prev_row.value).strip()
+            new_val = str(validated.get(key) or "").strip()
+            if prev_val != new_val:
+                destination_rematerialize_keys_changed.append(key)
+
+        tv_density_rematerialize_keys_changed: list[str] = []
+        for key in TV_DENSITY_REMATERIALIZE_SETTING_KEYS:
+            if key not in validated:
+                continue
+            prev_row = _get_row(session, key)
+            prev_val = "" if not prev_row or prev_row.value is None else str(prev_row.value).strip()
+            new_val = str(validated.get(key) or "").strip()
+            if prev_val != new_val:
+                tv_density_rematerialize_keys_changed.append(key)
+
+        if "LIBRARY_DESTINATION_MAP_JSON" in validated:
+            raw_map = str(validated.get("LIBRARY_DESTINATION_MAP_JSON") or "").strip()
+            if raw_map:
+                try:
+                    from services.library_destinations import (
+                        parse_library_destination_map,
+                        validate_library_destination_map_unique,
+                    )
+
+                    # Round-trip normalize so invalid JSON fails loudly at save.
+                    import json as _json
+
+                    payload = _json.loads(raw_map)
+                    if not isinstance(payload, list):
+                        errors["LIBRARY_DESTINATION_MAP_JSON"] = "must be a JSON array"
+                    else:
+                        normalized_rows = parse_library_destination_map(raw_map)
+                        dup_err = validate_library_destination_map_unique(normalized_rows)
+                        if dup_err:
+                            errors["LIBRARY_DESTINATION_MAP_JSON"] = dup_err
+                        else:
+                            validated["LIBRARY_DESTINATION_MAP_JSON"] = _json.dumps(
+                                normalized_rows,
+                                separators=(",", ":"),
+                            )
+                except Exception as exc:
+                    errors["LIBRARY_DESTINATION_MAP_JSON"] = f"invalid JSON: {exc}"
+
         if "ARR_INSTANCES_JSON" in validated:
             prev_row = _get_row(session, "ARR_INSTANCES_JSON")
             prev_raw = str(prev_row.value if prev_row and prev_row.value is not None else "") or ""
-            merged = _merge_arr_instances_for_stable_webhooks(prev_raw, str(validated.get("ARR_INSTANCES_JSON") or ""))
-            validated["ARR_INSTANCES_JSON"] = merged
+            arr_instances_previous_json = prev_raw
+            incoming_raw = str(validated.get("ARR_INSTANCES_JSON") or "")
+            merged = _merge_arr_instances_for_stable_webhooks(prev_raw, incoming_raw)
+            # Soft guard: empty overwrite of a populated config is almost always a
+            # client bug (redacted keys filtered out of form state). Keep the
+            # previous value and log loudly. Intentional full clear is rare; users
+            # can still clear by disconnecting slots then saving once this path is
+            # revisited with an explicit clear flag if needed.
+            try:
+                prev_list = json.loads(prev_raw) if str(prev_raw or "").strip() else []
+            except Exception:
+                prev_list = []
+            try:
+                merged_list = json.loads(merged) if str(merged or "").strip() else []
+            except Exception:
+                merged_list = []
+            if (
+                isinstance(prev_list, list)
+                and isinstance(merged_list, list)
+                and len(prev_list) > 0
+                and len(merged_list) == 0
+            ):
+                logger.error(
+                    "Refusing accidental ARR_INSTANCES_JSON wipe (client sent empty list; "
+                    f"keeping {len(prev_list)} previous instance(s))",
+                    extra={"emoji_type": "error"},
+                )
+                validated["ARR_INSTANCES_JSON"] = prev_raw
+            else:
+                validated["ARR_INSTANCES_JSON"] = merged
+                # Defer catalog transplants/renames until after validation succeeds so a
+                # rejected save (for example over the instance limit) cannot leave the
+                # catalog rewritten while ARR_INSTANCES_JSON stays unchanged.
+                arr_rewrite_prev = prev_raw
+                arr_rewrite_incoming = incoming_raw
+                arr_rewrite_merged = merged
 
         arr_instances_json = str(validated.get("ARR_INSTANCES_JSON", getattr(settings, "ARR_INSTANCES_JSON", "")) or "").strip()
-        arr_limit = max(1, int(getattr(settings, "ARR_MAX_INSTANCES_PER_TYPE", 2) or 2))
+        arr_limit = max(1, int(getattr(settings, "ARR_MAX_INSTANCES_PER_TYPE", 4) or 4))
         allowed_instance_keys: dict[str, set[str]] = {"radarr": set(), "sonarr": set()}
 
         if arr_instances_json:
@@ -1674,6 +2764,11 @@ def save_settings(
                     instance_key = _normalize_instance_key(item.get("instance_key") or item.get("key") or item.get("name") or "")
                     if not instance_key:
                         raise ValueError(f"item {index + 1} requires instance_key (or key/name)")
+                    if instance_key in _RESERVED_ARR_INSTANCE_KEYS:
+                        raise ValueError(
+                            f"item {index + 1} instance_key '{instance_key}' is reserved; "
+                            "choose a different name (for example sonarr_4k or sonarr2)"
+                        )
                     if instance_key in seen_keys:
                         raise ValueError(f"item {index + 1} has duplicate instance_key '{instance_key}'")
                     seen_keys.add(instance_key)
@@ -1687,6 +2782,10 @@ def save_settings(
                     for a in item.get("instance_key_aliases") or []:
                         ak = _normalize_instance_key(a)
                         if ak:
+                            if ak in _RESERVED_ARR_INSTANCE_KEYS:
+                                raise ValueError(
+                                    f"item {index + 1} alias '{ak}' is reserved; remove or rename the alias"
+                                )
                             tokens.append(ak)
                     for t in tokens:
                         if t in reserved_tokens:
@@ -1696,8 +2795,18 @@ def save_settings(
                         reserved_tokens.add(t)
                     url = str(item.get("url") or "").strip()
                     api_key = str(item.get("api_key") or item.get("apikey") or "").strip()
-                    if not url or not api_key:
-                        raise ValueError(f"item {index + 1} requires url and api_key")
+                    label = str(item.get("label") or instance_key or f"item {index + 1}").strip()
+                    if not url:
+                        raise ValueError(f"{label}: url is required")
+                    # Blank api_key is allowed after merge when the client sent a redacted
+                    # value and no prior secret exists (URL-only shell), or while the user is
+                    # still pasting keys. Runtime configured_arr_instances skips unkeyed rows.
+                    if not api_key:
+                        logger.warning(
+                            f"ARR_INSTANCES_JSON: '{label}' has no api_key after merge; "
+                            "saving as inactive until a key is provided",
+                            extra={"emoji_type": "warning"},
+                        )
                     counts[arr_type] += 1
                     if counts[arr_type] > arr_limit:
                         raise ValueError(f"{arr_type} supports up to {arr_limit} instances per deployment")
@@ -1726,6 +2835,51 @@ def save_settings(
                 extra={"emoji_type": "warning"},
             )
             return {"ok": False, "errors": errors}
+
+        if arr_rewrite_merged is not None:
+            try:
+                from services.source_of_truth.arr_instance_key_rewrite import (
+                    apply_instance_key_renames,
+                    prepare_url_transplants,
+                )
+
+                dest_for_rewrite = None
+                if "LIBRARY_DESTINATION_MAP_JSON" in validated:
+                    dest_for_rewrite = str(validated.get("LIBRARY_DESTINATION_MAP_JSON") or "")
+                transplant_prep = prepare_url_transplants(
+                    arr_rewrite_prev or "",
+                    arr_rewrite_incoming or "",
+                    destination_map_json=dest_for_rewrite,
+                )
+                arr_transplant_movie_ids = list(transplant_prep.get("movie_ids") or [])
+                arr_transplant_episode_ids = list(transplant_prep.get("episode_ids") or [])
+                rewritten_dest = transplant_prep.get("destination_map_json")
+                if (
+                    transplant_prep.get("ok")
+                    and rewritten_dest is not None
+                    and "LIBRARY_DESTINATION_MAP_JSON" in validated
+                    and str(rewritten_dest) != str(validated.get("LIBRARY_DESTINATION_MAP_JSON") or "")
+                ):
+                    validated["LIBRARY_DESTINATION_MAP_JSON"] = rewritten_dest
+                    dest_for_rewrite = str(rewritten_dest)
+                rewrite = apply_instance_key_renames(
+                    arr_rewrite_prev or "",
+                    arr_rewrite_merged,
+                    destination_map_json=dest_for_rewrite,
+                )
+                rewritten_dest = rewrite.get("destination_map_json")
+                if (
+                    rewrite.get("ok")
+                    and rewritten_dest is not None
+                    and "LIBRARY_DESTINATION_MAP_JSON" in validated
+                    and str(rewritten_dest) != str(validated.get("LIBRARY_DESTINATION_MAP_JSON") or "")
+                ):
+                    validated["LIBRARY_DESTINATION_MAP_JSON"] = rewritten_dest
+            except Exception as rewrite_exc:
+                logger.error(
+                    f"ARR instance_key rename rewrite after settings save failed: {rewrite_exc}",
+                    extra={"emoji_type": "error"},
+                )
 
         restart_required_keys: list[str] = []
         saved_keys: list[str] = []
@@ -1779,6 +2933,22 @@ def save_settings(
                 session.add(setup_row)
 
         session.commit()
+        path_keys_for_playback_migrate = {
+            "LIBRARY_ROOT",
+            "MOVIE_LIBRARY_FOLDER",
+            "TV_LIBRARY_FOLDER",
+            "LIBRARY_DESTINATION_MAP_JSON",
+        }
+        if path_keys_for_playback_migrate.intersection(saved_keys) or derived_library_paths:
+            # Folders may have just appeared (play-first onboarding). Re-run so deferred
+            # or empty-seed dest-list migration can seed search-monitored to all dests.
+            try:
+                migrate_playback_filters_to_dest_lists()
+            except Exception as migrate_exc:
+                logger.warning(
+                    f"Playback dest-filter migrate after path settings save failed: {migrate_exc}",
+                    extra={"emoji_type": "warning"},
+                )
         plex_location_cache_keys = {
             "ENABLE_PLEX",
             "PLEX_URL",
@@ -1815,7 +2985,10 @@ def save_settings(
                 from services.source_of_truth.arr_instance_reconcile import reconcile_after_arr_settings_save
 
                 arr_instance_reconcile = reconcile_after_arr_settings_save(
-                    str(validated.get("ARR_INSTANCES_JSON") or "")
+                    str(validated.get("ARR_INSTANCES_JSON") or ""),
+                    extra_movie_ids=arr_transplant_movie_ids,
+                    extra_episode_ids=arr_transplant_episode_ids,
+                    previous_arr_instances_json=arr_instances_previous_json,
                 )
             except Exception as exc:
                 logger.error(
@@ -1905,6 +3078,56 @@ def save_settings(
                 extra={"emoji_type": "processing"},
             )
 
+        destination_rematerialize_summary: dict[str, Any] | None = None
+        if destination_rematerialize_keys_changed and apply_scope:
+            effective_dest_scope = str(apply_scope)
+            if effective_dest_scope == "future":
+                effective_dest_scope = "next_full_sync"
+            try:
+                from services.library_destination_rematerialize import enqueue_destination_rematerialize
+
+                destination_rematerialize_summary = enqueue_destination_rematerialize(
+                    source="settings_save:destination_map",
+                    apply_now=(effective_dest_scope == "now"),
+                )
+                logger.info(
+                    f"Destination rematerialize after settings save scope={effective_dest_scope} "
+                    f"keys={destination_rematerialize_keys_changed}",
+                    extra={"emoji_type": "processing"},
+                )
+            except Exception as dest_exc:
+                logger.warning(
+                    f"Destination rematerialize after settings save failed: {dest_exc}",
+                    extra={"emoji_type": "warning"},
+                )
+                destination_rematerialize_summary = {"ok": False, "error": str(dest_exc)}
+
+        tv_density_rematerialize_summary: dict[str, Any] | None = None
+        if tv_density_rematerialize_keys_changed and apply_scope:
+            effective_density_scope = str(apply_scope)
+            if effective_density_scope == "future":
+                effective_density_scope = "next_full_sync"
+            try:
+                from services.source_of_truth.tv_density_rematerialize import (
+                    execute_tv_density_rematerialize_apply_scope,
+                )
+
+                tv_density_rematerialize_summary = execute_tv_density_rematerialize_apply_scope(
+                    effective_density_scope,
+                    source="settings_save:tv_density",
+                )
+                logger.info(
+                    f"TV density rematerialize after settings save scope={effective_density_scope} "
+                    f"keys={tv_density_rematerialize_keys_changed}",
+                    extra={"emoji_type": "processing"},
+                )
+            except Exception as dens_exc:
+                logger.warning(
+                    f"TV density rematerialize after settings save failed: {dens_exc}",
+                    extra={"emoji_type": "warning"},
+                )
+                tv_density_rematerialize_summary = {"ok": False, "error": str(dens_exc)}
+
         logger.info(
             "Settings saved"
             f" partial={partial}"
@@ -1924,6 +3147,10 @@ def save_settings(
             "nfo_backfill": backfill_summary,
             "art_backfill_keys_changed": art_backfill_keys_changed,
             "art_backfill": art_backfill_summary,
+            "destination_rematerialize_keys_changed": destination_rematerialize_keys_changed,
+            "destination_rematerialize": destination_rematerialize_summary,
+            "tv_density_rematerialize_keys_changed": tv_density_rematerialize_keys_changed,
+            "tv_density_rematerialize": tv_density_rematerialize_summary,
         }
     except Exception as exc:
         session.rollback()

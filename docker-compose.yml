@@ -9,17 +9,26 @@ services:
       DB_HOST: placeholdarr_postgres
       DB_PORT: 5432
       DB_USER: placeholdarr
+      # Password: use DB_PASS (below) or omit it and set DB_PASS_FILE to a mounted
+      # secret path (e.g. /run/secrets/placeholdarr_db_pass). Same vars as .env.
+      # Non-empty DB_PASS wins. For bundled Postgres, also set POSTGRES_PASSWORD
+      # or POSTGRES_PASSWORD_FILE on placeholdarr_postgres to the same value.
       DB_PASS: placeholdarr
+      # DB_PASS_FILE: /run/secrets/placeholdarr_db_pass
       DB_NAME: placeholdarr
       PUID: 1000
       PGID: 1000
+      # Optional: change the container listen port (default 8000). The right side of
+      # ports: below must match. Host-only remaps keep the right side at 8000.
+      # PLACEHOLDARR_PORT: "8000"
     volumes:
       # Map host appdata to /config inside the container (default app state + logs path).
       - ${PLACEHOLDARR_APPDATA:-./.appdata}:/config
       # Placeholder/media root mapping used by onboarding/settings path fields.
       - /path/on/host:/path/on/container
     ports:
-      # Dashboard listens on 8000. Auth is enabled by default (create admin on first open).
+      # Left = host port; right = container listen port (PLACEHOLDARR_PORT, default 8000).
+      # Auth is enabled by default (create admin on first open).
       # Do not publish this port to the internet without builtin auth or an authenticating reverse proxy (forward_auth).
       - "8000:8000"
     restart: unless-stopped
@@ -36,7 +45,10 @@ services:
       start_period: 10s
     environment:
       POSTGRES_USER: "placeholdarr"
+      # Match Placeholdarr's DB_PASS / DB_PASS_FILE. Official image also supports
+      # POSTGRES_PASSWORD_FILE for Docker/GitOps secrets.
       POSTGRES_PASSWORD: "placeholdarr"
+      # POSTGRES_PASSWORD_FILE: /run/secrets/placeholdarr_db_pass
       POSTGRES_DB: "placeholdarr"
     volumes:
       - ${PLACEHOLDARR_APPDATA:-./.appdata}/postgres:/var/lib/postgresql

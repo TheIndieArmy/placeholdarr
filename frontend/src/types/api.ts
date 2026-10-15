@@ -165,7 +165,8 @@ export interface LibraryItem {
   network?: string | null;
   poster_url?: string | null;
   backdrop_url?: string | null;
-  is_4k: boolean;
+  /** @deprecated Prefer instance_key / instance_label; backend may omit. */
+  is_4k?: boolean;
   instance_key?: string | null;
   instance_id?: string | null;
   instance_label?: string | null;
@@ -281,7 +282,8 @@ export interface MovieDetailResponse {
   actors?: DetailActorDisplay[];
   directors?: DetailActorDisplay[];
   trailer_url?: string | null;
-  is_4k: boolean;
+  /** @deprecated Prefer instance_key / instance_label; backend may omit. */
+  is_4k?: boolean;
   instance_key?: string | null;
   instance_id?: string | null;
   instance_label?: string | null;
@@ -306,6 +308,7 @@ export interface MovieDetailResponse {
   file_path?: string | null;
   file_size_bytes?: number | null;
   library_path?: string | null;
+  placeholder_folder?: string | null;
   radarr_id?: number | null;
   last_found_in_arr?: string | null;
   radarr_quality?: string | null;
@@ -383,7 +386,8 @@ export interface SeriesDetailResponse {
   ratings?: Record<string, unknown> | null;
   ratings_display?: DetailRatingDisplay[];
   actors?: DetailActorDisplay[];
-  is_4k: boolean;
+  /** @deprecated Prefer instance_key / instance_label; backend may omit. */
+  is_4k?: boolean;
   instance_key?: string | null;
   instance_id?: string | null;
   instance_label?: string | null;
@@ -401,6 +405,8 @@ export interface SeriesDetailResponse {
   placeholder_policy?: "auto" | "never" | "pinned";
   force_placeholder?: boolean;
   block_placeholder?: boolean;
+  /** Current TV placeholder density setting (episode | season | series). */
+  tv_placeholder_density?: "episode" | "season" | "series" | string | null;
   placeholder_policy_source?: "manual" | "tag" | null;
   policy_tag_control?: PolicyTagControl | null;
   first_aired?: string | null;
@@ -460,7 +466,8 @@ export interface CalendarItem {
   reason?: string | null;
   has_file: boolean;
   has_placeholder: boolean;
-  is_4k: boolean;
+  /** @deprecated Prefer instance_key; backend may omit. */
+  is_4k?: boolean;
   instance_key?: string | null;
   arr_link?: string | null;
   release_type?: "inCinemas" | "digitalRelease" | "physicalRelease";
@@ -535,8 +542,12 @@ export interface SettingsField {
   depends_on?: string;
   /** When set, the field is non-interactive while the parent bool setting is enabled. */
   disabled_when?: string;
+  /** When true, the UI toggle is the opposite of the stored bool (store still uses the schema key semantics). */
+  invert_bool?: boolean;
   /** Indent under the parent setting in the settings UI. */
   nested?: boolean;
+  /** When true, Settings/Play render destination multi-select instead of freeform chips. */
+  playback_dest_filter?: boolean;
 }
 
 export interface SettingsSection {
@@ -575,6 +586,8 @@ export interface SettingsPayload {
   sections: SettingsSection[];
   /** Not a settings field — used to display webhook URLs Radarr/Sonarr/etc. need. */
   webhook_api_key?: string | null;
+  /** Library dest folders for Playback filter multi-select (Movies / TV). */
+  playback_dest_options?: { movies: string[]; tv: string[] };
 }
 
 export interface SaveSettingsResponse {

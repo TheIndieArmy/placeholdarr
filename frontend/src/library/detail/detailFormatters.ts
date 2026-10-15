@@ -70,7 +70,10 @@ export function detailMutedChipClass(isLight: boolean): string {
   }`;
 }
 
-export function detailStatusChipClass(isLight: boolean, kind: "file" | "placeholder" | "missing"): string {
+export function detailStatusChipClass(
+  isLight: boolean,
+  kind: "file" | "placeholder" | "missing" | "not_needed",
+): string {
   const base = detailMutedChipClass(isLight);
   if (kind === "file") {
     return `${base} ${isLight ? "text-emerald-800" : "text-emerald-200"}`;
@@ -78,7 +81,24 @@ export function detailStatusChipClass(isLight: boolean, kind: "file" | "placehol
   if (kind === "placeholder") {
     return `${base} ${isLight ? "text-sky-800" : "text-sky-200"}`;
   }
+  if (kind === "not_needed") {
+    return `${base} ${isLight ? "text-slate-600" : "text-slate-400"}`;
+  }
   return `${base} ${isLight ? "text-red-800" : "text-red-200"}`;
+}
+
+/** Episode/movie row chip when there is no real file and no placeholder on disk. */
+export function unresolvedDetailStatus(determination: string | null | undefined): {
+  label: string;
+  kind: "missing" | "not_needed";
+} {
+  const v = String(determination || "")
+    .trim()
+    .toLowerCase();
+  if (v === "not_needed") {
+    return { label: "Not needed", kind: "not_needed" };
+  }
+  return { label: "Missing", kind: "missing" };
 }
 
 export function formatRatingLabel(source: string | null | undefined): string {

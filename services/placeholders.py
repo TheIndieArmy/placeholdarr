@@ -165,14 +165,19 @@ def _apply_dir_chain_permissions(path: str) -> None:
     try:
         target_parent = os.path.abspath(os.path.dirname(path))
         roots = []
-        for r in (
-            getattr(settings, "MOVIE_LIBRARY_FOLDER", None),
-            getattr(settings, "MOVIE_LIBRARY_4K_FOLDER", None),
-            getattr(settings, "TV_LIBRARY_FOLDER", None),
-            getattr(settings, "TV_LIBRARY_4K_FOLDER", None),
-        ):
-            if r:
-                roots.append(os.path.abspath(r))
+        try:
+            from services.library_destinations import all_configured_dest_roots
+
+            for r in all_configured_dest_roots():
+                if r:
+                    roots.append(os.path.abspath(r))
+        except Exception:
+            for r in (
+                getattr(settings, "MOVIE_LIBRARY_FOLDER", None),
+                getattr(settings, "TV_LIBRARY_FOLDER", None),
+            ):
+                if r:
+                    roots.append(os.path.abspath(r))
 
         for root in roots:
             try:
@@ -226,23 +231,19 @@ def sanitize_filename(value: str | None) -> str:
     return text or "unknown"
 
 
-def _arr_instance_role(content_type: str, item: Any) -> str:
-    arr_type = "radarr" if content_type == "movie" else "sonarr"
-    row = settings.resolve_arr_instance(
-        arr_type,
-        instance_id=str(getattr(item, "instance_id", "") or "").strip().lower() or None,
-        instance_key=str(getattr(item, "instance_key", "") or "").strip().lower() or None,
-    ) or {}
-    role = str(row.get("role") or "primary").strip().lower()
-    return role if role in {"primary", "secondary", "additional"} else "primary"
-
-
 def movie_placeholder_path(movie: Any) -> str:
     title = sanitize_filename(getattr(movie, "title", None))
     year = getattr(movie, "year", None)
 
-    movie_role = _arr_instance_role("movie", movie)
-    root = settings.MOVIE_LIBRARY_4K_FOLDER if movie_role != "primary" else settings.MOVIE_LIBRARY_FOLDER
+    from services.library_destinations import dest_folder_for_instance
+
+    arr_path = getattr(movie, "radarrpath", None)
+    instance_key = str(getattr(movie, "instance_key", None) or "").strip().lower() or None
+    root = dest_folder_for_instance(
+        arr_type="radarr",
+        instance_key=instance_key,
+        arr_path=arr_path if isinstance(arr_path, str) else None,
+    )
     tmdb_or_id = getattr(movie, "tmdbid", None) or getattr(movie, "id", None)
     default_folder = os.path.join(root, f"{title} ({year}) {{tmdb-{tmdb_or_id}}}" if year else f"{title} {{tmdb-{tmdb_or_id}}}")
     folder = getattr(movie, "placeholder_folder", None) or default_folder
@@ -257,8 +258,15 @@ def episode_placeholder_path(episode: Any, season: Any, series: Any) -> str:
     episode_title = sanitize_filename(getattr(episode, "title", None))
     year = getattr(series, "year", None)
 
-    series_role = _arr_instance_role("series", series)
-    root = settings.TV_LIBRARY_4K_FOLDER if series_role != "primary" else settings.TV_LIBRARY_FOLDER
+    from services.library_destinations import dest_folder_for_instance
+
+    arr_path = getattr(series, "sonarrpath", None)
+    instance_key = str(getattr(series, "instance_key", None) or "").strip().lower() or None
+    root = dest_folder_for_instance(
+        arr_type="sonarr",
+        instance_key=instance_key,
+        arr_path=arr_path if isinstance(arr_path, str) else None,
+    )
     tvdb_or_id = getattr(series, "tvdbid", None) or getattr(series, "id", None)
     series_folder = f"{series_title} ({year}) {{tvdb-{tvdb_or_id}}}" if year else f"{series_title} {{tvdb-{tvdb_or_id}}}"
     season_folder = f"Season {int(getattr(season, 'season_number', 0)):02d}"
@@ -278,6 +286,65 @@ def episode_placeholder_path(episode: Any, season: Any, series: Any) -> str:
         f"{episode_title}.mp4"
     )
     return os.path.join(folder, filename)
+
+
+def series_density_stub_path(series: Any) -> str:
+    """Playable series-density stub: always Season 01 / s01e01 under the series folder."""
+    series_title = sanitize_filename(getattr(series, "title", None))
+    year = getattr(series, "year", None)
+
+    from services.library_destinations import dest_folder_for_instance
+
+    arr_path = getattr(series, "sonarrpath", None)
+    instance_key = str(getattr(series, "instance_key", None) or "").strip().lower() or None
+    root = dest_folder_for_instance(
+        arr_type="sonarr",
+        instance_key=instance_key,
+        arr_path=arr_path if isinstance(arr_path, str) else None,
+    )
+    tvdb_or_id = getattr(series, "tvdbid", None) or getattr(series, "id", None)
+    series_folder_name = (
+        f"{series_title} ({year}) {{tvdb-{tvdb_or_id}}}" if year else f"{series_title} {{tvdb-{tvdb_or_id}}}"
+    )
+    pinned = str(getattr(series, "placeholder_folder", None) or "").strip()
+    series_folder = pinned if pinned else os.path.join(root, series_folder_name)
+    season_dir = os.path.join(series_folder, "Season 01")
+    year_part = f" ({year})" if year else ""
+    from services.source_of_truth.tv_density import DENSITY_PLACEHOLDER_TITLE
+
+    filename = f"{series_title}{year_part} - s01e01 - {DENSITY_PLACEHOLDER_TITLE}.mp4"
+    return os.path.join(season_dir, filename)
+
+
+def season_density_stub_path(series: Any, season: Any) -> str:
+    """Playable season-density placeholder: sNNe01 under that season's folder."""
+    series_title = sanitize_filename(getattr(series, "title", None))
+    year = getattr(series, "year", None)
+    season_number = int(getattr(season, "season_number", 0) or 0)
+
+    from services.library_destinations import dest_folder_for_instance
+
+    arr_path = getattr(series, "sonarrpath", None)
+    instance_key = str(getattr(series, "instance_key", None) or "").strip().lower() or None
+    root = dest_folder_for_instance(
+        arr_type="sonarr",
+        instance_key=instance_key,
+        arr_path=arr_path if isinstance(arr_path, str) else None,
+    )
+    tvdb_or_id = getattr(series, "tvdbid", None) or getattr(series, "id", None)
+    series_folder_name = (
+        f"{series_title} ({year}) {{tvdb-{tvdb_or_id}}}" if year else f"{series_title} {{tvdb-{tvdb_or_id}}}"
+    )
+    pinned_series = str(getattr(series, "placeholder_folder", None) or "").strip()
+    series_folder = pinned_series if pinned_series else os.path.join(root, series_folder_name)
+    season_folder_name = f"Season {season_number:02d}"
+    pinned_season = str(getattr(season, "placeholder_folder", None) or "").strip()
+    season_dir = pinned_season if pinned_season else os.path.join(series_folder, season_folder_name)
+    year_part = f" ({year})" if year else ""
+    from services.source_of_truth.tv_density import DENSITY_PLACEHOLDER_TITLE
+
+    filename = f"{series_title}{year_part} - s{season_number:02d}e01 - {DENSITY_PLACEHOLDER_TITLE}.mp4"
+    return os.path.join(season_dir, filename)
 
 
 def ensure_placeholder_file(
@@ -892,9 +959,16 @@ def ensure_series_nfo(series: Any, folder: str | None = None) -> bool:
     if not target_folder:
         target_folder = getattr(series, "placeholder_folder", None)
     if not target_folder:
+        from services.library_destinations import dest_folder_for_instance
+
         # Fallback to a best-effort folder using configured TV root + sanitized title
-        series_role = _arr_instance_role("series", series)
-        root = settings.TV_LIBRARY_4K_FOLDER if series_role != "primary" else settings.TV_LIBRARY_FOLDER
+        instance_key = str(getattr(series, "instance_key", None) or "").strip().lower() or None
+        arr_path = getattr(series, "sonarrpath", None)
+        root = dest_folder_for_instance(
+            arr_type="sonarr",
+            instance_key=instance_key,
+            arr_path=arr_path if isinstance(arr_path, str) else None,
+        )
         title = sanitize_filename(getattr(series, "title", None))
         year = getattr(series, "year", None)
         tvdb_or_id = getattr(series, "tvdbid", None) or getattr(series, "id", None)

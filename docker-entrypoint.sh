@@ -19,4 +19,14 @@ chown -R "${PUID}:${PGID}" /config /app
 
 # util-linux setpriv: --clear-groups and --init-groups are mutually exclusive (newer versions exit with an error).
 # Use --init-groups so supplementary groups match /etc/group for the dropped UID (typical PUID/PGID behavior).
+#
+# Default image CMD is uvicorn with a hardcoded --port 8000. Honor PLACEHOLDARR_PORT /
+# PLACEHOLDARR_HOST so compose/env can change the container listen port (#89).
+if [ "$1" = "uvicorn" ]; then
+  host="${PLACEHOLDARR_HOST:-0.0.0.0}"
+  port="${PLACEHOLDARR_PORT:-8000}"
+  exec setpriv --reuid="${PUID}" --regid="${PGID}" --init-groups -- \
+    uvicorn main:app --host "$host" --port "$port"
+fi
+
 exec setpriv --reuid="${PUID}" --regid="${PGID}" --init-groups -- "$@"
