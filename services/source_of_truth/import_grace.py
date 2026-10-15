@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -21,9 +22,66 @@ from services.status_projection import projected_status_display
 
 IMPORT_GRACE_JOB_TYPE = "import_grace"
 IMPORT_GRACE_REASON = "import_grace_countdown"
+IMPORT_GRACE_CANCEL_ERROR = "Cancelled: file deleted during import grace"
 # Number of countdown ticks before the final "less than a minute" tick.
 # Historically: 5, 4, 3, 2, 1 minutes remaining, plus a "less than a minute" final.
 COUNTDOWN_MINUTES_DECREASING = (5, 4, 3, 2, 1)
+
+
+def import_file_still_present(file_path: str | None) -> bool:
+    """True when grace has no path to verify, or the imported Arr file is still on disk.
+
+    Empty path keeps legacy behavior (cannot verify). A set path that is missing means
+    the import was undone (e.g. file delete during grace) and ticks/finalize should abort.
+    """
+    path = str(file_path or "").strip()
+    if not path:
+        return True
+    return os.path.isfile(path)
+
+
+def cancel_import_grace_for_entity(
+    session,
+    *,
+    content_type: str,
+    entity_id: int,
+) -> int:
+    """Fail queued/in-flight import_grace jobs for one movie or episode row.
+
+    File-delete handlers call this so countdown ticks and finalize cannot overwrite
+    rematerialization after the Arr file is gone. Returns how many jobs were cancelled.
+    """
+    ct = str(content_type or "").strip().lower()
+    try:
+        eid = int(entity_id)
+    except (TypeError, ValueError):
+        return 0
+    if ct not in {"movie", "episode"} or eid <= 0:
+        return 0
+
+    rows = (
+        session.query(Job)
+        .filter(
+            Job.job_type == IMPORT_GRACE_JOB_TYPE,
+            Job.status.in_(("PENDING", "CLAIMED", "WORKING")),
+        )
+        .all()
+    )
+    cancelled = 0
+    for job in rows:
+        payload = job.payload if isinstance(job.payload, dict) else {}
+        if str(payload.get("content_type") or "").strip().lower() != ct:
+            continue
+        try:
+            if int(payload.get("entity_id")) != eid:
+                continue
+        except (TypeError, ValueError):
+            continue
+        job.status = "FAILED"
+        job.error_message = IMPORT_GRACE_CANCEL_ERROR
+        session.add(job)
+        cancelled += 1
+    return cancelled
 
 
 def _countdown_status_text(minutes_remaining: int) -> str:
@@ -243,6 +301,23 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
         f"Import grace job processing: step_index={step_index}, finalize={is_finalize}, content_type={content_type}, entity_id={entity_id}, placeholder_ids={placeholder_ids}",
         extra={'emoji_type': 'debug'}
     )
+
+    if not import_file_still_present(None if file_path is None else str(file_path)):
+        phase = "finalize_aborted_file_missing" if is_finalize else "tick_aborted_file_missing"
+        logger.info(
+            f"Import grace aborted ({phase}): imported file no longer present "
+            f"content_type={content_type} entity_id={entity_id} file_path={file_path!r}",
+            extra={"emoji_type": "info"},
+        )
+        return {
+            "done": True,
+            "ok": True,
+            "phase": phase,
+            "content_type": content_type,
+            "entity_id": entity_id,
+            "reason": "import_file_missing",
+            "file_path": file_path,
+        }
 
     materialization: dict[str, Any] = {}
 

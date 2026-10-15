@@ -9,6 +9,23 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Summary
+
+- **Real library refresh on Arr import**: Path-refresh real Plex/Jellyfin/Emby libraries when Arr reports a file import (on by default).
+- **Real library refresh + Plex empty trash on Arr file delete**: Path-refresh on file delete; Plex empties trash after the scan (on by default).
+- **What's new (0.11.2)**: Startup ack for real-library refresh (Paths CTA).
+- **Import grace vs file delete**: Cancel grace on Arr file delete; abort ticks/finalize when the imported file is already gone.
+
+### Added
+
+- **Real library refresh on Arr import**: With `REFRESH_REAL_LIBRARIES_ON_ARR_EVENTS` (default on), Arr import webhooks schedule a path-scoped refresh of real media libraries (Plex location match, Jellyfin/Emby Media/Updated) in parallel with placeholder import grace.
+- **Real library refresh + Plex empty trash on Arr file delete**: The same setting path-refreshes real libraries on file delete and, for Plex, waits for the section scan then empties trash.
+- **What's new (0.11.2)**: Startup ack pointing at Settings → Paths to turn the toggle off if needed.
+
+### Fixed
+
+- **Import grace vs file delete**: Arr file-delete cancels pending import-grace jobs for that title. Grace ticks and finalize no-op when the imported path is already gone, so a mid-grace delete cannot leave `has_file=true` with no placeholder.
+
 ## Pre-release
 
 ## Released

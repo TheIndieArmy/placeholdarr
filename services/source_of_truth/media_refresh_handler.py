@@ -35,6 +35,7 @@ from core.config import settings
 from core.logger import logger, start_verbose_stall_heartbeat
 from services.media_servers.refresh import (
     refresh_all_path_batches_with_section_fallback,
+    refresh_real_library_paths,
     refresh_selected_sections,
 )
 from services.postgres.models import Job
@@ -52,6 +53,7 @@ KIND_PHASE_INITIAL_EPISODE = "phase_initial_episode"
 KIND_PHASE_FINAL_EPISODE = "phase_final_episode"
 KIND_OVERLAP_PATH_BATCH = "overlap_path_batch"
 KIND_DELAYED_FINAL = "delayed_final"
+KIND_ARR_REAL_LIBRARY = "arr_real_library"
 
 
 # Maximum number of times a single media_refresh Job may be re-enqueued because
@@ -60,7 +62,7 @@ KIND_DELAYED_FINAL = "delayed_final"
 _MAX_REENQUEUE_ATTEMPTS = 5
 
 # Path-batch refresh kinds that should merge into one pending job instead of fanning out.
-_COALESCE_KINDS = frozenset({KIND_DELAYED_FINAL, KIND_OVERLAP_PATH_BATCH})
+_COALESCE_KINDS = frozenset({KIND_DELAYED_FINAL, KIND_OVERLAP_PATH_BATCH, KIND_ARR_REAL_LIBRARY})
 
 
 def _coalesce_group_id(kind: str) -> str:
@@ -77,10 +79,68 @@ def _merge_path_payload(existing: dict[str, Any], incoming: dict[str, Any]) -> d
         if not isinstance(new_paths, list):
             new_paths = list(new_paths) if new_paths else []
         merged[key] = sorted(set(str(p) for p in old_paths if p) | set(str(p) for p in new_paths if p))
-    for flag in ("has_movies", "has_episodes", "include_plex", "include_jellyfin", "include_emby"):
+    for flag in (
+        "has_movies",
+        "has_episodes",
+        "include_plex",
+        "include_jellyfin",
+        "include_emby",
+        "empty_trash",
+    ):
         merged[flag] = bool(merged.get(flag)) or bool(incoming.get(flag))
     merged["kind"] = str(incoming.get("kind") or existing.get("kind") or "")
     return merged
+
+
+def schedule_arr_real_library_refresh(
+    session,
+    *,
+    paths: list[str] | set[str] | tuple[str, ...] | None,
+    update_type: str = "Created",
+    empty_trash: bool = False,
+    delay_seconds: float = 2.0,
+) -> Job | None:
+    """Enqueue a real-library path refresh when the setting is on and paths exist.
+
+    Returns the Job (or coalesced existing job), or None when skipped.
+    """
+    if not bool(getattr(settings, "REFRESH_REAL_LIBRARIES_ON_ARR_EVENTS", True)):
+        return None
+    cleaned = sorted({str(p).strip() for p in (paths or []) if str(p).strip()})
+    if not cleaned:
+        return None
+
+    update = str(update_type or "Created").strip() or "Created"
+    payload: dict[str, Any] = {
+        "kind": KIND_ARR_REAL_LIBRARY,
+        "created_paths": cleaned if update.lower() != "deleted" else [],
+        "delete_paths": cleaned if update.lower() == "deleted" else [],
+        "empty_trash": bool(empty_trash) and update.lower() == "deleted",
+        "include_plex": bool(getattr(settings, "plex_enabled", False)),
+        "include_jellyfin": bool(getattr(settings, "jellyfin_enabled", False)),
+        "include_emby": bool(getattr(settings, "emby_enabled", False)),
+    }
+    if not payload["include_plex"] and not payload["include_jellyfin"] and not payload["include_emby"]:
+        logger.debug(
+            "arr_real_library refresh skipped — no media players enabled",
+            extra={"emoji_type": "debug"},
+        )
+        return None
+
+    job = enqueue_media_refresh_job(
+        session,
+        kind=KIND_ARR_REAL_LIBRARY,
+        payload=payload,
+        delay_seconds=delay_seconds,
+        coalesce=True,
+    )
+    logger.debug(
+        f"arr_real_library refresh scheduled update_type={update} "
+        f"paths={len(cleaned)} empty_trash={payload['empty_trash']} "
+        f"job_id={getattr(job, 'id', None)}",
+        extra={"emoji_type": "debug"},
+    )
+    return job
 
 
 def use_job_driven_refresh() -> bool:
@@ -369,6 +429,52 @@ def process_media_refresh_job(session, job: Job) -> dict[str, Any]:
             )
             return {"ok": True, "kind": kind, "stats": stats}
 
+        if kind == KIND_ARR_REAL_LIBRARY:
+            created_paths = list(payload.get("created_paths") or [])
+            delete_paths = list(payload.get("delete_paths") or [])
+            empty_trash = _coerce_bool(payload.get("empty_trash"), default=False)
+            combined_stats: dict[str, Any] = {
+                "refreshed": 0,
+                "failed": 0,
+                "skipped": 0,
+                "trash": {},
+            }
+            if created_paths:
+                created_stats = refresh_real_library_paths(
+                    created_paths,
+                    update_type="Created",
+                    empty_trash=False,
+                    include_plex=include_plex,
+                    include_jellyfin=include_jellyfin,
+                    include_emby=include_emby,
+                )
+                combined_stats["refreshed"] += int(created_stats.get("refreshed", 0) or 0)
+                combined_stats["failed"] += int(created_stats.get("failed", 0) or 0)
+                combined_stats["skipped"] += int(created_stats.get("skipped", 0) or 0)
+            if delete_paths:
+                delete_stats = refresh_real_library_paths(
+                    delete_paths,
+                    update_type="Deleted",
+                    empty_trash=empty_trash,
+                    include_plex=include_plex,
+                    include_jellyfin=include_jellyfin,
+                    include_emby=include_emby,
+                )
+                combined_stats["refreshed"] += int(delete_stats.get("refreshed", 0) or 0)
+                combined_stats["failed"] += int(delete_stats.get("failed", 0) or 0)
+                combined_stats["skipped"] += int(delete_stats.get("skipped", 0) or 0)
+                combined_stats["trash"] = delete_stats.get("trash") or {}
+            logger.info(
+                f"{log_prefix} completed real-library refresh: "
+                f"refreshed={combined_stats.get('refreshed', 0)} "
+                f"failed={combined_stats.get('failed', 0)} "
+                f"skipped={combined_stats.get('skipped', 0)} "
+                f"created_paths={len(created_paths)} delete_paths={len(delete_paths)} "
+                f"empty_trash={empty_trash}",
+                extra={"emoji_type": "success"},
+            )
+            return {"ok": True, "kind": kind, "stats": combined_stats}
+
         logger.warning(
             f"{log_prefix} unknown media_refresh kind; skipping",
             extra={"emoji_type": "warning"},
@@ -393,7 +499,9 @@ __all__ = [
     "KIND_PHASE_FINAL_EPISODE",
     "KIND_OVERLAP_PATH_BATCH",
     "KIND_DELAYED_FINAL",
+    "KIND_ARR_REAL_LIBRARY",
     "use_job_driven_refresh",
     "enqueue_media_refresh_job",
+    "schedule_arr_real_library_refresh",
     "process_media_refresh_job",
 ]

@@ -11334,6 +11334,7 @@ function OnboardingWizard(props: {
             const fieldByKey = new Map(fields.map((f) => [f.key, f]));
 
             return (
+              <div className="space-y-5">
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                   {ONBOARDING_MEDIA_CARDS.map((card) => {
                     const enabled = Boolean(props.values[card.enabledKey]);
@@ -11470,6 +11471,21 @@ function OnboardingWizard(props: {
                       </div>
                     );
                   })}
+              </div>
+                {(() => {
+                  const remaining = fields.filter(
+                    (field) =>
+                      !SETTINGS_UI_HIDDEN_FIELD_KEYS.has(field.key) &&
+                      !HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) &&
+                      !isPlexSectionIdField(field.key) &&
+                      !ONBOARDING_MEDIA_CARDS.some((card) =>
+                        [card.enabledKey, ...card.keys].includes(field.key),
+                      ),
+                  );
+                  return remaining.length ? (
+                    <div className="space-y-4">{remaining.map((field) => wizardFieldRow(field))}</div>
+                  ) : null;
+                })()}
               </div>
             );
           })() : step.key === "arr" ? (

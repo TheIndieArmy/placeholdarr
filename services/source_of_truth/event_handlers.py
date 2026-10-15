@@ -36,9 +36,11 @@ from services.source_of_truth.materializer import (
     run_materialization_for_entities,
 )
 from services.source_of_truth.import_grace import (
+    cancel_import_grace_for_entity,
     schedule_episode_import_grace,
     schedule_movie_import_grace,
 )
+from services.source_of_truth.media_refresh_handler import schedule_arr_real_library_refresh
 from services.source_of_truth.sync_runner import (
     _apply_season_remote_posters,
     _episode_detail_fetches_enabled,
@@ -600,6 +602,19 @@ def process_movie_imported_event(payload: dict[str, Any], instance: str | None =
             movie_row_id=movie_row_id,
             file_path=file_path,
         )
+        real_scan_job = None
+        if file_path:
+            real_scan_job = schedule_arr_real_library_refresh(
+                session,
+                paths=[str(file_path)],
+                update_type="Created",
+                empty_trash=False,
+            )
+            if real_scan_job is not None:
+                logger.info(
+                    "Real file imported; triggering library scan.",
+                    extra={"emoji_type": "refresh"},
+                )
         session.commit()
 
         movie_ref = session.query(Movie).filter(Movie.id == movie_row_id).first()
@@ -615,6 +630,8 @@ def process_movie_imported_event(payload: dict[str, Any], instance: str | None =
                 f"({active_n} received countdown status)."
             )
             status_label = "Grace Scheduled"
+        if real_scan_job is not None:
+            result_reason = f"{result_reason} Real library scan scheduled."
         result_path = (
             str(getattr(movie_ref, "placeholder_filepath", "") or "").strip()
             if movie_ref
@@ -637,7 +654,12 @@ def process_movie_imported_event(payload: dict[str, Any], instance: str | None =
             reason=result_reason,
             status_label=status_label,
             source="event_movie_import",
-            extra_snapshot={"grace": g, "movie_id": int(movie_row_id), "import_file_path": file_path},
+            extra_snapshot={
+                "grace": g,
+                "movie_id": int(movie_row_id),
+                "import_file_path": file_path,
+                "real_library_scan_scheduled": real_scan_job is not None,
+            },
         )
         session.commit()
 
@@ -646,6 +668,7 @@ def process_movie_imported_event(payload: dict[str, Any], instance: str | None =
             "event": "movie_imported",
             "movie_id": movie_row_id,
             "grace": grace_stats,
+            "real_library_scan_scheduled": real_scan_job is not None,
         }
     except Exception:
         session.rollback()
@@ -721,6 +744,19 @@ def process_episode_imported_event(payload: dict[str, Any], instance: str | None
                     file_path=file_path,
                 )
             )
+        real_scan_job = None
+        if file_path:
+            real_scan_job = schedule_arr_real_library_refresh(
+                session,
+                paths=[str(file_path)],
+                update_type="Created",
+                empty_trash=False,
+            )
+            if real_scan_job is not None:
+                logger.info(
+                    "Real file imported; triggering library scan.",
+                    extra={"emoji_type": "refresh"},
+                )
         session.commit()
 
         for episode_row, g in zip(deduped_episode_rows, grace_stats):
@@ -749,6 +785,8 @@ def process_episode_imported_event(payload: dict[str, Any], instance: str | None
                     f"({active_n} received countdown status)."
                 )
                 status_label = "Grace Scheduled"
+            if real_scan_job is not None:
+                result_reason = f"{result_reason} Real library scan scheduled."
             sn = int(season.season_number or 0)
             en = int(ep.episode_number or 0)
             ep_label = f"S{sn:02d}E{en:02d} - {ep.title}"
@@ -773,7 +811,12 @@ def process_episode_imported_event(payload: dict[str, Any], instance: str | None
                 reason=result_reason,
                 status_label=status_label,
                 source="event_episode_import",
-                extra_snapshot={"grace": gd, "episode_id": eid, "import_file_path": file_path},
+                extra_snapshot={
+                    "grace": gd,
+                    "episode_id": eid,
+                    "import_file_path": file_path,
+                    "real_library_scan_scheduled": real_scan_job is not None,
+                },
             )
         session.commit()
 
@@ -783,6 +826,7 @@ def process_episode_imported_event(payload: dict[str, Any], instance: str | None
             "episode_id": episode_row_ids[0],
             "episode_ids": episode_row_ids,
             "grace": grace_stats,
+            "real_library_scan_scheduled": real_scan_job is not None,
         }
     except Exception:
         session.rollback()
@@ -867,6 +911,13 @@ def process_movie_file_deleted_event(payload: dict[str, Any], instance: str | No
         if not movie_row:
             raise ValueError(f"moviefiledelete_movie_not_found:radarrid={movie_id}:instance_key={resolved_instance_key}")
 
+        movie_file = payload.get("movieFile") if isinstance(payload.get("movieFile"), dict) else {}
+        deleted_file_path = (
+            str(movie_file.get("path") or "").strip()
+            or str(getattr(movie_row, "radarr_filepath", "") or "").strip()
+            or None
+        )
+
         # Reset file state
         movie_row.has_file = False
         movie_row.radarr_filepath = None
@@ -875,12 +926,30 @@ def process_movie_file_deleted_event(payload: dict[str, Any], instance: str | No
         session.add(movie_row)
         session.flush()
         movie_row_id = int(movie_row.id)
+        cancel_import_grace_for_entity(
+            session,
+            content_type="movie",
+            entity_id=movie_row_id,
+        )
         _mark_placeholder_rows_deleted(
             session,
             movie_id=movie_row_id,
             episode_id=None,
             activity_reason="event_movie_file_deleted",
         )
+        real_scan_job = None
+        if deleted_file_path:
+            real_scan_job = schedule_arr_real_library_refresh(
+                session,
+                paths=[deleted_file_path],
+                update_type="Deleted",
+                empty_trash=True,
+            )
+            if real_scan_job is not None:
+                logger.info(
+                    "Real file removed; refreshing library.",
+                    extra={"emoji_type": "refresh"},
+                )
         session.commit()
 
         expand_session = get_session()
@@ -902,6 +971,8 @@ def process_movie_file_deleted_event(payload: dict[str, Any], instance: str | No
         movie_after = session.query(Movie).filter(Movie.id == movie_row_id).first()
         mat = materialization_stats_dict(materialization_stats)
         result_reason, status_label = outcome_reason_and_status_from_materialization("Movie file deleted", mat)
+        if real_scan_job is not None:
+            result_reason = f"{result_reason} Real library scan scheduled."
         result_path = (
             str(getattr(movie_after, "placeholder_filepath", "") or "").strip()
             if movie_after
@@ -928,6 +999,8 @@ def process_movie_file_deleted_event(payload: dict[str, Any], instance: str | No
                 "determination": determination_stats if isinstance(determination_stats, dict) else {},
                 "materialization": mat,
                 "movie_id": int(movie_row_id),
+                "deleted_file_path": deleted_file_path,
+                "real_library_scan_scheduled": real_scan_job is not None,
             },
         )
         session.commit()
@@ -938,6 +1011,7 @@ def process_movie_file_deleted_event(payload: dict[str, Any], instance: str | No
             "movie_id": movie_row_id,
             "determination": determination_stats,
             "materialization": materialization_stats,
+            "real_library_scan_scheduled": real_scan_job is not None,
         }
     except Exception:
         session.rollback()
@@ -1086,6 +1160,15 @@ def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | 
         if not episode_rows:
             raise ValueError(f"episodefiledelete_episode_not_found:series={series_id}")
 
+        episode_file = payload.get("episodeFile") if isinstance(payload.get("episodeFile"), dict) else {}
+        deleted_file_path = str(episode_file.get("path") or "").strip() or None
+        if not deleted_file_path:
+            for ep_row in episode_rows:
+                stored = str(getattr(ep_row, "sonarr_filepath", "") or "").strip()
+                if stored:
+                    deleted_file_path = stored
+                    break
+
         # Reset file state for all matched episodes
         for ep_row in episode_rows:
             ep_row.has_file = False
@@ -1097,12 +1180,30 @@ def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | 
         session.flush()
         episode_ids = [int(ep.id) for ep in episode_rows if getattr(ep, "id", None)]
         for eid in episode_ids:
+            cancel_import_grace_for_entity(
+                session,
+                content_type="episode",
+                entity_id=eid,
+            )
             _mark_placeholder_rows_deleted(
                 session,
                 movie_id=None,
                 episode_id=eid,
                 activity_reason="event_episode_file_deleted",
             )
+        real_scan_job = None
+        if deleted_file_path:
+            real_scan_job = schedule_arr_real_library_refresh(
+                session,
+                paths=[deleted_file_path],
+                update_type="Deleted",
+                empty_trash=True,
+            )
+            if real_scan_job is not None:
+                logger.info(
+                    "Real file removed; refreshing library.",
+                    extra={"emoji_type": "refresh"},
+                )
         session.commit()
 
         expand_session = get_session()
@@ -1125,6 +1226,8 @@ def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | 
         n_eps = len(episode_ids)
         prefix = "Episode file deleted" if n_eps == 1 else f"Episode file deleted ({n_eps} episodes)"
         result_reason, status_label = outcome_reason_and_status_from_materialization(prefix, mat)
+        if real_scan_job is not None:
+            result_reason = f"{result_reason} Real library scan scheduled."
         primary_ep_id = int(episode_ids[0]) if episode_ids else None
         ctx = None
         if primary_ep_id:
@@ -1171,6 +1274,8 @@ def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | 
                 "materialization": mat,
                 "episode_ids": episode_ids,
                 "series_id": int(series_row.id),
+                "deleted_file_path": deleted_file_path,
+                "real_library_scan_scheduled": real_scan_job is not None,
             },
         )
         session.commit()
@@ -1182,6 +1287,7 @@ def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | 
             "episode_ids": episode_ids,
             "determination": determination_stats,
             "materialization": materialization_stats,
+            "real_library_scan_scheduled": real_scan_job is not None,
         }
     except Exception:
         session.rollback()
