@@ -154,7 +154,8 @@ def cancel_import_grace_for_entity(
     """Fail queued/in-flight import_grace jobs for one movie or episode row.
 
     File-delete handlers call this so countdown ticks and finalize cannot overwrite
-    rematerialization after the Arr file is gone. Returns how many jobs were cancelled.
+    a mid-grace interrupt (placeholder kept, status restored to REQUEST).
+    Returns how many jobs were cancelled.
     """
     ct = str(content_type or "").strip().lower()
     try:
@@ -187,6 +188,37 @@ def cancel_import_grace_for_entity(
         session.add(job)
         cancelled += 1
     return cancelled
+
+
+def interrupt_import_grace_keep_placeholder(
+    session,
+    *,
+    content_type: str,
+    entity_id: int,
+) -> dict[str, Any]:
+    """Cancel active grace for an entity and restore REQUEST without rematerializing.
+
+    Used when Arr reports file-delete while import grace is still running: the
+    placeholder file/row was never removed, so clearing ``has_placeholder`` and
+    rematerializing is unnecessary (and races the countdown UI).
+    """
+    cancelled = cancel_import_grace_for_entity(
+        session,
+        content_type=content_type,
+        entity_id=entity_id,
+    )
+    if cancelled <= 0:
+        return {"interrupted": False, "cancelled_jobs": 0, "restore": None}
+    restore = restore_request_after_import_grace_interrupt(
+        session,
+        content_type=content_type,
+        entity_id=entity_id,
+    )
+    return {
+        "interrupted": True,
+        "cancelled_jobs": int(cancelled),
+        "restore": restore,
+    }
 
 
 def _countdown_status_text(minutes_remaining: int) -> str:
@@ -384,6 +416,41 @@ def schedule_episode_import_grace(session, episode_row_id: int, file_path: str |
     )
 
 
+def _import_grace_job_was_cancelled(session, job: Job) -> bool:
+    """True when file-delete (or Arr abort) already failed this grace job row.
+
+    Cancel commits in another session while a worker may still hold a CLAIMED
+    descriptor. Re-read error_message so we do not overwrite REQUEST with a
+    stale countdown tick after interrupt.
+    """
+    raw_id = getattr(job, "id", None)
+    try:
+        jid = int(raw_id) if raw_id is not None else None
+    except (TypeError, ValueError):
+        jid = None
+    try:
+        session.refresh(job)
+    except Exception:
+        pass
+    err = str(getattr(job, "error_message", "") or "")
+    if err == IMPORT_GRACE_CANCEL_ERROR:
+        return True
+    if jid is None:
+        return False
+    try:
+        from sqlalchemy import text
+
+        row = session.execute(
+            text("SELECT error_message FROM job WHERE id = :id"),
+            {"id": jid},
+        ).first()
+        if row and str(row[0] or "") == IMPORT_GRACE_CANCEL_ERROR:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def process_import_grace_job(session, job: Job) -> dict[str, Any]:
     from core.logger import logger
     
@@ -406,6 +473,21 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
         f"Import grace job processing: step_index={step_index}, finalize={is_finalize}, content_type={content_type}, entity_id={entity_id}, placeholder_ids={placeholder_ids}",
         extra={'emoji_type': 'debug'}
     )
+
+    if _import_grace_job_was_cancelled(session, job):
+        logger.info(
+            f"Import grace skipped (job cancelled): step_index={step_index} finalize={is_finalize} "
+            f"content_type={content_type} entity_id={entity_id}",
+            extra={"emoji_type": "info"},
+        )
+        return {
+            "done": True,
+            "ok": True,
+            "phase": "cancelled",
+            "content_type": content_type,
+            "entity_id": entity_id,
+            "reason": "cancelled",
+        }
 
     if not arr_import_still_has_file(session, content_type=content_type, entity_id=entity_id):
         phase = "finalize_aborted_arr_no_file" if is_finalize else "tick_aborted_arr_no_file"
@@ -440,6 +522,19 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
     materialization: dict[str, Any] = {}
 
     if is_finalize:
+        if _import_grace_job_was_cancelled(session, job):
+            logger.info(
+                f"Import grace finalize skipped (job cancelled): content_type={content_type} entity_id={entity_id}",
+                extra={"emoji_type": "info"},
+            )
+            return {
+                "done": True,
+                "ok": True,
+                "phase": "cancelled",
+                "content_type": content_type,
+                "entity_id": entity_id,
+                "reason": "cancelled",
+            }
         logger.info(
             f"Import grace finalization starting: content_type={content_type}, entity_id={entity_id}, placeholder_ids={placeholder_ids}",
             extra={'emoji_type': 'info'}
@@ -642,6 +737,22 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
     if not status_text:
         logger.debug(f"Import grace tick: missing status_text at step_index={step_index}", extra={'emoji_type': 'debug'})
         return {"done": True, "ok": False, "reason": "missing_status_text"}
+
+    # Re-check cancel immediately before writing countdown (delete may have raced us).
+    if _import_grace_job_was_cancelled(session, job):
+        logger.info(
+            f"Import grace tick skipped (job cancelled): step_index={step_index} "
+            f"content_type={content_type} entity_id={entity_id}",
+            extra={"emoji_type": "info"},
+        )
+        return {
+            "done": True,
+            "ok": True,
+            "phase": "cancelled",
+            "content_type": content_type,
+            "entity_id": entity_id,
+            "reason": "cancelled",
+        }
 
     logger.debug(
         f"Import grace tick: step_index={step_index}, setting status_text='{status_text}' for {len(placeholder_ids)} placeholder(s)",

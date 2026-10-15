@@ -36,7 +36,7 @@ from services.source_of_truth.materializer import (
     run_materialization_for_entities,
 )
 from services.source_of_truth.import_grace import (
-    cancel_import_grace_for_entity,
+    interrupt_import_grace_keep_placeholder,
     schedule_episode_import_grace,
     schedule_movie_import_grace,
 )
@@ -890,10 +890,10 @@ def _extract_first_episode_pair(payload: dict[str, Any]) -> tuple[int, int] | No
 
 
 def process_movie_file_deleted_event(payload: dict[str, Any], instance: str | None = None) -> dict[str, Any]:
-    """Process movie file-deleted event by resetting has_file and rerunning determination/materialization.
+    """Process movie file-deleted event.
 
-    Radarr only emits file-delete when a real file was removed. Clear stale placeholder linkage so
-    determination is not stuck on ``placeholder_exists`` while the dummy/NFO may be missing on disk.
+    Mid-import-grace: cancel countdown, keep the existing placeholder, restore REQUEST.
+    Otherwise: clear placeholder linkage and rematerialize (real file gone, may need a new dummy).
     """
     movie_id = _extract_movie_id(payload)
     if not movie_id:
@@ -918,24 +918,18 @@ def process_movie_file_deleted_event(payload: dict[str, Any], instance: str | No
             or None
         )
 
-        # Reset file state
+        movie_row_id = int(movie_row.id)
+        # Real Arr file is gone either way; do not clear has_placeholder until we know
+        # this is not a mid-grace interrupt (placeholder is still on disk).
         movie_row.has_file = False
         movie_row.radarr_filepath = None
-        movie_row.has_placeholder = False
-        movie_row.placeholder_filepath = None
         session.add(movie_row)
         session.flush()
-        movie_row_id = int(movie_row.id)
-        cancel_import_grace_for_entity(
+
+        grace_interrupt = interrupt_import_grace_keep_placeholder(
             session,
             content_type="movie",
             entity_id=movie_row_id,
-        )
-        _mark_placeholder_rows_deleted(
-            session,
-            movie_id=movie_row_id,
-            episode_id=None,
-            activity_reason="event_movie_file_deleted",
         )
         real_scan_job = None
         if deleted_file_path:
@@ -950,6 +944,65 @@ def process_movie_file_deleted_event(payload: dict[str, Any], instance: str | No
                     "Real file removed; refreshing library.",
                     extra={"emoji_type": "refresh"},
                 )
+
+        if grace_interrupt.get("interrupted"):
+            session.commit()
+            movie_after = session.query(Movie).filter(Movie.id == movie_row_id).first()
+            result_reason = (
+                "Movie file deleted during import grace; placeholder kept and status restored to REQUEST."
+            )
+            if real_scan_job is not None:
+                result_reason = f"{result_reason} Real library scan scheduled."
+            result_path = (
+                str(getattr(movie_after, "placeholder_filepath", "") or "").strip()
+                if movie_after
+                else ""
+            ) or movie_placeholder_path(movie_after or movie_row)
+            append_placeholder_activity_status(
+                session,
+                item_type="movie",
+                movie_id=movie_row_id,
+                episode_id=None,
+                series_id=None,
+                season_id=None,
+                season_number=None,
+                instance_key=getattr(movie_after, "instance_key", None) if movie_after else getattr(movie_row, "instance_key", None),
+                instance_id=getattr(movie_after, "instance_id", None) if movie_after else getattr(movie_row, "instance_id", None),
+                event_type="placeholder_event_movie_file_deleted_result",
+                path=str(result_path or ""),
+                item_title=str(getattr(movie_after, "title", None) or getattr(movie_row, "title", None) or "Unknown Movie"),
+                series_title=None,
+                reason=result_reason,
+                status_label="Grace Interrupted",
+                source="event_movie_file_deleted",
+                extra_snapshot={
+                    "grace_interrupt": grace_interrupt,
+                    "movie_id": int(movie_row_id),
+                    "deleted_file_path": deleted_file_path,
+                    "real_library_scan_scheduled": real_scan_job is not None,
+                },
+            )
+            session.commit()
+            return {
+                "ok": True,
+                "event": "movie_file_deleted",
+                "movie_id": movie_row_id,
+                "grace_interrupted": True,
+                "grace_interrupt": grace_interrupt,
+                "determination": None,
+                "materialization": None,
+                "real_library_scan_scheduled": real_scan_job is not None,
+            }
+
+        movie_row.has_placeholder = False
+        movie_row.placeholder_filepath = None
+        session.add(movie_row)
+        _mark_placeholder_rows_deleted(
+            session,
+            movie_id=movie_row_id,
+            episode_id=None,
+            activity_reason="event_movie_file_deleted",
+        )
         session.commit()
 
         expand_session = get_session()
@@ -1009,6 +1062,7 @@ def process_movie_file_deleted_event(payload: dict[str, Any], instance: str | No
             "ok": True,
             "event": "movie_file_deleted",
             "movie_id": movie_row_id,
+            "grace_interrupted": False,
             "determination": determination_stats,
             "materialization": materialization_stats,
             "real_library_scan_scheduled": real_scan_job is not None,
@@ -1109,11 +1163,10 @@ def process_movie_deleted_event(payload: dict[str, Any], instance: str | None = 
 
 
 def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | None = None) -> dict[str, Any]:
-    """Process episode file-deleted event by resetting has_file and rerunning determination/materialization.
+    """Process episode file-deleted event.
 
-    Sonarr only emits ``episode_file_deleted`` when a real episode file existed. Clear stale
-    ``has_placeholder`` / ``placeholder_filepath`` and linked ``Placeholder`` rows so materialization
-    can take the ``needs_placeholder`` path instead of no-op ``placeholder_exists``.
+    Mid-import-grace: cancel countdown, keep the existing placeholder, restore REQUEST.
+    Otherwise: clear placeholder linkage and rematerialize.
     """
     series_id = _extract_series_id(payload)
     if not series_id:
@@ -1169,28 +1222,35 @@ def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | 
                     deleted_file_path = stored
                     break
 
-        # Reset file state for all matched episodes
+        episode_ids = [int(ep.id) for ep in episode_rows if getattr(ep, "id", None)]
+        interrupted_ids: list[int] = []
+        rematerialize_ids: list[int] = []
+
         for ep_row in episode_rows:
+            eid = int(ep_row.id)
             ep_row.has_file = False
             ep_row.sonarr_filepath = None
-            ep_row.has_placeholder = False
-            ep_row.placeholder_filepath = None
             session.add(ep_row)
-
-        session.flush()
-        episode_ids = [int(ep.id) for ep in episode_rows if getattr(ep, "id", None)]
-        for eid in episode_ids:
-            cancel_import_grace_for_entity(
+            session.flush()
+            grace_interrupt = interrupt_import_grace_keep_placeholder(
                 session,
                 content_type="episode",
                 entity_id=eid,
             )
+            if grace_interrupt.get("interrupted"):
+                interrupted_ids.append(eid)
+                continue
+            ep_row.has_placeholder = False
+            ep_row.placeholder_filepath = None
+            session.add(ep_row)
             _mark_placeholder_rows_deleted(
                 session,
                 movie_id=None,
                 episode_id=eid,
                 activity_reason="event_episode_file_deleted",
             )
+            rematerialize_ids.append(eid)
+
         real_scan_job = None
         if deleted_file_path:
             real_scan_job = schedule_arr_real_library_refresh(
@@ -1206,26 +1266,46 @@ def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | 
                 )
         session.commit()
 
-        expand_session = get_session()
-        try:
-            mat_movie_ids, mat_episode_ids = expand_determination_entity_ids(
-                expand_session,
-                episode_ids=episode_ids,
+        determination_stats: dict[str, Any] | None = None
+        materialization_stats: dict[str, Any] | None = None
+        if rematerialize_ids:
+            expand_session = get_session()
+            try:
+                mat_movie_ids, mat_episode_ids = expand_determination_entity_ids(
+                    expand_session,
+                    episode_ids=rematerialize_ids,
+                )
+            finally:
+                expand_session.close()
+
+            determination_stats = run_determination_for_entities_with_siblings(episode_ids=rematerialize_ids)
+            materialization_stats = run_materialization_for_entities(
+                movie_ids=mat_movie_ids,
+                episode_ids=mat_episode_ids,
+                observation_source="event_episode_file_deleted",
             )
-        finally:
-            expand_session.close()
 
-        determination_stats = run_determination_for_entities_with_siblings(episode_ids=episode_ids)
-        materialization_stats = run_materialization_for_entities(
-            movie_ids=mat_movie_ids,
-            episode_ids=mat_episode_ids,
-            observation_source="event_episode_file_deleted",
-        )
-
-        mat = materialization_stats_dict(materialization_stats)
         n_eps = len(episode_ids)
-        prefix = "Episode file deleted" if n_eps == 1 else f"Episode file deleted ({n_eps} episodes)"
-        result_reason, status_label = outcome_reason_and_status_from_materialization(prefix, mat)
+        n_interrupted = len(interrupted_ids)
+        if n_interrupted and not rematerialize_ids:
+            result_reason = (
+                "Episode file deleted during import grace; placeholder kept and status restored to REQUEST."
+                if n_eps == 1
+                else (
+                    f"Episode file deleted during import grace ({n_interrupted} episodes); "
+                    "placeholders kept and status restored to REQUEST."
+                )
+            )
+            status_label = "Grace Interrupted"
+            mat: dict[str, Any] = {}
+        else:
+            mat = materialization_stats_dict(materialization_stats or {})
+            prefix = "Episode file deleted" if n_eps == 1 else f"Episode file deleted ({n_eps} episodes)"
+            result_reason, status_label = outcome_reason_and_status_from_materialization(prefix, mat)
+            if n_interrupted:
+                result_reason = (
+                    f"{result_reason} ({n_interrupted} episode(s) interrupted mid-grace without rematerialize)."
+                )
         if real_scan_job is not None:
             result_reason = f"{result_reason} Real library scan scheduled."
         primary_ep_id = int(episode_ids[0]) if episode_ids else None
@@ -1273,6 +1353,8 @@ def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | 
                 "determination": determination_stats if isinstance(determination_stats, dict) else {},
                 "materialization": mat,
                 "episode_ids": episode_ids,
+                "grace_interrupted_episode_ids": interrupted_ids,
+                "rematerialized_episode_ids": rematerialize_ids,
                 "series_id": int(series_row.id),
                 "deleted_file_path": deleted_file_path,
                 "real_library_scan_scheduled": real_scan_job is not None,
@@ -1285,6 +1367,8 @@ def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | 
             "event": "episode_file_deleted",
             "series_id": int(series_row.id),
             "episode_ids": episode_ids,
+            "grace_interrupted_episode_ids": interrupted_ids,
+            "rematerialized_episode_ids": rematerialize_ids,
             "determination": determination_stats,
             "materialization": materialization_stats,
             "real_library_scan_scheduled": real_scan_job is not None,

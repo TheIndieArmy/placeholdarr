@@ -15,7 +15,8 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Real library refresh + Plex empty trash on Arr file delete**: Path-refresh on file delete; Plex empties trash after the scan (on by default).
 - **What's new (0.11.2)**: Startup ack for real-library refresh (Paths CTA).
 - **Import grace vs file delete**: Cancel grace on Arr file delete; abort ticks/finalize when Arr no longer reports hasFile.
-- **Import grace interrupt status**: Mid-grace Arr file loss restores REQUEST and pushes player metadata.
+- **Import grace interrupt (keep placeholder)**: Mid-grace file delete keeps the placeholder and restores REQUEST (no rematerialize).
+- **Playback re-search queue monitor**: Playing an earlier episode no longer stamps NOT_FOUND on a later title mid-download.
 
 ### Added
 
@@ -26,8 +27,9 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 ### Fixed
 
 - **Import grace vs file delete**: Arr file-delete cancels pending import-grace jobs for that title. Grace ticks and finalize abort when Arr no longer reports hasFile (not a local filesystem check), so a mid-grace delete cannot leave `has_file=true` with no placeholder.
-- **Import grace interrupt status**: When grace aborts because Arr lost the file, placeholders return to REQUEST with NFO refresh and direct player title/summary projection.
-- **File-delete rematerialize metadata**: Rematerializing after a real Arr file delete uses the delete-file status source so REQUEST updates push to Plex/Jellyfin/Emby instead of skipping player projection.
+- **Import grace interrupt (keep placeholder)**: During import grace, file delete no longer clears `has_placeholder` or rematerializes; it cancels grace and restores REQUEST with player projection on the existing placeholder.
+- **Playback re-search queue monitor**: A new playback-triggered Arr search clears stale left-queue / empty-search timers before the queue monitor polls, so an earlier episode play cannot immediately mark a later downloading episode as no qualifying release found.
+- **NFO follow-up player push**: When a status job requests player metadata refresh, projection still runs if the sidecar write was a no-op.
 
 ## Pre-release
 

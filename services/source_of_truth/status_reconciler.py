@@ -344,6 +344,8 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
     refreshed = 0
     # (Placeholder row, entity dedupe key) for rows whose NFO was rewritten this run
     refreshed_for_player_push: list[tuple[Placeholder, tuple[str, int]]] = []
+    # Active placeholders whose NFO was unchanged (still eligible for player push)
+    active_for_player_push: list[tuple[Placeholder, tuple[str, int]]] = []
     loop_pos = [0]
     nfo_started = time.monotonic()
     stop_nfo_hb = threading.Event()
@@ -383,19 +385,34 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
             if not effective_has_placeholder:
                 continue
 
-            if movie and _refresh_movie_nfo(placeholder, movie):
-                refreshed += 1
-                refreshed_for_player_push.append((placeholder, ("movie", int(movie.id))))
+            if movie:
+                entity_key = ("movie", int(movie.id))
+                if _refresh_movie_nfo(placeholder, movie):
+                    refreshed += 1
+                    refreshed_for_player_push.append((placeholder, entity_key))
+                else:
+                    # NFO may already match DB status (materializer wrote it first); still
+                    # eligible for player push when the job requested it.
+                    active_for_player_push.append((placeholder, entity_key))
                 continue
-            if episode and _refresh_episode_nfo(session, placeholder, episode):
-                refreshed += 1
-                refreshed_for_player_push.append((placeholder, ("episode", int(episode.id))))
+            if episode:
+                entity_key = ("episode", int(episode.id))
+                if _refresh_episode_nfo(session, placeholder, episode):
+                    refreshed += 1
+                    refreshed_for_player_push.append((placeholder, entity_key))
+                else:
+                    active_for_player_push.append((placeholder, entity_key))
                 continue
             if _refresh_density_stub_nfo(session, placeholder):
                 refreshed += 1
                 kind = str(getattr(placeholder, "placeholder_kind", "") or "") or "series_stub"
                 entity_id = int(placeholder.season_id or placeholder.series_id or placeholder.id)
                 refreshed_for_player_push.append((placeholder, (kind, entity_id)))
+            else:
+                kind = str(getattr(placeholder, "placeholder_kind", "") or "")
+                if kind in {PLACEHOLDER_KIND_SERIES_STUB, PLACEHOLDER_KIND_SEASON_STUB}:
+                    entity_id = int(placeholder.season_id or placeholder.series_id or placeholder.id)
+                    active_for_player_push.append((placeholder, (kind or "series_stub", entity_id)))
     finally:
         stop_nfo_hb.set()
 
@@ -416,12 +433,19 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
     except Exception:
         pass
 
-    if do_player and refreshed_for_player_push:
+    # Prefer rows whose NFO changed; if the job asked for player refresh and NFO was a
+    # no-op, still project. Otherwise Plex/Jellyfin/Emby can keep a prior title such as
+    # import-grace countdown after file-delete rematerialize already wrote REQUEST NFO.
+    player_push_rows = list(refreshed_for_player_push)
+    if do_player and not player_push_rows:
+        player_push_rows = list(active_for_player_push)
+
+    if do_player and player_push_rows:
         # One media-server refresh sequence per underlying movie/episode row, even if several
         # placeholder rows pointed at the same title (rare) or a batch carried duplicates.
         seen_entity: set[tuple[str, int]] = set()
         unique_for_projection: list[Placeholder] = []
-        for placeholder, entity_key in refreshed_for_player_push:
+        for placeholder, entity_key in player_push_rows:
             if not getattr(placeholder, "has_placeholder", False):
                 continue
             if entity_key in seen_entity:
