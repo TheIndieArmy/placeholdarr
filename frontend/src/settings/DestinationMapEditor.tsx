@@ -250,14 +250,14 @@ export function DestinationMapEditor(props: {
     message: string;
   }>(null);
 
-  const loadPlexSections = useCallback(() => {
+  const loadPlexSections = useCallback((opts?: { refresh?: boolean }) => {
     if (!props.plexActive) {
       setSections([]);
       setPlexSectionsLoading(false);
       return;
     }
     setPlexSectionsLoading(true);
-    getCollectionPlexSections()
+    getCollectionPlexSections({ refresh: opts?.refresh })
       .then((payload) => {
         setSections(payload.sections || []);
       })
@@ -711,7 +711,7 @@ export function DestinationMapEditor(props: {
                 <button
                   type="button"
                   disabled={plexSectionsLoading}
-                  onClick={() => loadPlexSections()}
+                  onClick={() => loadPlexSections({ refresh: true })}
                   className="ml-auto inline-flex items-center gap-1 rounded-lg border border-[#424753]/55 bg-[#0f1419] px-2.5 py-1 text-[12px] font-headline uppercase tracking-wider text-slate-300 transition hover:bg-[#151b24] disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <span

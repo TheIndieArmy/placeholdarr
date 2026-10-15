@@ -17,6 +17,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Import grace vs file delete**: Cancel grace on Arr file delete; abort ticks/finalize when Arr no longer reports hasFile.
 - **Import grace interrupt (keep placeholder)**: Mid-grace file delete keeps the placeholder and restores REQUEST (no rematerialize).
 - **Playback re-search queue monitor**: Playing an earlier episode no longer stamps NOT_FOUND on a later title mid-download.
+- **Rescan libraries**: Forces a fresh Plex section list after libraries are added or removed.
 
 ### Added
 
@@ -30,6 +31,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Import grace interrupt (keep placeholder)**: During import grace, file delete no longer clears `has_placeholder` or rematerializes; it cancels grace and restores REQUEST with player projection on the existing placeholder.
 - **Playback re-search queue monitor**: A new playback-triggered Arr search clears stale left-queue / empty-search timers before the queue monitor polls, so an earlier episode play cannot immediately mark a later downloading episode as no qualifying release found.
 - **NFO follow-up player push**: When a status job requests player metadata refresh, projection still runs if the sidecar write was a no-op.
+- **Rescan libraries**: Reloads the cached Plex client so the library dropdown picks up new/removed Plex sections without restarting Placeholdarr.
 
 ## Pre-release
 

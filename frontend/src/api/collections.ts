@@ -97,8 +97,13 @@ export function checkCollectionTitleConflicts(payload: {
   return postJson("/api/collections/title-conflicts", payload);
 }
 
-export function getCollectionPlexSections(): Promise<{ sections: PlexSectionOption[] }> {
-  return fetchJson("/api/collections/plex-sections");
+export function getCollectionPlexSections(opts?: {
+  refresh?: boolean;
+}): Promise<{ sections: PlexSectionOption[] }> {
+  const params = new URLSearchParams();
+  if (opts?.refresh) params.set("refresh", "true");
+  const qs = params.toString();
+  return fetchJson(`/api/collections/plex-sections${qs ? `?${qs}` : ""}`);
 }
 
 export function getCollectionTmdbMeta(mediaType: "movie" | "tv", region: string): Promise<CollectionTmdbMeta> {
