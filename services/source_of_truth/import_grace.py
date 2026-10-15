@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -13,31 +12,137 @@ from services.placeholder_activity_log import (
     outcome_reason_and_status_from_materialization,
 )
 from services.postgres.models import Episode, Job, Movie, Placeholder, Season, Series
+from services.source_of_truth.arr_api import fetch_radarr_movie, fetch_sonarr_episode_item
 from services.source_of_truth.arr_share_guard import expand_determination_entity_ids
 from services.source_of_truth.determiner import run_determination_for_entities_in_session
 from services.source_of_truth.materializer import run_materialization_for_entities
 from services.source_of_truth.materializer import run_materialization_for_entities_in_session
+from services.source_of_truth.status_intent import DisplayStatus, StatusIntent, StatusSource
+from services.source_of_truth.status_orchestrator import StatusOrchestrator
 from services.source_of_truth.status_reconciler import NFO_REFRESH_JOB_TYPE
 from services.status_projection import projected_status_display
 
 IMPORT_GRACE_JOB_TYPE = "import_grace"
 IMPORT_GRACE_REASON = "import_grace_countdown"
 IMPORT_GRACE_CANCEL_ERROR = "Cancelled: file deleted during import grace"
+IMPORT_GRACE_INTERRUPT_REASON = "import_grace_interrupted"
 # Number of countdown ticks before the final "less than a minute" tick.
 # Historically: 5, 4, 3, 2, 1 minutes remaining, plus a "less than a minute" final.
 COUNTDOWN_MINUTES_DECREASING = (5, 4, 3, 2, 1)
 
 
-def import_file_still_present(file_path: str | None) -> bool:
-    """True when grace has no path to verify, or the imported Arr file is still on disk.
+def arr_import_still_has_file(session, *, content_type: str, entity_id: int) -> bool:
+    """True when Arr still reports hasFile, or the Arr check cannot be completed.
 
-    Empty path keeps legacy behavior (cannot verify). A set path that is missing means
-    the import was undone (e.g. file delete during grace) and ticks/finalize should abort.
+    Placeholdarr often cannot see Arr download/import paths (unmounted volumes), so
+    grace validity uses Radarr/Sonarr hasFile rather than a local filesystem check.
+    API failure or missing ids keep grace running (cannot verify).
     """
-    path = str(file_path or "").strip()
-    if not path:
+    ct = str(content_type or "").strip().lower()
+    try:
+        eid = int(entity_id)
+    except (TypeError, ValueError):
         return True
-    return os.path.isfile(path)
+    if ct not in {"movie", "episode"} or eid <= 0:
+        return True
+
+    try:
+        if ct == "movie":
+            movie = session.query(Movie).filter(Movie.id == eid).first()
+            if not movie:
+                return True
+            radarr_id = getattr(movie, "radarrid", None)
+            if not radarr_id:
+                return True
+            base_url, api_key = settings.resolve_arr_endpoint(
+                "radarr",
+                instance_key=str(getattr(movie, "instance_key", "") or "") or None,
+                instance_id=str(getattr(movie, "instance_id", "") or "") or None,
+            )
+            if not base_url or not api_key:
+                return True
+            item = fetch_radarr_movie(int(radarr_id), base_url, api_key, bypass_cache=True)
+            if not isinstance(item, dict):
+                return True
+            return bool(item.get("hasFile") or (item.get("movieFile") or {}).get("path"))
+
+        episode = session.query(Episode).filter(Episode.id == eid).first()
+        if not episode:
+            return True
+        sonarr_id = getattr(episode, "sonarrid", None)
+        if not sonarr_id:
+            return True
+        season = session.query(Season).filter(Season.id == int(episode.season_id)).first()
+        if not season:
+            return True
+        series = session.query(Series).filter(Series.id == int(season.series_id)).first()
+        if not series:
+            return True
+        base_url, api_key = settings.resolve_arr_endpoint(
+            "sonarr",
+            instance_key=str(getattr(series, "instance_key", "") or "") or None,
+            instance_id=str(getattr(series, "instance_id", "") or "") or None,
+        )
+        if not base_url or not api_key:
+            return True
+        item = fetch_sonarr_episode_item(int(sonarr_id), url=base_url, api_key=api_key, bypass_cache=True)
+        if not isinstance(item, dict):
+            return True
+        return bool(item.get("hasFile") or (item.get("episodeFile") or {}).get("path"))
+    except Exception:
+        return True
+
+
+def restore_request_after_import_grace_interrupt(
+    session,
+    *,
+    content_type: str,
+    entity_id: int,
+    placeholder_ids: list[int] | None = None,
+) -> dict[str, Any]:
+    """Project REQUEST (with player metadata push) after grace is interrupted.
+
+    Used when Arr no longer reports a file mid-grace. EVENT_DELETE_FILE source
+    ensures post-NFO player title/summary projection runs (unlike INITIAL_CREATION).
+    """
+    ct = str(content_type or "").strip().lower()
+    try:
+        eid = int(entity_id)
+    except (TypeError, ValueError):
+        return {"ok": False, "reason": "bad_entity_id", "applied": 0}
+
+    ids = [int(pid) for pid in (placeholder_ids or []) if pid is not None]
+    if not ids:
+        q = session.query(Placeholder.id).filter(Placeholder.has_placeholder == True)  # noqa: E712
+        if ct == "movie":
+            q = q.filter(Placeholder.movie_id == eid)
+        elif ct == "episode":
+            q = q.filter(Placeholder.episode_id == eid)
+        else:
+            return {"ok": False, "reason": "bad_content_type", "applied": 0}
+        ids = [int(pid) for (pid,) in q.all()]
+
+    if not ids:
+        return {"ok": True, "applied": 0, "placeholder_ids": []}
+
+    intents = [
+        StatusIntent(
+            placeholder_id=pid,
+            new_status=DisplayStatus.REQUEST.value,
+            reason="Import grace interrupted: Arr no longer reports a file",
+            source=StatusSource.EVENT_DELETE_FILE,
+            trigger_nfo_refresh=True,
+            metadata={
+                "content_type": ct,
+                "entity_id": eid,
+                "reason": IMPORT_GRACE_INTERRUPT_REASON,
+            },
+        )
+        for pid in ids
+    ]
+    orchestrator = StatusOrchestrator(session=session)
+    applied = orchestrator.apply_and_project_statuses(intents)
+    return {"ok": True, "applied": int(applied), "placeholder_ids": ids}
 
 
 def cancel_import_grace_for_entity(
@@ -302,12 +407,23 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
         extra={'emoji_type': 'debug'}
     )
 
-    if not import_file_still_present(None if file_path is None else str(file_path)):
-        phase = "finalize_aborted_file_missing" if is_finalize else "tick_aborted_file_missing"
+    if not arr_import_still_has_file(session, content_type=content_type, entity_id=entity_id):
+        phase = "finalize_aborted_arr_no_file" if is_finalize else "tick_aborted_arr_no_file"
         logger.info(
-            f"Import grace aborted ({phase}): imported file no longer present "
+            f"Import grace aborted ({phase}): Arr no longer reports hasFile "
             f"content_type={content_type} entity_id={entity_id} file_path={file_path!r}",
             extra={"emoji_type": "info"},
+        )
+        cancelled = cancel_import_grace_for_entity(
+            session,
+            content_type=content_type,
+            entity_id=entity_id,
+        )
+        restore = restore_request_after_import_grace_interrupt(
+            session,
+            content_type=content_type,
+            entity_id=entity_id,
+            placeholder_ids=placeholder_ids,
         )
         return {
             "done": True,
@@ -315,8 +431,10 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
             "phase": phase,
             "content_type": content_type,
             "entity_id": entity_id,
-            "reason": "import_file_missing",
+            "reason": "arr_no_file",
             "file_path": file_path,
+            "cancelled_jobs": cancelled,
+            "restore": restore,
         }
 
     materialization: dict[str, Any] = {}

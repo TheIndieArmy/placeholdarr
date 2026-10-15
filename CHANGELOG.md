@@ -14,7 +14,8 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Real library refresh on Arr import**: Path-refresh real Plex/Jellyfin/Emby libraries when Arr reports a file import (on by default).
 - **Real library refresh + Plex empty trash on Arr file delete**: Path-refresh on file delete; Plex empties trash after the scan (on by default).
 - **What's new (0.11.2)**: Startup ack for real-library refresh (Paths CTA).
-- **Import grace vs file delete**: Cancel grace on Arr file delete; abort ticks/finalize when the imported file is already gone.
+- **Import grace vs file delete**: Cancel grace on Arr file delete; abort ticks/finalize when Arr no longer reports hasFile.
+- **Import grace interrupt status**: Mid-grace Arr file loss restores REQUEST and pushes player metadata.
 
 ### Added
 
@@ -24,7 +25,9 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ### Fixed
 
-- **Import grace vs file delete**: Arr file-delete cancels pending import-grace jobs for that title. Grace ticks and finalize no-op when the imported path is already gone, so a mid-grace delete cannot leave `has_file=true` with no placeholder.
+- **Import grace vs file delete**: Arr file-delete cancels pending import-grace jobs for that title. Grace ticks and finalize abort when Arr no longer reports hasFile (not a local filesystem check), so a mid-grace delete cannot leave `has_file=true` with no placeholder.
+- **Import grace interrupt status**: When grace aborts because Arr lost the file, placeholders return to REQUEST with NFO refresh and direct player title/summary projection.
+- **File-delete rematerialize metadata**: Rematerializing after a real Arr file delete uses the delete-file status source so REQUEST updates push to Plex/Jellyfin/Emby instead of skipping player projection.
 
 ## Pre-release
 

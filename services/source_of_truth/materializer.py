@@ -352,7 +352,13 @@ def _activity_reason_from_observation_source(source: str) -> str:
     return mapping.get(token, "Materialization run")
 
 
-def _apply_initial_status_for_placeholder(session, *, placeholder_id: int, event_type: str = "creation") -> None:
+def _apply_initial_status_for_placeholder(
+    session,
+    *,
+    placeholder_id: int,
+    event_type: str = "creation",
+    activity_reason: str | None = None,
+) -> None:
     """
     After materializer creates or deletes a placeholder, compute and apply initial status.
     
@@ -360,9 +366,23 @@ def _apply_initial_status_for_placeholder(session, *, placeholder_id: int, event
     status computation, not just file state changes.
     """
     try:
+        from services.source_of_truth.status_intent import StatusSource
+
         orchestrator = StatusOrchestrator(session=session)
         intent = orchestrator.compute_status_for_lifecycle_event(placeholder_id, event_type=event_type)
-        
+
+        # Rematerialize after Arr file delete must push player metadata. Plain
+        # INITIAL_CREATION REQUEST skips that push (library path refresh is enough
+        # for brand-new placeholders), which left mid-grace deletes stuck on
+        # retiring countdown text in Plex/Jellyfin/Emby.
+        if intent and str(activity_reason or "").strip() == "Real file deleted":
+            intent.source = StatusSource.EVENT_DELETE_FILE
+            intent.metadata = {
+                **(intent.metadata or {}),
+                "activity_reason": activity_reason,
+                "file_deleted_restore": True,
+            }
+
         if intent:
             orchestrator.apply_and_project_statuses([intent])
             logger.debug(f"Applied initial status for Placeholder[{placeholder_id}]: {intent.new_status}")
@@ -685,7 +705,12 @@ def apply_movie_materialization(movie_id: int, session=None, activity_reason: st
                 Placeholder.movie_id == movie.id
             ).order_by(Placeholder.id.desc()).first()
             if placeholder_row:
-                _apply_initial_status_for_placeholder(session, placeholder_id=placeholder_row.id, event_type="creation")
+                _apply_initial_status_for_placeholder(
+                    session,
+                    placeholder_id=placeholder_row.id,
+                    event_type="creation",
+                    activity_reason=activity_reason,
+                )
             placeholder_id = int(placeholder_row.id) if placeholder_row and getattr(placeholder_row, "id", None) else None
 
             # Persist canonical determination so the next materialization pass does not
@@ -808,7 +833,12 @@ def apply_episode_materialization(episode_id: int, session=None, activity_reason
                 Placeholder.episode_id == episode.id
             ).order_by(Placeholder.id.desc()).first()
             if placeholder_row:
-                _apply_initial_status_for_placeholder(session, placeholder_id=placeholder_row.id, event_type="creation")
+                _apply_initial_status_for_placeholder(
+                    session,
+                    placeholder_id=placeholder_row.id,
+                    event_type="creation",
+                    activity_reason=activity_reason,
+                )
             placeholder_id = int(placeholder_row.id) if placeholder_row and getattr(placeholder_row, "id", None) else None
 
             if bool(getattr(episode, "has_file", False)) or bool(getattr(episode, "is_deleted", False)):
