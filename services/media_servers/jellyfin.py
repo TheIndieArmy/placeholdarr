@@ -499,7 +499,7 @@ def update_jellyfin_item_text(item_id: str, *, title: str, overview: str) -> boo
         return False
 
 
-def refresh_jellyfin_item_metadata(item_id: str) -> bool:
+def refresh_jellyfin_item_metadata(item_id: str, *, refresh_images: bool = False) -> bool:
     """Trigger metadata refresh for a specific Jellyfin item id."""
     if not getattr(settings, "jellyfin_enabled", False):
         return False
@@ -512,9 +512,9 @@ def refresh_jellyfin_item_metadata(item_id: str) -> bool:
     endpoint = _build_url(f"Items/{target}/Refresh")
     params = {
         "MetadataRefreshMode": "Default",
-        "ImageRefreshMode": "None",
+        "ImageRefreshMode": "Full" if refresh_images else "None",
         "ReplaceAllMetadata": "false",
-        "ReplaceAllImages": "false",
+        "ReplaceAllImages": "true" if refresh_images else "false",
     }
     try:
         resp = sess.post(endpoint, params=params, timeout=15)

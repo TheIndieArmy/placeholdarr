@@ -338,6 +338,16 @@ class Settings(BaseSettings):
     PLACEHOLDER_POSTER_OVERLAY_MODE: Literal["off", "grayscale", "top_banner", "corner_logo"] = (
         os.getenv("PLACEHOLDER_POSTER_OVERLAY_MODE", "off").split("#")[0].strip().lower() or "off"
     )
+    # Opt-in Coming Soon date / Coming Soon strip on top of the selected overlay style (default off).
+    PLACEHOLDER_POSTER_COMING_SOON_BANNER: bool = (
+        os.getenv("PLACEHOLDER_POSTER_COMING_SOON_BANNER", "false").split("#")[0].strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    # Opt-in New Ep. date strip on series/season posters from the next unaired episode (default off).
+    PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER: bool = (
+        os.getenv("PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER", "false").split("#")[0].strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
     # Preferred TMDB poster language (ISO 639-1). Requires ENABLE_PREFERRED_POSTER_LANGUAGE.
     ENABLE_PREFERRED_POSTER_LANGUAGE: bool = (
         os.getenv("ENABLE_PREFERRED_POSTER_LANGUAGE", "false").split("#")[0].strip().lower()

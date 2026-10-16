@@ -12,12 +12,14 @@ from typing import Any
 from core.logger import logger
 from services.poster_overlay import (
     OVERLAY_META_FILENAME,
+    coming_soon_banner_enabled,
     composite_poster_from_url,
     logo_asset_stamp,
     normalize_poster_url,
     poster_overlay_mode,
     save_jpeg,
     save_raw_poster_from_url,
+    series_new_ep_banner_enabled,
 )
 
 POSTER_JPEG = "poster.jpg"
@@ -104,7 +106,7 @@ def _normalize_art_url(url: str | None) -> str:
 
 
 def _normalize_outputs_map(raw: Any) -> dict[str, dict[str, str]]:
-    """Per-artifact entries: meta_key -> {file, source_url, source_kind?}. Supports legacy string values."""
+    """Per-artifact entries: meta_key -> {file, source_url, source_kind?, overlay_text?}. Supports legacy string values."""
     if not isinstance(raw, dict):
         return {}
     out: dict[str, dict[str, str]] = {}
@@ -117,10 +119,87 @@ def _normalize_outputs_map(raw: Any) -> dict[str, dict[str, str]]:
                 kind = str(value.get("source_kind") or "").strip()
                 if kind:
                     entry["source_kind"] = kind
+                overlay_text = str(value.get("overlay_text") or "").strip()
+                if overlay_text:
+                    entry["overlay_text"] = overlay_text
                 out[str(key)] = entry
         elif isinstance(value, str) and value.strip():
             out[str(key)] = {"file": value.strip(), "source_url": ""}
     return out
+
+
+def _effective_overlay_text(mode: str, overlay_text: str | None) -> str:
+    """Canonical overlay_text for meta comparison.
+
+    ``top_banner`` always stores text (Coming Soon label or PLACEHOLDER).
+    Other modes store text only when a Coming Soon strip is drawn; empty means style only.
+    """
+    want = str(mode or "").strip().lower()
+    text = str(overlay_text or "").strip()
+    if want == "top_banner":
+        from services.poster_overlay_text import OVERLAY_BANNER_PLACEHOLDER
+
+        return text or OVERLAY_BANNER_PLACEHOLDER
+    return text
+
+
+def _movie_or_episode_overlay_text(mode: str, *, movie: Any = None, episode: Any = None) -> str | None:
+    """Resolve draw text for movie posters / episode thumbs from status + Coming Soon setting."""
+    from services.poster_overlay_text import (
+        lookup_active_placeholder_display_status,
+        resolve_draw_overlay_text,
+        resolve_episode_coming_soon_label,
+        resolve_movie_coming_soon_label,
+    )
+
+    want = str(mode or "off").strip().lower()
+    if want == "off":
+        return None
+    cs_on = coming_soon_banner_enabled()
+    cs_label: str | None = None
+    if cs_on:
+        if movie is not None:
+            movie_id = getattr(movie, "id", None)
+            status = (
+                lookup_active_placeholder_display_status(movie_id=int(movie_id))
+                if movie_id is not None
+                else None
+            )
+            cs_label = resolve_movie_coming_soon_label(movie, display_status=status)
+        elif episode is not None:
+            episode_id = getattr(episode, "id", None)
+            status = (
+                lookup_active_placeholder_display_status(episode_id=int(episode_id))
+                if episode_id is not None
+                else None
+            )
+            cs_label = resolve_episode_coming_soon_label(episode, display_status=status)
+    return resolve_draw_overlay_text(
+        mode=want,
+        coming_soon_banner_enabled=cs_on,
+        coming_soon_label=cs_label,
+    )
+
+
+def _series_or_season_overlay_text(
+    mode: str,
+    *,
+    series: Any,
+    season: Any | None = None,
+) -> str | None:
+    """Resolve draw text for series/season posters from the New Ep. setting."""
+    from services.poster_overlay_text import resolve_draw_overlay_text, resolve_series_new_ep_label
+
+    want = str(mode or "off").strip().lower()
+    if want == "off":
+        return None
+    new_ep_on = series_new_ep_banner_enabled()
+    label = resolve_series_new_ep_label(series, season=season) if new_ep_on else None
+    return resolve_draw_overlay_text(
+        mode=want,
+        coming_soon_banner_enabled=new_ep_on,
+        coming_soon_label=label,
+    )
 
 
 def _season_poster_source(season: Any, series: Any) -> tuple[str, str]:
@@ -180,17 +259,22 @@ def _write_meta(
     source_url: str,
     output_basename: str,
     source_kind: str = "",
+    overlay_text: str | None = None,
 ) -> None:
     existing = _read_meta(meta_path) or {}
     outputs = _normalize_outputs_map(existing.get("outputs"))
     entry: dict[str, str] = {"file": output_basename, "source_url": _normalize_art_url(source_url)}
     if source_kind:
         entry["source_kind"] = source_kind
+    desired_text = _effective_overlay_text(mode, overlay_text)
+    if desired_text:
+        entry["overlay_text"] = desired_text
     outputs[meta_key] = entry
     payload = {
         "mode": mode,
         "outputs": outputs,
         "logo_stamp": logo_asset_stamp(),
+        "coming_soon_banner": bool(coming_soon_banner_enabled()),
     }
     from services.placeholders import _apply_dir_chain_permissions, _ensure_open_permissions
 
@@ -210,6 +294,7 @@ def _needs_regenerate(
     source_url: str,
     meta_key: str,
     source_kind: str = "",
+    overlay_text: str | None = None,
 ) -> bool:
     source_url = _normalize_art_url(source_url)
     if not source_url:
@@ -224,6 +309,8 @@ def _needs_regenerate(
         return True
     if str(meta.get("logo_stamp") or "") != logo_asset_stamp():
         return True
+    # Do not invalidate on coming_soon_banner setting alone: overlay_text already
+    # captures whether a date strip is drawn. Non-Coming-Soon titles stay unchanged.
     entry = _output_entry(meta, meta_key, legacy_source_url=str(meta.get("source_url") or ""))
     if not entry:
         return True
@@ -233,6 +320,14 @@ def _needs_regenerate(
         return True
     expected_file = str(entry.get("file") or "").strip()
     if expected_file and os.path.basename(output_path) != expected_file:
+        return True
+    desired_text = _effective_overlay_text(mode, overlay_text)
+    stored_text = str(entry.get("overlay_text") or "").strip()
+    if str(mode or "").strip().lower() == "top_banner" and not stored_text:
+        from services.poster_overlay_text import OVERLAY_BANNER_PLACEHOLDER
+
+        stored_text = OVERLAY_BANNER_PLACEHOLDER
+    if stored_text != desired_text:
         return True
     return False
 
@@ -292,11 +387,18 @@ def resolve_library_grid_poster_path(
     return poster_abs
 
 
-def _save_image_to_path(output_path: str, url: str, *, mode: str, landscape: bool) -> bool:
+def _save_image_to_path(
+    output_path: str,
+    url: str,
+    *,
+    mode: str,
+    landscape: bool,
+    overlay_text: str | None = None,
+) -> bool:
     """Write JPEG using overlay mode (raw when off or compositing unavailable)."""
     if mode == "off":
         return save_raw_poster_from_url(url, output_path)
-    img = composite_poster_from_url(url, mode, landscape=landscape)
+    img = composite_poster_from_url(url, mode, landscape=landscape, overlay_text=overlay_text)
     if img is not None:
         return save_jpeg(img, output_path)
     return save_raw_poster_from_url(url, output_path)
@@ -310,13 +412,19 @@ def _write_art_file(
     landscape: bool,
     meta_key: str,
     source_kind: str = "",
+    overlay_text: str | None = None,
 ) -> bool:
     url = _normalize_art_url(source_url)
     if not url:
         return False
     meta_path = _meta_path_for_output(output_path)
     if not _needs_regenerate(
-        output_path, mode=mode, source_url=url, meta_key=meta_key, source_kind=source_kind
+        output_path,
+        mode=mode,
+        source_url=url,
+        meta_key=meta_key,
+        source_kind=source_kind,
+        overlay_text=overlay_text,
     ):
         artifacts = [output_path, meta_path]
         folder = os.path.dirname(os.path.abspath(output_path))
@@ -330,7 +438,9 @@ def _write_art_file(
                     artifacts.append(grid_path)
         _apply_art_file_permissions(output_path, *artifacts)
         return False
-    if not _save_image_to_path(output_path, url, mode=mode, landscape=landscape):
+    if not _save_image_to_path(
+        output_path, url, mode=mode, landscape=landscape, overlay_text=overlay_text
+    ):
         return False
     _write_meta(
         meta_path,
@@ -339,6 +449,7 @@ def _write_art_file(
         source_url=url,
         output_basename=os.path.basename(output_path),
         source_kind=source_kind,
+        overlay_text=overlay_text,
     )
     artifacts = [output_path, meta_path]
     if meta_key == "series_poster":
@@ -495,12 +606,20 @@ def ensure_movie_art(movie: Any, media_path: str) -> ArtResult:
     folder = os.path.dirname(os.path.abspath(media_path))
     out_path = os.path.join(folder, POSTER_JPEG)
     url = effective_poster_url(movie)
-    if _write_art_file(out_path, url, mode=mode, landscape=False, meta_key="poster"):
+    overlay_text = _movie_or_episode_overlay_text(mode, movie=movie)
+    if _write_art_file(
+        out_path,
+        url,
+        mode=mode,
+        landscape=False,
+        meta_key="poster",
+        overlay_text=overlay_text,
+    ):
         result.local_art.poster = POSTER_JPEG
         result.wrote_any = True
         result.art_counts["movie"] = 1
-    if ensure_library_grid_poster_for_movie(movie, media_path):
-        result.wrote_any = True
+    # Grid poster is dashboard-only; do not treat it as composited art rewrite.
+    ensure_library_grid_poster_for_movie(movie, media_path)
     if result.wrote_any:
         _note_local_poster_changed("movie", movie)
     return result
@@ -521,6 +640,7 @@ def ensure_season_art(season: Any, series: Any, series_folder: str) -> ArtResult
     filename = season_poster_filename(season_number)
     out_path = os.path.join(folder, filename)
     url, kind = _season_poster_source(season, series)
+    overlay_text = _series_or_season_overlay_text(mode, series=series, season=season)
     if _write_art_file(
         out_path,
         url,
@@ -528,6 +648,7 @@ def ensure_season_art(season: Any, series: Any, series_folder: str) -> ArtResult
         landscape=False,
         meta_key=_season_poster_meta_key(season_number),
         source_kind=kind,
+        overlay_text=overlay_text,
     ):
         result.local_art.poster = filename
         result.wrote_any = True
@@ -553,7 +674,16 @@ def ensure_series_art(
     out_path = os.path.join(folder, POSTER_JPEG)
     url = _normalize_art_url(effective_poster_url(series))
     kind = "series" if url else "none"
-    if _write_art_file(out_path, url, mode=mode, landscape=False, meta_key="series_poster", source_kind=kind):
+    overlay_text = _series_or_season_overlay_text(mode, series=series)
+    if _write_art_file(
+        out_path,
+        url,
+        mode=mode,
+        landscape=False,
+        meta_key="series_poster",
+        source_kind=kind,
+        overlay_text=overlay_text,
+    ):
         result.local_art.poster = POSTER_JPEG
         result.wrote_any = True
         result.art_counts["series"] = 1
@@ -576,8 +706,9 @@ def ensure_series_art(
         if one.wrote_any:
             result.wrote_any = True
             result.merge_counts(one)
-    if ensure_library_grid_poster_for_series(series, folder):
-        result.wrote_any = True
+    # Grid poster is dashboard-only; do not treat it as composited art rewrite
+    # (that would trigger player item refreshes when overlay art was unchanged).
+    ensure_library_grid_poster_for_series(series, folder)
     if result.wrote_any:
         _note_local_poster_changed("series", series)
     return result
@@ -597,7 +728,16 @@ def ensure_episode_still_art(
     thumb_path = os.path.join(folder, thumb_name)
     still_url, kind = _episode_thumb_source(episode, series)
     meta_key = episode_thumb_meta_key(thumb_name)
-    if _write_art_file(thumb_path, still_url, mode=mode, landscape=True, meta_key=meta_key, source_kind=kind):
+    overlay_text = _movie_or_episode_overlay_text(mode, episode=episode)
+    if _write_art_file(
+        thumb_path,
+        still_url,
+        mode=mode,
+        landscape=True,
+        meta_key=meta_key,
+        source_kind=kind,
+        overlay_text=overlay_text,
+    ):
         result.local_art.thumb = thumb_name
         result.wrote_any = True
         result.art_counts["episode"] = 1

@@ -19,15 +19,54 @@ PLACEHOLDER_REFRESH_SUBSTEP_KEY = "placeholder_refresh_substep"
 from services.task_run_history import begin_task_run, finish_task_run, update_task_run_summary
 
 
+_VALID_ART_SCOPES = frozenset({"all", "coming_soon", "tv_new_ep", "coming_soon_and_tv"})
+
+
 def _empty_intent(*, source: str | None = None) -> dict[str, Any]:
     return {
         "version": PENDING_REFRESH_VERSION,
         "metadata": False,
         "art": False,
         "templates": False,
+        # Narrow art refresh: all | coming_soon | tv_new_ep | coming_soon_and_tv
+        "art_scope": "all",
         "source": str(source or "").strip(),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def _normalize_art_scope(raw: Any, *, art: bool) -> str:
+    if not art:
+        return "all"
+    scope = str(raw.get("art_scope") if isinstance(raw, dict) else raw or "").strip().lower()
+    if not scope and isinstance(raw, dict) and raw.get("art_coming_soon_only"):
+        scope = "coming_soon"
+    return scope if scope in _VALID_ART_SCOPES else "all"
+
+
+def _merge_art_scopes(prior: str, new: str) -> str:
+    """Combine pending narrow art scopes; ``all`` always wins."""
+    left = str(prior or "all").strip().lower() or "all"
+    right = str(new or "all").strip().lower() or "all"
+    if left == "all" or right == "all":
+        return "all"
+    parts: set[str] = set()
+    for scope in (left, right):
+        if scope == "coming_soon":
+            parts.add("cs")
+        elif scope == "tv_new_ep":
+            parts.add("tv")
+        elif scope == "coming_soon_and_tv":
+            parts.update({"cs", "tv"})
+        else:
+            return "all"
+    if parts == {"cs"}:
+        return "coming_soon"
+    if parts == {"tv"}:
+        return "tv_new_ep"
+    if parts == {"cs", "tv"}:
+        return "coming_soon_and_tv"
+    return "all"
 
 
 def _normalize_intent(raw: Any) -> dict[str, Any]:
@@ -38,6 +77,7 @@ def _normalize_intent(raw: Any) -> dict[str, Any]:
     out["metadata"] = bool(raw.get("metadata"))
     out["art"] = bool(raw.get("art"))
     out["templates"] = bool(raw.get("templates"))
+    out["art_scope"] = _normalize_art_scope(raw, art=bool(out["art"]))
     if isinstance(raw.get("updated_at"), str) and str(raw.get("updated_at")).strip():
         out["updated_at"] = str(raw["updated_at"]).strip()
     return out
@@ -111,6 +151,8 @@ def merge_pending_intent(
     metadata: bool = False,
     art: bool = False,
     templates: bool = False,
+    art_coming_soon_only: bool = False,
+    art_scope: str | None = None,
     source: str | None = None,
 ) -> dict[str, Any]:
     session = get_session()
@@ -118,9 +160,25 @@ def merge_pending_intent(
         row = _get_pending_row(session)
         merged = _normalize_intent(row.value if row else None)
         legacy = _legacy_intent_flags(session)
+        had_art = bool(merged["art"] or legacy["art"])
+        prior_scope = str(merged.get("art_scope") or "all")
+        incoming_scope = str(art_scope or "").strip().lower()
+        if not incoming_scope and art_coming_soon_only:
+            incoming_scope = "coming_soon"
+        if not incoming_scope:
+            incoming_scope = "all"
+        if incoming_scope not in _VALID_ART_SCOPES:
+            incoming_scope = "all"
         merged["metadata"] = bool(merged["metadata"] or legacy["metadata"] or metadata)
-        merged["art"] = bool(merged["art"] or legacy["art"] or art)
+        merged["art"] = bool(had_art or art)
         merged["templates"] = bool(merged["templates"] or legacy["templates"] or templates)
+        if art:
+            if not had_art:
+                merged["art_scope"] = incoming_scope
+            else:
+                merged["art_scope"] = _merge_art_scopes(prior_scope, incoming_scope)
+        elif not merged["art"]:
+            merged["art_scope"] = "all"
         merged["source"] = str(source or merged.get("source") or "").strip()
         merged["updated_at"] = datetime.now(timezone.utc).isoformat()
         _set_pending_intent(session, merged)
@@ -249,6 +307,7 @@ def clear_pending_intent_domains(
             merged["templates"] = False
         if art:
             merged["art"] = False
+            merged["art_scope"] = "all"
         merged["updated_at"] = datetime.now(timezone.utc).isoformat()
         _set_pending_intent(session, merged)
         session.commit()
@@ -287,6 +346,8 @@ def execute_placeholder_refresh_apply_scope(
     metadata: bool = False,
     art: bool = False,
     templates: bool = False,
+    art_coming_soon_only: bool = False,
+    art_scope: str | None = None,
     source: str = "settings_save",
     task_run_trigger: str | None = None,
 ) -> dict[str, Any]:
@@ -297,6 +358,15 @@ def execute_placeholder_refresh_apply_scope(
     requested_templates = bool(templates)
     requested_metadata = bool(metadata or templates)
     requested_art = bool(art)
+    requested_art_scope = str(art_scope or "").strip().lower()
+    if not requested_art_scope and art_coming_soon_only:
+        requested_art_scope = "coming_soon"
+    if not requested_art_scope:
+        requested_art_scope = "all"
+    if requested_art_scope not in _VALID_ART_SCOPES:
+        requested_art_scope = "all"
+    if not requested_art:
+        requested_art_scope = "all"
     if not requested_metadata and not requested_art:
         return {
             "ok": True,
@@ -323,6 +393,7 @@ def execute_placeholder_refresh_apply_scope(
             metadata=requested_metadata,
             art=requested_art,
             templates=bool(templates),
+            art_scope=requested_art_scope,
             source=source,
         )
         out.update({"ok": True, "scope": "next_full_sync", "enqueued": False, "pending": True})
@@ -369,7 +440,11 @@ def execute_placeholder_refresh_apply_scope(
     if requested_art:
         from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_backfill_all
 
-        art_out = enqueue_placeholder_art_backfill_all(source=f"{source}:apply_now", **enqueue_kwargs)
+        art_out = enqueue_placeholder_art_backfill_all(
+            source=f"{source}:apply_now",
+            art_scope=requested_art_scope,
+            **enqueue_kwargs,
+        )
         out["art_backfill"] = art_out
         art_committed = _refresh_enqueue_committed(art_out)
         out["enqueued"] = bool(out["enqueued"] or art_committed and bool(art_out.get("enqueued")))
@@ -862,7 +937,11 @@ def run_placeholder_refresh_if_pending(*, source: str, task_run_id: int) -> dict
     if art:
         from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_backfill_all
 
-        art_out = enqueue_placeholder_art_backfill_all(source=source, task_run_id=task_run_id)
+        art_out = enqueue_placeholder_art_backfill_all(
+            source=source,
+            task_run_id=task_run_id,
+            art_scope=str(intent.get("art_scope") or "all"),
+        )
         out["art_backfill"] = art_out
         art_committed = _refresh_enqueue_committed(art_out)
         out["enqueued"] = bool(out["enqueued"] or art_committed and bool(art_out.get("enqueued")))

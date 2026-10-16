@@ -9,17 +9,41 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+## Pre-release
+
+## Released
+
+## [0.11.3] - 2026-10-16
+
 ### Summary
 
+- **Coming Soon date banner**: Opt-in poster strip (default off) across overlay styles; Settings examples swap when the toggle changes.
+- **New Ep. series posters**: Optional next-unaired date strip on series and season posters.
+- **Coming Soon banner art refresh**: Toggle-only saves refresh Coming Soon titles, not the whole library.
+- **New Ep. banner art refresh**: Toggle-only saves refresh series/season posters only.
+- **Narrow banner Plex refresh**: Coming Soon / New Ep. applies use path refresh, not full-library metadata.
+- **Local art player refresh**: Rewritten posters trigger per-title metadata refresh so Plex shows the new art.
+- **Plex item metadata refresh**: PUT instead of GET so item refreshes succeed.
+- **What's new (0.11.3)**: Startup ack for Coming Soon and New Ep. date banners (Poster Overlay CTA).
 - **NFO batch player push**: Mixed rewrite/no-op NFO jobs still project every active placeholder in the batch.
+
+### Added
+
+- **Coming Soon date banner**: `PLACEHOLDER_POSTER_COMING_SOON_BANNER` (default off) adds a date strip on Coming Soon movie posters and episode thumbs for every overlay style: top banner replaces PLACEHOLDER; grayscale gets a top strip; corner badge uses a bottom strip with the logo. Previews in Settings and onboarding update when the toggle is on or off.
+- **New Ep. series posters**: `PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER` (default off) shows `New Ep. - Oct 22` on series and season posters for the next unaired episode (including premieres).
+- **What's new (0.11.3)**: Startup ack for Coming Soon and New Ep. banners pointing at Settings → Poster Overlay.
+
+### Changed
+
+- **Coming Soon banner art refresh**: Turning only the Coming Soon date-banner setting on or off refreshes Coming Soon placeholders, not the whole library.
+- **New Ep. banner art refresh**: Turning only the series New Ep. setting on or off refreshes series/season posters (one placeholder per show), not episode thumbs or the whole library.
+- **Narrow banner Plex refresh**: Coming Soon / New Ep. toggle applies use path refresh only; they no longer force a full-library Plex metadata refresh.
+- **Local art player refresh**: After rewriting posters, refresh those titles' metadata on Plex/Jellyfin/Emby so new art appears without a manual Refresh Metadata.
+- **Plex item metadata refresh**: Use PUT (not GET) for `/library/metadata/{id}/refresh`; GET was 404ing while path scans still ran.
 
 ### Fixed
 
 - **NFO batch player push**: When a batched NFO follow-up rewrites some sidecars and leaves others unchanged, player metadata projection includes both sets (refreshed first on entity dedupe), so an unchanged REQUEST NFO no longer skips Plex/Jellyfin/Emby push because a sibling row was rewritten.
-
-## Pre-release
-
-## Released
 
 ## [0.11.2] - 2026-10-15
 

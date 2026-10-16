@@ -24,7 +24,10 @@ OVERLAY_META_FILENAME = ".poster-overlay.json"
 _LOGO_PATH = Path(__file__).resolve().parent / "assets" / "placeholdarr_logo_yellow.png"
 _FONT_PATH = Path(__file__).resolve().parent / "assets" / "fonts" / "SpaceGrotesk-Bold.ttf"
 _VALID_MODES = frozenset({"off", "grayscale", "top_banner", "corner_logo"})
-_TOP_BANNER_LAYOUT = "top-banner-space-grotesk-v2"
+# Bumped for Coming Soon / date-label banner text (auto-fit width).
+_TOP_BANNER_LAYOUT = "top-banner-space-grotesk-v3"
+# Corner logo + Coming Soon uses a bottom strip with the logo embedded in the bar.
+_CORNER_BOTTOM_BANNER_LAYOUT = "corner-bottom-banner-v1"
 
 
 def _asset_digest(path: Path) -> str | None:
@@ -43,7 +46,9 @@ def logo_asset_stamp() -> str:
     Uses file content hash (not mtime) so Docker restarts / image copies do not force a
     full-library art rebuild when the logo bytes are unchanged.
     """
-    layout_stamp = f"corner-br-v1:{_TOP_BANNER_LAYOUT}:prefer-local-nfo-v1"
+    layout_stamp = (
+        f"corner-br-v1:{_TOP_BANNER_LAYOUT}:{_CORNER_BOTTOM_BANNER_LAYOUT}:prefer-local-nfo-v1"
+    )
     logo_digest = _asset_digest(_LOGO_PATH)
     font_digest = _asset_digest(_FONT_PATH)
     parts = [layout_stamp]
@@ -110,6 +115,16 @@ def poster_overlay_mode() -> str:
 
 def poster_overlay_enabled() -> bool:
     return poster_overlay_mode() != "off"
+
+
+def coming_soon_banner_enabled() -> bool:
+    """Opt-in Coming Soon date / Coming Soon strip on top of the selected overlay style."""
+    return bool(getattr(settings, "PLACEHOLDER_POSTER_COMING_SOON_BANNER", False))
+
+
+def series_new_ep_banner_enabled() -> bool:
+    """Opt-in New Ep. date strip on series/season posters from the next unaired episode."""
+    return bool(getattr(settings, "PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER", False))
 
 
 def normalize_poster_url(url: str | None) -> str | None:
@@ -201,31 +216,58 @@ def _load_font(size: int):
     return ImageFont.load_default()
 
 
-def _apply_top_banner(img):
+def _fit_banner_font(text: str, *, max_width: int, preferred_size: int, min_size: int = 14):
+    """Shrink font until ``text`` fits within ``max_width`` (with side padding)."""
+    size = max(min_size, int(preferred_size))
+    font = _load_font(size)
+    if font is None:
+        return font
+    pad = max(16, int(max_width * 0.06))
+    limit = max(1, max_width - pad)
+    while size > min_size:
+        try:
+            bbox = font.getbbox(text)
+            text_w = int(bbox[2] - bbox[0]) if bbox else 0
+        except Exception:
+            text_w = 0
+        if text_w <= limit:
+            break
+        size = max(min_size, size - 2)
+        font = _load_font(size)
+    return font
+
+
+def _apply_banner_bar(img, text: str, *, position: str = "top"):
+    """Draw a semi-opaque text bar at the top or bottom of the poster."""
     mods = _pillow()
     if mods is None:
         return img
-    Image, ImageDraw, _, ImageFont, _ = mods
+    Image, ImageDraw, _, _, _ = mods
     out = img.convert("RGBA")
     w, h = out.size
     bar_h = max(56, int(h * 0.11))
+    y0 = 0 if position == "top" else max(0, h - bar_h)
     overlay = Image.new("RGBA", out.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    draw.rectangle([0, 0, w, bar_h], fill=(0, 0, 0, int(255 * 0.65)))
+    draw.rectangle([0, y0, w, y0 + bar_h], fill=(0, 0, 0, int(255 * 0.65)))
     out = Image.alpha_composite(out, overlay)
     draw = ImageDraw.Draw(out)
-    text = "PLACEHOLDER"
-    font_size = max(26, int(bar_h * 0.50))
-    font = _load_font(font_size)
+    label = str(text or "PLACEHOLDER").strip() or "PLACEHOLDER"
+    preferred = max(26, int(bar_h * 0.50))
+    font = _fit_banner_font(label, max_width=w, preferred_size=preferred)
     # anchor="mm" centers on the point; naive bbox math ignores font ascender offset.
     draw.text(
-        (w // 2, bar_h // 2),
-        text,
+        (w // 2, y0 + bar_h // 2),
+        label,
         fill=(255, 255, 255, 255),
         font=font,
         anchor="mm",
     )
     return out
+
+
+def _apply_top_banner(img, text: str = "PLACEHOLDER"):
+    return _apply_banner_bar(img, text, position="top")
 
 
 def _rounded_rectangle_mask(size: tuple[int, int], radius: int):
@@ -239,19 +281,13 @@ def _rounded_rectangle_mask(size: tuple[int, int], radius: int):
     return mask
 
 
-def _apply_corner_logo(img):
+def _build_corner_logo_badge(badge_w: int):
+    """Square brand badge used for corner-logo mode (standalone or in the bottom banner)."""
     mods = _pillow()
     if mods is None:
-        return img
+        return None
     Image, _, _, _, ImageOps = mods
-    out = img.convert("RGBA")
-    w, h = out.size
-    badge_w = max(64, int(w * 0.18))
     badge_h = badge_w
-    inset = max(8, int(w * 0.02))
-    x0 = w - badge_w - inset
-    y0 = h - badge_h - inset
-
     badge = Image.new("RGBA", (badge_w, badge_h), (0, 0, 0, 0))
     blue_layer = Image.new("RGBA", (badge_w, badge_h), BRAND_BLUE)
     radius = max(6, int(badge_w * 0.12))
@@ -268,12 +304,69 @@ def _apply_corner_logo(img):
             badge.paste(logo, (lx, ly), logo)
         except Exception as exc:
             logger.debug(f"Corner logo load failed: {exc}", extra={"emoji_type": "debug"})
+    return badge
 
+
+def _apply_corner_logo(img):
+    mods = _pillow()
+    if mods is None:
+        return img
+    out = img.convert("RGBA")
+    w, h = out.size
+    badge_w = max(64, int(w * 0.18))
+    inset = max(8, int(w * 0.02))
+    badge = _build_corner_logo_badge(badge_w)
+    if badge is None:
+        return out
+    x0 = w - badge_w - inset
+    y0 = h - badge_w - inset
     out.paste(badge, (x0, y0), badge)
     return out
 
 
-def apply_overlay(img, mode: str, *, landscape: bool = False):
+def _apply_corner_logo_bottom_banner(img, text: str):
+    """Bottom Coming Soon bar with the Placeholdarr logo badge embedded on the right."""
+    mods = _pillow()
+    if mods is None:
+        return img
+    Image, ImageDraw, _, _, _ = mods
+    out = img.convert("RGBA")
+    w, h = out.size
+    bar_h = max(72, int(h * 0.14))
+    y0 = max(0, h - bar_h)
+    overlay = Image.new("RGBA", out.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    draw.rectangle([0, y0, w, y0 + bar_h], fill=(0, 0, 0, int(255 * 0.72)))
+    out = Image.alpha_composite(out, overlay)
+
+    badge_pad = max(6, int(bar_h * 0.12))
+    badge_w = max(48, bar_h - 2 * badge_pad)
+    badge = _build_corner_logo_badge(badge_w)
+    inset = max(8, int(w * 0.02))
+    if badge is not None:
+        bx = w - badge_w - inset
+        by = y0 + (bar_h - badge_w) // 2
+        out.paste(badge, (bx, by), badge)
+        text_max_w = max(1, bx - inset)
+    else:
+        text_max_w = w
+
+    label = str(text or "").strip() or "Coming Soon"
+    preferred = max(22, int(bar_h * 0.42))
+    font = _fit_banner_font(label, max_width=text_max_w, preferred_size=preferred)
+    draw = ImageDraw.Draw(out)
+    # Center text in the region left of the badge.
+    draw.text(
+        (text_max_w // 2, y0 + bar_h // 2),
+        label,
+        fill=(255, 255, 255, 255),
+        font=font,
+        anchor="mm",
+    )
+    return out
+
+
+def apply_overlay(img, mode: str, *, landscape: bool = False, overlay_text: str | None = None):
     if _pillow() is None:
         _log_pillow_missing_once()
         return None
@@ -282,11 +375,17 @@ def apply_overlay(img, mode: str, *, landscape: bool = False):
         return img
     target = LANDSCAPE_SIZE if landscape else PORTRAIT_SIZE
     base = _fit_image(img, target)
+    label = str(overlay_text or "").strip() or None
     if want == "grayscale":
-        return _apply_grayscale(base)
+        out = _apply_grayscale(base)
+        if label:
+            out = _apply_top_banner(out, text=label)
+        return out
     if want == "top_banner":
-        return _apply_top_banner(base)
+        return _apply_top_banner(base, text=label or "PLACEHOLDER")
     if want == "corner_logo":
+        if label:
+            return _apply_corner_logo_bottom_banner(base, text=label)
         return _apply_corner_logo(base)
     return base
 
@@ -318,7 +417,13 @@ def save_raw_poster_from_url(url: str | None, path: str, *, quality: int = 88) -
     return save_jpeg(img, path, quality=quality)
 
 
-def composite_poster_from_url(url: str | None, mode: str, *, landscape: bool = False):
+def composite_poster_from_url(
+    url: str | None,
+    mode: str,
+    *,
+    landscape: bool = False,
+    overlay_text: str | None = None,
+):
     if _pillow() is None:
         _log_pillow_missing_once()
         return None
@@ -328,7 +433,7 @@ def composite_poster_from_url(url: str | None, mode: str, *, landscape: bool = F
     img = load_image_from_bytes(data)
     if img is None:
         return None
-    return apply_overlay(img, mode, landscape=landscape)
+    return apply_overlay(img, mode, landscape=landscape, overlay_text=overlay_text)
 
 
 def save_jpeg(img, path: str, *, quality: int = 88) -> bool:

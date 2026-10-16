@@ -390,17 +390,36 @@ const LOOK_AND_FEEL_FIELD_KEYS = [
   "PLACEHOLDER_STATUS_UPDATES",
   "PLACEHOLDER_STATUS_PROJECTION_MODE",
   "PLACEHOLDER_POSTER_OVERLAY_MODE",
+  "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
+  "PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER",
   "ENABLE_PREFERRED_POSTER_LANGUAGE",
   "PREFER_ORIGINAL_POSTER_LANGUAGE",
   "PREFERRED_POSTER_LANGUAGE",
 ] as const;
 
-const POSTER_OVERLAY_PREVIEW_TMDB_ID = 1226863;
 const POSTER_OVERLAY_EXAMPLES_BASE = `${import.meta.env.BASE_URL}overlay-examples/`.replace(/(?<!:)\/{2,}/g, "/");
 const POSTER_OVERLAY_EXAMPLE_MODES = [
-  { mode: "grayscale", label: "Grayscale poster", image: `${POSTER_OVERLAY_EXAMPLES_BASE}grayscale.jpg` },
-  { mode: "top_banner", label: "Top banner: PLACEHOLDER", image: `${POSTER_OVERLAY_EXAMPLES_BASE}top_banner.jpg` },
-  { mode: "corner_logo", label: "Corner badge: Placeholdarr logo", image: `${POSTER_OVERLAY_EXAMPLES_BASE}corner_logo.jpg` },
+  {
+    mode: "grayscale",
+    label: "Grayscale poster",
+    labelComingSoon: "Grayscale + Coming Soon banner",
+    image: `${POSTER_OVERLAY_EXAMPLES_BASE}grayscale.jpg`,
+    imageComingSoon: `${POSTER_OVERLAY_EXAMPLES_BASE}grayscale-coming-soon.jpg`,
+  },
+  {
+    mode: "top_banner",
+    label: "Top banner: PLACEHOLDER",
+    labelComingSoon: "Top banner: Digital - Oct 22",
+    image: `${POSTER_OVERLAY_EXAMPLES_BASE}top_banner.jpg`,
+    imageComingSoon: `${POSTER_OVERLAY_EXAMPLES_BASE}top_banner-coming-soon.jpg`,
+  },
+  {
+    mode: "corner_logo",
+    label: "Corner badge: Placeholdarr logo",
+    labelComingSoon: "Bottom banner + logo",
+    image: `${POSTER_OVERLAY_EXAMPLES_BASE}corner_logo.jpg`,
+    imageComingSoon: `${POSTER_OVERLAY_EXAMPLES_BASE}corner_logo-coming-soon.jpg`,
+  },
 ] as const;
 
 const TMDB_POSTER_IMG_BASE = "https://image.tmdb.org/t/p/w300";
@@ -7071,11 +7090,51 @@ function PlaceholderPosterOverlayDescription(props: { spacing: "settings" | "wiz
   );
 }
 
-function PosterOverlayExamples(props: { selectedMode: string; compact?: boolean }) {
+function ComingSoonPosterBannerDescription(props: { spacing: "settings" | "wizard" }) {
+  const top = props.spacing === "settings" ? "mt-1" : "mb-2";
+  return (
+    <ul className={`list-disc space-y-2 pl-5 text-[14px] text-slate-400 leading-relaxed ${top}`}>
+      <li>
+        <span className="font-medium text-slate-200">Enabled</span>
+        {": "}Coming Soon titles show a date banner using your preferred movie release type
+        (Theatrical, Digital, or Physical) or Airing on episode thumbs, or Coming Soon when the date
+        is unknown. See the overlay style examples above for how each style looks.
+      </li>
+      <li>
+        <span className="font-medium text-slate-200">Disabled</span>
+        {": "}Overlay styles only; no calendar date text on movie posters or episode thumbs.
+      </li>
+    </ul>
+  );
+}
+
+function SeriesNewEpPosterBannerDescription(props: { spacing: "settings" | "wizard" }) {
+  const top = props.spacing === "settings" ? "mt-1" : "mb-2";
+  return (
+    <ul className={`list-disc space-y-2 pl-5 text-[14px] text-slate-400 leading-relaxed ${top}`}>
+      <li>
+        <span className="font-medium text-slate-200">Enabled</span>
+        {": "}Series and season posters show New Ep. - date for the next unaired episode (including
+        premieres). Useful for season and series density where those posters are the main art.
+      </li>
+      <li>
+        <span className="font-medium text-slate-200">Disabled</span>
+        {": "}Series and season posters keep the base overlay style only.
+      </li>
+    </ul>
+  );
+}
+
+function PosterOverlayExamples(props: {
+  selectedMode: string;
+  comingSoonBanner?: boolean;
+  compact?: boolean;
+}) {
   const selected = String(props.selectedMode ?? "off").trim().toLowerCase();
+  const comingSoon = Boolean(props.comingSoonBanner);
   const gridClass = props.compact
-    ? "grid grid-cols-1 sm:grid-cols-3 gap-3"
-    : "grid grid-cols-1 sm:grid-cols-3 gap-4";
+    ? "grid grid-cols-1 sm:grid-cols-3 gap-3 max-w-xl"
+    : "grid grid-cols-1 sm:grid-cols-3 gap-4 max-w-2xl";
   return (
     <details className="mt-3 group rounded-lg border border-[#424753]/40 bg-[#0b111b]/40">
       <summary className="cursor-pointer select-none list-none px-4 py-3 text-[14px] font-headline uppercase tracking-wider text-slate-300 flex items-center gap-2">
@@ -7086,29 +7145,33 @@ function PosterOverlayExamples(props: { selectedMode: string; compact?: boolean 
           chevron_right
         </span>
         Overlay style examples
+        {comingSoon ? (
+          <span className="ml-auto text-[11px] font-headline uppercase tracking-wide text-[var(--brand-accent)]">
+            Coming Soon on
+          </span>
+        ) : null}
       </summary>
       <div className="px-4 pb-4 border-t border-[#424753]/30 pt-4 space-y-3">
-        <p className="text-[13px] text-slate-500 leading-relaxed">
-          Sample poster from TMDB movie {POSTER_OVERLAY_PREVIEW_TMDB_ID}. Your placeholders use each title&apos;s own poster.
-        </p>
         <div className={gridClass}>
           {POSTER_OVERLAY_EXAMPLE_MODES.map((item) => {
             const active = selected === item.mode;
+            const label = comingSoon ? item.labelComingSoon : item.label;
+            const image = comingSoon ? item.imageComingSoon : item.image;
             return (
               <figure
-                key={item.mode}
+                key={`${item.mode}-${comingSoon ? "cs" : "base"}`}
                 className={`rounded-lg overflow-hidden border bg-[#0f1419]/80 ${
                   active ? "border-[var(--brand-accent)] ring-1 ring-[var(--brand-accent)]/40" : "border-[#424753]/40"
                 }`}
               >
                 <img
-                  src={item.image}
-                  alt={`${item.label} overlay example`}
+                  src={image}
+                  alt={`${label} overlay example`}
                   className="w-full aspect-[2/3] object-cover bg-[#0b111b]"
                   loading="lazy"
                 />
                 <figcaption className="px-2 py-2 text-[12px] text-slate-400 leading-snug">
-                  <span className={active ? "font-medium text-slate-200" : ""}>{item.label}</span>
+                  <span className={active ? "font-medium text-slate-200" : ""}>{label}</span>
                   {active ? (
                     <span className="ml-1.5 text-[11px] font-headline uppercase tracking-wide text-[var(--brand-accent)]">
                       Selected
@@ -7733,6 +7796,10 @@ function SettingsPanel(props: {
                 <ProjectStatusIntoDescription spacing="settings" />
               ) : field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
                 <PlaceholderPosterOverlayDescription spacing="settings" />
+              ) : field.key === "PLACEHOLDER_POSTER_COMING_SOON_BANNER" ? (
+                <ComingSoonPosterBannerDescription spacing="settings" />
+              ) : field.key === "PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER" ? (
+                <SeriesNewEpPosterBannerDescription spacing="settings" />
               ) : field.key === "ENABLE_COMING_SOON_COUNTDOWN" ? (
                 <ComingSoonCountdownDescription spacing="settings" />
               ) : field.description && !isPlexSectionIdField(field.key) && !isPosterLanguageFieldKey(field.key) ? (
@@ -7802,7 +7869,10 @@ function SettingsPanel(props: {
         )}
 
         {field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
-          <PosterOverlayExamples selectedMode={String(value ?? "off")} />
+          <PosterOverlayExamples
+            selectedMode={String(value ?? "off")}
+            comingSoonBanner={Boolean(props.values.PLACEHOLDER_POSTER_COMING_SOON_BANNER)}
+          />
         ) : null}
 
         {field.key === "TMDB_API_KEY" ? (
@@ -8442,6 +8512,8 @@ const NFO_BACKFILL_SETTING_KEYS = [
   "PLACEHOLDER_STATUS_UPDATES",
   "PLACEHOLDER_STATUS_PROJECTION_MODE",
   "PLACEHOLDER_POSTER_OVERLAY_MODE",
+  "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
+  "PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER",
   "ENABLE_PREFERRED_POSTER_LANGUAGE",
   "PREFERRED_POSTER_LANGUAGE",
   "PREFER_ORIGINAL_POSTER_LANGUAGE",
@@ -11089,6 +11161,10 @@ function OnboardingWizard(props: {
             <ProjectStatusIntoDescription spacing="wizard" />
           ) : field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
             <PlaceholderPosterOverlayDescription spacing="wizard" />
+          ) : field.key === "PLACEHOLDER_POSTER_COMING_SOON_BANNER" ? (
+            <ComingSoonPosterBannerDescription spacing="wizard" />
+          ) : field.key === "PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER" ? (
+            <SeriesNewEpPosterBannerDescription spacing="wizard" />
           ) : field.key === "ENABLE_COMING_SOON_COUNTDOWN" ? (
             <ComingSoonCountdownDescription spacing="wizard" />
           ) : field.description && !isPosterLanguageFieldKey(field.key) ? (
@@ -11154,7 +11230,11 @@ function OnboardingWizard(props: {
           </div>
         )}
         {field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
-          <PosterOverlayExamples selectedMode={String(props.values[field.key] ?? "off")} compact />
+          <PosterOverlayExamples
+            selectedMode={String(props.values[field.key] ?? "off")}
+            comingSoonBanner={Boolean(props.values.PLACEHOLDER_POSTER_COMING_SOON_BANNER)}
+            compact
+          />
         ) : null}
         {testTarget ? (
           <div

@@ -752,10 +752,11 @@ def refresh_plex_item_metadata(rating_key: str | int) -> PlexMetadataRefreshResu
     if not plex_url or not plex_token:
         return "skipped"
     try:
+        # Plex accepts PUT for item metadata refresh (UI does the same). GET returns 404.
         url = f"{plex_url}/library/metadata/{key}/refresh"
-        response = requests.get(url, headers={"X-Plex-Token": plex_token}, timeout=20)
+        response = requests.put(url, headers={"X-Plex-Token": plex_token}, timeout=20)
         response.raise_for_status()
-        logger.debug(
+        logger.info(
             f"Plex item metadata refresh ok rating_key={key}",
             extra={"emoji_type": "refresh"},
         )

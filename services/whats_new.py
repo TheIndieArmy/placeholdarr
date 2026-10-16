@@ -256,6 +256,21 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         cta_path="/settings/paths",
         requires_ack=True,
     ),
+    WhatsNewNotice(
+        id="coming-soon-poster-banner-0-11-3",
+        since_version="0.11.3",
+        title="Release date banners on posters",
+        body=(
+            "Placeholder posters can show date banners. Coming Soon titles can use your preferred "
+            "movie release type (Theatrical, Digital, or Physical), or Airing on episode thumbs, "
+            "and Coming Soon when the date is unknown. Series and season posters can show "
+            "New Ep. - date for the next unaired episode (including premieres). Both are off by "
+            "default under Settings → Poster Overlay."
+        ),
+        cta_label="Open Poster Overlay",
+        cta_path="/settings/poster-overlay",
+        requires_ack=True,
+    ),
 )
 
 

@@ -44,9 +44,19 @@ NFO_BACKFILL_SETTING_KEYS = frozenset(
 ART_BACKFILL_SETTING_KEYS = frozenset(
     {
         "PLACEHOLDER_POSTER_OVERLAY_MODE",
+        "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
+        "PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER",
         "ENABLE_PREFERRED_POSTER_LANGUAGE",
         "PREFERRED_POSTER_LANGUAGE",
         "PREFER_ORIGINAL_POSTER_LANGUAGE",
+    }
+)
+
+# Art settings that can use a narrow placeholder refresh instead of the whole library.
+NARROW_ART_BACKFILL_SETTING_KEYS = frozenset(
+    {
+        "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
+        "PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER",
     }
 )
 
@@ -817,6 +827,28 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                     {"value": "top_banner", "label": "Top banner: PLACEHOLDER"},
                     {"value": "corner_logo", "label": "Corner badge: Placeholdarr logo"},
                 ],
+            },
+        ),
+        (
+            "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
+            {
+                "section": "Poster Overlay",
+                "label": "Coming Soon date banner",
+                "description": "",
+                "type": "bool",
+                "restart_required": False,
+                "default": False,
+            },
+        ),
+        (
+            "PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER",
+            {
+                "section": "Poster Overlay",
+                "label": "New episode banner on series posters",
+                "description": "",
+                "type": "bool",
+                "restart_required": False,
+                "default": False,
             },
         ),
         (
@@ -3047,11 +3079,24 @@ def save_settings(
             if language_keys_changed and effective_scope == "future":
                 effective_scope = "next_full_sync"
 
+            # Narrow poster-banner toggles only need matching titles rewritten.
+            changed_art = set(art_backfill_keys_changed)
+            art_scope = "all"
+            if changed_art and changed_art <= NARROW_ART_BACKFILL_SETTING_KEYS:
+                want_cs = "PLACEHOLDER_POSTER_COMING_SOON_BANNER" in changed_art
+                want_tv = "PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER" in changed_art
+                if want_cs and want_tv:
+                    art_scope = "coming_soon_and_tv"
+                elif want_cs:
+                    art_scope = "coming_soon"
+                else:
+                    art_scope = "tv_new_ep"
             refresh_out = execute_placeholder_refresh_apply_scope(
                 apply_scope=effective_scope,
                 metadata=bool(nfo_backfill_keys_changed),
                 art=bool(art_backfill_keys_changed),
                 templates=False,
+                art_scope=art_scope,
                 source="settings_save",
                 task_run_trigger="settings_change" if effective_scope == "now" else None,
             )

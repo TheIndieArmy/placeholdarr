@@ -629,5 +629,16 @@ class StatusOrchestrator:
                 enqueue_nfo_refresh(nfo_refresh_ids, session=session, player_metadata_refresh=player_refresh)
             except Exception as e:
                 logger.warning(f"Failed to enqueue NFO refresh: {e}", exc_info=True)
+
+            # Poster top-banner text follows Coming Soon vs PLACEHOLDER; skip is cheap
+            # when overlay_text in .poster-overlay.json already matches.
+            try:
+                from services.source_of_truth.placeholder_art_reconciler import (
+                    enqueue_placeholder_art_refresh,
+                )
+
+                enqueue_placeholder_art_refresh(nfo_refresh_ids, session=session)
+            except Exception as e:
+                logger.warning(f"Failed to enqueue placeholder art refresh: {e}", exc_info=True)
         
         return applied

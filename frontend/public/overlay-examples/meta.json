@@ -1,9 +1,6 @@
 {
   "tmdb_id": 1226863,
   "poster_url": "https://image.tmdb.org/t/p/w500/eJGWx219ZcEMVQJhAgMiqo8tYY.jpg",
-  "modes": [
-    "grayscale",
-    "top_banner",
-    "corner_logo"
-  ]
+  "modes": ["grayscale", "top_banner", "corner_logo"],
+  "coming_soon_sample": "Digital - Oct 22"
 }

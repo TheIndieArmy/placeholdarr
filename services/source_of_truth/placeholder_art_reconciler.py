@@ -10,7 +10,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from core.logger import logger
-from services.media_servers.refresh import refresh_all_paths, refresh_all_sections
+from services.media_servers.refresh import (
+    refresh_all_paths,
+    refresh_all_sections,
+    refresh_players_after_local_art_rewrite,
+)
 from services.placeholder_poster_art import (
     ensure_episode_still_art,
     ensure_movie_art,
@@ -31,6 +35,15 @@ ART_BACKFILL_RUN_ID_KEY = "art_backfill_run_id"
 ART_BACKFILL_REFRESH_ON_COMPLETION_KEY = "art_backfill_refresh_on_completion"
 ART_BACKFILL_TASK_RUN_ID_KEY = "art_backfill_task_run_id"
 
+# Narrow settings toggles: path-scoped media refresh only (no full-library metadata scan).
+NARROW_ART_SCOPES = frozenset({"coming_soon", "tv_new_ep", "coming_soon_and_tv"})
+
+
+def art_scope_uses_section_completion_refresh(art_scope: str | None) -> bool:
+    """Full overlay/language backfills use section refresh; banner toggles use path refresh."""
+    scope = str(art_scope or "all").strip().lower() or "all"
+    return scope not in NARROW_ART_SCOPES
+
 
 def collect_active_placeholder_ids(session) -> list[int]:
     rows = (
@@ -40,6 +53,98 @@ def collect_active_placeholder_ids(session) -> list[int]:
         .all()
     )
     return [int(r[0]) for r in rows if r and r[0] is not None]
+
+
+def collect_coming_soon_placeholder_ids(session) -> list[int]:
+    """Active placeholders currently in a Coming Soon display status (movies + episodes)."""
+    from services.source_of_truth.calendar_phase import _COMING_SOON_STATUS_VALUES
+
+    rows = (
+        session.query(Placeholder.id)
+        .filter(
+            Placeholder.has_placeholder == True,  # noqa: E712
+            Placeholder.display_status.in_(_COMING_SOON_STATUS_VALUES),
+        )
+        .order_by(Placeholder.id.asc())
+        .all()
+    )
+    return [int(r[0]) for r in rows if r and r[0] is not None]
+
+
+def collect_tv_placeholder_ids(session) -> list[int]:
+    """One active placeholder per series for series/season poster refreshes (New Ep. banner)."""
+    seen_series: set[int] = set()
+    out: list[int] = []
+
+    stub_rows = (
+        session.query(Placeholder.id, Placeholder.series_id)
+        .filter(
+            Placeholder.has_placeholder == True,  # noqa: E712
+            Placeholder.series_id.isnot(None),
+        )
+        .order_by(Placeholder.id.asc())
+        .all()
+    )
+    for pid, sid in stub_rows:
+        if sid is None:
+            continue
+        sid_i = int(sid)
+        if sid_i in seen_series:
+            continue
+        seen_series.add(sid_i)
+        out.append(int(pid))
+
+    ep_rows = (
+        session.query(Placeholder.id, Season.series_id)
+        .join(Episode, Episode.id == Placeholder.episode_id)
+        .join(Season, Season.id == Episode.season_id)
+        .filter(
+            Placeholder.has_placeholder == True,  # noqa: E712
+            Placeholder.episode_id.isnot(None),
+        )
+        .order_by(Placeholder.id.asc())
+        .all()
+    )
+    for pid, sid in ep_rows:
+        if sid is None:
+            continue
+        sid_i = int(sid)
+        if sid_i in seen_series:
+            continue
+        seen_series.add(sid_i)
+        out.append(int(pid))
+
+    return sorted(out)
+
+
+def art_scope_writes_episode_stills(art_scope: str | None, display_status: str | None) -> bool:
+    """Whether a narrow art refresh should rewrite episode thumbs.
+
+    ``tv_new_ep`` only updates series/season posters. ``coming_soon_and_tv`` stills
+    only for Coming Soon episode rows; other scopes rewrite stills as usual.
+    """
+    scope = str(art_scope or "all").strip().lower() or "all"
+    if scope == "tv_new_ep":
+        return False
+    if scope == "coming_soon_and_tv":
+        from services.source_of_truth.calendar_phase import _is_coming_soon_status
+
+        return _is_coming_soon_status(display_status)
+    return True
+
+
+def collect_placeholder_ids_for_art_scope(session, art_scope: str | None) -> list[int]:
+    """Resolve placeholder ids for a narrow or full art refresh scope."""
+    scope = str(art_scope or "all").strip().lower() or "all"
+    if scope == "coming_soon":
+        return collect_coming_soon_placeholder_ids(session)
+    if scope == "tv_new_ep":
+        return collect_tv_placeholder_ids(session)
+    if scope == "coming_soon_and_tv":
+        return sorted(
+            set(collect_coming_soon_placeholder_ids(session)) | set(collect_tv_placeholder_ids(session))
+        )
+    return collect_active_placeholder_ids(session)
 
 
 def enqueue_placeholder_art_refresh(
@@ -77,18 +182,40 @@ def enqueue_placeholder_art_backfill_all(
     source: str = "full_sync",
     task_run_id: int | None = None,
     placeholder_refresh_task_run_id: int | None = None,
+    coming_soon_only: bool = False,
+    art_scope: str | None = None,
 ) -> dict:
-    """Queue art refresh for every active placeholder with completion library scan."""
+    """Queue art refresh for active placeholders.
+
+    ``art_scope``: ``all`` | ``coming_soon`` | ``tv_new_ep`` | ``coming_soon_and_tv``.
+    Legacy ``coming_soon_only=True`` maps to ``coming_soon``.
+
+    Full-library scopes finish with a section metadata refresh. Narrow banner
+    toggles use per-batch path refresh only (no whole-library Plex metadata scan).
+    """
+    scope = str(art_scope or "").strip().lower()
+    if not scope:
+        scope = "coming_soon" if coming_soon_only else "all"
     session = get_session()
     try:
-        ids = collect_active_placeholder_ids(session)
+        ids = collect_placeholder_ids_for_art_scope(session, scope)
         if not ids:
-            return {"ok": True, "placeholder_count": 0, "enqueued": False, "source": source}
+            return {
+                "ok": True,
+                "placeholder_count": 0,
+                "enqueued": False,
+                "source": source,
+                "art_scope": scope,
+                "coming_soon_only": scope == "coming_soon",
+            }
         run_id = uuid.uuid4().hex
+        section_completion = art_scope_uses_section_completion_refresh(scope)
         extras: dict[str, Any] = {
             ART_BACKFILL_RUN_ID_KEY: run_id,
-            ART_BACKFILL_REFRESH_ON_COMPLETION_KEY: True,
+            ART_BACKFILL_REFRESH_ON_COMPLETION_KEY: section_completion,
             "art_backfill_source": source,
+            "art_scope": scope,
+            "coming_soon_only": scope == "coming_soon",
         }
         if task_run_id is not None:
             tid = int(task_run_id)
@@ -119,9 +246,59 @@ def enqueue_placeholder_art_backfill_all(
         out["art_backfill_run_id"] = run_id
         out["batch_count"] = batch_count
         out["enqueued"] = bool(out.get("ok")) and batch_count > 0
+        out["art_scope"] = scope
+        out["coming_soon_only"] = scope == "coming_soon"
         return out
     finally:
         session.close()
+
+
+def _art_refresh_pending_same_run(session, job: Job, *, run_id: str) -> bool:
+    job_id = int(job.id)
+    pending_same_run = (
+        session.query(Job.id)
+        .filter(
+            Job.job_type == PLACEHOLDER_ART_REFRESH_JOB_TYPE,
+            Job.status.in_(["PENDING", "CLAIMED", "WORKING"]),
+            Job.id != job_id,
+            Job.payload[ART_BACKFILL_RUN_ID_KEY].as_string() == run_id,
+        )
+        .first()
+    )
+    return bool(pending_same_run)
+
+
+def _art_refresh_bust_ui_library_cache(*, run_id: str, log_prefix: str) -> None:
+    try:
+        from services.library_poster_paths import invalidate_library_poster_cache
+        from services.postgres.db import get_session
+        from services.series_episode_stats_hooks import bump_library_versions_after_bulk
+
+        invalidate_library_poster_cache()
+        bump_session = get_session()
+        try:
+            bump_library_versions_after_bulk(bump_session, movies=True, series=True)
+            bump_session.commit()
+        finally:
+            bump_session.close()
+    except Exception as exc:
+        logger.warning(
+            f"{log_prefix} UI library cache bust failed run_id={run_id}: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+
+
+def _art_refresh_ui_bust_if_last_batch(
+    session,
+    job: Job,
+    *,
+    run_id: str,
+    log_prefix: str = "Placeholder art backfill",
+) -> None:
+    """For path-scoped narrow runs: bust Placeholdarr UI cache when the last batch finishes."""
+    if _art_refresh_pending_same_run(session, job, run_id=run_id):
+        return
+    _art_refresh_bust_ui_library_cache(run_id=run_id, log_prefix=log_prefix)
 
 
 def _art_refresh_completion_scan_if_last_batch(
@@ -134,17 +311,7 @@ def _art_refresh_completion_scan_if_last_batch(
     # Capture before commit/close: expire_on_commit would detach Job and make
     # later ``job.id`` access raise DetachedInstanceError (fails the whole batch).
     job_id = int(job.id)
-    pending_same_run = (
-        session.query(Job.id)
-        .filter(
-            Job.job_type == PLACEHOLDER_ART_REFRESH_JOB_TYPE,
-            Job.status.in_(["PENDING", "CLAIMED", "WORKING"]),
-            Job.id != job_id,
-            Job.payload[ART_BACKFILL_RUN_ID_KEY].as_string() == run_id,
-        )
-        .first()
-    )
-    if pending_same_run:
+    if _art_refresh_pending_same_run(session, job, run_id=run_id):
         return
 
     task_run_id = None
@@ -170,24 +337,7 @@ def _art_refresh_completion_scan_if_last_batch(
     except Exception:
         pass
 
-    # Bust Placeholdarr UI poster URLs / shelf cache after on-disk art rewrite completes.
-    try:
-        from services.library_poster_paths import invalidate_library_poster_cache
-        from services.postgres.db import get_session
-        from services.series_episode_stats_hooks import bump_library_versions_after_bulk
-
-        invalidate_library_poster_cache()
-        bump_session = get_session()
-        try:
-            bump_library_versions_after_bulk(bump_session, movies=True, series=True)
-            bump_session.commit()
-        finally:
-            bump_session.close()
-    except Exception as exc:
-        logger.warning(
-            f"{log_prefix} UI library cache bust failed run_id={run_id}: {exc}",
-            extra={"emoji_type": "warning"},
-        )
+    _art_refresh_bust_ui_library_cache(run_id=run_id, log_prefix=log_prefix)
 
     # Mark the full-sync task DONE before Plex/JF/Emby refresh so the Tasks UI does not
     # sit on WORKING for tens of minutes while library scans run.
@@ -237,11 +387,14 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
 
     from services.task_run_phases import accumulate_art_backfill_counts, empty_art_counts
 
+    art_scope = str(payload.get("art_scope") or "all").strip().lower() or "all"
     placeholders = session.query(Placeholder).filter(Placeholder.id.in_(ids)).all()
     n_total = len(placeholders)
     wrote = 0
     batch_counts = empty_art_counts()
     refresh_paths: set[str] = set()
+    rewritten_movies: list = []
+    rewritten_series: list = []
     processed_movies: set[int] = set()
     processed_series: set[int] = set()
     loop_pos = [0]
@@ -283,45 +436,57 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
                     result = ensure_movie_art(movie, path)
                     if result.wrote_any:
                         wrote += 1
+                        rewritten_movies.append(movie)
                         for k, v in result.art_counts.items():
                             batch_counts[k] = int(batch_counts.get(k, 0)) + int(v)
-                    refresh_paths.add(os.path.dirname(os.path.abspath(path)))
+                        refresh_paths.add(os.path.dirname(os.path.abspath(path)))
                 continue
 
-            if not episode or not bool(getattr(episode, "has_placeholder", False)):
-                continue
+            series = None
+            season = None
+            path = str(getattr(placeholder, "path", "") or "").strip()
+            if episode and bool(getattr(episode, "has_placeholder", False)):
+                season = session.query(Season).get(episode.season_id) if episode.season_id else None
+                series = session.query(Series).get(season.series_id) if season and season.series_id else None
+                if not path:
+                    path = str(getattr(episode, "placeholder_filepath", "") or "").strip()
+            elif getattr(placeholder, "series_id", None):
+                series = session.query(Series).get(placeholder.series_id)
+                if getattr(placeholder, "season_id", None):
+                    season = session.query(Season).get(placeholder.season_id)
 
-            season = session.query(Season).get(episode.season_id) if episode.season_id else None
-            series = session.query(Series).get(season.series_id) if season and season.series_id else None
-            if not season or not series:
-                continue
-
-            path = str(
-                getattr(placeholder, "path", "") or getattr(episode, "placeholder_filepath", "") or ""
-            ).strip()
-            if not path:
+            if not series:
                 continue
 
             sid = int(series.id)
-            series_folder = getattr(series, "placeholder_folder", None) or os.path.dirname(
-                os.path.dirname(os.path.dirname(os.path.abspath(path)))
+            series_folder = getattr(series, "placeholder_folder", None) or (
+                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(path)))) if path else None
             )
             if sid not in processed_series:
                 processed_series.add(sid)
                 series_result = ensure_series_art(series, series_folder=series_folder)
                 if series_result.wrote_any:
                     wrote += 1
+                    rewritten_series.append(series)
                     for k, v in series_result.art_counts.items():
                         batch_counts[k] = int(batch_counts.get(k, 0)) + int(v)
-                if series_folder:
-                    refresh_paths.add(os.path.abspath(series_folder))
+                    if series_folder:
+                        refresh_paths.add(os.path.abspath(series_folder))
+
+            if not episode or not season or not path:
+                continue
+            if not art_scope_writes_episode_stills(art_scope, getattr(placeholder, "display_status", None)):
+                continue
 
             still_result = ensure_episode_still_art(episode, season, series, path)
             if still_result.wrote_any:
                 wrote += 1
                 for k, v in still_result.art_counts.items():
                     batch_counts[k] = int(batch_counts.get(k, 0)) + int(v)
-            refresh_paths.add(os.path.dirname(os.path.abspath(path)))
+                refresh_paths.add(os.path.dirname(os.path.abspath(path)))
+                # Episode thumbs live under the show; refresh series art agents too.
+                if series not in rewritten_series:
+                    rewritten_series.append(series)
     finally:
         stop_hb.set()
 
@@ -350,11 +515,33 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
 
     if refresh_paths and not bulk_completion:
         try:
-            refresh_all_paths(refresh_paths, update_type="Modified", include_plex=True, include_jellyfin=True, include_emby=True)
+            refresh_all_paths(
+                refresh_paths,
+                update_type="Modified",
+                include_plex=True,
+                include_jellyfin=True,
+                include_emby=True,
+            )
         except Exception as exc:
             logger.warning(f"placeholder_art_refresh path refresh failed: {exc}", extra={"emoji_type": "warning"})
 
+    # Path scans do not update Plex posters; refresh rewritten titles at item level.
+    if (rewritten_movies or rewritten_series) and not bulk_completion:
+        try:
+            refresh_players_after_local_art_rewrite(
+                movies=rewritten_movies,
+                series_rows=rewritten_series,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"placeholder_art_refresh player item refresh failed: {exc}",
+                extra={"emoji_type": "warning"},
+            )
+
     if bulk_completion and run_id:
         _art_refresh_completion_scan_if_last_batch(session, job, run_id=run_id)
+    elif run_id and not bulk_completion:
+        # Narrow banner toggles: path refresh above; bust UI cache on the last batch.
+        _art_refresh_ui_bust_if_last_batch(session, job, run_id=run_id)
 
     return {"ok": True, "wrote": wrote, "scanned": len(placeholders), "series_count": len(processed_series)}
