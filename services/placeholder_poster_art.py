@@ -16,6 +16,7 @@ from services.poster_overlay import (
     composite_poster_from_url,
     logo_asset_stamp,
     normalize_poster_url,
+    poster_banner_position,
     poster_overlay_mode,
     save_jpeg,
     save_raw_poster_from_url,
@@ -275,6 +276,7 @@ def _write_meta(
         "outputs": outputs,
         "logo_stamp": logo_asset_stamp(),
         "coming_soon_banner": bool(coming_soon_banner_enabled()),
+        "banner_position": poster_banner_position(),
     }
     from services.placeholders import _apply_dir_chain_permissions, _ensure_open_permissions
 
@@ -308,6 +310,11 @@ def _needs_regenerate(
     if str(meta.get("mode") or "") != mode:
         return True
     if str(meta.get("logo_stamp") or "") != logo_asset_stamp():
+        return True
+    # Text banner placement (top_banner / grayscale strips). Legacy meta without the
+    # key is treated as top so existing libraries do not mass-rewrite until position changes.
+    stored_pos = str(meta.get("banner_position") or "top").strip().lower() or "top"
+    if stored_pos != poster_banner_position():
         return True
     # Do not invalidate on coming_soon_banner setting alone: overlay_text already
     # captures whether a date strip is drawn. Non-Coming-Soon titles stay unchanged.

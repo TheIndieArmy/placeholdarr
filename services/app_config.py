@@ -44,6 +44,7 @@ NFO_BACKFILL_SETTING_KEYS = frozenset(
 ART_BACKFILL_SETTING_KEYS = frozenset(
     {
         "PLACEHOLDER_POSTER_OVERLAY_MODE",
+        "PLACEHOLDER_POSTER_BANNER_POSITION",
         "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
         "PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER",
         "ENABLE_PREFERRED_POSTER_LANGUAGE",
@@ -824,8 +825,23 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "options": [
                     {"value": "off", "label": "Off (raw download, no overlay)"},
                     {"value": "grayscale", "label": "Grayscale poster"},
-                    {"value": "top_banner", "label": "Top banner: PLACEHOLDER"},
+                    {"value": "top_banner", "label": "Banner: PLACEHOLDER"},
                     {"value": "corner_logo", "label": "Corner badge: Placeholdarr logo"},
+                ],
+            },
+        ),
+        (
+            "PLACEHOLDER_POSTER_BANNER_POSITION",
+            {
+                "section": "Poster Overlay",
+                "label": "Banner position",
+                "description": "",
+                "type": "choice",
+                "restart_required": False,
+                "default": "top",
+                "options": [
+                    {"value": "top", "label": "Top"},
+                    {"value": "bottom", "label": "Bottom"},
                 ],
             },
         ),

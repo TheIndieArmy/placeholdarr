@@ -15,6 +15,11 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Coming Soon date-driven art**: Calendar date refresh enqueues poster art when release/air dates change, even if status/reason stay the same.
 - **New Ep. calendar/import art**: Episode air-date shifts and import-grace finalize refresh series/season New Ep. banners.
 - **Materializer art after status**: Placeholder art is written after initial Coming Soon status so the first poster has the correct banner.
+- **Banner position**: Top or bottom text bars for all overlay styles (default top).
+
+### Added
+
+- **Banner position**: `PLACEHOLDER_POSTER_BANNER_POSITION` (`top` / `bottom`, default `top`) places date / PLACEHOLDER text bars for Banner, Grayscale, and Corner overlays. Bottom keeps dates clear of Plex unwatched counts. The Corner logo badge itself stays bottom-right and is not part of the bar.
 
 ### Changed
 

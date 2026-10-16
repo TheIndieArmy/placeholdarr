@@ -390,6 +390,7 @@ const LOOK_AND_FEEL_FIELD_KEYS = [
   "PLACEHOLDER_STATUS_UPDATES",
   "PLACEHOLDER_STATUS_PROJECTION_MODE",
   "PLACEHOLDER_POSTER_OVERLAY_MODE",
+  "PLACEHOLDER_POSTER_BANNER_POSITION",
   "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
   "PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER",
   "ENABLE_PREFERRED_POSTER_LANGUAGE",
@@ -398,29 +399,67 @@ const LOOK_AND_FEEL_FIELD_KEYS = [
 ] as const;
 
 const POSTER_OVERLAY_EXAMPLES_BASE = `${import.meta.env.BASE_URL}overlay-examples/`.replace(/(?<!:)\/{2,}/g, "/");
-const POSTER_OVERLAY_EXAMPLE_MODES = [
+
+type PosterOverlayExampleMode = {
+  mode: string;
+  resolve: (opts: { comingSoon: boolean; bannerBottom: boolean }) => { label: string; image: string };
+};
+
+const POSTER_OVERLAY_EXAMPLE_MODES: PosterOverlayExampleMode[] = [
   {
     mode: "grayscale",
-    label: "Grayscale poster",
-    labelComingSoon: "Grayscale + Coming Soon banner",
-    image: `${POSTER_OVERLAY_EXAMPLES_BASE}grayscale.jpg`,
-    imageComingSoon: `${POSTER_OVERLAY_EXAMPLES_BASE}grayscale-coming-soon.jpg`,
+    resolve: ({ comingSoon, bannerBottom }) => {
+      if (!comingSoon) {
+        return {
+          label: "Grayscale poster",
+          image: `${POSTER_OVERLAY_EXAMPLES_BASE}grayscale.jpg`,
+        };
+      }
+      return {
+        label: bannerBottom ? "Grayscale + Coming Soon (bottom)" : "Grayscale + Coming Soon (top)",
+        image: bannerBottom
+          ? `${POSTER_OVERLAY_EXAMPLES_BASE}grayscale-coming-soon-bottom.jpg`
+          : `${POSTER_OVERLAY_EXAMPLES_BASE}grayscale-coming-soon.jpg`,
+      };
+    },
   },
   {
     mode: "top_banner",
-    label: "Top banner: PLACEHOLDER",
-    labelComingSoon: "Top banner: Digital - Oct 22",
-    image: `${POSTER_OVERLAY_EXAMPLES_BASE}top_banner.jpg`,
-    imageComingSoon: `${POSTER_OVERLAY_EXAMPLES_BASE}top_banner-coming-soon.jpg`,
+    resolve: ({ comingSoon, bannerBottom }) => {
+      if (comingSoon) {
+        return {
+          label: bannerBottom ? "Bottom banner: Digital - Oct 22" : "Top banner: Digital - Oct 22",
+          image: bannerBottom
+            ? `${POSTER_OVERLAY_EXAMPLES_BASE}top_banner-coming-soon-bottom.jpg`
+            : `${POSTER_OVERLAY_EXAMPLES_BASE}top_banner-coming-soon.jpg`,
+        };
+      }
+      return {
+        label: bannerBottom ? "Bottom banner: PLACEHOLDER" : "Top banner: PLACEHOLDER",
+        image: bannerBottom
+          ? `${POSTER_OVERLAY_EXAMPLES_BASE}top_banner-bottom.jpg`
+          : `${POSTER_OVERLAY_EXAMPLES_BASE}top_banner.jpg`,
+      };
+    },
   },
   {
     mode: "corner_logo",
-    label: "Corner badge: Placeholdarr logo",
-    labelComingSoon: "Bottom banner + logo",
-    image: `${POSTER_OVERLAY_EXAMPLES_BASE}corner_logo.jpg`,
-    imageComingSoon: `${POSTER_OVERLAY_EXAMPLES_BASE}corner_logo-coming-soon.jpg`,
+    resolve: ({ comingSoon, bannerBottom }) => {
+      if (!comingSoon) {
+        return {
+          label: "Corner badge: Placeholdarr logo",
+          image: `${POSTER_OVERLAY_EXAMPLES_BASE}corner_logo.jpg`,
+        };
+      }
+      return {
+        label: bannerBottom ? "Corner + Coming Soon (bottom)" : "Corner + Coming Soon (top)",
+        image: bannerBottom
+          ? `${POSTER_OVERLAY_EXAMPLES_BASE}corner_logo-coming-soon.jpg`
+          : `${POSTER_OVERLAY_EXAMPLES_BASE}corner_logo-coming-soon-top.jpg`,
+      };
+    },
   },
-] as const;
+];
 
 const TMDB_POSTER_IMG_BASE = "https://image.tmdb.org/t/p/w300";
 
@@ -5071,6 +5110,11 @@ function buildPersistableSettingsValues(values: FieldValueMap, payload: Settings
     }
   }
 
+  if ("PLACEHOLDER_POSTER_BANNER_POSITION" in cleaned) {
+    const pos = String(cleaned.PLACEHOLDER_POSTER_BANNER_POSITION ?? "top").trim().toLowerCase();
+    cleaned.PLACEHOLDER_POSTER_BANNER_POSITION = pos === "bottom" ? "bottom" : "top";
+  }
+
   return cleaned;
 }
 
@@ -7079,12 +7123,32 @@ function PlaceholderPosterOverlayDescription(props: { spacing: "settings" | "wiz
         {": "}Dimmed grayscale poster so placeholders stand out in the library grid.
       </li>
       <li>
-        <span className="font-medium text-slate-200">Top banner</span>
-        {": "}Original poster with a PLACEHOLDER banner across the top.
+        <span className="font-medium text-slate-200">Banner</span>
+        {": "}Original poster with a PLACEHOLDER text bar (position set below).
       </li>
       <li>
         <span className="font-medium text-slate-200">Corner badge</span>
         {": "}Placeholdarr logo badge in the bottom-right corner.
+      </li>
+    </ul>
+  );
+}
+
+function PosterBannerPositionDescription(props: { spacing: "settings" | "wizard" }) {
+  const top = props.spacing === "settings" ? "mt-1" : "mb-2";
+  return (
+    <ul className={`list-disc space-y-2 pl-5 text-[14px] text-slate-400 leading-relaxed ${top}`}>
+      <li>
+        <span className="font-medium text-slate-200">Top</span>
+        {": "}Default. Text bar across the top for Banner, Grayscale date strips, and Corner date strips.
+      </li>
+      <li>
+        <span className="font-medium text-slate-200">Bottom</span>
+        {": "}Moves those bars to the bottom so Plex unwatched counts (and similar badges) do not cover dates.
+      </li>
+      <li>
+        <span className="font-medium text-slate-200">Corner logo badge</span>
+        {": "}The Placeholdarr badge stays bottom-right on its own; it is not part of the text bar.
       </li>
     </ul>
   );
@@ -7128,10 +7192,12 @@ function SeriesNewEpPosterBannerDescription(props: { spacing: "settings" | "wiza
 function PosterOverlayExamples(props: {
   selectedMode: string;
   comingSoonBanner?: boolean;
+  bannerPosition?: string;
   compact?: boolean;
 }) {
   const selected = String(props.selectedMode ?? "off").trim().toLowerCase();
   const comingSoon = Boolean(props.comingSoonBanner);
+  const bannerBottom = String(props.bannerPosition ?? "top").trim().toLowerCase() === "bottom";
   const gridClass = props.compact
     ? "grid grid-cols-1 sm:grid-cols-3 gap-3 max-w-xl"
     : "grid grid-cols-1 sm:grid-cols-3 gap-4 max-w-2xl";
@@ -7155,11 +7221,10 @@ function PosterOverlayExamples(props: {
         <div className={gridClass}>
           {POSTER_OVERLAY_EXAMPLE_MODES.map((item) => {
             const active = selected === item.mode;
-            const label = comingSoon ? item.labelComingSoon : item.label;
-            const image = comingSoon ? item.imageComingSoon : item.image;
+            const { label, image } = item.resolve({ comingSoon, bannerBottom });
             return (
               <figure
-                key={`${item.mode}-${comingSoon ? "cs" : "base"}`}
+                key={`${item.mode}-${comingSoon ? "cs" : "base"}-${bannerBottom ? "bottom" : "top"}`}
                 className={`rounded-lg overflow-hidden border bg-[#0f1419]/80 ${
                   active ? "border-[var(--brand-accent)] ring-1 ring-[var(--brand-accent)]/40" : "border-[#424753]/40"
                 }`}
@@ -7796,6 +7861,8 @@ function SettingsPanel(props: {
                 <ProjectStatusIntoDescription spacing="settings" />
               ) : field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
                 <PlaceholderPosterOverlayDescription spacing="settings" />
+              ) : field.key === "PLACEHOLDER_POSTER_BANNER_POSITION" ? (
+                <PosterBannerPositionDescription spacing="settings" />
               ) : field.key === "PLACEHOLDER_POSTER_COMING_SOON_BANNER" ? (
                 <ComingSoonPosterBannerDescription spacing="settings" />
               ) : field.key === "PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER" ? (
@@ -7872,6 +7939,7 @@ function SettingsPanel(props: {
           <PosterOverlayExamples
             selectedMode={String(value ?? "off")}
             comingSoonBanner={Boolean(props.values.PLACEHOLDER_POSTER_COMING_SOON_BANNER)}
+            bannerPosition={String(props.values.PLACEHOLDER_POSTER_BANNER_POSITION ?? "top")}
           />
         ) : null}
 
@@ -8512,6 +8580,7 @@ const NFO_BACKFILL_SETTING_KEYS = [
   "PLACEHOLDER_STATUS_UPDATES",
   "PLACEHOLDER_STATUS_PROJECTION_MODE",
   "PLACEHOLDER_POSTER_OVERLAY_MODE",
+  "PLACEHOLDER_POSTER_BANNER_POSITION",
   "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
   "PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER",
   "ENABLE_PREFERRED_POSTER_LANGUAGE",
@@ -11161,6 +11230,8 @@ function OnboardingWizard(props: {
             <ProjectStatusIntoDescription spacing="wizard" />
           ) : field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
             <PlaceholderPosterOverlayDescription spacing="wizard" />
+          ) : field.key === "PLACEHOLDER_POSTER_BANNER_POSITION" ? (
+            <PosterBannerPositionDescription spacing="wizard" />
           ) : field.key === "PLACEHOLDER_POSTER_COMING_SOON_BANNER" ? (
             <ComingSoonPosterBannerDescription spacing="wizard" />
           ) : field.key === "PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER" ? (
@@ -11233,6 +11304,7 @@ function OnboardingWizard(props: {
           <PosterOverlayExamples
             selectedMode={String(props.values[field.key] ?? "off")}
             comingSoonBanner={Boolean(props.values.PLACEHOLDER_POSTER_COMING_SOON_BANNER)}
+            bannerPosition={String(props.values.PLACEHOLDER_POSTER_BANNER_POSITION ?? "top")}
             compact
           />
         ) : null}

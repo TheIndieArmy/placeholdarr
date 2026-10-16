@@ -338,6 +338,10 @@ class Settings(BaseSettings):
     PLACEHOLDER_POSTER_OVERLAY_MODE: Literal["off", "grayscale", "top_banner", "corner_logo"] = (
         os.getenv("PLACEHOLDER_POSTER_OVERLAY_MODE", "off").split("#")[0].strip().lower() or "off"
     )
+    # Text-banner bar placement for Banner, Grayscale, and Corner date strips (badge stays bottom-right).
+    PLACEHOLDER_POSTER_BANNER_POSITION: Literal["top", "bottom"] = (
+        os.getenv("PLACEHOLDER_POSTER_BANNER_POSITION", "top").split("#")[0].strip().lower() or "top"
+    )
     # Opt-in Coming Soon date / Coming Soon strip on top of the selected overlay style (default off).
     PLACEHOLDER_POSTER_COMING_SOON_BANNER: bool = (
         os.getenv("PLACEHOLDER_POSTER_COMING_SOON_BANNER", "false").split("#")[0].strip().lower()
@@ -591,6 +595,11 @@ class Settings(BaseSettings):
         if raw == "off" or raw not in {"summary", "title", "both"}:
             return "both"
         return raw
+
+    @validator("PLACEHOLDER_POSTER_BANNER_POSITION", pre=True)
+    def normalize_placeholder_poster_banner_position(cls, v):
+        raw = str(v or "top").strip().lower()
+        return "bottom" if raw == "bottom" else "top"
 
     @validator('COMING_SOON_DUMMY_FILE_PATH')
     def validate_coming_soon_dummy_file_path(cls, v):

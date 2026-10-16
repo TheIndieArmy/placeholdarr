@@ -14,6 +14,7 @@ from core.config import settings
 from core.logger import logger
 
 OverlayMode = Literal["off", "grayscale", "top_banner", "corner_logo"]
+BannerPosition = Literal["top", "bottom"]
 
 PORTRAIT_SIZE = (1000, 1500)
 LANDSCAPE_SIZE = (1920, 1080)
@@ -24,6 +25,7 @@ OVERLAY_META_FILENAME = ".poster-overlay.json"
 _LOGO_PATH = Path(__file__).resolve().parent / "assets" / "placeholdarr_logo_yellow.png"
 _FONT_PATH = Path(__file__).resolve().parent / "assets" / "fonts" / "SpaceGrotesk-Bold.ttf"
 _VALID_MODES = frozenset({"off", "grayscale", "top_banner", "corner_logo"})
+_VALID_BANNER_POSITIONS = frozenset({"top", "bottom"})
 # Bumped for Coming Soon / date-label banner text (auto-fit width).
 _TOP_BANNER_LAYOUT = "top-banner-space-grotesk-v3"
 # Corner logo + Coming Soon uses a bottom strip with the logo embedded in the bar.
@@ -125,6 +127,12 @@ def coming_soon_banner_enabled() -> bool:
 def series_new_ep_banner_enabled() -> bool:
     """Opt-in New Ep. date strip on series/season posters from the next unaired episode."""
     return bool(getattr(settings, "PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER", False))
+
+
+def poster_banner_position() -> BannerPosition:
+    """Where text banners sit for ``top_banner`` / grayscale date strips. Default top."""
+    raw = str(getattr(settings, "PLACEHOLDER_POSTER_BANNER_POSITION", "top") or "top").strip().lower()
+    return "bottom" if raw == "bottom" else "top"
 
 
 def normalize_poster_url(url: str | None) -> str | None:
@@ -266,8 +274,11 @@ def _apply_banner_bar(img, text: str, *, position: str = "top"):
     return out
 
 
-def _apply_top_banner(img, text: str = "PLACEHOLDER"):
-    return _apply_banner_bar(img, text, position="top")
+def _apply_top_banner(img, text: str = "PLACEHOLDER", *, position: str | None = None):
+    pos = str(position or poster_banner_position() or "top").strip().lower()
+    if pos not in _VALID_BANNER_POSITIONS:
+        pos = "top"
+    return _apply_banner_bar(img, text, position=pos)
 
 
 def _rounded_rectangle_mask(size: tuple[int, int], radius: int):
@@ -324,12 +335,27 @@ def _apply_corner_logo(img):
     return out
 
 
-def _apply_corner_logo_bottom_banner(img, text: str):
-    """Bottom Coming Soon bar with the Placeholdarr logo badge embedded on the right."""
+def _apply_corner_logo_date_banner(img, text: str, *, position: str = "bottom"):
+    """Date / Coming Soon text bar for corner-logo mode.
+
+    The text bar follows ``position`` (top or bottom). The Placeholdarr badge is
+    drawn separately afterward and always stays bottom-right (not part of the bar).
+    When the bar is also at the bottom, text is centered in the region left of the
+    badge so the two do not collide.
+    """
     mods = _pillow()
     if mods is None:
         return img
     Image, ImageDraw, _, _, _ = mods
+    pos = str(position or "bottom").strip().lower()
+    if pos not in _VALID_BANNER_POSITIONS:
+        pos = "bottom"
+    label = str(text or "").strip() or "Coming Soon"
+
+    # Top (or bottom without badge clearance): same bar as Banner / Grayscale.
+    if pos == "top":
+        return _apply_banner_bar(img, label, position="top")
+
     out = img.convert("RGBA")
     w, h = out.size
     bar_h = max(72, int(h * 0.14))
@@ -339,23 +365,15 @@ def _apply_corner_logo_bottom_banner(img, text: str):
     draw.rectangle([0, y0, w, y0 + bar_h], fill=(0, 0, 0, int(255 * 0.72)))
     out = Image.alpha_composite(out, overlay)
 
+    # Reserve right side for the independent bottom-right badge applied next.
     badge_pad = max(6, int(bar_h * 0.12))
     badge_w = max(48, bar_h - 2 * badge_pad)
-    badge = _build_corner_logo_badge(badge_w)
     inset = max(8, int(w * 0.02))
-    if badge is not None:
-        bx = w - badge_w - inset
-        by = y0 + (bar_h - badge_w) // 2
-        out.paste(badge, (bx, by), badge)
-        text_max_w = max(1, bx - inset)
-    else:
-        text_max_w = w
+    text_max_w = max(1, w - badge_w - 2 * inset)
 
-    label = str(text or "").strip() or "Coming Soon"
     preferred = max(22, int(bar_h * 0.42))
     font = _fit_banner_font(label, max_width=text_max_w, preferred_size=preferred)
     draw = ImageDraw.Draw(out)
-    # Center text in the region left of the badge.
     draw.text(
         (text_max_w // 2, y0 + bar_h // 2),
         label,
@@ -376,17 +394,20 @@ def apply_overlay(img, mode: str, *, landscape: bool = False, overlay_text: str 
     target = LANDSCAPE_SIZE if landscape else PORTRAIT_SIZE
     base = _fit_image(img, target)
     label = str(overlay_text or "").strip() or None
+    banner_pos = poster_banner_position()
     if want == "grayscale":
         out = _apply_grayscale(base)
         if label:
-            out = _apply_top_banner(out, text=label)
+            out = _apply_top_banner(out, text=label, position=banner_pos)
         return out
     if want == "top_banner":
-        return _apply_top_banner(base, text=label or "PLACEHOLDER")
+        return _apply_top_banner(base, text=label or "PLACEHOLDER", position=banner_pos)
     if want == "corner_logo":
+        out = base
         if label:
-            return _apply_corner_logo_bottom_banner(base, text=label)
-        return _apply_corner_logo(base)
+            out = _apply_corner_logo_date_banner(out, text=label, position=banner_pos)
+        # Badge always bottom-right, independent of banner position.
+        return _apply_corner_logo(out)
     return base
 
 
