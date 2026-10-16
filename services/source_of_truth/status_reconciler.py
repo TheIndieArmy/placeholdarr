@@ -433,12 +433,14 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
     except Exception:
         pass
 
-    # Prefer rows whose NFO changed; if the job asked for player refresh and NFO was a
-    # no-op, still project. Otherwise Plex/Jellyfin/Emby can keep a prior title such as
-    # import-grace countdown after file-delete rematerialize already wrote REQUEST NFO.
-    player_push_rows = list(refreshed_for_player_push)
-    if do_player and not player_push_rows:
-        player_push_rows = list(active_for_player_push)
+    # Prefer rows whose NFO changed, but also include NFO no-ops from the same batched
+    # job. Otherwise a mixed batch drops unchanged rows (e.g. file-delete rematerialize
+    # whose REQUEST NFO was already written) and Plex/Jellyfin/Emby can keep a prior
+    # title such as import-grace countdown. Refreshed entries win on entity dedupe.
+    player_push_rows: list[tuple[Placeholder, tuple[str, int]]] = []
+    if do_player:
+        player_push_rows.extend(refreshed_for_player_push)
+        player_push_rows.extend(active_for_player_push)
 
     if do_player and player_push_rows:
         # One media-server refresh sequence per underlying movie/episode row, even if several

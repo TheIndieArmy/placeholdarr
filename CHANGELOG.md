@@ -9,6 +9,14 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Summary
+
+- **NFO batch player push**: Mixed rewrite/no-op NFO jobs still project every active placeholder in the batch.
+
+### Fixed
+
+- **NFO batch player push**: When a batched NFO follow-up rewrites some sidecars and leaves others unchanged, player metadata projection includes both sets (refreshed first on entity dedupe), so an unchanged REQUEST NFO no longer skips Plex/Jellyfin/Emby push because a sibling row was rewritten.
+
 ## Pre-release
 
 ## Released
