@@ -50,9 +50,23 @@ _section_index_cache: dict[int, tuple[float, dict[str, dict[str, Any]]]] = {}
 _INDEX_TTL_SECONDS = 300.0
 
 
-def list_plex_sections() -> list[dict[str, Any]]:
-    """Return all Plex library sections usable as collection targets."""
-    plex = get_plex_server()
+def list_plex_sections(*, refresh: bool = False) -> list[dict[str, Any]]:
+    """Return all Plex library sections usable as collection targets.
+
+    plexapi caches ``Library._sectionsByID`` on the shared ``PlexServer`` client.
+    Pass ``refresh=True`` (Rescan libraries) to drop that client and reload from Plex
+    after libraries are added/removed.
+    """
+    if refresh:
+        with _index_lock:
+            _section_index_cache.clear()
+        try:
+            from services.media_servers.plex import clear_plex_section_location_cache
+
+            clear_plex_section_location_cache()
+        except Exception:
+            pass
+    plex = get_plex_server(refresh=refresh)
     if not plex:
         raise PlexCollectionsError("Plex is not configured or unreachable")
     sections = []

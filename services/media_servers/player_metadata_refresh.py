@@ -570,6 +570,7 @@ def _push_movie(
     else:
         summary.emby_disabled += 1
 
+    movie_label = str(getattr(movie, "title", "") or "").strip() or f"movie id {int(getattr(movie, 'id', 0) or 0)}"
     if getattr(settings, "plex_enabled", False):
         plex_key = _plex_coalesce_cached_rating_key(movie)
         if plex_key:
@@ -577,6 +578,7 @@ def _push_movie(
                 plex_key,
                 title=projected_title,
                 summary=projected_summary,
+                item_label=movie_label,
             )
             if outcome == "ok":
                 logger.debug(
@@ -639,6 +641,7 @@ def _push_movie(
                     plex_movie.ratingKey,
                     title=projected_title,
                     summary=projected_summary,
+                    item_label=movie_label,
                 )
                 if outcome == "ok":
                     logger.debug(
@@ -699,6 +702,13 @@ def _push_episode(
         runtime_minutes=runtime_minutes,
         media_context=media_ctx,
     )
+    series_title = str(getattr(series, "title", "") or "").strip() or "Series"
+    try:
+        sn = int(getattr(season, "season_number", 0) or 0)
+        en = int(getattr(episode, "episode_number", 0) or 0)
+    except (TypeError, ValueError):
+        sn, en = 0, 0
+    episode_label = f"{series_title} S{sn:02d}E{en:02d}"
     if getattr(settings, "jellyfin_enabled", False):
         jf_ep = _find_jellyfin_episode_item_id(series, season, episode)
         if jf_ep:
@@ -766,7 +776,12 @@ def _push_episode(
     if getattr(settings, "plex_enabled", False):
         ep_key = _plex_coalesce_cached_rating_key(episode)
         if ep_key:
-            ep_out = update_plex_item_text(ep_key, title=projected_ep_title, summary=projected_ep_summary)
+            ep_out = update_plex_item_text(
+                ep_key,
+                title=projected_ep_title,
+                summary=projected_ep_summary,
+                item_label=episode_label,
+            )
             if ep_out == "ok":
                 logger.debug(
                     "Plex: updated episode title/summary "
@@ -799,6 +814,7 @@ def _push_episode(
                         plex_ep.ratingKey,
                         title=projected_ep_title,
                         summary=projected_ep_summary,
+                        item_label=episode_label,
                     )
                     if retry_out == "ok":
                         logger.debug(
@@ -848,6 +864,7 @@ def _push_episode(
                     plex_ep.ratingKey,
                     title=projected_ep_title,
                     summary=projected_ep_summary,
+                    item_label=episode_label,
                 )
                 if outcome == "ok":
                     logger.debug(

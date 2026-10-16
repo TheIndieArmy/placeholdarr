@@ -1,12 +1,92 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 
 from services.media_servers.jellyfin import refresh_jellyfin_paths, refresh_jellyfin_sections
 from services.media_servers.emby import refresh_emby_paths, refresh_emby_sections
-from services.media_servers.plex import refresh_plex_paths, refresh_plex_sections
+from services.media_servers.plex import (
+    empty_plex_section_trash,
+    fetch_plex_section_scan_meta,
+    refresh_plex_library_paths,
+    refresh_plex_paths,
+    refresh_plex_sections,
+)
 from core.config import settings
 from core.logger import logger
+
+
+def refresh_real_library_paths(
+    paths: set[str] | list[str],
+    *,
+    update_type: str = "Created",
+    empty_trash: bool = False,
+    include_plex: bool = True,
+    include_jellyfin: bool = True,
+    include_emby: bool = True,
+    bypass_suppression: bool = False,
+) -> dict[str, Any]:
+    """Path-refresh real Arr media libraries on enabled players.
+
+    Unlike ``refresh_all_paths``, Plex matching uses library Location folders
+    (Autopulse-style) rather than Placeholdarr placeholder dest roots. On
+    deletes with ``empty_trash``, waits for Plex section scan idle then empties trash.
+    """
+    path_set = {str(p).strip() for p in (paths or []) if str(p).strip()}
+    if not path_set:
+        return {"refreshed": 0, "failed": 0, "skipped": 0, "trash": {}}
+
+    if not bypass_suppression and getattr(settings, "REFRESH_TRIGGER_SUPPRESSED", False):
+        logger.debug("Real-library path refresh suppressed by global sync flag.")
+        return {"refreshed": 0, "failed": 0, "skipped": 0, "trash": {}}
+
+    total_refreshed = 0
+    total_failed = 0
+    total_skipped = 0
+    trash_stats: dict[str, Any] = {}
+    before_scanned: dict[int, int | None] = {}
+
+    want_plex = include_plex and bool(getattr(settings, "plex_enabled", False))
+    if want_plex and empty_trash:
+        try:
+            before_scanned = {
+                sid: (meta.get("scanned_at") if isinstance(meta, dict) else None)
+                for sid, meta in fetch_plex_section_scan_meta().items()
+            }
+        except Exception as exc:
+            logger.debug(
+                f"Real-library refresh: could not snapshot Plex scannedAt before refresh: {exc}",
+                extra={"emoji_type": "debug"},
+            )
+
+    if want_plex:
+        plex_stats = refresh_plex_library_paths(path_set, update_type=update_type)
+        total_refreshed += int(plex_stats.get("refreshed", 0) or 0)
+        total_failed += int(plex_stats.get("failed", 0) or 0)
+        total_skipped += int(plex_stats.get("skipped", 0) or 0)
+        section_ids = list(plex_stats.get("section_ids") or [])
+        if empty_trash and section_ids:
+            trash_stats = empty_plex_section_trash(
+                section_ids,
+                before_scanned_at=before_scanned,
+            )
+
+    if include_jellyfin and bool(getattr(settings, "jellyfin_enabled", False)):
+        jf_stats = refresh_jellyfin_paths(path_set, update_type=update_type)
+        total_refreshed += int(jf_stats.get("refreshed", 0) or 0)
+        total_failed += int(jf_stats.get("failed", 0) or 0)
+
+    if include_emby and bool(getattr(settings, "emby_enabled", False)):
+        emby_stats = refresh_emby_paths(path_set, update_type=update_type)
+        total_refreshed += int(emby_stats.get("refreshed", 0) or 0)
+        total_failed += int(emby_stats.get("failed", 0) or 0)
+
+    return {
+        "refreshed": total_refreshed,
+        "failed": total_failed,
+        "skipped": total_skipped,
+        "trash": trash_stats,
+    }
 
 
 def refresh_all_paths(

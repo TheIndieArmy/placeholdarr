@@ -6397,7 +6397,7 @@ function LibraryPathsForm(props: {
   const [plexTipsOpen, setPlexTipsOpen] = useState(false);
   const focus = getBrandFocusClass(props.brand, props.themeMode);
 
-  const loadPlexSections = useCallback(() => {
+  const loadPlexSections = useCallback((opts?: { refresh?: boolean }) => {
     if (!plexActive || plexDefaults.length === 0) {
       setPlexSections([]);
       setPlexSectionsError(null);
@@ -6405,7 +6405,7 @@ function LibraryPathsForm(props: {
       return;
     }
     setPlexSectionsLoading(true);
-    getCollectionPlexSections()
+    getCollectionPlexSections({ refresh: opts?.refresh })
       .then((payload) => {
         setPlexSections(payload.sections || []);
         setPlexSectionsError(null);
@@ -6722,7 +6722,7 @@ function LibraryPathsForm(props: {
             <button
               type="button"
               disabled={plexSectionsLoading}
-              onClick={() => loadPlexSections()}
+              onClick={() => loadPlexSections({ refresh: true })}
               className="ml-auto inline-flex items-center gap-1 rounded-lg border border-[#424753]/55 bg-[#0f1419] px-2.5 py-1 text-[12px] font-headline uppercase tracking-wider text-slate-300 transition hover:bg-[#151b24] disabled:cursor-not-allowed disabled:opacity-50"
             >
               <span
@@ -11334,6 +11334,7 @@ function OnboardingWizard(props: {
             const fieldByKey = new Map(fields.map((f) => [f.key, f]));
 
             return (
+              <div className="space-y-5">
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                   {ONBOARDING_MEDIA_CARDS.map((card) => {
                     const enabled = Boolean(props.values[card.enabledKey]);
@@ -11470,6 +11471,21 @@ function OnboardingWizard(props: {
                       </div>
                     );
                   })}
+              </div>
+                {(() => {
+                  const remaining = fields.filter(
+                    (field) =>
+                      !SETTINGS_UI_HIDDEN_FIELD_KEYS.has(field.key) &&
+                      !HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) &&
+                      !isPlexSectionIdField(field.key) &&
+                      !ONBOARDING_MEDIA_CARDS.some((card) =>
+                        [card.enabledKey, ...card.keys].includes(field.key),
+                      ),
+                  );
+                  return remaining.length ? (
+                    <div className="space-y-4">{remaining.map((field) => wizardFieldRow(field))}</div>
+                  ) : null;
+                })()}
               </div>
             );
           })() : step.key === "arr" ? (

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import threading
+import time
 import xml.etree.ElementTree as ET
 from typing import Any, Literal
 from urllib.parse import quote
@@ -189,6 +190,315 @@ def _cached_section_locations(section_id: int) -> tuple[str, ...]:
             return _section_locations_by_id.get(int(section_id), ())
     parsed = prime_plex_section_location_cache(plex_url=plex_url, plex_token=plex_token)
     return parsed.get(int(section_id), ())
+
+
+def _all_cached_section_locations() -> dict[int, tuple[str, ...]]:
+    """Return the full section-id -> locations map, priming the process cache if needed."""
+    global _section_locations_by_id, _section_locations_creds
+    plex_url, plex_token = _plex_base_and_token()
+    if not plex_url or not plex_token:
+        return {}
+    fingerprint = _section_locations_fingerprint(plex_url, plex_token)
+    with _section_locations_lock:
+        if _section_locations_by_id is not None and _section_locations_creds == fingerprint:
+            return dict(_section_locations_by_id)
+    return dict(prime_plex_section_location_cache(plex_url=plex_url, plex_token=plex_token))
+
+
+def _normalize_plex_path(path: str) -> str:
+    text = str(path or "").strip().replace("\\", "/")
+    if not text:
+        return ""
+    # Preserve leading slash; collapse duplicate separators.
+    while "//" in text:
+        text = text.replace("//", "/")
+    if len(text) > 1 and text.endswith("/"):
+        text = text.rstrip("/")
+    return text
+
+
+def _path_component_count(path: str) -> int:
+    normalized = _normalize_plex_path(path)
+    if not normalized or normalized == "/":
+        return 0
+    return len([part for part in normalized.split("/") if part])
+
+
+def _event_path_under_location(event_path: str, location: str) -> bool:
+    """True when event_path is the location or a child path (boundary-safe prefix)."""
+    event = _normalize_plex_path(event_path)
+    loc = _normalize_plex_path(location)
+    if not event or not loc:
+        return False
+    if event == loc:
+        return True
+    prefix = loc if loc.endswith("/") else f"{loc}/"
+    return event.startswith(prefix)
+
+
+def match_plex_sections_for_path(path: str) -> list[int]:
+    """Return Plex section ids whose library locations contain ``path``.
+
+    Autopulse-style: keep location prefixes of the event path, prefer the deepest
+    location depth, and return section ids that have a match at that max depth.
+    Uses the in-process section-location cache (not a per-call /library/sections fetch).
+    """
+    event_path = _normalize_plex_path(path)
+    if not event_path:
+        return []
+
+    locations_by_id = _all_cached_section_locations()
+    if not locations_by_id:
+        return []
+
+    matches: list[tuple[int, int]] = []  # (component_count, section_id)
+    for section_id, locations in locations_by_id.items():
+        best_for_section = 0
+        for location in locations:
+            if not _event_path_under_location(event_path, location):
+                continue
+            depth = _path_component_count(location)
+            if depth > best_for_section:
+                best_for_section = depth
+        if best_for_section > 0:
+            matches.append((best_for_section, int(section_id)))
+
+    if not matches:
+        return []
+
+    max_depth = max(depth for depth, _ in matches)
+    section_ids = sorted({sid for depth, sid in matches if depth == max_depth})
+    logger.debug(
+        f"Plex real-library path match path={event_path!r} depth={max_depth} "
+        f"sections={section_ids}",
+        extra={"emoji_type": "debug"},
+    )
+    return section_ids
+
+
+def _scan_directory_for_refresh(path: str) -> str:
+    """Parent directory for files; path itself for directories (Plex refresh?path=)."""
+    candidate = str(path or "").strip()
+    if not candidate:
+        return ""
+    abs_path = os.path.abspath(candidate)
+    if os.path.isfile(abs_path) or (
+        not os.path.isdir(abs_path) and os.path.splitext(abs_path)[1]
+    ):
+        return os.path.dirname(abs_path) or abs_path
+    return abs_path
+
+
+def refresh_plex_library_paths(
+    paths: set[str] | list[str],
+    *,
+    update_type: str = "Created",
+) -> dict[str, Any]:
+    """Path-scoped refresh for real Arr media paths (not placeholder dest roots).
+
+    Matches each path against Plex library Location folders and calls
+    ``GET /library/sections/{id}/refresh?path=``. Does not use placeholder
+    ``_library_roots_and_section`` gating.
+    """
+    del update_type  # Plex path refresh has no Created/Deleted distinction.
+    if not paths:
+        return {"refreshed": 0, "failed": 0, "skipped": 0, "section_ids": []}
+
+    if not getattr(settings, "plex_enabled", False):
+        return {"refreshed": 0, "failed": 0, "skipped": 0, "section_ids": []}
+
+    plex_url, plex_token = _plex_base_and_token()
+    if not plex_url or not plex_token:
+        return {"refreshed": 0, "failed": 0, "skipped": 0, "section_ids": []}
+
+    refreshed = 0
+    failed = 0
+    skipped = 0
+    touched_sections: set[int] = set()
+
+    for raw_path in sorted({str(p).strip() for p in paths if str(p).strip()}):
+        scan_path = _scan_directory_for_refresh(raw_path)
+        section_ids = match_plex_sections_for_path(scan_path) or match_plex_sections_for_path(raw_path)
+        if not section_ids:
+            skipped += 1
+            logger.info(
+                f"No matching Plex library for path {raw_path}",
+                extra={"emoji_type": "info"},
+            )
+            continue
+
+        refresh_path = _normalize_plex_path(scan_path) or scan_path
+        for section_id in section_ids:
+            try:
+                url = f"{plex_url}/library/sections/{section_id}/refresh?path={quote(refresh_path)}"
+                logger.debug(
+                    f"Plex real-library refresh url={url}",
+                    extra={"emoji_type": "debug"},
+                )
+                response = requests.get(url, headers={"X-Plex-Token": plex_token}, timeout=15)
+                response.raise_for_status()
+                refreshed += 1
+                touched_sections.add(int(section_id))
+            except Exception as exc:
+                failed += 1
+                logger.warning(
+                    f"Plex real-library path refresh failed section={section_id} "
+                    f"path={refresh_path}: {exc}",
+                    extra={"emoji_type": "warning"},
+                )
+
+    return {
+        "refreshed": refreshed,
+        "failed": failed,
+        "skipped": skipped,
+        "section_ids": sorted(touched_sections),
+    }
+
+
+def _parse_section_scan_meta_xml(payload_text: str) -> dict[int, dict[str, Any]]:
+    root = ET.fromstring(payload_text)
+    parsed: dict[int, dict[str, Any]] = {}
+    for directory in root.findall(".//Directory"):
+        raw_key = directory.attrib.get("key")
+        if raw_key is None:
+            continue
+        try:
+            section_id = int(str(raw_key).strip())
+        except (TypeError, ValueError):
+            continue
+        refreshing_raw = directory.attrib.get("refreshing")
+        refreshing = str(refreshing_raw).strip().lower() in {"1", "true", "yes"} if refreshing_raw is not None else None
+        scanned_raw = directory.attrib.get("scannedAt")
+        scanned_at: int | None = None
+        if scanned_raw is not None and str(scanned_raw).strip():
+            try:
+                scanned_at = int(str(scanned_raw).strip())
+            except (TypeError, ValueError):
+                scanned_at = None
+        parsed[section_id] = {"refreshing": refreshing, "scanned_at": scanned_at}
+    return parsed
+
+
+def fetch_plex_section_scan_meta() -> dict[int, dict[str, Any]]:
+    """Fresh GET /library/sections metadata (refreshing / scannedAt) for empty-trash waits."""
+    plex_url, plex_token = _plex_base_and_token()
+    if not plex_url or not plex_token:
+        return {}
+    response = requests.get(
+        f"{plex_url}/library/sections",
+        headers={"X-Plex-Token": plex_token, "Accept": "application/xml"},
+        timeout=10,
+    )
+    response.raise_for_status()
+    return _parse_section_scan_meta_xml(response.text)
+
+
+def empty_plex_section_trash(
+    section_ids: set[int] | list[int],
+    *,
+    before_scanned_at: dict[int, int | None] | None = None,
+    timeout_seconds: float = 300.0,
+) -> dict[str, Any]:
+    """Wait for scanned sections to go idle, then empty Plex trash per section.
+
+    Pass ``before_scanned_at`` captured *before* the path refresh so short scans
+    are detected via scannedAt advancing. Skips a section when no scan is observed.
+    """
+    target_ids = sorted({int(x) for x in (section_ids or []) if int(x) > 0})
+    if not target_ids:
+        return {"emptied": 0, "skipped": 0, "failed": 0}
+
+    if not getattr(settings, "plex_enabled", False):
+        return {"emptied": 0, "skipped": 0, "failed": 0}
+
+    plex_url, plex_token = _plex_base_and_token()
+    if not plex_url or not plex_token:
+        return {"emptied": 0, "skipped": 0, "failed": 0}
+
+    before_map: dict[int, int | None] = dict(before_scanned_at or {})
+    if not before_map:
+        try:
+            before_map = {
+                sid: (meta.get("scanned_at") if isinstance(meta, dict) else None)
+                for sid, meta in fetch_plex_section_scan_meta().items()
+            }
+        except Exception as exc:
+            logger.warning(
+                f"Plex empty trash: failed to load section scan state: {exc}",
+                extra={"emoji_type": "warning"},
+            )
+            return {"emptied": 0, "skipped": 0, "failed": len(target_ids)}
+
+    emptied = 0
+    skipped = 0
+    failed = 0
+    max_wait = max(5.0, float(timeout_seconds))
+
+    for section_id in target_ids:
+        before_scanned = before_map.get(section_id)
+        observed_scan = False
+        scan_finished = False
+        started = time.monotonic()
+
+        while time.monotonic() - started < max_wait:
+            try:
+                meta = fetch_plex_section_scan_meta().get(section_id) or {}
+            except Exception as exc:
+                logger.debug(
+                    f"Plex empty trash poll failed section={section_id}: {exc}",
+                    extra={"emoji_type": "debug"},
+                )
+                time.sleep(1.0)
+                continue
+
+            refreshing = meta.get("refreshing")
+            scanned_at = meta.get("scanned_at")
+            scanned_advanced = (
+                before_scanned is not None
+                and scanned_at is not None
+                and int(scanned_at) > int(before_scanned)
+            )
+            if refreshing is True:
+                observed_scan = True
+            elif refreshing is False:
+                # Idle alone can mean queued. A newer timestamp also catches
+                # short scans that start and finish between polls.
+                if observed_scan or scanned_advanced:
+                    scan_finished = True
+                    break
+                if not observed_scan and (time.monotonic() - started) >= 5.0:
+                    break
+            time.sleep(1.0)
+
+        if not scan_finished:
+            skipped += 1
+            logger.info(
+                f"Skipped Plex trash for section {section_id}: no scan observed",
+                extra={"emoji_type": "info"},
+            )
+            continue
+
+        try:
+            url = f"{plex_url}/library/sections/{section_id}/emptyTrash"
+            logger.debug(
+                f"Plex empty trash url={url}",
+                extra={"emoji_type": "debug"},
+            )
+            response = requests.put(url, headers={"X-Plex-Token": plex_token}, timeout=30)
+            response.raise_for_status()
+            emptied += 1
+            logger.info(
+                f"Plex trash emptied for section {section_id}",
+                extra={"emoji_type": "success"},
+            )
+        except Exception as exc:
+            failed += 1
+            logger.warning(
+                f"Plex empty trash failed for section {section_id}: {exc}",
+                extra={"emoji_type": "warning"},
+            )
+
+    return {"emptied": emptied, "skipped": skipped, "failed": failed}
 
 
 def get_plex_section_scan_state(section_ids: set[int] | list[int]) -> dict[str, object]:
@@ -536,18 +846,29 @@ def unlock_and_restore_plex_item_text(
         return "failed"
 
 
-def update_plex_item_text(rating_key: str | int, *, title: str, summary: str) -> PlexMetadataRefreshResult:
+def update_plex_item_text(
+    rating_key: str | int,
+    *,
+    title: str,
+    summary: str,
+    item_label: str | None = None,
+) -> PlexMetadataRefreshResult:
     """Directly update Plex item title/summary via PlexAPI edit methods.
 
     Title and summary are locked after the edit so Plex agents (TMDB / local NFO)
     cannot immediately revert the projected status. Callers must only pass
     placeholder-library rating keys; real-library keys must never be edited here.
+
+    ``item_label`` is optional log context (e.g. ``Bleach S17E50`` or a movie title)
+    so per-item DEBUG/WARNING lines stay identifiable when batch INFO summaries truncate.
     """
     if not getattr(settings, "plex_enabled", False):
         return "skipped"
     key = str(rating_key or "").strip()
     if not key:
         return "skipped"
+    label = str(item_label or "").strip()
+    label_part = f" item={label!r}" if label else ""
     try:
         from services.media_servers.plex_lookup import get_plex_server
 
@@ -575,7 +896,7 @@ def update_plex_item_text(rating_key: str | int, *, title: str, summary: str) ->
         if title_ok and summary_ok:
             logger.debug(
                 "Plex: title/summary edit confirmed "
-                f"(rating_key={key} title {_plex_text_preview(before_title)!r} -> "
+                f"(rating_key={key}{label_part} title {_plex_text_preview(before_title)!r} -> "
                 f"{_plex_text_preview(after_title)!r} summary_changed="
                 f"{before_summary != after_summary})",
                 extra={"emoji_type": "debug"},
@@ -583,7 +904,7 @@ def update_plex_item_text(rating_key: str | int, *, title: str, summary: str) ->
             return "ok"
         logger.warning(
             "Plex: title/summary edit did not stick "
-            f"(rating_key={key} title_ok={title_ok} summary_ok={summary_ok} "
+            f"(rating_key={key}{label_part} title_ok={title_ok} summary_ok={summary_ok} "
             f"before_title={_plex_text_preview(before_title)!r} "
             f"after_title={_plex_text_preview(after_title)!r} "
             f"expected_title={_plex_text_preview(wanted_title)!r} "
@@ -597,12 +918,12 @@ def update_plex_item_text(rating_key: str | int, *, title: str, summary: str) ->
         text = str(ex).lower()
         if "404" in text or "not found" in text:
             logger.warning(
-                f"Plex direct update not found (stale rating_key?) rating_key={key}: {ex}",
+                f"Plex direct update not found (stale rating_key?) rating_key={key}{label_part}: {ex}",
                 extra={"emoji_type": "warning"},
             )
             return "not_found"
         logger.warning(
-            f"Plex direct update failed rating_key={key}: {ex}",
+            f"Plex direct update failed rating_key={key}{label_part}: {ex}",
             extra={"emoji_type": "warning"},
         )
         return "failed"

@@ -240,6 +240,22 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         cta_path="/settings/density-lookahead",
         requires_ack=True,
     ),
+    WhatsNewNotice(
+        id="real-library-refresh-0-11-2",
+        since_version="0.11.2",
+        title="Refresh real libraries on Arr import/delete",
+        body=(
+            "Placeholdarr can now path-refresh your real Plex, Jellyfin, and Emby libraries when "
+            "Radarr or Sonarr reports a file import or file delete. On file delete, Plex also empties "
+            "trash after the scan finishes.\n\n"
+            "Placeholder libraries are always refreshed for these events, whether this is on or off. "
+            "This is on by default. Turn it off under Settings → Paths "
+            "(Refresh real libraries on Arr import/delete)."
+        ),
+        cta_label="Open Paths",
+        cta_path="/settings/paths",
+        requires_ack=True,
+    ),
 )
 
 

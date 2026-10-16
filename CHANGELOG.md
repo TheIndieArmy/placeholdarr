@@ -13,6 +13,34 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## Released
 
+## [0.11.2] - 2026-10-15
+
+### Summary
+
+- **Real library refresh on Arr import**: Path-refresh real Plex/Jellyfin/Emby libraries when Arr reports a file import (on by default).
+- **Real library refresh + Plex empty trash on Arr file delete**: Path-refresh on file delete; Plex empties trash after the scan (on by default).
+- **What's new (0.11.2)**: Startup ack for real-library refresh (Paths CTA).
+- **Import grace vs file delete**: Cancel grace on Arr file delete; abort ticks/finalize when Arr no longer reports hasFile.
+- **Import grace interrupt (keep placeholder)**: Mid-grace file delete keeps the placeholder and restores REQUEST (no rematerialize).
+- **Playback re-search queue monitor**: Playing an earlier episode no longer stamps NOT_FOUND on a later title mid-download.
+- **Rescan libraries**: Forces a fresh Plex section list after libraries are added or removed.
+- **Plex edit logs**: Per-item title/summary DEBUG and WARNING lines include series SxxExx or movie title.
+
+### Added
+
+- **Real library refresh on Arr import**: With `REFRESH_REAL_LIBRARIES_ON_ARR_EVENTS` (default on), Arr import webhooks schedule a path-scoped refresh of real media libraries (Plex location match, Jellyfin/Emby Media/Updated) in parallel with placeholder import grace.
+- **Real library refresh + Plex empty trash on Arr file delete**: The same setting path-refreshes real libraries on file delete and, for Plex, waits for the section scan then empties trash.
+- **What's new (0.11.2)**: Startup ack pointing at Settings → Paths to turn the toggle off if needed.
+
+### Fixed
+
+- **Import grace vs file delete**: Arr file-delete cancels pending import-grace jobs for that title. Grace ticks and finalize abort when Arr no longer reports hasFile (not a local filesystem check), so a mid-grace delete cannot leave `has_file=true` with no placeholder.
+- **Import grace interrupt (keep placeholder)**: During import grace, file delete no longer clears `has_placeholder` or rematerializes; it cancels grace and restores REQUEST with player projection on the existing placeholder.
+- **Playback re-search queue monitor**: A new playback-triggered Arr search clears stale left-queue / empty-search timers before the queue monitor polls, so an earlier episode play cannot immediately mark a later downloading episode as no qualifying release found.
+- **NFO follow-up player push**: When a status job requests player metadata refresh, projection still runs if the sidecar write was a no-op.
+- **Rescan libraries**: Reloads the cached Plex client so the library dropdown picks up new/removed Plex sections without restarting Placeholdarr.
+- **Plex edit logs**: `update_plex_item_text` DEBUG/WARNING lines include an `item=` label (movie title or `Series SxxExx`) so truncated batch INFO summaries are not the only way to identify a TBA/placeholder edit.
+
 ## [0.11.1] - 2026-10-08
 
 ### Summary

@@ -429,6 +429,21 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "REFRESH_REAL_LIBRARIES_ON_ARR_EVENTS",
+            {
+                "section": "Paths",
+                "label": "Refresh real libraries on Arr import/delete",
+                "description": (
+                    "When Radarr or Sonarr reports a file import or file delete, path-refresh your "
+                    "real Plex, Jellyfin, and Emby libraries. On file delete, Plex also empties trash "
+                    "after the scan finishes. Enabled by default. "
+                    "Placeholder libraries are always refreshed for these events, whether this is on or off."
+                ),
+                "type": "bool",
+                "restart_required": False,
+            },
+        ),
+        (
             "STARTUP_SYNC_MODE",
             {
                 "section": "Library sync",

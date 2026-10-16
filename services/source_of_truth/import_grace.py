@@ -12,18 +12,213 @@ from services.placeholder_activity_log import (
     outcome_reason_and_status_from_materialization,
 )
 from services.postgres.models import Episode, Job, Movie, Placeholder, Season, Series
+from services.source_of_truth.arr_api import fetch_radarr_movie, fetch_sonarr_episode_item
 from services.source_of_truth.arr_share_guard import expand_determination_entity_ids
 from services.source_of_truth.determiner import run_determination_for_entities_in_session
 from services.source_of_truth.materializer import run_materialization_for_entities
 from services.source_of_truth.materializer import run_materialization_for_entities_in_session
+from services.source_of_truth.status_intent import DisplayStatus, StatusIntent, StatusSource
+from services.source_of_truth.status_orchestrator import StatusOrchestrator
 from services.source_of_truth.status_reconciler import NFO_REFRESH_JOB_TYPE
 from services.status_projection import projected_status_display
 
 IMPORT_GRACE_JOB_TYPE = "import_grace"
 IMPORT_GRACE_REASON = "import_grace_countdown"
+IMPORT_GRACE_CANCEL_ERROR = "Cancelled: file deleted during import grace"
+IMPORT_GRACE_INTERRUPT_REASON = "import_grace_interrupted"
 # Number of countdown ticks before the final "less than a minute" tick.
 # Historically: 5, 4, 3, 2, 1 minutes remaining, plus a "less than a minute" final.
 COUNTDOWN_MINUTES_DECREASING = (5, 4, 3, 2, 1)
+
+
+def arr_import_still_has_file(session, *, content_type: str, entity_id: int) -> bool:
+    """True when Arr still reports hasFile, or the Arr check cannot be completed.
+
+    Placeholdarr often cannot see Arr download/import paths (unmounted volumes), so
+    grace validity uses Radarr/Sonarr hasFile rather than a local filesystem check.
+    API failure or missing ids keep grace running (cannot verify).
+    """
+    ct = str(content_type or "").strip().lower()
+    try:
+        eid = int(entity_id)
+    except (TypeError, ValueError):
+        return True
+    if ct not in {"movie", "episode"} or eid <= 0:
+        return True
+
+    try:
+        if ct == "movie":
+            movie = session.query(Movie).filter(Movie.id == eid).first()
+            if not movie:
+                return True
+            radarr_id = getattr(movie, "radarrid", None)
+            if not radarr_id:
+                return True
+            base_url, api_key = settings.resolve_arr_endpoint(
+                "radarr",
+                instance_key=str(getattr(movie, "instance_key", "") or "") or None,
+                instance_id=str(getattr(movie, "instance_id", "") or "") or None,
+            )
+            if not base_url or not api_key:
+                return True
+            item = fetch_radarr_movie(int(radarr_id), base_url, api_key, bypass_cache=True)
+            if not isinstance(item, dict):
+                return True
+            return bool(item.get("hasFile") or (item.get("movieFile") or {}).get("path"))
+
+        episode = session.query(Episode).filter(Episode.id == eid).first()
+        if not episode:
+            return True
+        sonarr_id = getattr(episode, "sonarrid", None)
+        if not sonarr_id:
+            return True
+        season = session.query(Season).filter(Season.id == int(episode.season_id)).first()
+        if not season:
+            return True
+        series = session.query(Series).filter(Series.id == int(season.series_id)).first()
+        if not series:
+            return True
+        base_url, api_key = settings.resolve_arr_endpoint(
+            "sonarr",
+            instance_key=str(getattr(series, "instance_key", "") or "") or None,
+            instance_id=str(getattr(series, "instance_id", "") or "") or None,
+        )
+        if not base_url or not api_key:
+            return True
+        item = fetch_sonarr_episode_item(int(sonarr_id), url=base_url, api_key=api_key, bypass_cache=True)
+        if not isinstance(item, dict):
+            return True
+        return bool(item.get("hasFile") or (item.get("episodeFile") or {}).get("path"))
+    except Exception:
+        return True
+
+
+def restore_request_after_import_grace_interrupt(
+    session,
+    *,
+    content_type: str,
+    entity_id: int,
+    placeholder_ids: list[int] | None = None,
+) -> dict[str, Any]:
+    """Project REQUEST (with player metadata push) after grace is interrupted.
+
+    Used when Arr no longer reports a file mid-grace. EVENT_DELETE_FILE source
+    ensures post-NFO player title/summary projection runs (unlike INITIAL_CREATION).
+    """
+    ct = str(content_type or "").strip().lower()
+    try:
+        eid = int(entity_id)
+    except (TypeError, ValueError):
+        return {"ok": False, "reason": "bad_entity_id", "applied": 0}
+
+    ids = [int(pid) for pid in (placeholder_ids or []) if pid is not None]
+    if not ids:
+        q = session.query(Placeholder.id).filter(Placeholder.has_placeholder == True)  # noqa: E712
+        if ct == "movie":
+            q = q.filter(Placeholder.movie_id == eid)
+        elif ct == "episode":
+            q = q.filter(Placeholder.episode_id == eid)
+        else:
+            return {"ok": False, "reason": "bad_content_type", "applied": 0}
+        ids = [int(pid) for (pid,) in q.all()]
+
+    if not ids:
+        return {"ok": True, "applied": 0, "placeholder_ids": []}
+
+    intents = [
+        StatusIntent(
+            placeholder_id=pid,
+            new_status=DisplayStatus.REQUEST.value,
+            reason="Import grace interrupted: Arr no longer reports a file",
+            source=StatusSource.EVENT_DELETE_FILE,
+            trigger_nfo_refresh=True,
+            metadata={
+                "content_type": ct,
+                "entity_id": eid,
+                "reason": IMPORT_GRACE_INTERRUPT_REASON,
+            },
+        )
+        for pid in ids
+    ]
+    orchestrator = StatusOrchestrator(session=session)
+    applied = orchestrator.apply_and_project_statuses(intents)
+    return {"ok": True, "applied": int(applied), "placeholder_ids": ids}
+
+
+def cancel_import_grace_for_entity(
+    session,
+    *,
+    content_type: str,
+    entity_id: int,
+) -> int:
+    """Fail queued/in-flight import_grace jobs for one movie or episode row.
+
+    File-delete handlers call this so countdown ticks and finalize cannot overwrite
+    a mid-grace interrupt (placeholder kept, status restored to REQUEST).
+    Returns how many jobs were cancelled.
+    """
+    ct = str(content_type or "").strip().lower()
+    try:
+        eid = int(entity_id)
+    except (TypeError, ValueError):
+        return 0
+    if ct not in {"movie", "episode"} or eid <= 0:
+        return 0
+
+    rows = (
+        session.query(Job)
+        .filter(
+            Job.job_type == IMPORT_GRACE_JOB_TYPE,
+            Job.status.in_(("PENDING", "CLAIMED", "WORKING")),
+        )
+        .all()
+    )
+    cancelled = 0
+    for job in rows:
+        payload = job.payload if isinstance(job.payload, dict) else {}
+        if str(payload.get("content_type") or "").strip().lower() != ct:
+            continue
+        try:
+            if int(payload.get("entity_id")) != eid:
+                continue
+        except (TypeError, ValueError):
+            continue
+        job.status = "FAILED"
+        job.error_message = IMPORT_GRACE_CANCEL_ERROR
+        session.add(job)
+        cancelled += 1
+    return cancelled
+
+
+def interrupt_import_grace_keep_placeholder(
+    session,
+    *,
+    content_type: str,
+    entity_id: int,
+) -> dict[str, Any]:
+    """Cancel active grace for an entity and restore REQUEST without rematerializing.
+
+    Used when Arr reports file-delete while import grace is still running: the
+    placeholder file/row was never removed, so clearing ``has_placeholder`` and
+    rematerializing is unnecessary (and races the countdown UI).
+    """
+    cancelled = cancel_import_grace_for_entity(
+        session,
+        content_type=content_type,
+        entity_id=entity_id,
+    )
+    if cancelled <= 0:
+        return {"interrupted": False, "cancelled_jobs": 0, "restore": None}
+    restore = restore_request_after_import_grace_interrupt(
+        session,
+        content_type=content_type,
+        entity_id=entity_id,
+    )
+    return {
+        "interrupted": True,
+        "cancelled_jobs": int(cancelled),
+        "restore": restore,
+    }
 
 
 def _countdown_status_text(minutes_remaining: int) -> str:
@@ -221,6 +416,41 @@ def schedule_episode_import_grace(session, episode_row_id: int, file_path: str |
     )
 
 
+def _import_grace_job_was_cancelled(session, job: Job) -> bool:
+    """True when file-delete (or Arr abort) already failed this grace job row.
+
+    Cancel commits in another session while a worker may still hold a CLAIMED
+    descriptor. Re-read error_message so we do not overwrite REQUEST with a
+    stale countdown tick after interrupt.
+    """
+    raw_id = getattr(job, "id", None)
+    try:
+        jid = int(raw_id) if raw_id is not None else None
+    except (TypeError, ValueError):
+        jid = None
+    try:
+        session.refresh(job)
+    except Exception:
+        pass
+    err = str(getattr(job, "error_message", "") or "")
+    if err == IMPORT_GRACE_CANCEL_ERROR:
+        return True
+    if jid is None:
+        return False
+    try:
+        from sqlalchemy import text
+
+        row = session.execute(
+            text("SELECT error_message FROM job WHERE id = :id"),
+            {"id": jid},
+        ).first()
+        if row and str(row[0] or "") == IMPORT_GRACE_CANCEL_ERROR:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def process_import_grace_job(session, job: Job) -> dict[str, Any]:
     from core.logger import logger
     
@@ -244,9 +474,67 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
         extra={'emoji_type': 'debug'}
     )
 
+    if _import_grace_job_was_cancelled(session, job):
+        logger.info(
+            f"Import grace skipped (job cancelled): step_index={step_index} finalize={is_finalize} "
+            f"content_type={content_type} entity_id={entity_id}",
+            extra={"emoji_type": "info"},
+        )
+        return {
+            "done": True,
+            "ok": True,
+            "phase": "cancelled",
+            "content_type": content_type,
+            "entity_id": entity_id,
+            "reason": "cancelled",
+        }
+
+    if not arr_import_still_has_file(session, content_type=content_type, entity_id=entity_id):
+        phase = "finalize_aborted_arr_no_file" if is_finalize else "tick_aborted_arr_no_file"
+        logger.info(
+            f"Import grace aborted ({phase}): Arr no longer reports hasFile "
+            f"content_type={content_type} entity_id={entity_id} file_path={file_path!r}",
+            extra={"emoji_type": "info"},
+        )
+        cancelled = cancel_import_grace_for_entity(
+            session,
+            content_type=content_type,
+            entity_id=entity_id,
+        )
+        restore = restore_request_after_import_grace_interrupt(
+            session,
+            content_type=content_type,
+            entity_id=entity_id,
+            placeholder_ids=placeholder_ids,
+        )
+        return {
+            "done": True,
+            "ok": True,
+            "phase": phase,
+            "content_type": content_type,
+            "entity_id": entity_id,
+            "reason": "arr_no_file",
+            "file_path": file_path,
+            "cancelled_jobs": cancelled,
+            "restore": restore,
+        }
+
     materialization: dict[str, Any] = {}
 
     if is_finalize:
+        if _import_grace_job_was_cancelled(session, job):
+            logger.info(
+                f"Import grace finalize skipped (job cancelled): content_type={content_type} entity_id={entity_id}",
+                extra={"emoji_type": "info"},
+            )
+            return {
+                "done": True,
+                "ok": True,
+                "phase": "cancelled",
+                "content_type": content_type,
+                "entity_id": entity_id,
+                "reason": "cancelled",
+            }
         logger.info(
             f"Import grace finalization starting: content_type={content_type}, entity_id={entity_id}, placeholder_ids={placeholder_ids}",
             extra={'emoji_type': 'info'}
@@ -449,6 +737,22 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
     if not status_text:
         logger.debug(f"Import grace tick: missing status_text at step_index={step_index}", extra={'emoji_type': 'debug'})
         return {"done": True, "ok": False, "reason": "missing_status_text"}
+
+    # Re-check cancel immediately before writing countdown (delete may have raced us).
+    if _import_grace_job_was_cancelled(session, job):
+        logger.info(
+            f"Import grace tick skipped (job cancelled): step_index={step_index} "
+            f"content_type={content_type} entity_id={entity_id}",
+            extra={"emoji_type": "info"},
+        )
+        return {
+            "done": True,
+            "ok": True,
+            "phase": "cancelled",
+            "content_type": content_type,
+            "entity_id": entity_id,
+            "reason": "cancelled",
+        }
 
     logger.debug(
         f"Import grace tick: step_index={step_index}, setting status_text='{status_text}' for {len(placeholder_ids)} placeholder(s)",

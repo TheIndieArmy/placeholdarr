@@ -706,6 +706,7 @@ def fetch_sonarr_episode_item(
     *,
     url: Optional[str] = None,
     api_key: Optional[str] = None,
+    bypass_cache: bool = False,
 ) -> Optional[Dict]:
     """Fetch one Sonarr episode by id."""
     url = url or _default_sonarr_endpoint()[0]
@@ -715,9 +716,10 @@ def fetch_sonarr_episode_item(
 
     endpoint = _build_endpoint(url, f'episode/{int(episode_id)}')
     cache_key = f'sonarr_episode_item:{endpoint}'
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
+    if not bypass_cache:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
 
     data = _get_json(endpoint, {'apikey': api_key})
     if isinstance(data, dict):

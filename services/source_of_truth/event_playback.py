@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import and_, func, or_, text
+from sqlalchemy.orm.attributes import flag_modified
 
 from core.config import settings
 from core.logger import logger
@@ -2089,6 +2090,11 @@ def _activate_queue_monitor_after_playback_search(
 
     Only flags rows here. Caller must ``commit`` then call
     ``_notify_queue_monitor_signal`` so the producer sees committed flags.
+
+    Also clears stale ``extra.queue_monitor`` clocks. A prior left-queue /
+    empty-search timer must not survive a new playback-triggered search, or the
+    next poll can immediately apply NOT_FOUND (seen when playing an earlier
+    episode re-searches a later title that was still mid-download).
     """
     if not search_triggered or not intents:
         return
@@ -2098,6 +2104,16 @@ def _activate_queue_monitor_after_playback_search(
         if ph:
             ph.queue_monitor_active = True
             ph.queue_monitor_active_set_at = now
+            extra = dict(ph.extra) if isinstance(getattr(ph, "extra", None), dict) else {}
+            extra["queue_monitor"] = {
+                "seen_queue_once": False,
+                "search_restarted_at": now.isoformat(),
+            }
+            ph.extra = extra
+            try:
+                flag_modified(ph, "extra")
+            except Exception:
+                pass
             session.add(ph)
 
 

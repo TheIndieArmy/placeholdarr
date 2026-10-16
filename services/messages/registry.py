@@ -728,8 +728,10 @@ def _build_registry() -> tuple[MessageKey, ...]:
             group="Import Grace",
             subgroup=None,
             tooltip=(
-                "Shown each minute during the import-grace countdown after the file is imported into your "
-                "library. {MinutesRemaining} resolves to 5, 4, 3, 2, or 1."
+                "Shown each minute during the import-grace countdown after Arr reports a file import. "
+                "When Refresh real libraries on Arr import/delete is enabled (Settings → Paths), "
+                "Placeholdarr also path-refreshes your real Plex/Jellyfin/Emby libraries for that file. "
+                "{MinutesRemaining} resolves to 5, 4, 3, 2, or 1."
             ),
             allowed_tokens=("Sep", "MinutesRemaining"),
             sample_context={"MinutesRemaining": "3"},

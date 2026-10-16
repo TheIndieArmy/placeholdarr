@@ -387,6 +387,11 @@ class Settings(BaseSettings):
     ENABLE_PLEX: bool = False
     ENABLE_JELLYFIN: bool = False
     ENABLE_EMBY: bool = False
+    # When true, Arr import/file-delete webhooks also path-refresh real Plex/JF/Emby
+    # libraries (and empty Plex trash after deletes). Default on.
+    REFRESH_REAL_LIBRARIES_ON_ARR_EVENTS: bool = (
+        os.getenv("REFRESH_REAL_LIBRARIES_ON_ARR_EVENTS", "true").split("#")[0].strip().lower() == "true"
+    )
 
     # Job queue / batching
     ENABLE_QUEUE_MONITOR: bool = os.getenv("ENABLE_QUEUE_MONITOR", "true").split('#')[0].strip().lower() == "true"

@@ -249,9 +249,9 @@ async def create_recipe(body: RecipePayload):
 
 
 @router.get("/api/collections/plex-sections")
-async def plex_sections():
+async def plex_sections(refresh: bool = Query(False)):
     try:
-        sections = plex_collections.list_plex_sections()
+        sections = plex_collections.list_plex_sections(refresh=refresh)
     except plex_collections.PlexCollectionsError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     return {"sections": sections}
