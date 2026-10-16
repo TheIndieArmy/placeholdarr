@@ -19,6 +19,9 @@ from services.placeholder_poster_art import (
     ensure_episode_still_art,
     ensure_movie_art,
     ensure_series_art,
+    episode_still_art_needs_refresh,
+    movie_art_needs_refresh,
+    series_art_needs_refresh,
 )
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Job, Movie, Placeholder, Season, Series
@@ -147,24 +150,219 @@ def collect_placeholder_ids_for_art_scope(session, art_scope: str | None) -> lis
     return collect_active_placeholder_ids(session)
 
 
+def collect_active_placeholder_ids_for_movies(session, movie_ids: list[int] | set[int]) -> list[int]:
+    """Active placeholder ids linked to the given movie ids."""
+    ids = sorted({int(mid) for mid in (movie_ids or []) if mid is not None})
+    if not ids:
+        return []
+    rows = (
+        session.query(Placeholder.id)
+        .filter(
+            Placeholder.has_placeholder == True,  # noqa: E712
+            Placeholder.movie_id.in_(ids),
+        )
+        .order_by(Placeholder.id.asc())
+        .all()
+    )
+    return [int(r[0]) for r in rows if r and r[0] is not None]
+
+
+def collect_active_placeholder_ids_for_episodes(session, episode_ids: list[int] | set[int]) -> list[int]:
+    """Active placeholder ids linked to the given episode ids."""
+    ids = sorted({int(eid) for eid in (episode_ids or []) if eid is not None})
+    if not ids:
+        return []
+    rows = (
+        session.query(Placeholder.id)
+        .filter(
+            Placeholder.has_placeholder == True,  # noqa: E712
+            Placeholder.episode_id.in_(ids),
+        )
+        .order_by(Placeholder.id.asc())
+        .all()
+    )
+    return [int(r[0]) for r in rows if r and r[0] is not None]
+
+
+def collect_tv_placeholder_ids_for_series(session, series_ids: list[int] | set[int]) -> list[int]:
+    """One active placeholder per series id (for series/season New Ep. posters)."""
+    wanted = {int(sid) for sid in (series_ids or []) if sid is not None}
+    if not wanted:
+        return []
+    seen_series: set[int] = set()
+    out: list[int] = []
+
+    stub_rows = (
+        session.query(Placeholder.id, Placeholder.series_id)
+        .filter(
+            Placeholder.has_placeholder == True,  # noqa: E712
+            Placeholder.series_id.in_(sorted(wanted)),
+        )
+        .order_by(Placeholder.id.asc())
+        .all()
+    )
+    for pid, sid in stub_rows:
+        if sid is None:
+            continue
+        sid_i = int(sid)
+        if sid_i not in wanted or sid_i in seen_series:
+            continue
+        seen_series.add(sid_i)
+        out.append(int(pid))
+
+    remaining = wanted - seen_series
+    if remaining:
+        ep_rows = (
+            session.query(Placeholder.id, Season.series_id)
+            .join(Episode, Episode.id == Placeholder.episode_id)
+            .join(Season, Season.id == Episode.season_id)
+            .filter(
+                Placeholder.has_placeholder == True,  # noqa: E712
+                Placeholder.episode_id.isnot(None),
+                Season.series_id.in_(sorted(remaining)),
+            )
+            .order_by(Placeholder.id.asc())
+            .all()
+        )
+        for pid, sid in ep_rows:
+            if sid is None:
+                continue
+            sid_i = int(sid)
+            if sid_i not in remaining or sid_i in seen_series:
+                continue
+            seen_series.add(sid_i)
+            out.append(int(pid))
+
+    return sorted(out)
+
+
+def placeholder_art_needs_refresh(session, placeholder: Placeholder, *, art_scope: str | None = "all") -> bool:
+    """Desired overlay/source vs on-disk sidecar; True when a rewrite is needed."""
+    if not bool(getattr(placeholder, "has_placeholder", False)):
+        return False
+
+    scope = str(art_scope or "all").strip().lower() or "all"
+
+    movie = session.query(Movie).get(placeholder.movie_id) if placeholder.movie_id else None
+    if movie and bool(getattr(movie, "has_placeholder", False)):
+        path = str(
+            getattr(placeholder, "path", "") or getattr(movie, "placeholder_filepath", "") or ""
+        ).strip()
+        if not path:
+            return False
+        return movie_art_needs_refresh(movie, path)
+
+    episode = session.query(Episode).get(placeholder.episode_id) if placeholder.episode_id else None
+    series = None
+    season = None
+    path = str(getattr(placeholder, "path", "") or "").strip()
+    if episode and bool(getattr(episode, "has_placeholder", False)):
+        season = session.query(Season).get(episode.season_id) if episode.season_id else None
+        series = session.query(Series).get(season.series_id) if season and season.series_id else None
+        if not path:
+            path = str(getattr(episode, "placeholder_filepath", "") or "").strip()
+    elif getattr(placeholder, "series_id", None):
+        series = session.query(Series).get(placeholder.series_id)
+        if getattr(placeholder, "season_id", None):
+            season = session.query(Season).get(placeholder.season_id)
+
+    if not series:
+        return False
+
+    series_folder = getattr(series, "placeholder_folder", None) or (
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(path)))) if path else None
+    )
+    if series_art_needs_refresh(series, series_folder=series_folder):
+        return True
+
+    if not episode or not season or not path:
+        return False
+    if not art_scope_writes_episode_stills(scope, getattr(placeholder, "display_status", None)):
+        return False
+    return episode_still_art_needs_refresh(episode, season, series, path)
+
+
+def determine_art_refresh_ids(
+    session,
+    placeholder_ids: list[int],
+    *,
+    art_scope: str | None = "all",
+) -> list[int]:
+    """Return placeholder ids whose local art sidecar does not match desired overlay."""
+    from services.source_of_truth.placeholder_job_enqueue import normalize_placeholder_ids
+
+    ids = normalize_placeholder_ids(placeholder_ids)
+    if not ids:
+        return []
+    rows = (
+        session.query(Placeholder)
+        .filter(Placeholder.id.in_(ids), Placeholder.has_placeholder == True)  # noqa: E712
+        .order_by(Placeholder.id.asc())
+        .all()
+    )
+    by_id = {int(ph.id): ph for ph in rows if getattr(ph, "id", None) is not None}
+    out: list[int] = []
+    for pid in ids:
+        ph = by_id.get(int(pid))
+        if ph is None:
+            continue
+        try:
+            if placeholder_art_needs_refresh(session, ph, art_scope=art_scope):
+                out.append(int(pid))
+        except Exception as exc:
+            logger.debug(
+                f"art determination failed placeholder_id={pid}: {exc}",
+                extra={"emoji_type": "debug"},
+            )
+            # Fail open: enqueue so write-time skip can still decide.
+            out.append(int(pid))
+    return out
+
+
 def enqueue_placeholder_art_refresh(
     placeholder_ids: list[int],
     session=None,
     *,
     merge_into_pending: bool = True,
     payload_extras: dict[str, Any] | None = None,
+    skip_determination: bool = False,
 ) -> dict:
     owns_session = session is None
     session = session or get_session()
     try:
-        return enqueue_batched_placeholder_job(
+        art_scope = "all"
+        if isinstance(payload_extras, dict):
+            art_scope = str(payload_extras.get("art_scope") or "all").strip().lower() or "all"
+
+        ids = list(placeholder_ids or [])
+        skipped = 0
+        if not skip_determination and ids:
+            needed = determine_art_refresh_ids(session, ids, art_scope=art_scope)
+            skipped = max(0, len({int(x) for x in ids if x is not None}) - len(needed))
+            ids = needed
+
+        if not ids:
+            return {
+                "ok": True,
+                "placeholder_count": 0,
+                "jobs_created": 0,
+                "jobs_updated": 0,
+                "skipped_determination": skipped,
+                "enqueued": False,
+                "reason": "no_art_mismatch",
+            }
+
+        out = enqueue_batched_placeholder_job(
             PLACEHOLDER_ART_REFRESH_JOB_TYPE,
-            placeholder_ids,
+            ids,
             session,
             merge_into_pending=merge_into_pending,
             payload_extras=payload_extras,
             include_player_metadata_refresh=False,
         )
+        if isinstance(out, dict):
+            out["skipped_determination"] = skipped
+        return out
     except Exception as exc:
         logger.error(f"Failed to enqueue placeholder art refresh: {exc}", exc_info=True)
         session.rollback()
@@ -175,6 +373,31 @@ def enqueue_placeholder_art_refresh(
                 session.close()
             except Exception:
                 pass
+
+
+def enqueue_art_refresh_for_calendar_date_changes(
+    session,
+    *,
+    movie_ids: list[int] | set[int] | None = None,
+    episode_ids: list[int] | set[int] | None = None,
+    series_ids: list[int] | set[int] | None = None,
+) -> dict:
+    """Enqueue art for placeholders affected by calendar date / New Ep. next-air changes."""
+    ph_ids: list[int] = []
+    ph_ids.extend(collect_active_placeholder_ids_for_movies(session, list(movie_ids or [])))
+    ph_ids.extend(collect_active_placeholder_ids_for_episodes(session, list(episode_ids or [])))
+    ph_ids.extend(collect_tv_placeholder_ids_for_series(session, list(series_ids or [])))
+    # Dedupe while preserving order
+    seen: set[int] = set()
+    unique: list[int] = []
+    for pid in ph_ids:
+        if pid in seen:
+            continue
+        seen.add(pid)
+        unique.append(pid)
+    if not unique:
+        return {"ok": True, "placeholder_count": 0, "enqueued": False, "reason": "no_placeholders"}
+    return enqueue_placeholder_art_refresh(unique, session=session)
 
 
 def enqueue_placeholder_art_backfill_all(

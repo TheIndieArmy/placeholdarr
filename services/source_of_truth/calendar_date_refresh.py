@@ -62,6 +62,7 @@ def run_calendar_date_refresh() -> dict:
         "movie_rows_updated": 0,
         "episode_rows_seen": 0,
         "episode_rows_updated": 0,
+        "art_refresh": {},
         "errors": 0,
     }
 
@@ -70,6 +71,10 @@ def run_calendar_date_refresh() -> dict:
         f"Calendar date refresh started: start_date={start_date.isoformat()} end_date={end_date.isoformat()}",
         extra={"emoji_type": "info"},
     )
+
+    changed_movie_ids: set[int] = set()
+    changed_episode_ids: set[int] = set()
+    changed_series_ids: set[int] = set()
 
     session = get_session()
     try:
@@ -109,6 +114,8 @@ def run_calendar_date_refresh() -> dict:
                         movie.last_found_in_radarr = datetime.now(timezone.utc)
                         session.add(movie)
                         stats["movie_rows_updated"] += 1
+                        if getattr(movie, "id", None) is not None:
+                            changed_movie_ids.add(int(movie.id))
 
             elif content_type == "series":
                 rows = fetch_sonarr_calendar(start_date, end_date, base_url, api_key)
@@ -134,9 +141,39 @@ def run_calendar_date_refresh() -> dict:
                         episode.last_found_in_sonarr = datetime.now(timezone.utc)
                         session.add(episode)
                         stats["episode_rows_updated"] += 1
+                        if getattr(episode, "id", None) is not None:
+                            changed_episode_ids.add(int(episode.id))
+                        season = session.get(Season, int(episode.season_id)) if episode.season_id else None
+                        if season and getattr(season, "series_id", None) is not None:
+                            changed_series_ids.add(int(season.series_id))
 
         session.commit()
         logger.info(f"Calendar date refresh complete: {stats}", extra={"emoji_type": "success"})
+
+        if changed_movie_ids or changed_episode_ids or changed_series_ids:
+            try:
+                from services.source_of_truth.placeholder_art_reconciler import (
+                    enqueue_art_refresh_for_calendar_date_changes,
+                )
+
+                art_out = enqueue_art_refresh_for_calendar_date_changes(
+                    session,
+                    movie_ids=changed_movie_ids,
+                    episode_ids=changed_episode_ids,
+                    series_ids=changed_series_ids,
+                )
+                stats["art_refresh"] = art_out if isinstance(art_out, dict) else {}
+                try:
+                    session.commit()
+                except Exception:
+                    session.rollback()
+            except Exception as art_exc:
+                stats["art_refresh"] = {"ok": False, "reason": str(art_exc)}
+                logger.warning(
+                    f"Calendar date refresh art enqueue failed: {art_exc}",
+                    extra={"emoji_type": "warning"},
+                )
+
         try:
             from services.activity_markers import record_calendar_date_refresh_activity
 

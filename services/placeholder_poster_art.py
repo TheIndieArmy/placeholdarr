@@ -596,6 +596,113 @@ def ensure_library_grid_poster_for_series(series: Any, series_folder: str) -> bo
     return bool(resolved and os.path.isfile(resolved))
 
 
+def movie_art_needs_refresh(movie: Any, media_path: str) -> bool:
+    """True when ``ensure_movie_art`` would rewrite the composited poster."""
+    from services.poster_language import effective_poster_url
+
+    mode = poster_overlay_mode()
+    folder = os.path.dirname(os.path.abspath(media_path))
+    out_path = os.path.join(folder, POSTER_JPEG)
+    url = effective_poster_url(movie)
+    overlay_text = _movie_or_episode_overlay_text(mode, movie=movie)
+    return _needs_regenerate(
+        out_path,
+        mode=mode,
+        source_url=url or "",
+        meta_key="poster",
+        overlay_text=overlay_text,
+    )
+
+
+def season_art_needs_refresh(season: Any, series: Any, series_folder: str) -> bool:
+    """True when ``ensure_season_art`` would rewrite the season poster."""
+    if not series_folder:
+        return False
+    mode = poster_overlay_mode()
+    folder = os.path.abspath(series_folder)
+    season_number = int(getattr(season, "season_number", 0) or 0)
+    out_path = os.path.join(folder, season_poster_filename(season_number))
+    url, kind = _season_poster_source(season, series)
+    overlay_text = _series_or_season_overlay_text(mode, series=series, season=season)
+    return _needs_regenerate(
+        out_path,
+        mode=mode,
+        source_url=url,
+        meta_key=_season_poster_meta_key(season_number),
+        source_kind=kind,
+        overlay_text=overlay_text,
+    )
+
+
+def series_art_needs_refresh(
+    series: Any,
+    series_folder: str | None = None,
+    seasons: list[Any] | None = None,
+) -> bool:
+    """True when ``ensure_series_art`` would rewrite series or season posters."""
+    from services.poster_language import effective_poster_url
+
+    folder = series_folder or _resolve_series_folder(series)
+    if not folder:
+        return False
+    mode = poster_overlay_mode()
+    folder = os.path.abspath(folder)
+    out_path = os.path.join(folder, POSTER_JPEG)
+    url = _normalize_art_url(effective_poster_url(series))
+    kind = "series" if url else "none"
+    overlay_text = _series_or_season_overlay_text(mode, series=series)
+    if _needs_regenerate(
+        out_path,
+        mode=mode,
+        source_url=url,
+        meta_key="series_poster",
+        source_kind=kind,
+        overlay_text=overlay_text,
+    ):
+        return True
+
+    rows = seasons
+    if rows is None:
+        from services.postgres.db import session_scope
+        from services.postgres.models import Season
+
+        series_id = getattr(series, "id", None)
+        if series_id:
+            with session_scope() as session:
+                rows = (
+                    session.query(Season)
+                    .filter(Season.series_id == int(series_id), Season.is_deleted == False)  # noqa: E712
+                    .all()
+                )
+    for season in rows or []:
+        if season_art_needs_refresh(season, series, folder):
+            return True
+    return False
+
+
+def episode_still_art_needs_refresh(
+    episode: Any,
+    season: Any,
+    series: Any,
+    media_path: str,
+) -> bool:
+    """True when ``ensure_episode_still_art`` would rewrite the episode thumb."""
+    mode = poster_overlay_mode()
+    folder = os.path.dirname(os.path.abspath(media_path))
+    thumb_name = episode_thumb_filename(media_path)
+    thumb_path = os.path.join(folder, thumb_name)
+    still_url, kind = _episode_thumb_source(episode, series)
+    overlay_text = _movie_or_episode_overlay_text(mode, episode=episode)
+    return _needs_regenerate(
+        thumb_path,
+        mode=mode,
+        source_url=still_url,
+        meta_key=episode_thumb_meta_key(thumb_name),
+        source_kind=kind,
+        overlay_text=overlay_text,
+    )
+
+
 def ensure_movie_art(movie: Any, media_path: str) -> ArtResult:
     """Write movie poster.jpg (overlay or raw)."""
     from services.poster_language import effective_poster_url, ensure_localized_poster_current

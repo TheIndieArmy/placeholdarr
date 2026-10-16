@@ -9,6 +9,20 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Summary
+
+- **Art determination**: Art refresh enqueue compares desired overlay to `.poster-overlay.json` and skips matching titles.
+- **Coming Soon date-driven art**: Calendar date refresh enqueues poster art when release/air dates change, even if status/reason stay the same.
+- **New Ep. calendar/import art**: Episode air-date shifts and import-grace finalize refresh series/season New Ep. banners.
+- **Materializer art after status**: Placeholder art is written after initial Coming Soon status so the first poster has the correct banner.
+
+### Changed
+
+- **Art determination**: `enqueue_placeholder_art_refresh` filters to placeholders whose on-disk overlay sidecar does not match the desired banner text (and related art inputs).
+- **Coming Soon date-driven art**: After Arr calendar date refresh updates movie or episode dates, enqueue art for those placeholders so absolute date strips stay current without a status change.
+- **New Ep. calendar/import art**: Episode air-date updates enqueue one series-scoped art refresh; import-grace finalize does the same when an episode becomes available so next-unaired banners advance.
+- **Materializer art after status**: Movie and episode materialization applies initial lifecycle status before writing local poster/still art.
+
 ## Pre-release
 
 ## Released
