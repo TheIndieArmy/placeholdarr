@@ -9,6 +9,12 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+## Pre-release
+
+## Released
+
+## [0.11.2] - 2026-10-15
+
 ### Summary
 
 - **Real library refresh on Arr import**: Path-refresh real Plex/Jellyfin/Emby libraries when Arr reports a file import (on by default).
@@ -18,6 +24,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Import grace interrupt (keep placeholder)**: Mid-grace file delete keeps the placeholder and restores REQUEST (no rematerialize).
 - **Playback re-search queue monitor**: Playing an earlier episode no longer stamps NOT_FOUND on a later title mid-download.
 - **Rescan libraries**: Forces a fresh Plex section list after libraries are added or removed.
+- **Plex edit logs**: Per-item title/summary DEBUG and WARNING lines include series SxxExx or movie title.
 
 ### Added
 
@@ -32,10 +39,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Playback re-search queue monitor**: A new playback-triggered Arr search clears stale left-queue / empty-search timers before the queue monitor polls, so an earlier episode play cannot immediately mark a later downloading episode as no qualifying release found.
 - **NFO follow-up player push**: When a status job requests player metadata refresh, projection still runs if the sidecar write was a no-op.
 - **Rescan libraries**: Reloads the cached Plex client so the library dropdown picks up new/removed Plex sections without restarting Placeholdarr.
-
-## Pre-release
-
-## Released
+- **Plex edit logs**: `update_plex_item_text` DEBUG/WARNING lines include an `item=` label (movie title or `Series SxxExx`) so truncated batch INFO summaries are not the only way to identify a TBA/placeholder edit.
 
 ## [0.11.1] - 2026-10-08
 

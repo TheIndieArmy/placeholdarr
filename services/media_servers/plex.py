@@ -846,18 +846,29 @@ def unlock_and_restore_plex_item_text(
         return "failed"
 
 
-def update_plex_item_text(rating_key: str | int, *, title: str, summary: str) -> PlexMetadataRefreshResult:
+def update_plex_item_text(
+    rating_key: str | int,
+    *,
+    title: str,
+    summary: str,
+    item_label: str | None = None,
+) -> PlexMetadataRefreshResult:
     """Directly update Plex item title/summary via PlexAPI edit methods.
 
     Title and summary are locked after the edit so Plex agents (TMDB / local NFO)
     cannot immediately revert the projected status. Callers must only pass
     placeholder-library rating keys; real-library keys must never be edited here.
+
+    ``item_label`` is optional log context (e.g. ``Bleach S17E50`` or a movie title)
+    so per-item DEBUG/WARNING lines stay identifiable when batch INFO summaries truncate.
     """
     if not getattr(settings, "plex_enabled", False):
         return "skipped"
     key = str(rating_key or "").strip()
     if not key:
         return "skipped"
+    label = str(item_label or "").strip()
+    label_part = f" item={label!r}" if label else ""
     try:
         from services.media_servers.plex_lookup import get_plex_server
 
@@ -885,7 +896,7 @@ def update_plex_item_text(rating_key: str | int, *, title: str, summary: str) ->
         if title_ok and summary_ok:
             logger.debug(
                 "Plex: title/summary edit confirmed "
-                f"(rating_key={key} title {_plex_text_preview(before_title)!r} -> "
+                f"(rating_key={key}{label_part} title {_plex_text_preview(before_title)!r} -> "
                 f"{_plex_text_preview(after_title)!r} summary_changed="
                 f"{before_summary != after_summary})",
                 extra={"emoji_type": "debug"},
@@ -893,7 +904,7 @@ def update_plex_item_text(rating_key: str | int, *, title: str, summary: str) ->
             return "ok"
         logger.warning(
             "Plex: title/summary edit did not stick "
-            f"(rating_key={key} title_ok={title_ok} summary_ok={summary_ok} "
+            f"(rating_key={key}{label_part} title_ok={title_ok} summary_ok={summary_ok} "
             f"before_title={_plex_text_preview(before_title)!r} "
             f"after_title={_plex_text_preview(after_title)!r} "
             f"expected_title={_plex_text_preview(wanted_title)!r} "
@@ -907,12 +918,12 @@ def update_plex_item_text(rating_key: str | int, *, title: str, summary: str) ->
         text = str(ex).lower()
         if "404" in text or "not found" in text:
             logger.warning(
-                f"Plex direct update not found (stale rating_key?) rating_key={key}: {ex}",
+                f"Plex direct update not found (stale rating_key?) rating_key={key}{label_part}: {ex}",
                 extra={"emoji_type": "warning"},
             )
             return "not_found"
         logger.warning(
-            f"Plex direct update failed rating_key={key}: {ex}",
+            f"Plex direct update failed rating_key={key}{label_part}: {ex}",
             extra={"emoji_type": "warning"},
         )
         return "failed"
