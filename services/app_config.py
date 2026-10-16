@@ -2681,44 +2681,40 @@ def save_settings(
                 except Exception:
                     errors[section_key] = "must be a positive integer"
 
+        def _setting_value_changed(key: str) -> bool:
+            """Compare with normalized types so bool false is not treated as blank."""
+            prev_row = _get_row(session, key)
+            prev_raw = None if not prev_row else prev_row.value
+            return _normalized_stored_setting_value(key, prev_raw) != _normalized_stored_setting_value(
+                key, validated.get(key)
+            )
+
         nfo_backfill_keys_changed: list[str] = []
         for key in NFO_BACKFILL_SETTING_KEYS:
             if key not in validated:
                 continue
-            prev_row = _get_row(session, key)
-            prev_val = "" if not prev_row or prev_row.value is None else str(prev_row.value).strip()
-            new_val = str(validated.get(key) or "").strip()
-            if prev_val != new_val:
+            if _setting_value_changed(key):
                 nfo_backfill_keys_changed.append(key)
 
         art_backfill_keys_changed: list[str] = []
         for key in ART_BACKFILL_SETTING_KEYS:
             if key not in validated:
                 continue
-            prev_row = _get_row(session, key)
-            prev_val = "" if not prev_row or prev_row.value is None else str(prev_row.value).strip()
-            new_val = str(validated.get(key) or "").strip()
-            if prev_val != new_val:
+            if _setting_value_changed(key):
                 art_backfill_keys_changed.append(key)
 
         destination_rematerialize_keys_changed: list[str] = []
         for key in DESTINATION_REMATERIALIZE_SETTING_KEYS:
             if key not in validated:
                 continue
-            prev_row = _get_row(session, key)
-            prev_val = "" if not prev_row or prev_row.value is None else str(prev_row.value).strip()
-            new_val = str(validated.get(key) or "").strip()
-            if prev_val != new_val:
+            if _setting_value_changed(key):
                 destination_rematerialize_keys_changed.append(key)
 
         tv_density_rematerialize_keys_changed: list[str] = []
         for key in TV_DENSITY_REMATERIALIZE_SETTING_KEYS:
             if key not in validated:
                 continue
-            prev_row = _get_row(session, key)
-            prev_val = "" if not prev_row or prev_row.value is None else str(prev_row.value).strip()
-            new_val = str(validated.get(key) or "").strip()
-            if prev_val != new_val:
+            if _setting_value_changed(key):
                 tv_density_rematerialize_keys_changed.append(key)
 
         if "LIBRARY_DESTINATION_MAP_JSON" in validated:

@@ -24,6 +24,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Narrow banner Plex refresh**: Coming Soon / New Ep. applies use path refresh, not full-library metadata.
 - **Local art player refresh**: Rewritten posters trigger per-title metadata refresh so Plex shows the new art.
 - **Plex item metadata refresh**: PUT instead of GET so item refreshes succeed.
+- **Settings art-change detection**: Unchanged off bools no longer force a full art refresh.
 - **What's new (0.11.3)**: Startup ack for Coming Soon and New Ep. date banners (Poster Overlay CTA).
 - **NFO batch player push**: Mixed rewrite/no-op NFO jobs still project every active placeholder in the batch.
 
@@ -40,6 +41,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Narrow banner Plex refresh**: Coming Soon / New Ep. toggle applies use path refresh only; they no longer force a full-library Plex metadata refresh.
 - **Local art player refresh**: After rewriting posters, refresh those titles' metadata on Plex/Jellyfin/Emby so new art appears without a manual Refresh Metadata.
 - **Plex item metadata refresh**: Use PUT (not GET) for `/library/metadata/{id}/refresh`; GET was 404ing while path scans still ran.
+- **Settings art-change detection**: Bool settings no longer look “changed” when saved as `false` (was compared as blank), which wrongly forced a full poster art refresh.
 
 ### Fixed
 
