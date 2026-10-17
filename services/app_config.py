@@ -3221,7 +3221,27 @@ def save_settings(
                     session.rollback()
                 except Exception:
                     pass
-        if (nfo_backfill_keys_changed or art_backfill_keys_changed) and apply_scope:
+        pending_art = False
+        pending_metadata = False
+        pending_art_scope = "all"
+        if apply_scope == "now":
+            # A prior "next full sync" save may still be waiting. Apply now should consume it
+            # even when this save did not change overlay keys again.
+            try:
+                from services.source_of_truth.placeholder_refresh import get_pending_intent
+
+                intent = get_pending_intent()
+                pending_metadata = bool(intent.get("metadata") or intent.get("templates"))
+                pending_art = bool(intent.get("art"))
+                pending_art_scope = str(intent.get("art_scope") or "all").strip().lower() or "all"
+            except Exception:
+                pass
+
+        if (
+            nfo_backfill_keys_changed
+            or art_backfill_keys_changed
+            or (apply_scope == "now" and (pending_art or pending_metadata))
+        ) and apply_scope:
             from services.source_of_truth.placeholder_refresh import execute_placeholder_refresh_apply_scope
 
             # Poster language must apply to existing placeholders too; never leave them on a stale language.
@@ -3241,9 +3261,16 @@ def save_settings(
             art_scope = "all"
             if changed_art and changed_art <= NARROW_ART_BACKFILL_SETTING_KEYS:
                 art_scope = "coming_soon_and_tv"
+            elif not changed_art and pending_art and pending_art_scope in {
+                "all",
+                "coming_soon",
+                "tv_new_ep",
+                "coming_soon_and_tv",
+            }:
+                art_scope = pending_art_scope
 
-            do_metadata = bool(nfo_backfill_keys_changed)
-            do_art = bool(art_backfill_keys_changed)
+            do_metadata = bool(nfo_backfill_keys_changed) or (effective_scope == "now" and pending_metadata)
+            do_art = bool(art_backfill_keys_changed) or (effective_scope == "now" and pending_art)
             if effective_scope == "now":
                 # Settings rows are already committed. Enqueue / determination can take a long time
                 # on large libraries; run Apply now off the request so the UI can leave immediately.

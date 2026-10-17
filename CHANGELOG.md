@@ -60,6 +60,8 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Plex item metadata refresh**: Use PUT (not GET) for `/library/metadata/{id}/refresh`; GET was 404ing while path scans still ran.
 - **Settings art-change detection**: Bool settings no longer look “changed” when saved as `false` (was compared as blank), which wrongly forced a full poster art refresh.
 - **Settings Apply now**: Art / NFO / destination / density Apply-now work runs after the save response so the Settings UI unblocks immediately.
+- **Settings Apply now art enqueue**: Overlay Apply now skips the multi-minute sidecar scan and queues batches immediately; Tasks reconcile no longer marks the refresh done before jobs exist.
+- **Settings Apply now after next full sync**: Choosing Apply now consumes a pending art/metadata refresh left from an earlier “next full sync” save.
 
 ### Fixed
 

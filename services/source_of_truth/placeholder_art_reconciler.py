@@ -407,6 +407,7 @@ def enqueue_placeholder_art_backfill_all(
     placeholder_refresh_task_run_id: int | None = None,
     coming_soon_only: bool = False,
     art_scope: str | None = None,
+    skip_determination: bool = False,
 ) -> dict:
     """Queue art refresh for active placeholders.
 
@@ -415,6 +416,9 @@ def enqueue_placeholder_art_backfill_all(
 
     Full-library scopes finish with a section metadata refresh. Narrow banner
     toggles use per-batch path refresh only (no whole-library Plex metadata scan).
+
+    ``skip_determination``: enqueue every scoped id without scanning overlay sidecars
+    first (used for settings Apply now so batches exist immediately).
     """
     scope = str(art_scope or "").strip().lower()
     if not scope:
@@ -453,16 +457,22 @@ def enqueue_placeholder_art_backfill_all(
             session=session,
             merge_into_pending=False,
             payload_extras=extras,
+            skip_determination=bool(skip_determination),
         )
         batch_count = int(out.get("jobs_created") or 0)
         phase_task_run_id = task_run_id if task_run_id is not None else placeholder_refresh_task_run_id
-        if phase_task_run_id is not None and out.get("ok"):
+        # Only mark the art phase once batches exist. Calling begin with 0 batches
+        # (or before enqueue finishes) races Tasks reconcile into a false "done".
+        if phase_task_run_id is not None and out.get("ok") and batch_count > 0:
             from services.task_run_phases import begin_art_backfill_phase
 
+            queued_count = out.get("placeholder_count")
+            if queued_count is None:
+                queued_count = len(ids)
             begin_art_backfill_phase(
                 int(phase_task_run_id),
                 art_run_id=run_id,
-                placeholder_count=int(out.get("placeholder_count") or len(ids)),
+                placeholder_count=int(queued_count),
                 batch_count=batch_count,
                 source=source,
             )

@@ -440,9 +440,13 @@ def execute_placeholder_refresh_apply_scope(
     if requested_art:
         from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_backfill_all
 
+        # Settings overlay / language Apply now already knows art must change; skip the
+        # multi-minute per-file sidecar scan so batches exist before Tasks reconcile runs.
+        skip_art_determination = str(source or "").strip().lower().startswith("settings_save")
         art_out = enqueue_placeholder_art_backfill_all(
             source=f"{source}:apply_now",
             art_scope=requested_art_scope,
+            skip_determination=skip_art_determination,
             **enqueue_kwargs,
         )
         out["art_backfill"] = art_out
@@ -863,6 +867,18 @@ def try_complete_placeholder_refresh_task_run(
         if not row or str(row.status or "").lower() != "working":
             return False
         summary = row.summary if isinstance(row.summary, dict) else {}
+        # Apply-now enqueue can take a while (or runs deferred after the HTTP response).
+        # Tasks reconcile must not treat "no linked jobs yet" as finished, or the row
+        # flips to done before batches exist and the refresh looks like a no-op.
+        if not failed and not statuses:
+            art_requested = bool(summary.get("art_requested"))
+            metadata_requested = bool(summary.get("metadata_requested"))
+            art_meta = summary.get("art_backfill") if isinstance(summary.get("art_backfill"), dict) else {}
+            nfo_meta = summary.get("nfo_backfill") if isinstance(summary.get("nfo_backfill"), dict) else {}
+            art_enqueue_started = bool(str(art_meta.get("run_id") or "").strip())
+            nfo_enqueue_started = bool(str(nfo_meta.get("run_id") or "").strip())
+            if (art_requested and not art_enqueue_started) or (metadata_requested and not nfo_enqueue_started):
+                return False
         has_failed_job = any(s == "FAILED" for s in statuses)
         if failed or has_failed_job:
             linked_reason, failed_types = _linked_refresh_fail_details(
