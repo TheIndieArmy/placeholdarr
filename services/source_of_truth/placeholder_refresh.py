@@ -197,12 +197,13 @@ def clear_pending_intent() -> dict[str, Any]:
     try:
         _set_pending_intent(session, intent)
         session.commit()
-        return intent
     except Exception:
         session.rollback()
         raise
     finally:
         session.close()
+    # Legacy AppConfig flags are OR'd into get_pending_intent(); clear them after the
+    # unified row commit (must run after finally, not before a return in try).
     try:
         from services.source_of_truth.template_backfill import clear_pending_template_backfill
 
@@ -452,6 +453,20 @@ def execute_placeholder_refresh_apply_scope(
     task_summary: dict[str, Any] | None = None
     track_task_run = bool(str(task_run_trigger or "").strip())
     if track_task_run:
+        from services.task_run_history import get_working_run
+
+        # Match routes/tasks.py: do not stack a second tracked refresh while one
+        # (or a full sync) is already working.
+        if get_working_run("placeholder_refresh") or get_working_run("full_sync"):
+            return {
+                "ok": False,
+                "scope": "now",
+                "enqueued": False,
+                "reason": "task_already_running",
+                "pending": has_pending_intent(),
+                "metadata_requested": requested_metadata,
+                "art_requested": requested_art,
+            }
         trigger = str(task_run_trigger).strip().lower()
         task_run_id = begin_task_run(task_key="placeholder_refresh", trigger=trigger)
         task_summary = _initial_refresh_summary(
@@ -925,6 +940,28 @@ def _linked_refresh_fail_details(
     return "linked_refresh_job_failed", failed_types
 
 
+def _backfill_batches_still_open(meta: Any) -> bool:
+    """True while a begun art/NFO backfill still has unfinished batches.
+
+    Used by try_complete so Tasks reconcile cannot flip the parent row to DONE
+    after ``run_id`` is set but before linked jobs are visible or finished
+    (art-only refresh race: empty statuses + enqueue started ⇒ premature DONE).
+    """
+    if not isinstance(meta, dict):
+        return False
+    status = str(meta.get("status") or "").strip().lower()
+    if status in ("done", "failed", "skipped"):
+        return False
+    try:
+        batch_count = int(meta.get("batch_count") or 0)
+        batches_done = int(meta.get("batches_done") or 0)
+    except (TypeError, ValueError):
+        return False
+    if batch_count <= 0:
+        return False
+    return batches_done < batch_count
+
+
 def try_complete_placeholder_refresh_task_run(
     task_run_id: int,
     *,
@@ -952,18 +989,27 @@ def try_complete_placeholder_refresh_task_run(
         if not row or str(row.status or "").lower() != "working":
             return False
         summary = row.summary if isinstance(row.summary, dict) else {}
+        art_requested = bool(summary.get("art_requested"))
+        metadata_requested = bool(summary.get("metadata_requested"))
+        art_meta = summary.get("art_backfill") if isinstance(summary.get("art_backfill"), dict) else {}
+        nfo_meta = summary.get("nfo_backfill") if isinstance(summary.get("nfo_backfill"), dict) else {}
         # Apply-now enqueue can take a while (or runs deferred after the HTTP response).
         # Tasks reconcile must not treat "no linked jobs yet" as finished, or the row
         # flips to done before batches exist and the refresh looks like a no-op.
-        if not failed and not statuses:
-            art_requested = bool(summary.get("art_requested"))
-            metadata_requested = bool(summary.get("metadata_requested"))
-            art_meta = summary.get("art_backfill") if isinstance(summary.get("art_backfill"), dict) else {}
-            nfo_meta = summary.get("nfo_backfill") if isinstance(summary.get("nfo_backfill"), dict) else {}
-            art_enqueue_started = bool(str(art_meta.get("run_id") or "").strip())
-            nfo_enqueue_started = bool(str(nfo_meta.get("run_id") or "").strip())
-            if (art_requested and not art_enqueue_started) or (metadata_requested and not nfo_enqueue_started):
+        # Also: once run_id is set with batch_count > 0, empty statuses must wait until
+        # batches_done catches up (jobs may not be visible to this query yet).
+        if not failed:
+            if art_requested and _backfill_batches_still_open(art_meta):
                 return False
+            if metadata_requested and _backfill_batches_still_open(nfo_meta):
+                return False
+            if not statuses:
+                art_enqueue_started = bool(str(art_meta.get("run_id") or "").strip())
+                nfo_enqueue_started = bool(str(nfo_meta.get("run_id") or "").strip())
+                if (art_requested and not art_enqueue_started) or (
+                    metadata_requested and not nfo_enqueue_started
+                ):
+                    return False
         has_failed_job = any(s == "FAILED" for s in statuses)
         if failed or has_failed_job:
             linked_reason, failed_types = _linked_refresh_fail_details(

@@ -13,7 +13,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## Released
 
-## [0.11.3] - 2026-10-16
+## [0.11.3] - 2026-10-17
 
 ### Summary
 
@@ -26,6 +26,12 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Settings Apply now**: Save returns immediately; art work queues in the background and Tasks shows progress.
 - **Live task progress**: Art refresh shows determination and updating progress in Tasks and a sidebar pill while the run is working.
 - **Stop task**: Stop a working placeholder refresh from the run row or sidebar pill; status shows STOPPED.
+- **Art-only refresh premature DONE**: Parent task stays working until art batches actually finish.
+- **Missing Arr poster on art refresh**: Empty `remote_poster` re-fetches from Radarr/Sonarr before writing.
+- **Stop failure feedback**: Failed Stop keeps the confirm open and shows why it failed.
+- **Clear pending intent**: Also clears legacy template/art backfill AppConfig flags.
+- **Apply now overlap**: Tracked Apply now refuses to start while a placeholder refresh or full sync is already working.
+- **Art needs-refresh localization**: Determination uses the same Arr + TMDB localized poster resolve as the write path.
 
 ### Added
 
@@ -62,6 +68,12 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Art live progress races**: Task-run summary updates take a row lock; batch completion increments counters and marks the live bar done in one write.
 - **Art progress honesty**: Updating stays below 100% while any batch is working; working bars no longer round 249/250 to a full green bar.
 - **Shared overlay meta poison**: Per-poster `layers` stamps in `.poster-overlay.json` so rewriting series art cannot mark season/episode files current without rewriting them.
+- **Art-only refresh premature DONE**: Placeholder refresh no longer finishes while art batches are still open when linked jobs are not visible yet.
+- **Missing Arr poster on art refresh**: When `remote_poster` is empty, art refresh re-fetches the poster from Radarr/Sonarr before writing (covers titles that gained Arr art after the last sync, including TVDB-only shows with no TMDB id).
+- **Stop failure feedback**: If Stop fails, the confirm dialog stays open and shows the error reason (Tasks and sidebar pill).
+- **Clear pending intent**: Clearing the unified pending refresh intent also clears legacy template/art backfill AppConfig flags (previously unreachable after the early return).
+- **Apply now overlap**: Tracked Apply now / placeholder refresh returns `task_already_running` instead of starting a second run while a refresh or full sync is working.
+- **Art needs-refresh localization**: Movie/series/season art determination calls `ensure_localized_poster_current` (Arr fill + language resolve) before comparing on-disk sidecars, matching the write path.
 
 ## [0.11.2] - 2026-10-15
 

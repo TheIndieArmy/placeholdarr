@@ -251,10 +251,174 @@ def resolve_localized_poster_for_season(
     return changed
 
 
+def _persist_entity_arr_poster(kind: str, entity_id: int, *, remote_poster: str, remote_fanart: str | None = None, tmdb_id: int | None = None) -> None:
+    session = get_session()
+    try:
+        model = {"movie": Movie, "series": Series, "season": Season}[kind]
+        row = session.query(model).get(int(entity_id))
+        if not row:
+            return
+        row.remote_poster = remote_poster
+        if remote_fanart and not str(getattr(row, "remote_fanart", None) or "").strip():
+            row.remote_fanart = remote_fanart
+        if kind == "series" and tmdb_id and int(tmdb_id) > 0:
+            if not int(getattr(row, "sonarr_tmdbid", None) or 0):
+                row.sonarr_tmdbid = int(tmdb_id)
+        if kind == "movie" and tmdb_id and int(tmdb_id) > 0:
+            if not int(getattr(row, "tmdbid", None) or 0):
+                row.tmdbid = int(tmdb_id)
+        session.add(row)
+        session.commit()
+    except Exception as exc:
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        logger.debug(
+            f"persist arr remote_poster failed kind={kind} id={entity_id}: {exc}",
+            extra={"emoji_type": "debug"},
+        )
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
+
+
+def ensure_arr_remote_poster_current(entity: Any, *, series: Any | None = None) -> bool:
+    """When Arr ``remote_poster`` is empty, re-fetch from Radarr/Sonarr and persist.
+
+    Art refresh only reads DB poster URLs. Titles that gained Arr art after the last
+    sync (or synced before images existed) otherwise stay blank forever, and TMDB
+    cannot help when Arr has no tmdbId (e.g. some TVDB-only shows).
+    """
+    if entity is None:
+        return False
+    remote = str(getattr(entity, "remote_poster", None) or "").strip()
+    if remote:
+        return False
+
+    is_movie = isinstance(entity, Movie) or getattr(entity, "__tablename__", None) == "movie"
+    is_series = isinstance(entity, Series) or getattr(entity, "__tablename__", None) == "series"
+    is_season = isinstance(entity, Season) or getattr(entity, "__tablename__", None) == "season"
+    if not is_movie and not is_series and not is_season:
+        if hasattr(entity, "tvdbid") and hasattr(entity, "sonarrid") and hasattr(entity, "remote_poster"):
+            is_series = True
+        elif hasattr(entity, "radarrid") and hasattr(entity, "remote_poster") and not hasattr(entity, "tvdbid"):
+            is_movie = True
+        elif hasattr(entity, "season_number") and series is not None:
+            is_season = True
+
+    if is_season:
+        # Season posters often fall back to the series poster; fill the parent first.
+        if series is not None:
+            ensure_arr_remote_poster_current(series)
+        return False
+
+    try:
+        from services.source_of_truth.sync_runner import (
+            _extract_image_url,
+            _extract_poster_url,
+        )
+    except Exception:
+        return False
+
+    if is_series:
+        sonarr_id = int(getattr(entity, "sonarrid", None) or 0)
+        if sonarr_id <= 0:
+            return False
+        key = str(getattr(entity, "instance_key", None) or getattr(entity, "instance_id", None) or "").strip()
+        try:
+            url, api_key = settings.resolve_arr_endpoint("sonarr", instance_key=key or None)
+        except Exception:
+            url, api_key = "", ""
+        if not url or not api_key:
+            return False
+        try:
+            from services.source_of_truth.arr_api import fetch_sonarr_series_item
+
+            detail = fetch_sonarr_series_item(sonarr_id, url, api_key, bypass_cache=True)
+        except Exception as exc:
+            logger.debug(
+                f"arr remote_poster fetch failed series sonarrid={sonarr_id}: {exc}",
+                extra={"emoji_type": "debug"},
+            )
+            return False
+        if not isinstance(detail, dict):
+            return False
+        poster = str(_extract_poster_url(detail) or "").strip()
+        if not poster:
+            return False
+        fanart = str(_extract_image_url(detail, ("fanart", "background", "backdrop")) or "").strip() or None
+        try:
+            tmdb_id = int(detail.get("tmdbId") or 0) or None
+        except (TypeError, ValueError):
+            tmdb_id = None
+        entity.remote_poster = poster
+        if fanart and not str(getattr(entity, "remote_fanart", None) or "").strip():
+            entity.remote_fanart = fanart
+        if tmdb_id and not int(getattr(entity, "sonarr_tmdbid", None) or 0):
+            entity.sonarr_tmdbid = int(tmdb_id)
+        entity_id = getattr(entity, "id", None)
+        if entity_id is not None:
+            _persist_entity_arr_poster(
+                "series",
+                int(entity_id),
+                remote_poster=poster,
+                remote_fanart=fanart,
+                tmdb_id=tmdb_id,
+            )
+        return True
+
+    if is_movie:
+        radarr_id = int(getattr(entity, "radarrid", None) or getattr(entity, "radarr_id", None) or 0)
+        if radarr_id <= 0:
+            return False
+        key = str(getattr(entity, "instance_key", None) or getattr(entity, "instance_id", None) or "").strip()
+        try:
+            url, api_key = settings.resolve_arr_endpoint("radarr", instance_key=key or None)
+        except Exception:
+            url, api_key = "", ""
+        if not url or not api_key:
+            return False
+        try:
+            from services.source_of_truth.arr_api import fetch_radarr_movie
+
+            detail = fetch_radarr_movie(radarr_id, url, api_key, bypass_cache=True)
+        except Exception as exc:
+            logger.debug(
+                f"arr remote_poster fetch failed movie radarrid={radarr_id}: {exc}",
+                extra={"emoji_type": "debug"},
+            )
+            return False
+        if not isinstance(detail, dict):
+            return False
+        poster = str(_extract_poster_url(detail) or "").strip()
+        if not poster:
+            return False
+        fanart = str(_extract_image_url(detail, ("fanart", "background", "backdrop")) or "").strip() or None
+        entity.remote_poster = poster
+        if fanart and not str(getattr(entity, "remote_fanart", None) or "").strip():
+            entity.remote_fanart = fanart
+        entity_id = getattr(entity, "id", None)
+        if entity_id is not None:
+            _persist_entity_arr_poster(
+                "movie",
+                int(entity_id),
+                remote_poster=poster,
+                remote_fanart=fanart,
+            )
+        return True
+
+    return False
+
+
 def ensure_localized_poster_current(entity: Any, *, series: Any | None = None) -> None:
     """Resolve-if-empty for movie/series/season before art download."""
     if entity is None:
         return
+    # Arr remote_poster first: TMDB language resolve needs ids, and art write uses DB URLs only.
+    ensure_arr_remote_poster_current(entity, series=series)
     if isinstance(entity, Movie) or getattr(entity, "__tablename__", None) == "movie":
         resolve_localized_poster_for_movie(entity)
         return

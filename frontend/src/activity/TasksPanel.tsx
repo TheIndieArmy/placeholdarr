@@ -179,6 +179,7 @@ export function TasksPanel(props: {
   const [historyExpanded, setHistoryExpanded] = useState<Record<string, boolean>>({});
   const [stopConfirmRunId, setStopConfirmRunId] = useState<number | null>(null);
   const [stopPending, setStopPending] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
   const panelBorder = isLight ? semantic.border : "rgba(66,71,83,0.4)";
   const panelBg = isLight ? semantic.surfacePanel : "#171c22";
 
@@ -411,7 +412,10 @@ export function TasksPanel(props: {
                           {canStop ? (
                             <button
                               type="button"
-                              onClick={() => setStopConfirmRunId(run.id)}
+                              onClick={() => {
+                                setStopError(null);
+                                setStopConfirmRunId(run.id);
+                              }}
                               className="px-2.5 py-1 rounded-lg border text-[11px] font-headline uppercase tracking-wider"
                               style={{ borderColor: semantic.danger, color: semantic.danger }}
                             >
@@ -456,21 +460,30 @@ export function TasksPanel(props: {
         <ConfirmModal
           title="Stop this task?"
           message={TASK_STOP_CONFIRM_MESSAGE}
+          error={stopError}
           confirmLabel={stopPending ? "Stopping…" : "Stop task"}
           cancelLabel="Keep running"
           accentHex={props.accent.hex}
           themeMode={props.themeMode}
           onCancel={() => {
-            if (!stopPending) setStopConfirmRunId(null);
+            if (stopPending) return;
+            setStopConfirmRunId(null);
+            setStopError(null);
           }}
           onConfirm={() => {
             if (stopPending || stopConfirmRunId == null) return;
             setStopPending(true);
+            setStopError(null);
             void Promise.resolve(props.onStopRun(stopConfirmRunId))
-              .catch(() => undefined)
+              .then(() => {
+                setStopConfirmRunId(null);
+                setStopError(null);
+              })
+              .catch((e) => {
+                setStopError(e instanceof Error ? e.message : "Failed to stop task");
+              })
               .finally(() => {
                 setStopPending(false);
-                setStopConfirmRunId(null);
               });
           }}
         />

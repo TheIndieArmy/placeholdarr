@@ -93,6 +93,7 @@ export function TaskStatusPillPrototype(props: {
   const [expanded, setExpanded] = useState(false);
   const [stopConfirmOpen, setStopConfirmOpen] = useState(false);
   const [stopPending, setStopPending] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
   const panelId = useId();
 
   const workingRun = useMemo(() => {
@@ -111,6 +112,7 @@ export function TaskStatusPillPrototype(props: {
     if (!liveModel) {
       setExpanded(false);
       setStopConfirmOpen(false);
+      setStopError(null);
     }
   }, [liveModel]);
 
@@ -164,7 +166,10 @@ export function TaskStatusPillPrototype(props: {
             {canStop ? (
               <button
                 type="button"
-                onClick={() => setStopConfirmOpen(true)}
+                onClick={() => {
+                  setStopError(null);
+                  setStopConfirmOpen(true);
+                }}
                 className={`inline-flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-[12px] font-headline uppercase tracking-wider transition-colors ${
                   glass
                     ? "border-rose-500/45 text-rose-300 hover:bg-rose-500/10 hover:text-rose-200"
@@ -195,22 +200,31 @@ export function TaskStatusPillPrototype(props: {
         <ConfirmModal
           title="Stop this task?"
           message={TASK_STOP_CONFIRM_MESSAGE}
+          error={stopError}
           confirmLabel={stopPending ? "Stopping…" : "Stop task"}
           cancelLabel="Keep running"
           accentHex={props.accentHex}
           themeMode={props.themeMode}
           onCancel={() => {
-            if (!stopPending) setStopConfirmOpen(false);
+            if (stopPending) return;
+            setStopConfirmOpen(false);
+            setStopError(null);
           }}
           onConfirm={() => {
             if (stopPending) return;
             setStopPending(true);
+            setStopError(null);
             void Promise.resolve(props.onStopRun(workingRun.id))
-              .catch(() => undefined)
+              .then(() => {
+                setStopConfirmOpen(false);
+                setStopError(null);
+                setExpanded(false);
+              })
+              .catch((e) => {
+                setStopError(e instanceof Error ? e.message : "Failed to stop task");
+              })
               .finally(() => {
                 setStopPending(false);
-                setStopConfirmOpen(false);
-                setExpanded(false);
               });
           }}
         />

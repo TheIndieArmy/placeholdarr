@@ -677,8 +677,10 @@ def ensure_library_grid_poster_for_series(series: Any, series_folder: str) -> bo
 
 def movie_art_needs_refresh(movie: Any, media_path: str) -> bool:
     """True when ``ensure_movie_art`` would rewrite the composited poster."""
-    from services.poster_language import effective_poster_url
+    from services.poster_language import effective_poster_url, ensure_localized_poster_current
 
+    # Match write path: Arr fill then TMDB language resolve before comparing sidecars.
+    ensure_localized_poster_current(movie)
     mode = poster_overlay_mode()
     folder = os.path.dirname(os.path.abspath(media_path))
     out_path = os.path.join(folder, POSTER_JPEG)
@@ -697,6 +699,10 @@ def season_art_needs_refresh(season: Any, series: Any, series_folder: str) -> bo
     """True when ``ensure_season_art`` would rewrite the season poster."""
     if not series_folder:
         return False
+    from services.poster_language import ensure_localized_poster_current
+
+    ensure_localized_poster_current(series)
+    ensure_localized_poster_current(season, series=series)
     mode = poster_overlay_mode()
     folder = os.path.abspath(series_folder)
     season_number = int(getattr(season, "season_number", 0) or 0)
@@ -719,8 +725,9 @@ def series_art_needs_refresh(
     seasons: list[Any] | None = None,
 ) -> bool:
     """True when ``ensure_series_art`` would rewrite series or season posters."""
-    from services.poster_language import effective_poster_url
+    from services.poster_language import effective_poster_url, ensure_localized_poster_current
 
+    ensure_localized_poster_current(series)
     folder = series_folder or _resolve_series_folder(series)
     if not folder:
         return False
