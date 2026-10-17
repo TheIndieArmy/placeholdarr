@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
+
+from sqlalchemy.orm.attributes import flag_modified
 
 from core.logger import logger
 from services.postgres.db import get_session
@@ -41,22 +43,49 @@ def begin_task_run(*, task_key: str, trigger: str) -> int:
         session.close()
 
 
-def update_task_run_summary(run_id: int, summary: dict[str, Any]) -> None:
+def mutate_task_run_summary(
+    run_id: int,
+    mutator: Callable[[dict[str, Any]], dict[str, Any] | None],
+) -> dict[str, Any] | None:
+    """Apply ``mutator`` to ``summary`` under a row lock so concurrent batch writes cannot drop counters.
+
+    ``mutator`` receives a shallow copy of the current summary and must return the next summary
+    (or ``None`` to leave the row unchanged).
+    """
     session = get_session()
     try:
-        row = session.query(ScheduledTaskRun).filter(ScheduledTaskRun.id == int(run_id)).first()
+        row = (
+            session.query(ScheduledTaskRun)
+            .filter(ScheduledTaskRun.id == int(run_id))
+            .with_for_update()
+            .first()
+        )
         if not row:
-            return
-        existing = row.summary if isinstance(row.summary, dict) else {}
-        merged = {**existing, **summary}
-        row.summary = merged
+            return None
+        current = dict(row.summary) if isinstance(row.summary, dict) else {}
+        updated = mutator(current)
+        if updated is None:
+            return current
+        row.summary = updated
+        flag_modified(row, "summary")
         session.add(row)
         session.commit()
+        return updated
     except Exception as exc:
         session.rollback()
-        logger.warning("task run summary update failed run_id=%s: %s", run_id, exc)
+        logger.warning("task run summary mutate failed run_id=%s: %s", run_id, exc)
+        return None
     finally:
         session.close()
+
+
+def update_task_run_summary(run_id: int, summary: dict[str, Any]) -> None:
+    """Shallow-merge ``summary`` into the locked row (preferred: ``mutate_task_run_summary`` for counters)."""
+
+    def _merge(current: dict[str, Any]) -> dict[str, Any]:
+        return {**current, **summary}
+
+    mutate_task_run_summary(int(run_id), _merge)
 
 
 def reopen_task_run(run_id: int) -> None:

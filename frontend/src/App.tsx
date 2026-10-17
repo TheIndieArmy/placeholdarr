@@ -7222,8 +7222,8 @@ function PosterPlaceholderBannerDescription(props: { spacing: "settings" | "wiza
   const top = props.spacing === "settings" ? "mt-1" : "mb-2";
   return (
     <p className={`ui-field-description leading-relaxed ${top}`}>
-      Show a PLACEHOLDER text bar on titles that are not using a Coming Soon / New Ep. date.
-      Alone, this puts PLACEHOLDER on every placeholder poster.
+      A PLACEHOLDER text bar on the poster. If Coming Soon is also enabled, unreleased titles use that
+      date bar instead.
     </p>
   );
 }
@@ -7231,18 +7231,10 @@ function PosterPlaceholderBannerDescription(props: { spacing: "settings" | "wiza
 function ComingSoonPosterBannerDescription(props: { spacing: "settings" | "wizard" }) {
   const top = props.spacing === "settings" ? "mt-1" : "mb-2";
   return (
-    <ul className={`list-disc space-y-2 pl-5 text-[14px] text-slate-400 leading-relaxed ${top}`}>
-      <li>
-        <span className="font-medium text-slate-200">Enabled</span>
-        {": "}Coming Soon movies and episodes show a date bar (Theatrical / Digital / Physical or
-        Airing). Series and season posters show New Ep. for the next unaired episode. Alone, only
-        those titles get a text bar (no PLACEHOLDER elsewhere).
-      </li>
-      <li>
-        <span className="font-medium text-slate-200">Disabled</span>
-        {": "}No calendar date text on posters.
-      </li>
-    </ul>
+    <p className={`ui-field-description leading-relaxed ${top}`}>
+      A date or New Ep. text bar on unreleased titles (Theatrical, Digital, Physical, or Airing; series
+      and seasons show New Ep.). Replaces the PLACEHOLDER bar on those posters when both are enabled.
+    </p>
   );
 }
 
@@ -8022,9 +8014,6 @@ function SettingsPanel(props: {
             )}
           </div>
         ) : null}
-        {field.key === "PLACEHOLDER_POSTER_PLACEHOLDER_BANNER" && !density ? (
-          <p className="mb-3 text-[12px] font-headline uppercase tracking-wider text-slate-500">Banner</p>
-        ) : null}
         <div
           className={`flex items-start gap-3 mb-2 ${
             field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" && !density ? "mt-4" : ""
@@ -8670,39 +8659,22 @@ function SettingsPanel(props: {
                   <PosterOverlayControlsWithPreview
                     values={props.values}
                     controls={
-                      <div className="space-y-6">
-                        <SettingsDensityFrame
-                          legend="Layers"
-                          intro={
-                            <p>
-                              Compose grayscale and badge layers independently. The preview updates as you change
-                              options.
-                            </p>
-                          }
-                        >
-                          {POSTER_OVERLAY_LAYER_KEYS.map((key) => {
-                            const field = active.fields.find((f) => f.key === key);
-                            return field ? (
-                              <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
-                            ) : null;
-                          })}
-                        </SettingsDensityFrame>
-                        <SettingsDensityFrame
-                          legend="Banner"
-                          intro={
-                            <p>
-                              Date and PLACEHOLDER text bars. Position applies when either banner is enabled.
-                            </p>
-                          }
-                        >
-                          {POSTER_OVERLAY_BANNER_KEYS.map((key) => {
-                            const field = active.fields.find((f) => f.key === key);
-                            return field ? (
-                              <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
-                            ) : null;
-                          })}
-                        </SettingsDensityFrame>
-                      </div>
+                      <SettingsDensityFrame
+                        legend="Layers"
+                        intro={
+                          <p>
+                            Compose grayscale, badge, and text banners independently. The preview updates as you
+                            change options. Banner position applies when either text banner is enabled.
+                          </p>
+                        }
+                      >
+                        {[...POSTER_OVERLAY_LAYER_KEYS, ...POSTER_OVERLAY_BANNER_KEYS].map((key) => {
+                          const field = active.fields.find((f) => f.key === key);
+                          return field ? (
+                            <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
+                          ) : null;
+                        })}
+                      </SettingsDensityFrame>
                     }
                   />
                 </div>
@@ -11551,9 +11523,6 @@ function OnboardingWizard(props: {
             Placeholdarr keeps using Radarr/Sonarr posters.
           </p>
         ) : null}
-        {field.key === "PLACEHOLDER_POSTER_PLACEHOLDER_BANNER" && !density ? (
-          <p className="mb-2 text-[12px] font-headline uppercase tracking-wider text-slate-500">Banner</p>
-        ) : null}
         <label
           className={`block text-[16px] font-semibold text-white font-headline mb-1 ${
             field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" && !density ? "mt-3" : ""
@@ -12113,27 +12082,19 @@ function OnboardingWizard(props: {
                     values={props.values}
                     compact
                     controls={
-                      <div className="space-y-6">
-                        <SettingsDensityFrame
-                          legend="Layers"
-                          intro={
-                            <p>
-                              Compose grayscale and badge layers independently. The preview updates as you change
-                              options.
-                            </p>
-                          }
-                        >
-                          {layerFields.map((field) => wizardFieldRow(field, { density: true }))}
-                        </SettingsDensityFrame>
-                        <SettingsDensityFrame
-                          legend="Banner"
-                          intro={
-                            <p>Date and PLACEHOLDER text bars. Position applies when either banner is enabled.</p>
-                          }
-                        >
-                          {bannerFields.map((field) => wizardFieldRow(field, { density: true }))}
-                        </SettingsDensityFrame>
-                      </div>
+                      <SettingsDensityFrame
+                        legend="Layers"
+                        intro={
+                          <p>
+                            Compose grayscale, badge, and text banners independently. The preview updates as you
+                            change options. Banner position applies when either text banner is enabled.
+                          </p>
+                        }
+                      >
+                        {[...layerFields, ...bannerFields].map((field) =>
+                          wizardFieldRow(field, { density: true }),
+                        )}
+                      </SettingsDensityFrame>
                     }
                   />
                 </div>

@@ -1069,30 +1069,31 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
     run_id = str(payload.get(ART_BACKFILL_RUN_ID_KEY) or "").strip()
     task_run_id_raw = task_run_id_for_live
     items_in_batch = max(int(loop_pos[0]), int(n_total or 0))
+    # Do not mark the batch done after cancel: abandon freezes live instead.
     if task_run_id_raw is not None and run_id and not cancelled:
         try:
-            # Lock finished items into art_backfill before the done publish so overall %
-            # does not double-count this batch as both locked and in-flight.
+            batch_total = max(1, int(n_total or 0))
+            batch_done = items_in_batch if items_in_batch > 0 else batch_total
+            # Counters + live done bar in one locked summary write (avoids lost batches_done).
             accumulate_art_backfill_counts(
                 int(task_run_id_raw),
                 run_id,
                 batch_counts,
                 exclude_job_id=int(job.id),
                 items_processed=items_in_batch,
+                completed_batch=(
+                    {
+                        "index": int(batch_index),
+                        "done": int(batch_done),
+                        "total": int(batch_total),
+                        "status": "done",
+                    }
+                    if batch_index > 0
+                    else None
+                ),
             )
         except Exception as exc:
             logger.debug(f"art backfill phase stats update skipped: {exc}", extra={"emoji_type": "debug"})
-
-    # Do not mark the batch done after cancel: that fills bars to 100% while overall
-    # stays near 0%. Abandon freezes live (clears batches, keeps phase counts).
-    if task_run_id_for_live is not None and batch_index > 0 and not cancelled:
-        _publish_art_batch_live(
-            task_run_id_for_live,
-            batch_index=batch_index,
-            done=items_in_batch if items_in_batch > 0 else max(1, n_total),
-            total=max(1, n_total),
-            status="done",
-        )
 
     try:
         session.commit()

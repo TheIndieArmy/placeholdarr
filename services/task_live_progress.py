@@ -274,8 +274,8 @@ def freeze_task_live_on_interrupt(live: dict[str, Any] | None) -> dict[str, Any]
     return out
 
 
-def publish_task_live_progress(
-    task_run_id: int,
+def _build_live_payload(
+    summary: dict[str, Any],
     *,
     kind: str,
     label: str,
@@ -289,28 +289,13 @@ def publish_task_live_progress(
     detail_sections: list[dict[str, Any]] | None = None,
     replace_active_units: bool = False,
     replace_phases: bool = False,
+    now: datetime | None = None,
 ) -> dict[str, Any] | None:
-    """Merge-safe write of ``summary.live``. Bumps ``seq`` on every publish.
-
-    ``phases`` are durable per-pipeline-step bars (art: Determining + Updating;
-    full sync later: one bar per sync phase). Unlike ``active_units`` (ephemeral
-    batches), completed phases are never pruned from the live payload.
-    """
-    from services.task_run_history import update_task_run_summary
-
-    try:
-        run_id = int(task_run_id)
-    except Exception:
-        return None
-    if run_id <= 0:
-        return None
-
-    now = _utc_now()
-    summary = _load_summary(run_id)
+    """Build next ``summary.live`` from a locked summary snapshot. Returns None if frozen."""
     prev = summary.get(LIVE_KEY) if isinstance(summary.get(LIVE_KEY), dict) else {}
-    # After Stop / abandon: keep the frozen snapshot; ignore late batch/finalize publishes.
     if summary.get("interrupted") or (isinstance(prev, dict) and prev.get("frozen")):
-        return prev if isinstance(prev, dict) else None
+        return None
+    stamp = now or _utc_now()
     try:
         seq = int(prev.get("seq") or 0) + 1
     except Exception:
@@ -320,10 +305,21 @@ def publish_task_live_progress(
     if replace_active_units:
         merged_units = _prune_active_units(
             [u for u in (_normalize_unit(x) for x in (active_units or [])) if u],
-            now=now,
+            now=stamp,
         )
     else:
-        merged_units = _merge_active_units(prev_units, active_units, now=now)
+        merged_units = _merge_active_units(prev_units, active_units, now=stamp)
+    # Completion publishes must land at full total even if the last heartbeat was N-1.
+    for unit in merged_units:
+        if str(unit.get("status") or "").lower() != "done":
+            continue
+        try:
+            total_u = int(unit.get("total") or 0)
+            done_u = int(unit.get("done") or 0)
+        except Exception:
+            continue
+        if total_u > 0 and done_u < total_u:
+            unit["done"] = total_u
 
     prev_phases = list(prev.get("phases") or []) if isinstance(prev.get("phases"), list) else []
     if phases is None and not replace_phases:
@@ -336,7 +332,12 @@ def publish_task_live_progress(
     done = max(0, int(units_done or 0))
     if total > 0:
         done = min(done, total)
+        # Match phase honesty: do not report 100% while a batch bar is still working.
+        if any(str(u.get("status") or "").lower() == "working" for u in merged_units) and done >= total:
+            done = total - 1
         overall_pct = int(round((100.0 * done) / total))
+        if done < total:
+            overall_pct = min(overall_pct, 99)
     else:
         # Nothing queued (e.g. determination found no art mismatches): treat as complete.
         overall_pct = 100
@@ -358,9 +359,9 @@ def publish_task_live_progress(
         else:
             stage_text = stage_key.replace("_", " ").title()
 
-    live: dict[str, Any] = {
+    return {
         "seq": seq,
-        "updated_at": _iso(now),
+        "updated_at": _iso(stamp),
         "kind": str(kind or "").strip().lower() or "task",
         "label": str(label or "Task").strip() or "Task",
         "stage": stage_key,
@@ -373,12 +374,74 @@ def publish_task_live_progress(
         "active_units": merged_units,
         "detail_sections": list(sections or []),
     }
+
+
+def publish_task_live_progress(
+    task_run_id: int,
+    *,
+    kind: str,
+    label: str,
+    units_done: int,
+    units_total: int,
+    unit_label: str = "batches",
+    stage: str | None = None,
+    stage_label: str | None = None,
+    phases: list[dict[str, Any]] | None = None,
+    active_units: list[dict[str, Any]] | None = None,
+    detail_sections: list[dict[str, Any]] | None = None,
+    replace_active_units: bool = False,
+    replace_phases: bool = False,
+) -> dict[str, Any] | None:
+    """Merge-safe write of ``summary.live`` under a row lock. Bumps ``seq`` on every publish.
+
+    ``phases`` are durable per-pipeline-step bars (art: Determining + Updating;
+    full sync later: one bar per sync phase). Unlike ``active_units`` (ephemeral
+    batches), completed phases are never pruned from the live payload.
+    """
+    from services.task_run_history import mutate_task_run_summary
+
     try:
-        update_task_run_summary(run_id, {LIVE_KEY: live})
+        run_id = int(task_run_id)
+    except Exception:
+        return None
+    if run_id <= 0:
+        return None
+
+    now = _utc_now()
+    built: dict[str, Any] | None = None
+
+    def _mutator(summary: dict[str, Any]) -> dict[str, Any] | None:
+        nonlocal built
+        live = _build_live_payload(
+            summary,
+            kind=kind,
+            label=label,
+            units_done=units_done,
+            units_total=units_total,
+            unit_label=unit_label,
+            stage=stage,
+            stage_label=stage_label,
+            phases=phases,
+            active_units=active_units,
+            detail_sections=detail_sections,
+            replace_active_units=replace_active_units,
+            replace_phases=replace_phases,
+            now=now,
+        )
+        if live is None:
+            prev = summary.get(LIVE_KEY) if isinstance(summary.get(LIVE_KEY), dict) else None
+            built = prev if isinstance(prev, dict) else None
+            return None
+        summary[LIVE_KEY] = live
+        built = live
+        return summary
+
+    try:
+        mutate_task_run_summary(run_id, _mutator)
     except Exception as exc:
         logger.debug("publish_task_live_progress failed run_id=%s: %s", run_id, exc, extra={"emoji_type": "debug"})
         return None
-    return live
+    return built
 
 
 def clear_task_live_progress(task_run_id: int) -> None:
@@ -455,6 +518,10 @@ def _art_items_progress(
             continue
 
     items_done = min(items_total, max(0, items_locked + in_flight))
+    # Never show Updating at 100% while any batch bar is still working (ghost or real).
+    any_working = any(str(u.get("status") or "").lower() == "working" for u in by_index.values())
+    if any_working and items_total > 0 and items_done >= items_total:
+        items_done = items_total - 1
     return items_done, items_total
 
 
@@ -639,19 +706,24 @@ def publish_art_determination_live(
     )
 
 
-def publish_art_refresh_live(
-    task_run_id: int,
+def apply_art_refresh_live_into_summary(
+    summary: dict[str, Any],
     *,
+    task_run_id: int | None = None,
     active_batch: dict[str, Any] | None = None,
     replace_active_units: bool = False,
+    now: datetime | None = None,
 ) -> dict[str, Any] | None:
-    """Art-refresh adapter: derive live fields from ``summary.art_backfill`` + phases."""
-    summary = _load_summary(int(task_run_id))
+    """Derive art live fields into ``summary[live]`` (caller holds the row lock)."""
     art = summary.get("art_backfill") if isinstance(summary.get("art_backfill"), dict) else {}
     counts = art.get("counts") if isinstance(art.get("counts"), dict) else {}
     batches_done = int(art.get("batches_done") or 0)
     batches_total = int(art.get("batch_count") or 0)
-    trigger = _task_run_trigger(int(task_run_id)) or str(summary.get("trigger") or "").strip() or "-"
+    trigger = "-"
+    if task_run_id is not None:
+        trigger = _task_run_trigger(int(task_run_id)) or str(summary.get("trigger") or "").strip() or "-"
+    else:
+        trigger = str(summary.get("trigger") or "").strip() or "-"
     source = str(art.get("source") or summary.get("art_backfill_source") or "-")
     prev_live = summary.get(LIVE_KEY) if isinstance(summary.get(LIVE_KEY), dict) else {}
     items_done, items_total = _art_items_progress(art, active_batch=active_batch, prev_live=prev_live)
@@ -771,11 +843,12 @@ def publish_art_refresh_live(
         status=determining_status if determining_status in ("done", "skipped") else "done",
     )
 
+    replace_units = replace_active_units
     # Ephemeral batch bars: show while Updating is working; clear once the phase finishes
     # (prune-after-N-seconds only runs on subsequent publishes, which stop when the run ends).
     if updating_status in ("done", "skipped", "pending") or not art_working:
         units: list[dict[str, Any]] | None = []
-        replace_active_units = True
+        replace_units = True
     elif active_batch is not None:
         units = [active_batch]
     else:
@@ -810,8 +883,8 @@ def publish_art_refresh_live(
         headline_done, headline_total = items_done, items_total
         stage, stage_label = "updating", "Updating"
 
-    return publish_task_live_progress(
-        int(task_run_id),
+    live = _build_live_payload(
+        summary,
         kind="art_refresh",
         label="Art refresh",
         stage=stage,
@@ -822,5 +895,49 @@ def publish_art_refresh_live(
         phases=phase_updates,
         active_units=units,
         detail_sections=detail_sections,
-        replace_active_units=replace_active_units,
+        replace_active_units=replace_units,
+        now=now,
     )
+    if live is None:
+        return None
+    summary[LIVE_KEY] = live
+    return live
+
+
+def publish_art_refresh_live(
+    task_run_id: int,
+    *,
+    active_batch: dict[str, Any] | None = None,
+    replace_active_units: bool = False,
+) -> dict[str, Any] | None:
+    """Art-refresh adapter: derive live fields from ``summary.art_backfill`` + phases."""
+    from services.task_run_history import mutate_task_run_summary
+
+    try:
+        run_id = int(task_run_id)
+    except Exception:
+        return None
+    if run_id <= 0:
+        return None
+
+    built: dict[str, Any] | None = None
+    now = _utc_now()
+
+    def _mutator(summary: dict[str, Any]) -> dict[str, Any] | None:
+        nonlocal built
+        live = apply_art_refresh_live_into_summary(
+            summary,
+            task_run_id=run_id,
+            active_batch=active_batch,
+            replace_active_units=replace_active_units,
+            now=now,
+        )
+        if live is None:
+            prev = summary.get(LIVE_KEY) if isinstance(summary.get(LIVE_KEY), dict) else None
+            built = prev if isinstance(prev, dict) else None
+            return None
+        built = live
+        return summary
+
+    mutate_task_run_summary(run_id, _mutator)
+    return built

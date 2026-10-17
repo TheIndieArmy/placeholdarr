@@ -192,7 +192,9 @@ export function TaskLiveDetailSections(props: {
 function phaseBarPct(done: number, total: number, status: LivePhaseBar["status"]): number {
   if (status === "pending" || status === "skipped") return 0;
   if (total <= 0) return status === "done" ? 100 : 0;
-  return Math.max(0, Math.min(100, Math.round((100 * done) / total)));
+  if (status === "done" || done >= total) return 100;
+  // Working: never paint a full bar from rounding (e.g. 249/250 → 100%).
+  return Math.min(99, Math.floor((100 * done) / total));
 }
 
 function phaseCountsLabel(phase: LivePhaseBar): string {
@@ -255,7 +257,7 @@ export function TaskLiveProgress(props: {
             const pct = phaseBarPct(phase.done, phase.total, phase.status);
             const working = phase.status === "working";
             const failed = phase.status === "failed";
-            const done = phase.status === "done" || (pct >= 100 && phase.status !== "skipped" && !failed);
+            const done = phase.status === "done";
             const pending = phase.status === "pending";
             const skipped = phase.status === "skipped";
             const statusNote = done
@@ -315,16 +317,23 @@ export function TaskLiveProgress(props: {
       {units.length ? (
         <ul className={compact ? "space-y-2" : "space-y-2.5"}>
           {units.map((unit) => {
-            const pct = unit.total > 0 ? Math.round((100 * unit.done) / unit.total) : unit.status === "done" ? 100 : 0;
             const working = unit.status === "working";
-            const done = !working || pct >= 100;
+            const finished = unit.status === "done" || (unit.total > 0 && unit.done >= unit.total);
+            const pct =
+              unit.total <= 0
+                ? finished
+                  ? 100
+                  : 0
+                : finished
+                  ? 100
+                  : Math.min(99, Math.floor((100 * unit.done) / unit.total));
             const name = unit.label || (compact ? `B${unit.index}` : `Batch ${unit.index}`);
             return (
               <li key={unit.index} className="space-y-1">
                 <div className={`flex items-center justify-between gap-2 ${compact ? "text-[11px]" : "text-[12px]"}`}>
-                  <span className={`font-headline uppercase tracking-wider ${working ? fg : muted}`}>
+                  <span className={`font-headline uppercase tracking-wider ${working && !finished ? fg : muted}`}>
                     {name}
-                    {!working ? (
+                    {finished ? (
                       <span className="ml-1.5 normal-case tracking-normal opacity-70">done</span>
                     ) : null}
                   </span>
@@ -334,7 +343,9 @@ export function TaskLiveProgress(props: {
                 </div>
                 <div className={`h-1.5 w-full overflow-hidden rounded-full ${track}`}>
                   <div
-                    className={`h-full rounded-full transition-[width] duration-500 ease-out ${done ? fillDone : fill}`}
+                    className={`h-full rounded-full transition-[width] duration-500 ease-out ${
+                      finished ? fillDone : fill
+                    }`}
                     style={{ width: `${Math.max(0, Math.min(100, pct))}%` }}
                   />
                 </div>

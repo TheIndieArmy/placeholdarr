@@ -59,6 +59,8 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Art refresh queued**: While batches wait on workers (e.g. during startup sync), live progress shows Queued instead of a stuck Updating bar.
 - **Stop shows STOPPED**: Manual and settings-apply Stop both end as STOPPED (not DONE or FAILED); cancelled art determination no longer finishes as done.
 - **Stop freezes live progress**: Clearing batch bars and keeping phase counts at the stop moment; cancelled art batches no longer publish as 100% done.
+- **Art live progress races**: Task-run summary updates take a row lock; batch completion increments counters and marks the live bar done in one write.
+- **Art progress honesty**: Updating stays below 100% while any batch is working; working bars no longer round 249/250 to a full green bar.
 - **Shared overlay meta poison**: Per-poster `layers` stamps in `.poster-overlay.json` so rewriting series art cannot mark season/episode files current without rewriting them.
 
 ## [0.11.2] - 2026-10-15
