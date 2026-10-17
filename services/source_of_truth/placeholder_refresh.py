@@ -495,10 +495,10 @@ def execute_placeholder_refresh_apply_scope(
             )
             finish_task_run(task_run_id, status="done", summary=done_summary)
             return out
-        merged = _persist_placeholder_refresh_progress(
-            task_run_id, {**task_summary, **out}, overall_status="WORKING"
-        )
-        update_task_run_summary(task_run_id, merged)
+        # begin_*_backfill_phase already wrote phases, progress, and art_backfill.run_id.
+        # Do not re-persist the pre-enqueue summary or the enqueue result dict under
+        # art_backfill / nfo_backfill — that wiped metrics and broke accumulate updates.
+        _merge_placeholder_refresh_enqueue_flags(task_run_id, out)
 
     if (requested_metadata and not metadata_committed) or (requested_art and not art_committed):
         out["ok"] = False
@@ -531,6 +531,17 @@ def placeholder_refresh_task_label(summary: dict[str, Any] | None) -> str:
     if art:
         return "Art refresh"
     return "Placeholder refresh"
+
+
+def _merge_placeholder_refresh_enqueue_flags(task_run_id: int, out: dict[str, Any]) -> None:
+    """Attach enqueue result flags without clobbering begin_* phase metrics / run ids."""
+    from services.task_run_history import update_task_run_summary
+    from services.task_run_phases import _load_summary
+
+    live = _load_summary(int(task_run_id)) or {}
+    skip = {"art_backfill", "nfo_backfill", "phases", "progress"}
+    safe = {k: v for k, v in out.items() if k not in skip}
+    update_task_run_summary(int(task_run_id), {**live, **safe, "enqueued": bool(out.get("enqueued"))})
 
 
 def _persist_placeholder_refresh_progress(
@@ -692,8 +703,8 @@ def run_placeholder_refresh_task(
                 metadata_committed=metadata_committed,
                 art_committed=art_committed,
             )
-        merged = _persist_placeholder_refresh_progress(task_run_id, {**summary, **out}, overall_status="WORKING")
-        update_task_run_summary(task_run_id, merged)
+        # begin_* already persisted metrics; keep them (see execute_placeholder_refresh_apply_scope).
+        _merge_placeholder_refresh_enqueue_flags(task_run_id, out)
         return out
     except Exception as exc:
         session.rollback()

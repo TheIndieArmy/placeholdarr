@@ -62,6 +62,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Settings Apply now**: Art / NFO / destination / density Apply-now work runs after the save response so the Settings UI unblocks immediately.
 - **Settings Apply now art enqueue**: Overlay Apply now skips the multi-minute sidecar scan and queues batches immediately; Tasks reconcile no longer marks the refresh done before jobs exist.
 - **Settings Apply now after next full sync**: Choosing Apply now consumes a pending art/metadata refresh left from an earlier “next full sync” save.
+- **Placeholder refresh Tasks metrics**: Enqueue no longer overwrites art/metadata phase metrics, so Placeholders queued and Batches completed keep updating while Apply now / Refresh art runs.
 
 ### Fixed
 
