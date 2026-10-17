@@ -110,23 +110,72 @@ def _normalize_art_url(url: str | None) -> str:
     return str(url or "").strip()
 
 
-def _normalize_outputs_map(raw: Any) -> dict[str, dict[str, str]]:
-    """Per-artifact entries: meta_key -> {file, source_url, source_kind?, overlay_text?}. Supports legacy string values."""
+def _layers_stamp_from_settings() -> dict[str, Any]:
+    """Layer + logo fingerprint stored on each output entry when that JPEG is written."""
+    layers = overlay_layer_fingerprint()
+    return {
+        "grayscale": bool(layers.get("grayscale")),
+        "badge": bool(layers.get("badge")),
+        "badge_position": str(layers.get("badge_position") or "bottom_right"),
+        "placeholder_banner": bool(layers.get("placeholder_banner")),
+        "banner_position": str(layers.get("banner_position") or poster_banner_position()),
+        "logo_stamp": logo_asset_stamp(),
+    }
+
+
+def _normalize_layers_stamp(raw: Any) -> dict[str, Any] | None:
+    """Return a normalized per-output layers stamp, or None when missing/legacy."""
+    if not isinstance(raw, dict):
+        return None
+    # Require at least one layer key so empty dicts do not count as stamped.
+    if not any(
+        k in raw
+        for k in (
+            "grayscale",
+            "badge",
+            "badge_position",
+            "placeholder_banner",
+            "banner_position",
+            "logo_stamp",
+        )
+    ):
+        return None
+    badge_pos = str(raw.get("badge_position") or "bottom_right").strip().lower().replace("-", "_")
+    banner_pos = str(raw.get("banner_position") or "top").strip().lower() or "top"
+    return {
+        "grayscale": bool(raw.get("grayscale")),
+        "badge": bool(raw.get("badge")),
+        "badge_position": badge_pos or "bottom_right",
+        "placeholder_banner": bool(raw.get("placeholder_banner")),
+        "banner_position": banner_pos,
+        "logo_stamp": str(raw.get("logo_stamp") or ""),
+    }
+
+
+def _normalize_outputs_map(raw: Any) -> dict[str, dict[str, Any]]:
+    """Per-artifact entries: meta_key -> {file, source_url, source_kind?, overlay_text?, layers?}.
+
+    Supports legacy string values. ``layers`` is the stamp for that JPEG only so writing
+    one sibling cannot mark others current via shared folder-level flags.
+    """
     if not isinstance(raw, dict):
         return {}
-    out: dict[str, dict[str, str]] = {}
+    out: dict[str, dict[str, Any]] = {}
     for key, value in raw.items():
         if isinstance(value, dict):
             file_name = str(value.get("file") or "").strip()
             src = _normalize_art_url(value.get("source_url"))
             if file_name and src:
-                entry = {"file": file_name, "source_url": src}
+                entry: dict[str, Any] = {"file": file_name, "source_url": src}
                 kind = str(value.get("source_kind") or "").strip()
                 if kind:
                     entry["source_kind"] = kind
                 overlay_text = str(value.get("overlay_text") or "").strip()
                 if overlay_text:
                     entry["overlay_text"] = overlay_text
+                layers = _normalize_layers_stamp(value.get("layers"))
+                if layers is not None:
+                    entry["layers"] = layers
                 out[str(key)] = entry
         elif isinstance(value, str) and value.strip():
             out[str(key)] = {"file": value.strip(), "source_url": ""}
@@ -229,7 +278,7 @@ def _episode_thumb_source(episode: Any, series: Any) -> tuple[str, str]:
     return "", "none"
 
 
-def _output_entry(meta: dict | None, meta_key: str, *, legacy_source_url: str = "") -> dict[str, str] | None:
+def _output_entry(meta: dict | None, meta_key: str, *, legacy_source_url: str = "") -> dict[str, Any] | None:
     if not meta:
         return None
     outputs = _normalize_outputs_map(meta.get("outputs"))
@@ -268,24 +317,31 @@ def _write_meta(
 ) -> None:
     existing = _read_meta(meta_path) or {}
     outputs = _normalize_outputs_map(existing.get("outputs"))
-    entry: dict[str, str] = {"file": output_basename, "source_url": _normalize_art_url(source_url)}
+    entry_layers = _layers_stamp_from_settings()
+    entry: dict[str, Any] = {
+        "file": output_basename,
+        "source_url": _normalize_art_url(source_url),
+        "layers": entry_layers,
+    }
     if source_kind:
         entry["source_kind"] = source_kind
     desired_text = _effective_overlay_text(mode, overlay_text)
     if desired_text:
         entry["overlay_text"] = desired_text
     outputs[meta_key] = entry
+    # Folder-level layer keys remain for humans / older readers; skip/regen uses
+    # per-output ``layers`` so a sibling write cannot mark unwritten files current.
     layers = overlay_layer_fingerprint()
     payload = {
         "mode": mode if mode in {"off", "grayscale", "top_banner", "corner_logo"} else COMPOSE_MODE,
         "outputs": outputs,
-        "logo_stamp": logo_asset_stamp(),
+        "logo_stamp": str(entry_layers.get("logo_stamp") or logo_asset_stamp()),
         "coming_soon_banner": bool(layers.get("coming_soon_banner")),
-        "banner_position": str(layers.get("banner_position") or poster_banner_position()),
-        "grayscale": bool(layers.get("grayscale")),
-        "badge": bool(layers.get("badge")),
-        "badge_position": str(layers.get("badge_position") or "bottom_right"),
-        "placeholder_banner": bool(layers.get("placeholder_banner")),
+        "banner_position": str(entry_layers.get("banner_position") or poster_banner_position()),
+        "grayscale": bool(entry_layers.get("grayscale")),
+        "badge": bool(entry_layers.get("badge")),
+        "badge_position": str(entry_layers.get("badge_position") or "bottom_right"),
+        "placeholder_banner": bool(entry_layers.get("placeholder_banner")),
     }
     from services.placeholders import _apply_dir_chain_permissions, _ensure_open_permissions
 
@@ -325,22 +381,6 @@ def _needs_regenerate(
         return True
     if want_mode != COMPOSE_MODE and stored_mode != want_mode:
         return True
-    if str(meta.get("logo_stamp") or "") != logo_asset_stamp():
-        return True
-    layers = overlay_layer_fingerprint()
-    if bool(meta.get("grayscale")) != bool(layers.get("grayscale")):
-        return True
-    if bool(meta.get("badge")) != bool(layers.get("badge")):
-        return True
-    stored_badge_pos = str(meta.get("badge_position") or "bottom_right").strip().lower().replace("-", "_")
-    if stored_badge_pos != str(layers.get("badge_position") or "bottom_right"):
-        return True
-    if bool(meta.get("placeholder_banner")) != bool(layers.get("placeholder_banner")):
-        return True
-    # Text banner placement. Legacy meta without the key is treated as top.
-    stored_pos = str(meta.get("banner_position") or "top").strip().lower() or "top"
-    if stored_pos != str(layers.get("banner_position") or poster_banner_position()):
-        return True
     # Do not invalidate on coming_soon_banner setting alone: overlay_text already
     # captures whether a date strip is drawn. Non-Coming-Soon titles stay unchanged.
     entry = _output_entry(meta, meta_key, legacy_source_url=str(meta.get("source_url") or ""))
@@ -352,6 +392,13 @@ def _needs_regenerate(
         return True
     expected_file = str(entry.get("file") or "").strip()
     if expected_file and os.path.basename(output_path) != expected_file:
+        return True
+    # Per-output layer stamp. Missing stamp (legacy / sibling poisoned by a shared
+    # folder-level update) always regenerates so each JPEG is rewritten once.
+    stored_layers = _normalize_layers_stamp(entry.get("layers"))
+    if stored_layers is None:
+        return True
+    if stored_layers != _layers_stamp_from_settings():
         return True
     desired_text = _effective_overlay_text(mode, overlay_text)
     stored_text = str(entry.get("overlay_text") or "").strip()

@@ -23,7 +23,15 @@ function metricValue(
 
 function normalizePhaseStatus(raw: unknown): LivePhaseBar["status"] {
   const status = String(raw || "working").toLowerCase();
-  if (status === "done" || status === "pending" || status === "working" || status === "skipped") return status;
+  if (
+    status === "done" ||
+    status === "pending" ||
+    status === "working" ||
+    status === "skipped" ||
+    status === "failed"
+  ) {
+    return status;
+  }
   return "working";
 }
 
@@ -40,19 +48,22 @@ export function phasesFromLive(live: TaskRunLiveProgress): LivePhaseBar[] {
         const status = normalizePhaseStatus(phase.status);
         let done = Number(phase.done ?? 0);
         let total = Number(phase.total ?? 0);
-        if (status === "skipped" || status === "pending" || (status === "done" && total <= 0 && key === "updating")) {
+        if (status === "done" && total <= 0 && key === "updating") {
           // Empty Updating after a full determination is skipped, not 0/0 done.
-          if (status === "done" && key === "updating" && total <= 0) {
-            return {
-              key,
-              label: String(phase.label || key.replace(/_/g, " ")),
-              done: 0,
-              total: 0,
-              status: "skipped" as const,
-            } satisfies LivePhaseBar;
-          }
+          return {
+            key,
+            label: String(phase.label || key.replace(/_/g, " ")),
+            done: 0,
+            total: 0,
+            status: "skipped" as const,
+          } satisfies LivePhaseBar;
+        }
+        if (status === "skipped") {
           done = 0;
           total = 0;
+        } else if (status === "pending") {
+          done = 0;
+          // Keep total when known (queued work waiting on workers).
         }
         return {
           key,

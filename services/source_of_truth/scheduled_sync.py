@@ -218,6 +218,12 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
         try_complete_full_sync_task_run,
     )
 
+    from services.task_run_cancel import (
+        TaskRunCancelled,
+        ensure_task_run_not_cancelled,
+        task_run_cancel_scope,
+    )
+
     phases = TaskRunPhaseTracker(task_run_id, started_at=started_at)
     begin_full_sync()
     result: dict[str, Any] = {
@@ -228,9 +234,11 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
         "task_run_started_at": started_at.isoformat(),
     }
     try:
+      with task_run_cancel_scope(task_run_id):
         phases.begin("arr_sync", "ARR catalog sync")
         sync_stats: dict[str, Any] = {}
         for instance in _configured_arr_instances():
+            ensure_task_run_not_cancelled(task_run_id)
             arr_type = str(instance.get("arr_type") or "").strip().lower()
             if arr_type not in {"radarr", "sonarr"}:
                 continue
@@ -245,12 +253,15 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
 
         result["arr_sync"] = sync_stats
         phases.end("arr_sync", metrics=metrics_from_arr_sync(sync_stats))
+        ensure_task_run_not_cancelled(task_run_id)
 
         pipeline_stats: dict[str, Any] = {"run_id": run_id}
         acquire_pipeline_blocking()
         try:
+            ensure_task_run_not_cancelled(task_run_id)
             pipeline_stats["calendar_date_refresh"] = run_calendar_date_refresh()
 
+            ensure_task_run_not_cancelled(task_run_id)
             phases.begin("fs_scan", "Filesystem scan")
             scan_result = scan_once_if_needed(run_id, prefer_incremental=False)
             if isinstance(scan_result, tuple):
@@ -261,10 +272,12 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
             pipeline_stats["reconcile"] = run_placeholder_link_reconcile()
             phases.end("fs_scan", metrics=metrics_from_pipeline(pipeline_stats).get("fs_scan"))
 
+            ensure_task_run_not_cancelled(task_run_id)
             phases.begin("determination", "Status determination")
             pipeline_stats["determination"] = run_determination_pass()
             phases.end("determination", metrics=metrics_from_pipeline(pipeline_stats).get("determination"))
 
+            ensure_task_run_not_cancelled(task_run_id)
             phases.begin("materialization", "Placeholder materialization")
             pipeline_stats["materialization"] = run_materialization_pass()
             from services.source_of_truth.tag_placeholder_policy import (
@@ -297,6 +310,7 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
                     extra={"emoji_type": "warning"},
                 )
 
+            ensure_task_run_not_cancelled(task_run_id)
             phases.begin("calendar", "Calendar status")
             pipeline_stats["calendar"] = run_calendar_phase()
             pipeline_stats["orphan_placeholders"] = run_orphan_placeholder_cleanup()
@@ -306,6 +320,7 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
         finally:
             release_pipeline()
 
+        ensure_task_run_not_cancelled(task_run_id)
         sync_completed_at = datetime.now(timezone.utc)
         result["sync_completed_at"] = sync_completed_at.isoformat()
         mat = pipeline_stats.get("materialization") if isinstance(pipeline_stats.get("materialization"), dict) else {}
@@ -369,6 +384,19 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
         else:
             try_complete_full_sync_task_run(task_run_id)
         return result
+    except TaskRunCancelled:
+        logger.warning(
+            "Full sync stopped by user run_id=%s task_run_id=%s",
+            run_id,
+            task_run_id,
+            extra={"emoji_type": "warning"},
+        )
+        for key in list(phases._open.keys()):
+            phases.end(key, failed=True, status="failed")
+        result["cancelled"] = True
+        result["phases"] = phases.phases()
+        update_task_run_summary(task_run_id, result)
+        return result
     except Exception as exc:
         logger.exception("Full sync failed run_id=%s", run_id)
         for key in list(phases._open.keys()):
@@ -406,6 +434,12 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
         logger.warning("Lite sync skipped: pipeline busy", extra={"emoji_type": "warning"})
         return {"skipped": True, "reason": "pipeline_busy", "task_run_id": skip_id}
 
+    from services.task_run_cancel import (
+        TaskRunCancelled,
+        ensure_task_run_not_cancelled,
+        task_run_cancel_scope,
+    )
+
     own_run = task_run_id is None
     if own_run:
         task_run_id = begin_task_run(task_key="lite_sync", trigger=trigger)
@@ -413,6 +447,7 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
     started_at = datetime.now(timezone.utc)
     result: dict[str, Any] = {"task_run_id": task_run_id}
     try:
+      with task_run_cancel_scope(task_run_id):
         instances = _configured_arr_instances()
         _record_progress(
             task_run_id=task_run_id,
@@ -429,8 +464,11 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
             run_specials_backfill_if_pending,
         )
 
+        ensure_task_run_not_cancelled(task_run_id)
         specials_backfill_stats = run_specials_backfill_if_pending(instances=instances)
+        ensure_task_run_not_cancelled(task_run_id)
         pre_movie_ids, pre_episode_ids, recon_stats = run_lite_startup_reconciliation_pre_discovery()
+        ensure_task_run_not_cancelled(task_run_id)
         startup_sync_stats = _run_startup_lite_snapshot_for_instances(
             instances,
             seed_movie_row_ids=set(pre_movie_ids),
@@ -453,11 +491,13 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
 
         movie_row_ids = [int(x) for x in (startup_sync_stats.get("movie_row_ids") or []) if x is not None]
         episode_row_ids = [int(x) for x in (startup_sync_stats.get("episode_row_ids") or []) if x is not None]
+        ensure_task_run_not_cancelled(task_run_id)
         result["placeholder_truth"] = _refresh_placeholder_presence_for_entities(
             movie_row_ids=movie_row_ids,
             episode_row_ids=episode_row_ids,
         )
 
+        ensure_task_run_not_cancelled(task_run_id)
         phase_started = time.monotonic()
         result["calendar_date_refresh"] = run_calendar_date_refresh()
         logger.info(
@@ -466,6 +506,7 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
             extra={"emoji_type": "info"},
         )
 
+        ensure_task_run_not_cancelled(task_run_id)
         _record_progress(
             task_run_id=task_run_id,
             mode="lite",
@@ -488,6 +529,7 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
             }
         result["determination"] = determination_stats
 
+        ensure_task_run_not_cancelled(task_run_id)
         _record_progress(
             task_run_id=task_run_id,
             mode="lite",
@@ -514,6 +556,7 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
         )
         result["materialization"] = materialization_stats
 
+        ensure_task_run_not_cancelled(task_run_id)
         _record_progress(
             task_run_id=task_run_id,
             mode="lite",
@@ -553,6 +596,17 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
         if own_run:
             finish_task_run(task_run_id, status="done", summary=result)
             _apply_schedule_after_success("lite_sync", trigger)
+        return result
+    except TaskRunCancelled:
+        logger.warning(
+            "Lite sync stopped by user task_run_id=%s",
+            task_run_id,
+            extra={"emoji_type": "warning"},
+        )
+        result["cancelled"] = True
+        if own_run:
+            # Abandon already marked failed; keep that outcome.
+            update_task_run_summary(int(task_run_id), result)
         return result
     except Exception as exc:
         logger.exception("Lite sync failed")

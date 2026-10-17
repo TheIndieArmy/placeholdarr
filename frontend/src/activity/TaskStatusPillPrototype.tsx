@@ -1,7 +1,10 @@
 import { useEffect, useId, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { ConfirmModal } from "../ConfirmModal";
+import type { ThemeMode } from "../brandTypes";
 import { TaskLiveProgress, type TaskLiveProgressModel } from "./TaskLiveProgress";
 import { taskLiveFromApi } from "./taskLiveProgress";
+import { TASK_KEYS_WITH_STOP_SUPPORT, TASK_STOP_CONFIRM_MESSAGE } from "./taskStopConfirm";
 import type { TaskRunRow } from "../types/api";
 
 /**
@@ -21,14 +24,21 @@ function MinimizedTaskPill(props: {
   const pct = Math.max(0, Math.min(100, props.model.overallPct));
   const muted = glass ? "text-slate-400" : "text-slate-600";
   const fg = glass ? "text-slate-100" : "text-slate-900";
-  const barFill = pct >= 100 ? fillDone : fill;
+  const queued = String(props.model.stage || "").toLowerCase() === "queued";
+  const barFill = queued ? track : pct >= 100 ? fillDone : fill;
+  const stageText = queued ? "Queued" : props.model.stageLabel;
+  const countsText = queued
+    ? props.model.unitsTotal > 0
+      ? `0% · 0/${props.model.unitsTotal}`
+      : "Waiting for a worker"
+    : `${props.model.overallPct}% · ${props.model.unitsDone}/${props.model.unitsTotal}`;
 
   return (
     <button
       type="button"
       onClick={props.onClick}
       aria-expanded={false}
-      title="Show task progress"
+      title={queued ? "Show queued task" : "Show task progress"}
       className={`w-full rounded-lg border px-3 py-2.5 text-left transition-colors ${
         glass
           ? "border-[#424753]/55 bg-[#1e2430]/90 text-slate-200 hover:border-sky-500/40 hover:bg-[#252e3a]"
@@ -37,27 +47,31 @@ function MinimizedTaskPill(props: {
     >
       <div className="flex items-start gap-2">
         <span
-          className={`material-symbols-outlined mt-0.5 shrink-0 animate-spin ${glass ? "text-sky-400" : "text-sky-600"}`}
+          className={`material-symbols-outlined mt-0.5 shrink-0 ${
+            queued
+              ? glass
+                ? "text-slate-400"
+                : "text-slate-500"
+              : `animate-spin ${glass ? "text-sky-400" : "text-sky-600"}`
+          }`}
           style={{ fontSize: 16 }}
         >
-          progress_activity
+          {queued ? "schedule" : "progress_activity"}
         </span>
         <span className="min-w-0 flex-1">
           <span className={`block font-headline text-[12px] uppercase tracking-wider ${fg}`}>
             {props.model.label}
           </span>
-          {props.model.stageLabel ? (
+          {stageText ? (
             <span className={`mt-0.5 block font-headline text-[11px] uppercase tracking-wider ${muted}`}>
-              {props.model.stageLabel}
+              {stageText}
             </span>
           ) : null}
-          <span className={`mt-0.5 block tabular-nums text-[11px] ${muted}`}>
-            {props.model.overallPct}% · {props.model.unitsDone}/{props.model.unitsTotal}
-          </span>
+          <span className={`mt-0.5 block tabular-nums text-[11px] ${muted}`}>{countsText}</span>
           <div className={`mt-2 h-1.5 w-full overflow-hidden rounded-full ${track}`}>
             <div
               className={`h-full rounded-full transition-[width] duration-500 ease-out ${barFill}`}
-              style={{ width: `${pct}%` }}
+              style={{ width: queued ? "0%" : `${pct}%` }}
             />
           </div>
         </span>
@@ -68,23 +82,36 @@ function MinimizedTaskPill(props: {
 
 export function TaskStatusPillPrototype(props: {
   isStudioGlass: boolean;
+  themeMode: ThemeMode;
+  accentHex: string;
   /** Working task runs; live model from the first WORKING run with ``live``. */
   taskRuns?: TaskRunRow[];
+  onStopRun: (runId: number) => Promise<void> | void;
 }) {
   const glass = props.isStudioGlass;
   const navigate = useNavigate();
   const [expanded, setExpanded] = useState(false);
+  const [stopConfirmOpen, setStopConfirmOpen] = useState(false);
+  const [stopPending, setStopPending] = useState(false);
   const panelId = useId();
 
-  const liveModel = useMemo(() => {
-    const working = (props.taskRuns || []).find(
+  const workingRun = useMemo(() => {
+    return (props.taskRuns || []).find(
       (run) => String(run.status || "").toUpperCase() === "WORKING" && run.live,
     );
-    return taskLiveFromApi(working?.live);
   }, [props.taskRuns]);
 
+  const canStop = Boolean(
+    workingRun && TASK_KEYS_WITH_STOP_SUPPORT.has(String(workingRun.task_key || "").trim().toLowerCase()),
+  );
+
+  const liveModel = useMemo(() => taskLiveFromApi(workingRun?.live), [workingRun]);
+
   useEffect(() => {
-    if (!liveModel) setExpanded(false);
+    if (!liveModel) {
+      setExpanded(false);
+      setStopConfirmOpen(false);
+    }
   }, [liveModel]);
 
   useEffect(() => {
@@ -96,8 +123,9 @@ export function TaskStatusPillPrototype(props: {
     return () => window.removeEventListener("keydown", onKey);
   }, [expanded]);
 
-  if (!liveModel) return null;
+  if (!liveModel || !workingRun) return null;
 
+  const queued = String(liveModel.stage || "").toLowerCase() === "queued";
   const panelShell = glass
     ? "border-[#424753]/50 bg-[#141a24] text-slate-100"
     : "border-[#c5d0de] bg-[#eef3f8] text-slate-900";
@@ -117,7 +145,9 @@ export function TaskStatusPillPrototype(props: {
           className={`overflow-hidden rounded-xl border p-3 transition-all duration-300 ease-out ${panelShell}`}
         >
           <div className="mb-2.5 flex items-start justify-between gap-2">
-            <p className="text-[10px] font-headline uppercase tracking-widest opacity-50">In progress</p>
+            <p className="text-[10px] font-headline uppercase tracking-widest opacity-50">
+              {queued ? "Queued" : "In progress"}
+            </p>
             <button
               type="button"
               onClick={() => setExpanded(false)}
@@ -130,22 +160,61 @@ export function TaskStatusPillPrototype(props: {
             </button>
           </div>
           <TaskLiveProgress model={liveModel} density="compact" isStudioGlass={glass} />
-          <button
-            type="button"
-            onClick={goToTasks}
-            className={`mt-3 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-[12px] font-headline uppercase tracking-wider transition-colors ${
-              glass
-                ? "border-[#424753]/55 text-slate-300 hover:border-sky-500/40 hover:bg-white/5 hover:text-white"
-                : "border-[#c5d0de] text-slate-600 hover:border-sky-500/50 hover:bg-white hover:text-slate-900"
-            }`}
-          >
-            Open in Tasks
-            <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
-              arrow_forward
-            </span>
-          </button>
+          <div className="mt-3 flex flex-col gap-2">
+            {canStop ? (
+              <button
+                type="button"
+                onClick={() => setStopConfirmOpen(true)}
+                className={`inline-flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-[12px] font-headline uppercase tracking-wider transition-colors ${
+                  glass
+                    ? "border-rose-500/45 text-rose-300 hover:bg-rose-500/10 hover:text-rose-200"
+                    : "border-rose-400/70 text-rose-700 hover:bg-rose-50 hover:text-rose-800"
+                }`}
+              >
+                Stop task
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={goToTasks}
+              className={`inline-flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-[12px] font-headline uppercase tracking-wider transition-colors ${
+                glass
+                  ? "border-[#424753]/55 text-slate-300 hover:border-sky-500/40 hover:bg-white/5 hover:text-white"
+                  : "border-[#c5d0de] text-slate-600 hover:border-sky-500/50 hover:bg-white hover:text-slate-900"
+              }`}
+            >
+              Open in Tasks
+              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
+                arrow_forward
+              </span>
+            </button>
+          </div>
         </div>
       )}
+      {stopConfirmOpen ? (
+        <ConfirmModal
+          title="Stop this task?"
+          message={TASK_STOP_CONFIRM_MESSAGE}
+          confirmLabel={stopPending ? "Stopping…" : "Stop task"}
+          cancelLabel="Keep running"
+          accentHex={props.accentHex}
+          themeMode={props.themeMode}
+          onCancel={() => {
+            if (!stopPending) setStopConfirmOpen(false);
+          }}
+          onConfirm={() => {
+            if (stopPending) return;
+            setStopPending(true);
+            void Promise.resolve(props.onStopRun(workingRun.id))
+              .catch(() => undefined)
+              .finally(() => {
+                setStopPending(false);
+                setStopConfirmOpen(false);
+                setExpanded(false);
+              });
+          }}
+        />
+      ) : null}
     </div>
   );
 }

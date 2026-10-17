@@ -31,7 +31,7 @@ import {
 import { getCollectionPlexSections } from "./api/collections";
 import { DestinationMapEditor } from "./settings/DestinationMapEditor";
 import type { IntegrationsStatusResponse, PlexSectionOption } from "./types/api";
-import { postTaskRun } from "./api/tasks";
+import { postTaskAbandon, postTaskRun } from "./api/tasks";
 import { fetchJson, postJson, setUnauthorizedHandler, getCsrfToken } from "./api/client";
 import { changePassword, getAuthStatus, getWebhookApiKey, logoutAuth, regenerateWebhookApiKey, type AuthStatus } from "./api/auth";
 import { dismissWhatsNew, getWhatsNew, groupWhatsNewByVersion, type WhatsNewNotice } from "./api/whatsNew";
@@ -1962,6 +1962,16 @@ export function App() {
                 setTaskRunPending(false);
               }
             }}
+            onStopRun={async (runId) => {
+              setTaskRunError(null);
+              try {
+                await postTaskAbandon({ runId, reason: "stopped_by_user" });
+                void refreshTasks();
+              } catch (e) {
+                setTaskRunError(e instanceof Error ? e.message : "Failed to stop task");
+                throw e;
+              }
+            }}
           />
         );
       }
@@ -2695,7 +2705,22 @@ export function App() {
           </nav>
 
           <div className="mt-auto w-full shrink-0">
-            <TaskStatusPillPrototype isStudioGlass={isStudioGlass} taskRuns={taskHistory} />
+            <TaskStatusPillPrototype
+              isStudioGlass={isStudioGlass}
+              themeMode={themeMode}
+              accentHex={brandAccent.hex}
+              taskRuns={taskHistory}
+              onStopRun={async (runId) => {
+                setTaskRunError(null);
+                try {
+                  await postTaskAbandon({ runId, reason: "stopped_by_user" });
+                  void refreshTasks();
+                } catch (e) {
+                  setTaskRunError(e instanceof Error ? e.message : "Failed to stop task");
+                  throw e;
+                }
+              }}
+            />
             <button
               type="button"
               onClick={() => void openWhatsNewCatalog()}

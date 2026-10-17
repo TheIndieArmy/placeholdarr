@@ -25,6 +25,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Faster art determination**: One catalog load and one overlay check per movie/show before episode stills.
 - **Settings Apply now**: Save returns immediately; art work queues in the background and Tasks shows progress.
 - **Live task progress**: Art refresh shows determination and updating progress in Tasks and a sidebar pill while the run is working.
+- **Stop task**: Stop a working placeholder refresh from the run row or sidebar pill; status shows STOPPED.
 
 ### Added
 
@@ -33,6 +34,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Banner position**: Top or bottom text bars (default top). Badge corners stay independent.
 - **Poster Art**: TMDB language and overlays under Settings → Poster Art.
 - **Live task progress**: Working art refresh publishes shared live progress (determination, then updating) for Tasks and an expand-up sidebar pill.
+- **Stop task**: Stop a working placeholder refresh (art/metadata) from the run row or sidebar pill, with confirm.
 - **What's new (0.11.3)**: Startup ack for layered overlays pointing at Poster Art.
 
 ### Changed
@@ -54,6 +56,10 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Art refresh empty Updating**: Updating totals use enqueued placeholders (not the full scan); 0 needed finishes at 100% with Determination kept.
 - **Live phase bars**: Task live progress shows a durable bar per pipeline phase (not only the current stage); completed bars stay green at 100%.
 - **Art phase skip states**: Settings Apply skips Determining; a full scan with nothing to rewrite skips Updating (`—% · —/—`).
+- **Art refresh queued**: While batches wait on workers (e.g. during startup sync), live progress shows Queued instead of a stuck Updating bar.
+- **Stop shows STOPPED**: Manual and settings-apply Stop both end as STOPPED (not DONE or FAILED); cancelled art determination no longer finishes as done.
+- **Stop freezes live progress**: Clearing batch bars and keeping phase counts at the stop moment; cancelled art batches no longer publish as 100% done.
+- **Shared overlay meta poison**: Per-poster `layers` stamps in `.poster-overlay.json` so rewriting series art cannot mark season/episode files current without rewriting them.
 
 ## [0.11.2] - 2026-10-15
 

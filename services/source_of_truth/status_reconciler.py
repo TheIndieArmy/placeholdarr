@@ -367,9 +367,29 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
             daemon=True,
         )
         _nfo_hb_t.start()
+    from services.task_run_cancel import TaskRunCancelled, ensure_task_run_not_cancelled
+    from services.worker import is_claim_revoked
+
+    task_run_id_for_cancel = None
+    try:
+        raw_tid = (
+            payload.get("placeholder_refresh_task_run_id")
+            or payload.get("full_sync_task_run_id")
+            or payload.get("art_backfill_task_run_id")
+        )
+        if raw_tid is not None:
+            task_run_id_for_cancel = int(raw_tid)
+    except Exception:
+        task_run_id_for_cancel = None
+
+    cancelled = False
     try:
         for placeholder in placeholders:
             loop_pos[0] += 1
+            if task_run_id_for_cancel is not None:
+                ensure_task_run_not_cancelled(task_run_id_for_cancel)
+            if job.id is not None and is_claim_revoked(int(job.id)):
+                raise TaskRunCancelled(f"job_id={job.id} claim revoked")
             movie = session.query(Movie).get(placeholder.movie_id) if placeholder.movie_id else None
             episode = session.query(Episode).get(placeholder.episode_id) if placeholder.episode_id else None
             effective_has_placeholder = bool(getattr(placeholder, "has_placeholder", False))
@@ -413,8 +433,27 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
                 if kind in {PLACEHOLDER_KIND_SERIES_STUB, PLACEHOLDER_KIND_SEASON_STUB}:
                     entity_id = int(placeholder.season_id or placeholder.series_id or placeholder.id)
                     active_for_player_push.append((placeholder, (kind or "series_stub", entity_id)))
+    except TaskRunCancelled:
+        cancelled = True
+        logger.info(
+            f"nfo_refresh job_id={job.id} stopped early "
+            f"progress={loop_pos[0]}/{n_total} nfo_refreshed={refreshed}",
+            extra={"emoji_type": "info"},
+        )
     finally:
         stop_nfo_hb.set()
+
+    if cancelled:
+        try:
+            session.commit()
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "cancelled": True,
+            "nfo_refreshed": refreshed,
+            "scanned": int(loop_pos[0]),
+        }
 
     do_player = _job_player_metadata_refresh(job)
     run_id = str(payload.get("request_backfill_run_id") or "").strip()

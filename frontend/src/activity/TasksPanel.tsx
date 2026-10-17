@@ -3,6 +3,7 @@ import type { Brand, ThemeMode } from "../brandTypes";
 import { getBrandSemanticTokens } from "../brandSemanticTheme";
 import type { ActiveSearchItem, ActiveSearchesResponse } from "../api/dashboard";
 import type { ActivityRow, ScheduledTaskRow, TaskRunRow } from "../types/api";
+import { ConfirmModal } from "../ConfirmModal";
 import {
   TaskLiveDetailSections,
   TaskLiveProgress,
@@ -11,6 +12,7 @@ import {
 } from "./TaskLiveProgress";
 import { taskLiveFromApi } from "./taskLiveProgress";
 import { formatTaskDuration, formatTaskTrigger, timeAgo, timeUntil } from "./formatActivityTime";
+import { TASK_KEYS_WITH_STOP_SUPPORT, TASK_STOP_CONFIRM_MESSAGE } from "./taskStopConfirm";
 
 type StripAccent = { hex: string; text: string; icon: string; hoverHex: string };
 
@@ -72,9 +74,17 @@ function statusClass(status: string | null | undefined, semantic: { success: str
   const t = String(status || "").toUpperCase();
   if (t === "DONE") return semantic.success;
   if (t === "FAILED") return semantic.danger;
-  if (t === "SKIPPED") return "#d97706";
+  if (t === "STOPPED" || t === "SKIPPED") return "#d97706";
   if (t === "WORKING") return semantic.accentIce;
   return semantic.fgMuted;
+}
+
+function showRunErrorMessage(run: { status?: string | null; error_message?: string | null }): string | null {
+  const msg = String(run.error_message || "").trim();
+  if (!msg) return null;
+  // Status badge already says STOPPED; do not repeat stopped_by_user in red.
+  if (String(run.status || "").toLowerCase() === "stopped") return null;
+  return msg;
 }
 
 function ActiveSearchesSection(props: {
@@ -162,10 +172,13 @@ export function TasksPanel(props: {
   onRequestRun: (kind: "full" | "lite") => void;
   onRunCollections: () => Promise<void> | void;
   onRequestRefresh: (kind: "metadata" | "art" | "both") => Promise<void> | void;
+  onStopRun: (runId: number) => Promise<void> | void;
 }) {
   const semantic = getBrandSemanticTokens(props.brand, props.themeMode, props.accent);
   const isLight = props.themeMode === "light";
   const [historyExpanded, setHistoryExpanded] = useState<Record<string, boolean>>({});
+  const [stopConfirmRunId, setStopConfirmRunId] = useState<number | null>(null);
+  const [stopPending, setStopPending] = useState(false);
   const panelBorder = isLight ? semantic.border : "rgba(66,71,83,0.4)";
   const panelBg = isLight ? semantic.surfacePanel : "#171c22";
 
@@ -327,9 +340,9 @@ export function TasksPanel(props: {
             <table className="min-w-[640px] w-full">
               <thead>
                 <tr className="border-b" style={{ borderColor: isLight ? semantic.border : "rgba(66,71,83,0.2)" }}>
-                  {["Name", "Trigger", "Started", "Ended", "Duration", "Status"].map((h) => (
+                  {["Name", "Trigger", "Started", "Ended", "Duration", "Status", ""].map((h) => (
                     <th
-                      key={h}
+                      key={h || "actions"}
                       className="px-3 py-2 text-left text-[12px] font-headline uppercase tracking-widest font-normal"
                       style={{ color: semantic.fgSubtle }}
                     >
@@ -347,6 +360,10 @@ export function TasksPanel(props: {
                   const leftoverDetails = leftoverSections.map(legacySectionToLiveDetail);
                   const hasProgress = leftoverDetails.length > 0 || Boolean(liveModel);
                   const isExpanded = !!historyExpanded[rowKey];
+                  const isWorking = String(run.status || "").toUpperCase() === "WORKING";
+                  const canStop =
+                    isWorking && TASK_KEYS_WITH_STOP_SUPPORT.has(String(run.task_key || "").trim().toLowerCase());
+                  const errorLine = showRunErrorMessage(run);
                   return (
                     <Fragment key={run.id}>
                       <tr className="border-b" style={{ borderColor: isLight ? semantic.border : "rgba(66,71,83,0.15)" }}>
@@ -384,16 +401,28 @@ export function TasksPanel(props: {
                           <span className="text-[12px] font-headline uppercase tracking-wider" style={{ color: statusClass(run.status, semantic) }}>
                             {run.status}
                           </span>
-                          {run.error_message ? (
+                          {errorLine ? (
                             <p className="text-[11px] mt-0.5" style={{ color: semantic.danger }}>
-                              {run.error_message}
+                              {errorLine}
                             </p>
+                          ) : null}
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          {canStop ? (
+                            <button
+                              type="button"
+                              onClick={() => setStopConfirmRunId(run.id)}
+                              className="px-2.5 py-1 rounded-lg border text-[11px] font-headline uppercase tracking-wider"
+                              style={{ borderColor: semantic.danger, color: semantic.danger }}
+                            >
+                              Stop
+                            </button>
                           ) : null}
                         </td>
                       </tr>
                       {hasProgress && isExpanded ? (
                         <tr>
-                          <td colSpan={6} className="px-4 py-3" style={{ backgroundColor: isLight ? semantic.surfaceMuted : "#1a2028" }}>
+                          <td colSpan={7} className="px-4 py-3" style={{ backgroundColor: isLight ? semantic.surfaceMuted : "#1a2028" }}>
                             <div className="space-y-3">
                               {liveModel ? (
                                 <TaskLiveProgress
@@ -422,6 +451,30 @@ export function TasksPanel(props: {
           </div>
         )}
       </div>
+
+      {stopConfirmRunId != null ? (
+        <ConfirmModal
+          title="Stop this task?"
+          message={TASK_STOP_CONFIRM_MESSAGE}
+          confirmLabel={stopPending ? "Stopping…" : "Stop task"}
+          cancelLabel="Keep running"
+          accentHex={props.accent.hex}
+          themeMode={props.themeMode}
+          onCancel={() => {
+            if (!stopPending) setStopConfirmRunId(null);
+          }}
+          onConfirm={() => {
+            if (stopPending || stopConfirmRunId == null) return;
+            setStopPending(true);
+            void Promise.resolve(props.onStopRun(stopConfirmRunId))
+              .catch(() => undefined)
+              .finally(() => {
+                setStopPending(false);
+                setStopConfirmRunId(null);
+              });
+          }}
+        />
+      ) : null}
     </div>
   );
 }

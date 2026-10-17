@@ -196,7 +196,12 @@ function phaseBarPct(done: number, total: number, status: LivePhaseBar["status"]
 }
 
 function phaseCountsLabel(phase: LivePhaseBar): string {
-  if (phase.status === "pending" || phase.status === "skipped") return "—% · —/—";
+  if (phase.status === "skipped") return "—% · —/—";
+  if (phase.status === "pending") {
+    // Queued with a known size (e.g. batches waiting on workers).
+    if (phase.total > 0) return `0% · 0/${phase.total}`;
+    return "—% · —/—";
+  }
   const pct = phaseBarPct(phase.done, phase.total, phase.status);
   return `${pct}% · ${phase.done}/${phase.total}`;
 }
@@ -233,18 +238,35 @@ export function TaskLiveProgress(props: {
 
   return (
     <div className={compact ? "space-y-2.5" : "space-y-3"}>
-      <div className={`${compact ? "text-[12px]" : "text-[13px]"}`}>
+      <div className={`flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1 ${compact ? "text-[12px]" : "text-[13px]"}`}>
         <span className={`font-headline uppercase tracking-wider ${fg}`}>{props.model.label}</span>
+        {stage === "queued" ? (
+          <span className={`font-headline uppercase tracking-wider ${muted}`}>Queued</span>
+        ) : null}
       </div>
+      {stage === "queued" ? (
+        <p className={`${compact ? "text-[11px]" : "text-[12px]"} ${muted}`}>
+          Waiting for a worker. Other tasks may still be running.
+        </p>
+      ) : null}
       {hasPhases ? (
         <ul className={compact ? "space-y-2" : "space-y-2.5"}>
           {phases.map((phase) => {
             const pct = phaseBarPct(phase.done, phase.total, phase.status);
             const working = phase.status === "working";
-            const done = phase.status === "done" || (pct >= 100 && phase.status !== "skipped");
+            const failed = phase.status === "failed";
+            const done = phase.status === "done" || (pct >= 100 && phase.status !== "skipped" && !failed);
             const pending = phase.status === "pending";
             const skipped = phase.status === "skipped";
-            const statusNote = done ? "done" : pending ? "pending" : skipped ? "skipped" : null;
+            const statusNote = done
+              ? "done"
+              : pending
+                ? "pending"
+                : skipped
+                  ? "skipped"
+                  : failed
+                    ? "stopped"
+                    : null;
             return (
               <li key={phase.key} className="space-y-1">
                 <div className={`flex items-center justify-between gap-2 ${compact ? "text-[11px]" : "text-[12px]"}`}>

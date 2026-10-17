@@ -224,11 +224,18 @@ def clear_pending_intent() -> dict[str, Any]:
     return intent
 
 
+def _refresh_was_cancelled(result: Any) -> bool:
+    return isinstance(result, dict) and bool(result.get("cancelled"))
+
+
 def _refresh_enqueue_committed(result: Any) -> bool:
     """True when an enqueue helper completed successfully (work queued or nothing to do)."""
     if not isinstance(result, dict):
         return False
     if not bool(result.get("ok")):
+        return False
+    # User Stop during determination: not a successful empty enqueue.
+    if _refresh_was_cancelled(result):
         return False
     if bool(result.get("enqueued")):
         return True
@@ -247,6 +254,37 @@ def _refresh_enqueue_committed(result: Any) -> bool:
         return False
 
 
+def _finalize_placeholder_refresh_stopped(
+    *,
+    task_run_id: int,
+    summary: dict[str, Any],
+    out: dict[str, Any],
+    reason: str = "stopped_by_user",
+) -> dict[str, Any]:
+    """Close a refresh run after cooperative cancel (or no-op if abandon already stopped it)."""
+    from services.task_run_history import mark_summary_interrupted
+
+    stop_reason = str(reason or "stopped_by_user").strip() or "stopped_by_user"
+    merged = mark_summary_interrupted(
+        dict(summary),
+        ended_at=datetime.now(timezone.utc),
+        reason=stop_reason,
+    )
+    out = {**out, "ok": True, "cancelled": True, "reason": stop_reason, "enqueued": False}
+    merged = _persist_placeholder_refresh_progress(
+        task_run_id,
+        {**merged, **out},
+        overall_status="STOPPED",
+    )
+    finish_task_run(
+        task_run_id,
+        status="stopped",
+        summary=merged,
+        error_message=stop_reason,
+    )
+    return out
+
+
 def _finalize_placeholder_refresh_enqueue(
     *,
     task_run_id: int,
@@ -258,6 +296,14 @@ def _finalize_placeholder_refresh_enqueue(
     art_committed: bool,
 ) -> dict[str, Any]:
     """Close the task run only when every requested domain failed to enqueue; otherwise stay working."""
+    # Cancelled determination must not be reported as enqueue_failed.
+    if _refresh_was_cancelled(out.get("art_backfill")) or _refresh_was_cancelled(out.get("nfo_backfill")):
+        return _finalize_placeholder_refresh_stopped(
+            task_run_id=task_run_id,
+            summary=summary,
+            out=out,
+        )
+
     metadata_failed = bool(metadata and not metadata_committed)
     art_failed = bool(art and not art_committed)
     if not metadata_failed and not art_failed:
@@ -450,6 +496,12 @@ def execute_placeholder_refresh_apply_scope(
             **enqueue_kwargs,
         )
         out["art_backfill"] = art_out
+        if task_run_id is not None and task_summary is not None and _refresh_was_cancelled(art_out):
+            return _finalize_placeholder_refresh_stopped(
+                task_run_id=task_run_id,
+                summary=task_summary,
+                out=out,
+            )
         art_committed = _refresh_enqueue_committed(art_out)
         out["enqueued"] = bool(out["enqueued"] or art_committed and bool(art_out.get("enqueued")))
 
@@ -687,6 +739,12 @@ def run_placeholder_refresh_task(
                 payload_extras=art_extras,
             )
             out["art_backfill"] = art_out
+            if _refresh_was_cancelled(art_out):
+                return _finalize_placeholder_refresh_stopped(
+                    task_run_id=task_run_id,
+                    summary=summary,
+                    out=out,
+                )
             art_committed = _refresh_enqueue_committed(art_out)
             out["enqueued"] = bool(out["enqueued"] or (art_committed and bool(art_out.get("enqueued"))))
             if art_committed:

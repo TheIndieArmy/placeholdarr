@@ -498,11 +498,15 @@ def determine_art_refresh_ids(
     movie_need_cache: dict[int, bool] = {}
     series_need_cache: dict[int, bool] = {}
     scope = str(art_scope or "all").strip().lower() or "all"
+    from services.task_run_cancel import ensure_active_task_run_not_cancelled
+
     out: list[int] = []
     last_publish = time.monotonic()
     scanned = 0
     for pid in ids:
         scanned += 1
+        # Prefer ContextVar (manual refresh / sync); no-op when unset.
+        ensure_active_task_run_not_cancelled()
         ph = by_id.get(int(pid))
         if ph is None:
             continue
@@ -582,6 +586,8 @@ def enqueue_placeholder_art_refresh(
         ids = list(placeholder_ids or [])
         skipped = 0
         if not skip_determination and ids:
+            from services.task_run_cancel import TaskRunCancelled, task_run_cancel_scope
+
             def _on_determine_progress(scanned: int, total: int, needed: int) -> None:
                 if task_run_id_for_live is None:
                     return
@@ -597,12 +603,27 @@ def enqueue_placeholder_art_refresh(
                 except Exception as exc:
                     logger.debug(f"art determination live publish skipped: {exc}", extra={"emoji_type": "debug"})
 
-            needed = determine_art_refresh_ids(
-                session,
-                ids,
-                art_scope=art_scope,
-                on_progress=_on_determine_progress if task_run_id_for_live is not None else None,
-            )
+            try:
+                with task_run_cancel_scope(task_run_id_for_live):
+                    needed = determine_art_refresh_ids(
+                        session,
+                        ids,
+                        art_scope=art_scope,
+                        on_progress=_on_determine_progress if task_run_id_for_live is not None else None,
+                    )
+            except TaskRunCancelled:
+                logger.info(
+                    f"art determination stopped by user task_run_id={task_run_id_for_live}",
+                    extra={"emoji_type": "info"},
+                )
+                return {
+                    "ok": True,
+                    "cancelled": True,
+                    "placeholder_count": 0,
+                    "jobs_created": 0,
+                    "jobs_updated": 0,
+                    "skipped_determination": 0,
+                }
             skipped = max(0, len({int(x) for x in ids if x is not None}) - len(needed))
             ids = needed
 
@@ -958,9 +979,17 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
         )
         hb_thread.start()
 
+    from services.task_run_cancel import TaskRunCancelled, ensure_task_run_not_cancelled
+    from services.worker import is_claim_revoked
+
+    cancelled = False
     try:
         for placeholder in placeholders:
             loop_pos[0] += 1
+            if task_run_id_for_live is not None:
+                ensure_task_run_not_cancelled(task_run_id_for_live)
+            if job.id is not None and is_claim_revoked(int(job.id)):
+                raise TaskRunCancelled(f"job_id={job.id} claim revoked")
             if not bool(getattr(placeholder, "has_placeholder", False)):
                 continue
 
@@ -1026,6 +1055,13 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
                 # Episode thumbs live under the show; refresh series art agents too.
                 if series not in rewritten_series:
                     rewritten_series.append(series)
+    except TaskRunCancelled:
+        cancelled = True
+        logger.info(
+            f"placeholder_art_refresh job_id={job.id} stopped early "
+            f"progress={loop_pos[0]}/{n_total} wrote={wrote}",
+            extra={"emoji_type": "info"},
+        )
     finally:
         stop_hb.set()
 
@@ -1033,7 +1069,7 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
     run_id = str(payload.get(ART_BACKFILL_RUN_ID_KEY) or "").strip()
     task_run_id_raw = task_run_id_for_live
     items_in_batch = max(int(loop_pos[0]), int(n_total or 0))
-    if task_run_id_raw is not None and run_id:
+    if task_run_id_raw is not None and run_id and not cancelled:
         try:
             # Lock finished items into art_backfill before the done publish so overall %
             # does not double-count this batch as both locked and in-flight.
@@ -1047,7 +1083,9 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
         except Exception as exc:
             logger.debug(f"art backfill phase stats update skipped: {exc}", extra={"emoji_type": "debug"})
 
-    if task_run_id_for_live is not None and batch_index > 0:
+    # Do not mark the batch done after cancel: that fills bars to 100% while overall
+    # stays near 0%. Abandon freezes live (clears batches, keeps phase counts).
+    if task_run_id_for_live is not None and batch_index > 0 and not cancelled:
         _publish_art_batch_live(
             task_run_id_for_live,
             batch_index=batch_index,
@@ -1060,6 +1098,15 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
         session.commit()
     except Exception:
         pass
+
+    if cancelled:
+        return {
+            "ok": True,
+            "cancelled": True,
+            "wrote": wrote,
+            "scanned": int(loop_pos[0]),
+            "series_count": len(processed_series),
+        }
 
     if refresh_paths and not bulk_completion:
         try:

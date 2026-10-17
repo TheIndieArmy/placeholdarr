@@ -58,6 +58,7 @@ export interface TaskRunRow {
   task_key: TaskKey | string;
   task_label: string;
   trigger: string;
+  /** working | done | failed | stopped | skipped */
   status: string;
   started_at: string | null;
   ended_at: string | null;

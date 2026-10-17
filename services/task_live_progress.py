@@ -158,11 +158,16 @@ def _normalize_phase(raw: dict[str, Any] | None) -> dict[str, Any] | None:
     except Exception:
         total = 0
     status = str(raw.get("status") or "working").strip().lower()
-    if status not in ("working", "done", "pending", "skipped"):
+    if status not in ("working", "done", "pending", "skipped", "failed"):
         status = "working"
-    if status in ("skipped", "pending"):
+    if status == "skipped":
+        # Intentionally not run: no meaningful counts.
         done = 0
         total = 0
+    elif status == "pending":
+        # Queued / not started yet: keep total when known (e.g. batches waiting on workers).
+        done = 0
+        total = max(0, total)
     elif status == "done" and total <= 0:
         done = 0
     elif total > 0:
@@ -203,10 +208,13 @@ def _merge_phases(
         prev = by_key.get(key)
         prev_status = str(prev.get("status") or "") if prev else ""
         new_status = str(phase.get("status") or "")
-        if prev and prev_status in ("done", "skipped") and new_status == "working":
+        if prev and prev_status in ("done", "skipped", "failed") and new_status == "working":
             continue
         if prev and prev_status == "skipped" and new_status == "done":
             # Skipped means the phase never ran; do not rewrite as a successful finish.
+            phase = dict(prev)
+        elif prev and prev_status == "failed" and new_status in ("done", "skipped", "pending"):
+            # Interrupted freeze wins over late finalize/skip publishes.
             phase = dict(prev)
         elif prev and new_status not in ("skipped", "pending"):
             # Allow status-only updates without wiping prior done/total (phase bars persist).
@@ -223,6 +231,47 @@ def _merge_phases(
         if key not in order:
             order.append(key)
     return [by_key[k] for k in order if k in by_key]
+
+
+def freeze_task_live_on_interrupt(live: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Clear ephemeral batch bars and freeze phase counts after Stop / abandon.
+
+    Working phases become ``failed`` with done/total left as-is so the UI keeps
+    the last known progress instead of flipping batches to 100% or overall to 0%.
+    """
+    if not isinstance(live, dict) or not live:
+        return live
+    out = dict(live)
+    out["frozen"] = True
+    out["active_units"] = []
+    try:
+        out["seq"] = int(out.get("seq") or 0) + 1
+    except Exception:
+        out["seq"] = 1
+    out["updated_at"] = _iso()
+
+    phases: list[dict[str, Any]] = []
+    for raw in out.get("phases") or []:
+        if not isinstance(raw, dict):
+            continue
+        phase = dict(raw)
+        if str(phase.get("status") or "").lower() == "working":
+            phase["status"] = "failed"
+        normalized = _normalize_phase(phase)
+        if normalized:
+            phases.append(normalized)
+    out["phases"] = phases
+
+    sections: list[dict[str, Any]] = []
+    for raw in out.get("detail_sections") or []:
+        if not isinstance(raw, dict):
+            continue
+        section = dict(raw)
+        if str(section.get("status") or "").lower() == "working":
+            section["status"] = "failed"
+        sections.append(section)
+    out["detail_sections"] = sections
+    return out
 
 
 def publish_task_live_progress(
@@ -259,6 +308,9 @@ def publish_task_live_progress(
     now = _utc_now()
     summary = _load_summary(run_id)
     prev = summary.get(LIVE_KEY) if isinstance(summary.get(LIVE_KEY), dict) else {}
+    # After Stop / abandon: keep the frozen snapshot; ignore late batch/finalize publishes.
+    if summary.get("interrupted") or (isinstance(prev, dict) and prev.get("frozen")):
+        return prev if isinstance(prev, dict) else None
     try:
         seq = int(prev.get("seq") or 0) + 1
     except Exception:
@@ -299,6 +351,8 @@ def publish_task_live_progress(
     if not stage_text:
         if stage_key == "determining":
             stage_text = "Determining"
+        elif stage_key == "queued":
+            stage_text = "Queued"
         elif stage_key in ("refreshing", "updating"):
             stage_text = "Updating"
         else:
@@ -505,8 +559,9 @@ def seed_art_refresh_live_phases(
                 ],
             },
         ]
-        stage = "updating"
-        stage_label = "Updating"
+        # Batches may exist but workers can still be busy (e.g. startup sync).
+        stage = "queued"
+        stage_label = "Queued"
     else:
         phases = _art_phase_rows(determining_status="pending", updating_status="pending")
         detail_sections = [
@@ -613,13 +668,26 @@ def publish_art_refresh_live(
         determining_status = "skipped"
 
     empty_queue = int(items_total or 0) <= 0 and int(batches_total or 0) <= 0 and active_batch is None
-    if art_working and not empty_queue:
-        updating_status = "working"
-    elif empty_queue and determining_status == "done":
-        # Determination ran and found nothing to rewrite: Updating never starts.
+    prev_units = prev_live.get("active_units") if isinstance(prev_live.get("active_units"), list) else []
+    had_working_unit = any(
+        isinstance(u, dict) and str(u.get("status") or "").lower() == "working" for u in prev_units
+    )
+    # art_backfill.status becomes "working" as soon as batches are enqueued; workers may still
+    # be blocked (startup sync). Stay pending/queued until a batch heartbeat or progress exists.
+    update_started = bool(
+        active_batch is not None
+        or int(items_done or 0) > 0
+        or int(batches_done or 0) > 0
+        or had_working_unit
+    )
+    if empty_queue and determining_status == "done":
         updating_status = "skipped"
     elif empty_queue and determining_status == "skipped":
         updating_status = "skipped"
+    elif art_working and not empty_queue and update_started:
+        updating_status = "working"
+    elif art_working and not empty_queue and not update_started:
+        updating_status = "pending"
     else:
         updating_status = "done"
 
@@ -649,6 +717,29 @@ def publish_art_refresh_live(
                 {"label": "Season posters", "value": "—"},
                 {"label": "Episode stills", "value": "—"},
                 {"label": "Created total", "value": "—"},
+            ],
+        }
+    elif updating_status == "pending":
+        run_section = {
+            "name": "Run",
+            "status": "pending",
+            "metrics": [
+                {"label": "Trigger", "value": trigger_label},
+                {"label": "Source", "value": source_label},
+                {"label": "Placeholders", "value": f"0 / {items_total}"},
+                {"label": "Batches", "value": f"0 / {batches_total}"},
+                {"label": "Reason", "value": "Queued; waiting for a worker"},
+            ],
+        }
+        outcomes_section = {
+            "name": "Outcomes",
+            "status": "pending",
+            "metrics": [
+                {"label": "Movie posters", "value": 0},
+                {"label": "Series posters", "value": 0},
+                {"label": "Season posters", "value": 0},
+                {"label": "Episode stills", "value": 0},
+                {"label": "Created total", "value": 0},
             ],
         }
     else:
@@ -682,7 +773,7 @@ def publish_art_refresh_live(
 
     # Ephemeral batch bars: show while Updating is working; clear once the phase finishes
     # (prune-after-N-seconds only runs on subsequent publishes, which stop when the run ends).
-    if not art_working or updating_status in ("done", "skipped"):
+    if updating_status in ("done", "skipped", "pending") or not art_working:
         units: list[dict[str, Any]] | None = []
         replace_active_units = True
     elif active_batch is not None:
@@ -697,8 +788,12 @@ def publish_art_refresh_live(
         determining_done=det_done,
         determining_total=det_total,
         updating_status=updating_status,
-        updating_done=0 if updating_status == "skipped" else items_done,
-        updating_total=0 if updating_status == "skipped" else items_total,
+        updating_done=0 if updating_status in ("skipped", "pending") else items_done,
+        updating_total=(
+            0
+            if updating_status == "skipped"
+            else items_total
+        ),
     )
 
     # Headline follows the phase that still matters for compact surfaces.
@@ -708,6 +803,9 @@ def publish_art_refresh_live(
     elif updating_status == "skipped":
         headline_done, headline_total = 0, 0
         stage, stage_label = "updating", "Updating"
+    elif updating_status == "pending":
+        headline_done, headline_total = 0, items_total
+        stage, stage_label = "queued", "Queued"
     else:
         headline_done, headline_total = items_done, items_total
         stage, stage_label = "updating", "Updating"
