@@ -142,6 +142,14 @@ def enqueue_batched_placeholder_job(
     from services.source_of_truth.job_priority import default_priority_for
 
     job_priority = default_priority_for(job_type)
+    stamp_batches = bool(
+        isinstance(payload_extras, dict)
+        and (payload_extras.get("art_backfill_run_id") or payload_extras.get("nfo_backfill_run_id"))
+    )
+    planned_new_batches = 0
+    if stamp_batches and ids_remaining:
+        planned_new_batches = (len(ids_remaining) + batch_size - 1) // batch_size
+    created_job_ids: list[int] = []
     while ids_remaining:
         chunk = ids_remaining[:batch_size]
         ids_remaining = ids_remaining[batch_size:]
@@ -150,6 +158,10 @@ def enqueue_batched_placeholder_job(
             payload["player_metadata_refresh"] = _placeholder_player_merge_flag(
                 chunk, player_metadata_refresh_by_id
             )
+        if stamp_batches:
+            created_jobs += 1
+            payload["batch_index"] = int(created_jobs)
+            payload["batch_total"] = int(planned_new_batches or created_jobs)
         job = Job(
             job_type=job_type,
             payload=payload,
@@ -160,7 +172,21 @@ def enqueue_batched_placeholder_job(
         session.add(job)
         session.flush()
         touched_job_ids.append(int(job.id))
-        created_jobs += 1
+        created_job_ids.append(int(job.id))
+        if not stamp_batches:
+            created_jobs += 1
+
+    if stamp_batches and created_job_ids:
+        total = len(created_job_ids)
+        for index, job_id in enumerate(created_job_ids, start=1):
+            job = session.query(Job).filter(Job.id == int(job_id)).first()
+            if not job:
+                continue
+            payload = dict(job.payload or {}) if isinstance(job.payload, dict) else {}
+            payload["batch_index"] = int(index)
+            payload["batch_total"] = int(total)
+            job.payload = payload
+            session.add(job)
 
     session.commit()
 

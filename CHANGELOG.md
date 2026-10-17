@@ -13,6 +13,68 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## Released
 
+## [0.11.3] - 2026-10-17
+
+### Summary
+
+- **Layered poster overlays**: Grayscale, badge, and banner compose independently (replaces exclusive overlay mode).
+- **Poster Art**: Language and overlay settings on one page, with live Movie / TV / Episode previews.
+- **Coming Soon drives New Ep.**: One banner toggle for date strips and series/season New Ep. text.
+- **Settings Density framing**: Settings pages use stacked accent framed groups.
+- **Smarter art refresh**: Skip matching posters; refresh on calendar dates and Coming Soon toggles without always scanning the whole library.
+- **Faster art determination**: One catalog load and one overlay check per movie/show before episode stills.
+- **Settings Apply now**: Save returns immediately; art work queues in the background and Tasks shows progress.
+- **Live task progress**: Art refresh shows determination and updating progress in Tasks and a sidebar pill while the run is working.
+- **Stop task**: Stop a working placeholder refresh from the run row or sidebar pill; status shows STOPPED.
+- **Art-only refresh premature DONE**: Parent task stays working until art batches actually finish.
+- **Missing Arr poster on art refresh**: Empty `remote_poster` re-fetches from Radarr/Sonarr before writing.
+- **Stop failure feedback**: Failed Stop keeps the confirm open and shows why it failed.
+- **Clear pending intent**: Also clears legacy template/art backfill AppConfig flags.
+- **Apply now overlap**: Tracked Apply now refuses to start while a placeholder refresh or full sync is already working.
+- **Art needs-refresh localization**: Determination uses the same Arr + TMDB localized poster resolve as the write path.
+
+### Added
+
+- **Layered poster overlays**: Independent grayscale, badge (+ corner), PLACEHOLDER banner, and Coming Soon banner settings. Legacy exclusive overlay mode migrates on startup.
+- **Live overlay preview**: Settings and onboarding show the composed Movie / TV / Episode stack.
+- **Banner position**: Top or bottom text bars (default top). Badge corners stay independent.
+- **Poster Art**: TMDB language and overlays under Settings → Poster Art.
+- **Live task progress**: Working art refresh publishes shared live progress (determination, then updating) for Tasks and an expand-up sidebar pill.
+- **Stop task**: Stop a working placeholder refresh (art/metadata) from the run row or sidebar pill, with confirm.
+- **What's new (0.11.3)**: Startup ack for layered overlays pointing at Poster Art.
+
+### Changed
+
+- **Coming Soon drives New Ep.**: Enabling Coming Soon also shows New Ep. on series/season posters.
+- **Settings Density framing**: Paths, Media, Arr, Optional APIs, Playback, Library sync, Calendar, Status Updates, Poster Art, Dummy Video, Advanced, and Security use Density-style framed groups.
+- **Art determination**: Art enqueue skips placeholders whose on-disk overlay already matches.
+- **Art determination scan**: Bulk-loads catalog rows and checks each movie/show overlay once per pass.
+- **Date-driven and toggle art**: Calendar date changes and Coming Soon toggles refresh the affected posters (narrow path refresh when possible).
+- **Materializer art after status**: Initial Coming Soon status is applied before the first local poster write.
+- **Local art player refresh**: After rewriting posters, refresh those titles on Plex/Jellyfin/Emby.
+- **Settings Apply now**: Overlay Apply now returns after save, queues batches quickly, consumes a pending next-full-sync refresh, and keeps Tasks metrics updating.
+
+### Fixed
+
+- **Plex item metadata refresh**: Use PUT for `/library/metadata/{id}/refresh` (GET was 404ing).
+- **Settings art-change detection**: Saving an unchanged off bool no longer forces a full art refresh.
+- **NFO batch player push**: Mixed rewrite/no-op NFO batches still project every active placeholder in the batch.
+- **Art refresh empty Updating**: Updating totals use enqueued placeholders (not the full scan); 0 needed finishes at 100% with Determination kept.
+- **Live phase bars**: Task live progress shows a durable bar per pipeline phase (not only the current stage); completed bars stay green at 100%.
+- **Art phase skip states**: Settings Apply skips Determining; a full scan with nothing to rewrite skips Updating (`—% · —/—`).
+- **Art refresh queued**: While batches wait on workers (e.g. during startup sync), live progress shows Queued instead of a stuck Updating bar.
+- **Stop shows STOPPED**: Manual and settings-apply Stop both end as STOPPED (not DONE or FAILED); cancelled art determination no longer finishes as done.
+- **Stop freezes live progress**: Clearing batch bars and keeping phase counts at the stop moment; cancelled art batches no longer publish as 100% done.
+- **Art live progress races**: Task-run summary updates take a row lock; batch completion increments counters and marks the live bar done in one write.
+- **Art progress honesty**: Updating stays below 100% while any batch is working; working bars no longer round 249/250 to a full green bar.
+- **Shared overlay meta poison**: Per-poster `layers` stamps in `.poster-overlay.json` so rewriting series art cannot mark season/episode files current without rewriting them.
+- **Art-only refresh premature DONE**: Placeholder refresh no longer finishes while art batches are still open when linked jobs are not visible yet.
+- **Missing Arr poster on art refresh**: When `remote_poster` is empty, art refresh re-fetches the poster from Radarr/Sonarr before writing (covers titles that gained Arr art after the last sync, including TVDB-only shows with no TMDB id).
+- **Stop failure feedback**: If Stop fails, the confirm dialog stays open and shows the error reason (Tasks and sidebar pill).
+- **Clear pending intent**: Clearing the unified pending refresh intent also clears legacy template/art backfill AppConfig flags (previously unreachable after the early return).
+- **Apply now overlap**: Tracked Apply now / placeholder refresh returns `task_already_running` instead of starting a second run while a refresh or full sync is working.
+- **Art needs-refresh localization**: Movie/series/season art determination calls `ensure_localized_poster_current` (Arr fill + language resolve) before comparing on-disk sidecars, matching the write path.
+
 ## [0.11.2] - 2026-10-15
 
 ### Summary

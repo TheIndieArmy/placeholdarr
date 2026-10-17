@@ -686,7 +686,6 @@ def apply_movie_materialization(movie_id: int, session=None, activity_reason: st
             _initial_variant = _compute_initial_dummy_variant_for_movie(movie)
             created = ensure_placeholder_file(target_path, dummy_file_path=_dummy_file_path_for_variant(_initial_variant))
             nfo_written = ensure_movie_nfo(target_path, movie)
-            ensure_movie_art(movie, target_path)
             movie.has_placeholder = True
             movie.placeholder_filepath = target_path
             movie.updated_at = func.now()
@@ -700,7 +699,7 @@ def apply_movie_materialization(movie_id: int, session=None, activity_reason: st
             )
             _sync_content_placeholder_status(session, movie_id=movie.id, episode_id=None)
             
-            # Apply initial status for the created placeholder
+            # Apply initial status before art so Coming Soon banners use final display_status.
             placeholder_row = session.query(Placeholder).filter(
                 Placeholder.movie_id == movie.id
             ).order_by(Placeholder.id.desc()).first()
@@ -711,6 +710,10 @@ def apply_movie_materialization(movie_id: int, session=None, activity_reason: st
                     event_type="creation",
                     activity_reason=activity_reason,
                 )
+            try:
+                ensure_movie_art(movie, target_path)
+            except Exception:
+                pass
             placeholder_id = int(placeholder_row.id) if placeholder_row and getattr(placeholder_row, "id", None) else None
 
             # Persist canonical determination so the next materialization pass does not
@@ -808,11 +811,6 @@ def apply_episode_materialization(episode_id: int, session=None, activity_reason
                 series_nfo_written = ensure_series_nfo(series, folder=series_folder)
             except Exception:
                 series_nfo_written = False
-            try:
-                ensure_series_art(series, series_folder=series_folder)
-                ensure_episode_still_art(episode, season, series, target_path)
-            except Exception:
-                pass
             episode.has_placeholder = True
             episode.placeholder_filepath = target_path
             episode.updated_at = func.now()
@@ -828,7 +826,7 @@ def apply_episode_materialization(episode_id: int, session=None, activity_reason
             )
             _sync_content_placeholder_status(session, movie_id=None, episode_id=episode.id)
             
-            # Apply initial status for the created placeholder
+            # Apply initial status before art so Coming Soon / New Ep. banners use final status.
             placeholder_row = session.query(Placeholder).filter(
                 Placeholder.episode_id == episode.id
             ).order_by(Placeholder.id.desc()).first()
@@ -839,6 +837,11 @@ def apply_episode_materialization(episode_id: int, session=None, activity_reason
                     event_type="creation",
                     activity_reason=activity_reason,
                 )
+            try:
+                ensure_series_art(series, series_folder=series_folder)
+                ensure_episode_still_art(episode, season, series, target_path)
+            except Exception:
+                pass
             placeholder_id = int(placeholder_row.id) if placeholder_row and getattr(placeholder_row, "id", None) else None
 
             if bool(getattr(episode, "has_file", False)) or bool(getattr(episode, "is_deleted", False)):
@@ -1243,8 +1246,11 @@ def _run_materialization_for_ids(
             if should_trigger:
                 _emit_overlap_checkpoint(f"movie_{trigger_kind}")
 
+    from services.task_run_cancel import maybe_check_active_cancel
+
     movie_obsolete_ids, _movie_needs_seed = _split_movie_ids_by_determination(session, movie_ids)
-    for movie_id in movie_obsolete_ids:
+    for idx, movie_id in enumerate(movie_obsolete_ids, start=1):
+        maybe_check_active_cancel(idx)
         _process_single_movie_materialization(movie_id)
     if movie_obsolete_ids:
         run_determination_for_entities_in_session(session, movie_ids=list(movie_obsolete_ids), episode_ids=[])
@@ -1260,7 +1266,8 @@ def _run_materialization_for_ids(
         ]
     else:
         pending_movie_needs = []
-    for movie_id in pending_movie_needs:
+    for idx, movie_id in enumerate(pending_movie_needs, start=1):
+        maybe_check_active_cancel(idx)
         _process_single_movie_materialization(movie_id)
     _scoped_phase("needs-placeholder movie pass done")
 
@@ -1478,7 +1485,8 @@ def _run_materialization_for_ids(
     bulk_episode_ids = {eid for eids in bulk_deleted_series_map.values() for eid in eids}
     for sid, eids in bulk_deleted_series_map.items():
         _process_deleted_series_bulk(sid, eids)
-    for episode_id in episode_obsolete_ids:
+    for idx, episode_id in enumerate(episode_obsolete_ids, start=1):
+        maybe_check_active_cancel(idx)
         if episode_id in bulk_episode_ids:
             continue
         _process_single_episode_materialization(episode_id)
@@ -1493,7 +1501,8 @@ def _run_materialization_for_ids(
         ]
     else:
         pending_episode_needs = []
-    for episode_id in pending_episode_needs:
+    for idx, episode_id in enumerate(pending_episode_needs, start=1):
+        maybe_check_active_cancel(idx)
         _process_single_episode_materialization(episode_id)
     _scoped_phase("episode obsolete + needs passes done")
 
@@ -1724,7 +1733,11 @@ def run_materialization_pass() -> dict[str, Any]:
         logger.info(f"Materialization phase complete: {stats}", extra={"emoji_type": "success"})
         return stats
     except Exception as e:
+        from services.task_run_cancel import TaskRunCancelled
+
         session.rollback()
+        if isinstance(e, TaskRunCancelled):
+            raise
         logger.error(f"Materialization phase failed: {e}", extra={"emoji_type": "error"})
         raise
     finally:

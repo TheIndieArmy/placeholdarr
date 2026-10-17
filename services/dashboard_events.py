@@ -78,7 +78,14 @@ def _task_runs_fingerprint() -> str:
     if row is None:
         return "none"
     ended = row.ended_at.isoformat() if row.ended_at else ""
-    return f"{row.id}:{row.status}:{ended}:w{working_count}"
+    live_seq = "none"
+    try:
+        from services.task_live_progress import working_live_progress_seq_fingerprint
+
+        live_seq = working_live_progress_seq_fingerprint()
+    except Exception:
+        live_seq = "none"
+    return f"{row.id}:{row.status}:{ended}:w{working_count}:live:{live_seq}"
 
 
 def _state_fingerprint(events: list[dict[str, Any]]) -> str:

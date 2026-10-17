@@ -3,7 +3,16 @@ import type { Brand, ThemeMode } from "../brandTypes";
 import { getBrandSemanticTokens } from "../brandSemanticTheme";
 import type { ActiveSearchItem, ActiveSearchesResponse } from "../api/dashboard";
 import type { ActivityRow, ScheduledTaskRow, TaskRunRow } from "../types/api";
+import { ConfirmModal } from "../ConfirmModal";
+import {
+  TaskLiveDetailSections,
+  TaskLiveProgress,
+  type LiveDetailSection,
+  type TaskLiveProgressModel,
+} from "./TaskLiveProgress";
+import { taskLiveFromApi } from "./taskLiveProgress";
 import { formatTaskDuration, formatTaskTrigger, timeAgo, timeUntil } from "./formatActivityTime";
+import { TASK_KEYS_WITH_STOP_SUPPORT, TASK_STOP_CONFIRM_MESSAGE } from "./taskStopConfirm";
 
 type StripAccent = { hex: string; text: string; icon: string; hoverHex: string };
 
@@ -15,6 +24,37 @@ function taskRunProgressSections(progress: ActivityRow["progress"] | undefined):
   else if (Array.isArray((progress as any).sections)) sections = (progress as any).sections;
   // Hide follow-up phases that were never requested (legacy full-sync rows).
   return sections.filter((section) => !isUnrequestedFollowUpSection(section));
+}
+
+/** Drop phase cards already represented by ``summary.live`` (avoids duplicate Art refresh blocks). */
+function sectionsNotCoveredByLive(sections: Array<any>, live: TaskLiveProgressModel | null): Array<any> {
+  if (!live) return sections;
+  const kind = String(live.kind || "").toLowerCase();
+  return sections.filter((section) => {
+    const key = String(section?.key || section?.name || "")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, "_");
+    if (kind === "art_refresh" && (key === "art_refresh" || key === "art refresh")) return false;
+    if (kind === "metadata_refresh" && (key === "metadata_refresh" || key === "metadata refresh")) return false;
+    return true;
+  });
+}
+
+function legacySectionToLiveDetail(section: any): LiveDetailSection {
+  const statusRaw = String(section?.status || "pending").toLowerCase();
+  const status = (["working", "done", "pending", "failed"].includes(statusRaw)
+    ? statusRaw
+    : "pending") as LiveDetailSection["status"];
+  const metrics = Array.isArray(section?.metrics) ? section.metrics : [];
+  return {
+    name: String(section?.name || section?.key || "Step"),
+    status,
+    metrics: metrics.map((metric: any) => ({
+      label: String(metric?.label || "Metric"),
+      value: (metric?.value ?? "--") as string | number,
+    })),
+  };
 }
 
 function isUnrequestedFollowUpSection(section: any): boolean {
@@ -34,9 +74,17 @@ function statusClass(status: string | null | undefined, semantic: { success: str
   const t = String(status || "").toUpperCase();
   if (t === "DONE") return semantic.success;
   if (t === "FAILED") return semantic.danger;
-  if (t === "SKIPPED") return "#d97706";
+  if (t === "STOPPED" || t === "SKIPPED") return "#d97706";
   if (t === "WORKING") return semantic.accentIce;
   return semantic.fgMuted;
+}
+
+function showRunErrorMessage(run: { status?: string | null; error_message?: string | null }): string | null {
+  const msg = String(run.error_message || "").trim();
+  if (!msg) return null;
+  // Status badge already says STOPPED; do not repeat stopped_by_user in red.
+  if (String(run.status || "").toLowerCase() === "stopped") return null;
+  return msg;
 }
 
 function ActiveSearchesSection(props: {
@@ -124,10 +172,14 @@ export function TasksPanel(props: {
   onRequestRun: (kind: "full" | "lite") => void;
   onRunCollections: () => Promise<void> | void;
   onRequestRefresh: (kind: "metadata" | "art" | "both") => Promise<void> | void;
+  onStopRun: (runId: number) => Promise<void> | void;
 }) {
   const semantic = getBrandSemanticTokens(props.brand, props.themeMode, props.accent);
   const isLight = props.themeMode === "light";
   const [historyExpanded, setHistoryExpanded] = useState<Record<string, boolean>>({});
+  const [stopConfirmRunId, setStopConfirmRunId] = useState<number | null>(null);
+  const [stopPending, setStopPending] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
   const panelBorder = isLight ? semantic.border : "rgba(66,71,83,0.4)";
   const panelBg = isLight ? semantic.surfacePanel : "#171c22";
 
@@ -136,7 +188,9 @@ export function TasksPanel(props: {
       const next = { ...prev };
       for (const run of props.history) {
         const key = `task-run-${run.id}`;
-        const hasProgress = taskRunProgressSections(run.progress).length > 0;
+        const live = taskLiveFromApi(run.live);
+        const leftover = sectionsNotCoveredByLive(taskRunProgressSections(run.progress), live);
+        const hasProgress = leftover.length > 0 || Boolean(live);
         if (!hasProgress) continue;
         if (String(run.status).toUpperCase() === "WORKING" && next[key] === undefined) {
           next[key] = true;
@@ -287,9 +341,9 @@ export function TasksPanel(props: {
             <table className="min-w-[640px] w-full">
               <thead>
                 <tr className="border-b" style={{ borderColor: isLight ? semantic.border : "rgba(66,71,83,0.2)" }}>
-                  {["Name", "Trigger", "Started", "Ended", "Duration", "Status"].map((h) => (
+                  {["Name", "Trigger", "Started", "Ended", "Duration", "Status", ""].map((h) => (
                     <th
-                      key={h}
+                      key={h || "actions"}
                       className="px-3 py-2 text-left text-[12px] font-headline uppercase tracking-widest font-normal"
                       style={{ color: semantic.fgSubtle }}
                     >
@@ -302,8 +356,15 @@ export function TasksPanel(props: {
                 {props.history.map((run) => {
                   const rowKey = `task-run-${run.id}`;
                   const sections = taskRunProgressSections(run.progress);
-                  const hasProgress = sections.length > 0;
+                  const liveModel = taskLiveFromApi(run.live);
+                  const leftoverSections = sectionsNotCoveredByLive(sections, liveModel);
+                  const leftoverDetails = leftoverSections.map(legacySectionToLiveDetail);
+                  const hasProgress = leftoverDetails.length > 0 || Boolean(liveModel);
                   const isExpanded = !!historyExpanded[rowKey];
+                  const isWorking = String(run.status || "").toUpperCase() === "WORKING";
+                  const canStop =
+                    isWorking && TASK_KEYS_WITH_STOP_SUPPORT.has(String(run.task_key || "").trim().toLowerCase());
+                  const errorLine = showRunErrorMessage(run);
                   return (
                     <Fragment key={run.id}>
                       <tr className="border-b" style={{ borderColor: isLight ? semantic.border : "rgba(66,71,83,0.15)" }}>
@@ -341,41 +402,47 @@ export function TasksPanel(props: {
                           <span className="text-[12px] font-headline uppercase tracking-wider" style={{ color: statusClass(run.status, semantic) }}>
                             {run.status}
                           </span>
-                          {run.error_message ? (
+                          {errorLine ? (
                             <p className="text-[11px] mt-0.5" style={{ color: semantic.danger }}>
-                              {run.error_message}
+                              {errorLine}
                             </p>
+                          ) : null}
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          {canStop ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setStopError(null);
+                                setStopConfirmRunId(run.id);
+                              }}
+                              className="px-2.5 py-1 rounded-lg border text-[11px] font-headline uppercase tracking-wider"
+                              style={{ borderColor: semantic.danger, color: semantic.danger }}
+                            >
+                              Stop
+                            </button>
                           ) : null}
                         </td>
                       </tr>
                       {hasProgress && isExpanded ? (
                         <tr>
-                          <td colSpan={6} className="px-4 py-3" style={{ backgroundColor: isLight ? semantic.surfaceMuted : "#1a2028" }}>
-                            <div className="space-y-2">
-                              {sections.map((section: any, sidx: number) => (
-                                <div
-                                  key={`sec-${sidx}`}
-                                  className="rounded border p-3"
-                                  style={{ borderColor: semantic.border, backgroundColor: isLight ? semantic.surfacePanel : "#1b2431" }}
-                                >
-                                  <div className="flex justify-between gap-2 mb-1">
-                                    <span className="text-[12px] font-headline uppercase tracking-wider" style={{ color: semantic.fg }}>
-                                      {String(section?.name || "Step")}
-                                    </span>
-                                    <span className="text-[11px] uppercase" style={{ color: semantic.fgMuted }}>
-                                      {String(section?.status || "pending")}
-                                    </span>
-                                  </div>
-                                  {Array.isArray(section?.metrics)
-                                    ? section.metrics.map((metric: any, midx: number) => (
-                                        <div key={midx} className="flex justify-between text-[13px]" style={{ color: semantic.fgMuted }}>
-                                          <span>{String(metric?.label || "Metric")}</span>
-                                          <span style={{ color: semantic.fg }}>{String(metric?.value ?? "--")}</span>
-                                        </div>
-                                      ))
-                                    : null}
-                                </div>
-                              ))}
+                          <td colSpan={7} className="px-4 py-3" style={{ backgroundColor: isLight ? semantic.surfaceMuted : "#1a2028" }}>
+                            <div className="space-y-3">
+                              {liveModel ? (
+                                <TaskLiveProgress
+                                  model={liveModel}
+                                  density="comfortable"
+                                  isStudioGlass={!isLight}
+                                  showFullDetails
+                                />
+                              ) : null}
+                              {leftoverDetails.length ? (
+                                <TaskLiveDetailSections
+                                  sections={leftoverDetails}
+                                  density="comfortable"
+                                  isStudioGlass={!isLight}
+                                />
+                              ) : null}
                             </div>
                           </td>
                         </tr>
@@ -388,6 +455,39 @@ export function TasksPanel(props: {
           </div>
         )}
       </div>
+
+      {stopConfirmRunId != null ? (
+        <ConfirmModal
+          title="Stop this task?"
+          message={TASK_STOP_CONFIRM_MESSAGE}
+          error={stopError}
+          confirmLabel={stopPending ? "Stopping…" : "Stop task"}
+          cancelLabel="Keep running"
+          accentHex={props.accent.hex}
+          themeMode={props.themeMode}
+          onCancel={() => {
+            if (stopPending) return;
+            setStopConfirmRunId(null);
+            setStopError(null);
+          }}
+          onConfirm={() => {
+            if (stopPending || stopConfirmRunId == null) return;
+            setStopPending(true);
+            setStopError(null);
+            void Promise.resolve(props.onStopRun(stopConfirmRunId))
+              .then(() => {
+                setStopConfirmRunId(null);
+                setStopError(null);
+              })
+              .catch((e) => {
+                setStopError(e instanceof Error ? e.message : "Failed to stop task");
+              })
+              .finally(() => {
+                setStopPending(false);
+              });
+          }}
+        />
+      ) : null}
     </div>
   );
 }

@@ -1064,7 +1064,10 @@ def run_determination_pass() -> dict:
                 f"Determination · full_scan · movies: {len(movies)} rows to check",
                 extra={'emoji_type': 'info'},
             )
+            from services.task_run_cancel import maybe_check_active_cancel
+
             for idx, movie in enumerate(movies, start=1):
+                maybe_check_active_cancel(idx)
                 value, path_drift = _resolve_movie_determination(
                     session,
                     movie,
@@ -1179,9 +1182,12 @@ def run_determination_pass() -> dict:
                         if getattr(ep, "season_id", None) is not None
                     },
                 )
+                from services.task_run_cancel import maybe_check_active_cancel
+
                 for episode in chunk:
                     processed += 1
                     idx = processed
+                    maybe_check_active_cancel(idx)
                     episode_meta = (
                         episode_order_meta_by_id.get(int(episode.id))
                         if getattr(episode, "id", None) is not None
@@ -1271,7 +1277,11 @@ def run_determination_pass() -> dict:
             logger.info(f"Determination · full_scan · complete: {stats}", extra={'emoji_type': 'success'})
             return stats
     except Exception as e:
+        from services.task_run_cancel import TaskRunCancelled
+
         session.rollback()
+        if isinstance(e, TaskRunCancelled):
+            raise
         logger.error(f"Determination · full_scan · failed: {e}", extra={'emoji_type': 'error'})
         raise
     finally:
@@ -1351,7 +1361,11 @@ def run_determination_for_entities(
         logger.info(f"Determination · scoped · complete: {stats}", extra={'emoji_type': 'success'})
         return stats
     except Exception as e:
+        from services.task_run_cancel import TaskRunCancelled
+
         session.rollback()
+        if isinstance(e, TaskRunCancelled):
+            raise
         logger.error(f"Determination · scoped · failed: {e}", extra={'emoji_type': 'error'})
         raise
     finally:
@@ -1403,7 +1417,10 @@ def run_determination_for_entities_in_session(
             extra={'emoji_type': 'info'},
         )
 
+    from services.task_run_cancel import maybe_check_active_cancel
+
     for idx, movie in enumerate(movies, start=1):
+        maybe_check_active_cancel(idx)
         value, path_drift = _resolve_movie_determination(
             session,
             movie,
@@ -1501,6 +1518,7 @@ def run_determination_for_entities_in_session(
     )
 
     for idx, episode in enumerate(episodes, start=1):
+        maybe_check_active_cancel(idx)
         episode_meta = episode_order_meta_by_id.get(int(episode.id)) if getattr(episode, "id", None) is not None else None
         season_number = int(episode_meta[1]) if episode_meta is not None else -1
         season_id = int(episode.season_id) if getattr(episode, "season_id", None) is not None else None

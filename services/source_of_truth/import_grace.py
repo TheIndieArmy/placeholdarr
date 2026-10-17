@@ -674,6 +674,22 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
                         "placeholder_ids": placeholder_ids,
                     },
                 )
+                # Next-unaired may advance after import; refresh series/season New Ep. banners.
+                try:
+                    from services.source_of_truth.placeholder_art_reconciler import (
+                        enqueue_art_refresh_for_calendar_date_changes,
+                    )
+
+                    enqueue_art_refresh_for_calendar_date_changes(
+                        session,
+                        series_ids=[int(series.id)],
+                    )
+                except Exception as art_exc:
+                    logger.debug(
+                        f"Import grace New Ep. art enqueue skipped episode_id={entity_id}: {art_exc}",
+                        extra={"emoji_type": "debug"},
+                        exc_info=True,
+                    )
             else:
                 append_placeholder_activity_status(
                     session,

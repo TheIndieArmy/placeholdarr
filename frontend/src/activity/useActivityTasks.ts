@@ -9,11 +9,14 @@ function taskStatusFingerprint(status: TaskRunStatusResponse): string {
     return "idle";
   }
   const run = status.run;
-  return `${run.id}:${run.status}:${run.ended_at ?? ""}:${JSON.stringify(run.progress ?? null)}`;
+  const liveSeq = run.live && typeof run.live.seq === "number" ? run.live.seq : 0;
+  return `${run.id}:${run.status}:${run.ended_at ?? ""}:live${liveSeq}:${JSON.stringify(run.progress ?? null)}`;
 }
 
 export function useActivityTasks(opts: {
   enabled: boolean;
+  /** When false, background refreshes skip the dashboard chrome spinner (sidebar live progress). */
+  chromeOnRefresh?: boolean;
   onSuccess?: () => void;
   onError?: (message: string) => void;
   onRefreshing?: (refreshing: boolean) => void;
@@ -25,15 +28,17 @@ export function useActivityTasks(opts: {
 
   const statusFingerprintRef = useRef("idle");
   const workingRef = useRef(false);
+  const chromeOnRefreshRef = useRef(Boolean(opts.chromeOnRefresh));
   const onSuccessRef = useRef(opts.onSuccess);
   const onErrorRef = useRef(opts.onError);
   const onRefreshingRef = useRef(opts.onRefreshing);
 
   useEffect(() => {
+    chromeOnRefreshRef.current = Boolean(opts.chromeOnRefresh);
     onSuccessRef.current = opts.onSuccess;
     onErrorRef.current = opts.onError;
     onRefreshingRef.current = opts.onRefreshing;
-  }, [opts.onError, opts.onRefreshing, opts.onSuccess]);
+  }, [opts.chromeOnRefresh, opts.onError, opts.onRefreshing, opts.onSuccess]);
 
   const refreshTasks = useCallback(async (options?: { showLoading?: boolean; showChrome?: boolean }) => {
     const showLoading = options?.showLoading ?? false;
@@ -96,11 +101,11 @@ export function useActivityTasks(opts: {
 
         if (status.working) {
           if (statusChanged) {
-            await refreshTasks({ showChrome: true });
+            await refreshTasks({ showChrome: chromeOnRefreshRef.current });
           }
           schedule(TASKS_ACTIVE_POLL_MS);
         } else {
-          await refreshTasks();
+          await refreshTasks({ showChrome: chromeOnRefreshRef.current });
           schedule(TAB_IDLE_POLL_MS);
         }
       } catch (err) {
@@ -111,7 +116,10 @@ export function useActivityTasks(opts: {
       }
     };
 
-    void refreshTasks({ showLoading: true, showChrome: true }).then(() => {
+    void refreshTasks({
+      showLoading: chromeOnRefreshRef.current,
+      showChrome: chromeOnRefreshRef.current,
+    }).then(() => {
       if (!stopped) {
         schedule(workingRef.current ? TASKS_ACTIVE_POLL_MS : TAB_IDLE_POLL_MS);
       }

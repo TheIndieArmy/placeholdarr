@@ -103,6 +103,7 @@ def _serialize_run(row: ScheduledTaskRun) -> dict[str, Any]:
     task_label = TASK_LABELS.get(row.task_key, row.task_key)
     if row.task_key == "placeholder_refresh":
         task_label = placeholder_refresh_task_label(summary)
+    live = summary.get("live") if isinstance(summary.get("live"), dict) else None
     return {
         "id": row.id,
         "task_key": row.task_key,
@@ -119,6 +120,7 @@ def _serialize_run(row: ScheduledTaskRun) -> dict[str, Any]:
         "skip_reason": row.skip_reason,
         "details": details,
         "progress": progress,
+        "live": live,
     }
 
 

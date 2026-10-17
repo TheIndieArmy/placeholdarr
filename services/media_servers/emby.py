@@ -454,7 +454,7 @@ def update_emby_item_text(item_id: str, *, title: str, overview: str) -> bool:
         return False
 
 
-def refresh_emby_item_metadata(item_id: str) -> bool:
+def refresh_emby_item_metadata(item_id: str, *, refresh_images: bool = False) -> bool:
     """Trigger metadata refresh for a specific Emby item id."""
     if not getattr(settings, "emby_enabled", False):
         return False
@@ -467,9 +467,9 @@ def refresh_emby_item_metadata(item_id: str) -> bool:
     endpoint = _build_url(f"Items/{target}/Refresh")
     params = {
         "MetadataRefreshMode": "Default",
-        "ImageRefreshMode": "Default",
+        "ImageRefreshMode": "Full" if refresh_images else "Default",
         "ReplaceAllMetadata": "false",
-        "ReplaceAllImages": "false",
+        "ReplaceAllImages": "true" if refresh_images else "false",
     }
     try:
         resp = sess.post(endpoint, params=params, timeout=15)

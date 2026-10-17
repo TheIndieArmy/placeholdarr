@@ -23,3 +23,14 @@ export function postTaskRun(
     body: JSON.stringify({ task_key: taskKey, ...(opts || {}) }),
   });
 }
+
+export function postTaskAbandon(opts?: { runId?: number; reason?: string }) {
+  return fetchJson<{ ok: boolean; abandoned: number[]; reason: string }>("/api/tasks/abandon", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      run_id: opts?.runId ?? null,
+      reason: opts?.reason ?? "stopped_by_user",
+    }),
+  });
+}

@@ -174,8 +174,8 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
             "selected Language, then the Arr poster if neither is available. Episode stills are unchanged.\n\n"
             "This needs a TMDB API key under Optional APIs."
         ),
-        cta_label="Open Poster Overlay",
-        cta_path="/settings/poster-overlay",
+        cta_label="Open Poster Art",
+        cta_path="/settings/poster-art",
         requires_ack=True,
     ),
     WhatsNewNotice(
@@ -254,6 +254,22 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         ),
         cta_label="Open Paths",
         cta_path="/settings/paths",
+        requires_ack=True,
+    ),
+    WhatsNewNotice(
+        id="layered-poster-overlays-0-11-3",
+        since_version="0.11.3",
+        title="Release date banners on posters",
+        body=(
+            "New placeholder poster banner options let you show release dates for upcoming content. "
+            "Movies show the date for your preferred movie release type. Series posters show the next "
+            "airing episode's date. Episode thumb art shows the air date for that episode.\n\n"
+            "Poster overlays are now more flexible: apply grayscale, Placeholdarr badging, and banners "
+            "independently so you can mix the elements to your liking. Find these settings on the "
+            "updated Poster Art page."
+        ),
+        cta_label="Open Poster Art",
+        cta_path="/settings/poster-art",
         requires_ack=True,
     ),
 )

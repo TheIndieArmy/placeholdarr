@@ -5,6 +5,8 @@ import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "./brandAccentUi";
 export function ConfirmModal(props: {
   title: string;
   message: string;
+  /** Optional failure text shown under the message (e.g. Stop request failed). */
+  error?: string | null;
   confirmLabel?: string;
   cancelLabel?: string;
   accentHex: string;
@@ -15,6 +17,7 @@ export function ConfirmModal(props: {
   const isLight = props.themeMode === "light";
   const confirmLabel = props.confirmLabel ?? "Leave";
   const cancelLabel = props.cancelLabel ?? "Stay";
+  const errorText = String(props.error || "").trim();
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -49,6 +52,11 @@ export function ConfirmModal(props: {
           <p className={`mt-2 text-[15px] leading-relaxed ${isLight ? "text-slate-600" : "text-slate-300"}`}>
             {props.message}
           </p>
+          {errorText ? (
+            <p className="mt-3 text-[14px] leading-snug text-red-400" role="alert">
+              {errorText}
+            </p>
+          ) : null}
         </div>
         <div
           className={`px-5 py-4 flex flex-wrap justify-end gap-3 border-t ${

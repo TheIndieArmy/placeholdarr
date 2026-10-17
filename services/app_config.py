@@ -6,9 +6,10 @@ from datetime import datetime, timezone
 import os
 from pathlib import Path
 import re
+import threading
 import uuid
 from urllib.parse import urlparse
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import func
 
@@ -19,6 +20,22 @@ from services.postgres.models import AppConfig
 
 
 SETUP_COMPLETED_KEY = "APP_SETUP_COMPLETED_AT"
+
+
+def _defer_settings_post_save_work(name: str, fn: Callable[[], None]) -> None:
+    """Run heavy Apply-now work off the settings save request so the UI can unblock."""
+
+    def _run() -> None:
+        try:
+            fn()
+        except Exception as exc:
+            logger.error(
+                f"Deferred settings work '{name}' failed: {exc}",
+                exc_info=True,
+                extra={"emoji_type": "error"},
+            )
+
+    threading.Thread(target=_run, name=f"settings-{name}"[:48], daemon=True).start()
 
 # Choice fields that also accept a concrete Arr instance_key (from the instance name).
 _INSTANCE_SEARCH_MODE_KEYS = frozenset(
@@ -43,10 +60,23 @@ NFO_BACKFILL_SETTING_KEYS = frozenset(
 # Settings that re-download / re-composite on-disk poster art (decoupled from NFO).
 ART_BACKFILL_SETTING_KEYS = frozenset(
     {
-        "PLACEHOLDER_POSTER_OVERLAY_MODE",
+        "PLACEHOLDER_POSTER_GRAYSCALE",
+        "PLACEHOLDER_POSTER_BADGE",
+        "PLACEHOLDER_POSTER_BADGE_POSITION",
+        "PLACEHOLDER_POSTER_PLACEHOLDER_BANNER",
+        "PLACEHOLDER_POSTER_BANNER_POSITION",
+        "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
         "ENABLE_PREFERRED_POSTER_LANGUAGE",
         "PREFERRED_POSTER_LANGUAGE",
         "PREFER_ORIGINAL_POSTER_LANGUAGE",
+    }
+)
+
+# Art settings that can use a narrow placeholder refresh instead of the whole library.
+# Coming Soon also drives New Ep. series/season banners → coming_soon_and_tv.
+NARROW_ART_BACKFILL_SETTING_KEYS = frozenset(
+    {
+        "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
     }
 )
 
@@ -798,31 +828,87 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
-            "PLACEHOLDER_POSTER_OVERLAY_MODE",
+            "PLACEHOLDER_POSTER_GRAYSCALE",
             {
-                "section": "Poster Overlay",
-                "label": "Placeholder poster overlay",
-                "description": (
-                    "How placeholder posters appear in Plex, Jellyfin, and Emby. Always writes local poster.jpg, "
-                    "seasonNN-poster.jpg at the series root, and episode thumb JPEGs (composited when a style is "
-                    "selected, raw download when Off). NFOs do not include art tags; players pick up files from "
-                    "disk after a library refresh. Changing this can trigger an art placeholder refresh now or "
-                    "at the next full sync."
-                ),
+                "section": "Poster Art",
+                "label": "Grayscale",
+                "description": "",
+                "type": "bool",
+                "restart_required": False,
+                "default": False,
+            },
+        ),
+        (
+            "PLACEHOLDER_POSTER_BADGE",
+            {
+                "section": "Poster Art",
+                "label": "Placeholdarr badge",
+                "description": "",
+                "type": "bool",
+                "restart_required": False,
+                "default": False,
+            },
+        ),
+        (
+            "PLACEHOLDER_POSTER_BADGE_POSITION",
+            {
+                "section": "Poster Art",
+                "label": "Badge position",
+                "description": "",
                 "type": "choice",
                 "restart_required": False,
+                "default": "bottom_right",
+                "depends_on": "PLACEHOLDER_POSTER_BADGE",
+                "nested": True,
                 "options": [
-                    {"value": "off", "label": "Off (raw download, no overlay)"},
-                    {"value": "grayscale", "label": "Grayscale poster"},
-                    {"value": "top_banner", "label": "Top banner: PLACEHOLDER"},
-                    {"value": "corner_logo", "label": "Corner badge: Placeholdarr logo"},
+                    {"value": "bottom_right", "label": "Bottom right"},
+                    {"value": "bottom_left", "label": "Bottom left"},
+                    {"value": "top_right", "label": "Top right"},
+                    {"value": "top_left", "label": "Top left"},
+                ],
+            },
+        ),
+        (
+            "PLACEHOLDER_POSTER_PLACEHOLDER_BANNER",
+            {
+                "section": "Poster Art",
+                "label": "PLACEHOLDER banner",
+                "description": "",
+                "type": "bool",
+                "restart_required": False,
+                "default": False,
+            },
+        ),
+        (
+            "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
+            {
+                "section": "Poster Art",
+                "label": "Coming Soon banner",
+                "description": "",
+                "type": "bool",
+                "restart_required": False,
+                "default": False,
+            },
+        ),
+        (
+            "PLACEHOLDER_POSTER_BANNER_POSITION",
+            {
+                "section": "Poster Art",
+                "label": "Banner position",
+                "description": "",
+                "type": "choice",
+                "restart_required": False,
+                "default": "top",
+                "options": [
+                    {"value": "top", "label": "Top"},
+                    {"value": "bottom", "label": "Bottom"},
                 ],
             },
         ),
         (
             "ENABLE_PREFERRED_POSTER_LANGUAGE",
             {
-                "section": "Poster Overlay",
+                "section": "Poster Art",
                 "label": "Fetch from TMDB",
                 "description": "",
                 "type": "bool",
@@ -833,7 +919,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "PREFER_ORIGINAL_POSTER_LANGUAGE",
             {
-                "section": "Poster Overlay",
+                "section": "Poster Art",
                 "label": "Original language first",
                 "description": "",
                 "type": "bool",
@@ -846,7 +932,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "PREFERRED_POSTER_LANGUAGE",
             {
-                "section": "Poster Overlay",
+                "section": "Poster Art",
                 "label": "Language",
                 "description": "",
                 "type": "choice",
@@ -2415,6 +2501,108 @@ def migrate_play_also_instances_from_legacy(session=None) -> dict[str, Any]:
             session.close()
 
 
+def _upsert_bool_config(session, key: str, value: bool) -> None:
+    meta = SETTINGS_SCHEMA.get(key) or {}
+    stored = bool(value)
+    row = _get_row(session, key)
+    if not row:
+        session.add(
+            AppConfig(
+                key=key,
+                value=stored,
+                value_type=str(meta.get("type") or "bool"),
+                restart_required=bool(meta.get("restart_required", False)),
+                description=str(meta.get("description") or ""),
+            )
+        )
+    else:
+        row.value = stored
+        row.value_type = str(meta.get("type") or row.value_type or "bool")
+        session.add(row)
+
+
+def _upsert_string_config(session, key: str, value: str) -> None:
+    meta = SETTINGS_SCHEMA.get(key) or {}
+    stored = str(value or "")
+    row = _get_row(session, key)
+    if not row:
+        session.add(
+            AppConfig(
+                key=key,
+                value=stored,
+                value_type=str(meta.get("type") or "choice"),
+                description=str(meta.get("description") or ""),
+            )
+        )
+    else:
+        row.value = stored
+        row.value_type = str(meta.get("type") or row.value_type or "choice")
+        session.add(row)
+
+
+def migrate_poster_overlay_layers(session=None) -> dict[str, Any]:
+    """Map legacy exclusive overlay mode (+ New Ep. toggle) onto layered settings."""
+    owns_session = session is None
+    session = session or get_session()
+    wrote: list[str] = []
+    try:
+        layer_keys = (
+            "PLACEHOLDER_POSTER_GRAYSCALE",
+            "PLACEHOLDER_POSTER_BADGE",
+            "PLACEHOLDER_POSTER_PLACEHOLDER_BANNER",
+        )
+        existing_layers = (
+            session.query(AppConfig.key)
+            .filter(AppConfig.key.in_(layer_keys))
+            .all()
+        )
+        has_layers = bool(existing_layers)
+
+        def _bool_row(key: str) -> bool:
+            row = _get_row(session, key)
+            if row is None or row.value is None:
+                return False
+            return str(row.value).strip().lower() in {"1", "true", "yes", "on"}
+
+        if not has_layers:
+            mode_row = session.query(AppConfig).filter(AppConfig.key == "PLACEHOLDER_POSTER_OVERLAY_MODE").first()
+            mode = str(getattr(mode_row, "value", None) or "off").strip().lower()
+            gs = mode == "grayscale"
+            badge = mode == "corner_logo"
+            ph = mode == "top_banner"
+            _upsert_bool_config(session, "PLACEHOLDER_POSTER_GRAYSCALE", gs)
+            _upsert_bool_config(session, "PLACEHOLDER_POSTER_BADGE", badge)
+            _upsert_bool_config(session, "PLACEHOLDER_POSTER_PLACEHOLDER_BANNER", ph)
+            if badge and _get_row(session, "PLACEHOLDER_POSTER_BADGE_POSITION") is None:
+                _upsert_string_config(session, "PLACEHOLDER_POSTER_BADGE_POSITION", "bottom_right")
+            wrote.extend(layer_keys)
+
+        # Fold legacy New Ep. into Coming Soon.
+        if _bool_row("PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER") and not _bool_row(
+            "PLACEHOLDER_POSTER_COMING_SOON_BANNER"
+        ):
+            _upsert_bool_config(session, "PLACEHOLDER_POSTER_COMING_SOON_BANNER", True)
+            wrote.append("PLACEHOLDER_POSTER_COMING_SOON_BANNER")
+
+        if wrote:
+            session.commit()
+            logger.info(
+                f"Poster overlay layers migration wrote: {', '.join(wrote)}",
+                extra={"emoji_type": "info"},
+            )
+        return {"ok": True, "wrote": wrote, "migrated_from_mode": not has_layers}
+    except Exception as exc:
+        session.rollback()
+        logger.warning(
+            f"Poster overlay layers migration failed: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+        return {"ok": False, "wrote": wrote, "error": str(exc)}
+    finally:
+        if owns_session:
+            session.close()
+
+
 def apply_persisted_settings(session=None) -> dict[str, Any]:
     owns_session = session is None
     session = session or get_session()
@@ -2430,6 +2618,7 @@ def apply_persisted_settings(session=None) -> dict[str, Any]:
         migrate_playback_future_search_suppress_default()
         migrate_playback_filters_to_dest_lists()
         migrate_play_also_instances_from_legacy()
+        migrate_poster_overlay_layers()
         rows = session.query(AppConfig).filter(AppConfig.key.in_(tuple(SETTINGS_SCHEMA.keys()))).all()
         for row in rows:
             if row.key not in SETTINGS_SCHEMA:
@@ -2649,44 +2838,40 @@ def save_settings(
                 except Exception:
                     errors[section_key] = "must be a positive integer"
 
+        def _setting_value_changed(key: str) -> bool:
+            """Compare with normalized types so bool false is not treated as blank."""
+            prev_row = _get_row(session, key)
+            prev_raw = None if not prev_row else prev_row.value
+            return _normalized_stored_setting_value(key, prev_raw) != _normalized_stored_setting_value(
+                key, validated.get(key)
+            )
+
         nfo_backfill_keys_changed: list[str] = []
         for key in NFO_BACKFILL_SETTING_KEYS:
             if key not in validated:
                 continue
-            prev_row = _get_row(session, key)
-            prev_val = "" if not prev_row or prev_row.value is None else str(prev_row.value).strip()
-            new_val = str(validated.get(key) or "").strip()
-            if prev_val != new_val:
+            if _setting_value_changed(key):
                 nfo_backfill_keys_changed.append(key)
 
         art_backfill_keys_changed: list[str] = []
         for key in ART_BACKFILL_SETTING_KEYS:
             if key not in validated:
                 continue
-            prev_row = _get_row(session, key)
-            prev_val = "" if not prev_row or prev_row.value is None else str(prev_row.value).strip()
-            new_val = str(validated.get(key) or "").strip()
-            if prev_val != new_val:
+            if _setting_value_changed(key):
                 art_backfill_keys_changed.append(key)
 
         destination_rematerialize_keys_changed: list[str] = []
         for key in DESTINATION_REMATERIALIZE_SETTING_KEYS:
             if key not in validated:
                 continue
-            prev_row = _get_row(session, key)
-            prev_val = "" if not prev_row or prev_row.value is None else str(prev_row.value).strip()
-            new_val = str(validated.get(key) or "").strip()
-            if prev_val != new_val:
+            if _setting_value_changed(key):
                 destination_rematerialize_keys_changed.append(key)
 
         tv_density_rematerialize_keys_changed: list[str] = []
         for key in TV_DENSITY_REMATERIALIZE_SETTING_KEYS:
             if key not in validated:
                 continue
-            prev_row = _get_row(session, key)
-            prev_val = "" if not prev_row or prev_row.value is None else str(prev_row.value).strip()
-            new_val = str(validated.get(key) or "").strip()
-            if prev_val != new_val:
+            if _setting_value_changed(key):
                 tv_density_rematerialize_keys_changed.append(key)
 
         if "LIBRARY_DESTINATION_MAP_JSON" in validated:
@@ -3013,11 +3198,15 @@ def save_settings(
         _set_runtime_value("PLACEHOLDER_CREATE_NFO", True)
         backfill_summary: dict[str, Any] | None = None
         art_backfill_summary: dict[str, Any] | None = None
-        if (
-            "ENABLE_PREFERRED_POSTER_LANGUAGE" in art_backfill_keys_changed
-            or "PREFERRED_POSTER_LANGUAGE" in art_backfill_keys_changed
-            or "PREFER_ORIGINAL_POSTER_LANGUAGE" in art_backfill_keys_changed
-        ):
+        language_poster_cleanup_needed = bool(
+            {
+                "ENABLE_PREFERRED_POSTER_LANGUAGE",
+                "PREFERRED_POSTER_LANGUAGE",
+                "PREFER_ORIGINAL_POSTER_LANGUAGE",
+            }.intersection(art_backfill_keys_changed)
+        )
+        if language_poster_cleanup_needed and apply_scope != "now":
+            # Apply now defers this with the enqueue work so the save response stays fast.
             try:
                 from services.poster_language import clear_stale_localized_posters
 
@@ -3032,7 +3221,27 @@ def save_settings(
                     session.rollback()
                 except Exception:
                     pass
-        if (nfo_backfill_keys_changed or art_backfill_keys_changed) and apply_scope:
+        pending_art = False
+        pending_metadata = False
+        pending_art_scope = "all"
+        if apply_scope == "now":
+            # A prior "next full sync" save may still be waiting. Apply now should consume it
+            # even when this save did not change overlay keys again.
+            try:
+                from services.source_of_truth.placeholder_refresh import get_pending_intent
+
+                intent = get_pending_intent()
+                pending_metadata = bool(intent.get("metadata") or intent.get("templates"))
+                pending_art = bool(intent.get("art"))
+                pending_art_scope = str(intent.get("art_scope") or "all").strip().lower() or "all"
+            except Exception:
+                pass
+
+        if (
+            nfo_backfill_keys_changed
+            or art_backfill_keys_changed
+            or (apply_scope == "now" and (pending_art or pending_metadata))
+        ) and apply_scope:
             from services.source_of_truth.placeholder_refresh import execute_placeholder_refresh_apply_scope
 
             # Poster language must apply to existing placeholders too; never leave them on a stale language.
@@ -3047,101 +3256,221 @@ def save_settings(
             if language_keys_changed and effective_scope == "future":
                 effective_scope = "next_full_sync"
 
-            refresh_out = execute_placeholder_refresh_apply_scope(
-                apply_scope=effective_scope,
-                metadata=bool(nfo_backfill_keys_changed),
-                art=bool(art_backfill_keys_changed),
-                templates=False,
-                source="settings_save",
-                task_run_trigger="settings_change" if effective_scope == "now" else None,
-            )
-            if (
-                language_keys_changed
-                and effective_scope == "now"
-            ):
-                try:
-                    from services.source_of_truth.poster_language_job import (
-                        enqueue_poster_language_resolve_stale,
+            # Narrow Coming Soon toggle also refreshes series/season New Ep. posters.
+            changed_art = set(art_backfill_keys_changed)
+            art_scope = "all"
+            if changed_art and changed_art <= NARROW_ART_BACKFILL_SETTING_KEYS:
+                art_scope = "coming_soon_and_tv"
+            elif not changed_art and pending_art and pending_art_scope in {
+                "all",
+                "coming_soon",
+                "tv_new_ep",
+                "coming_soon_and_tv",
+            }:
+                art_scope = pending_art_scope
+
+            do_metadata = bool(nfo_backfill_keys_changed) or (effective_scope == "now" and pending_metadata)
+            do_art = bool(art_backfill_keys_changed) or (effective_scope == "now" and pending_art)
+            if effective_scope == "now":
+                # Settings rows are already committed. Enqueue / determination can take a long time
+                # on large libraries; run Apply now off the request so the UI can leave immediately.
+                def _apply_now_placeholder_refresh(
+                    *,
+                    _art_scope: str = art_scope,
+                    _do_metadata: bool = do_metadata,
+                    _do_art: bool = do_art,
+                    _do_lang: bool = language_keys_changed,
+                    _meta_keys: list[str] = list(nfo_backfill_keys_changed),
+                    _art_keys: list[str] = list(art_backfill_keys_changed),
+                ) -> None:
+                    if _do_lang:
+                        try:
+                            from services.postgres.db import session_scope
+                            from services.poster_language import clear_stale_localized_posters
+
+                            with session_scope() as cleanup_session:
+                                clear_stale_localized_posters(cleanup_session)
+                                cleanup_session.commit()
+                        except Exception as cleanup_exc:
+                            logger.warning(
+                                f"Failed to clear stale localized posters after language change: {cleanup_exc}",
+                                extra={"emoji_type": "warning"},
+                            )
+                    refresh_out = execute_placeholder_refresh_apply_scope(
+                        apply_scope="now",
+                        metadata=_do_metadata,
+                        art=_do_art,
+                        templates=False,
+                        art_scope=_art_scope,
+                        source="settings_save",
+                        task_run_trigger="settings_change",
+                    )
+                    if _do_lang:
+                        try:
+                            from services.source_of_truth.poster_language_job import (
+                                enqueue_poster_language_resolve_stale,
+                            )
+
+                            enqueue_poster_language_resolve_stale(source="settings_save:poster_language")
+                        except Exception as lang_exc:
+                            logger.warning(
+                                f"Poster language resolve enqueue after settings save failed: {lang_exc}",
+                                extra={"emoji_type": "warning"},
+                            )
+                    logger.info(
+                        f"Placeholder refresh after settings save (deferred) scope=now "
+                        f"metadata_keys={_meta_keys} art_keys={_art_keys} "
+                        f"enqueued={bool(refresh_out.get('enqueued'))}",
+                        extra={"emoji_type": "processing"},
                     )
 
-                    enqueue_poster_language_resolve_stale(source="settings_save:poster_language")
-                except Exception as lang_exc:
-                    logger.warning(
-                        f"Poster language resolve enqueue after settings save failed: {lang_exc}",
-                        extra={"emoji_type": "warning"},
-                    )
-            if isinstance(refresh_out.get("nfo_backfill"), dict):
-                backfill_summary = dict(refresh_out["nfo_backfill"])
-            else:
-                backfill_summary = {
-                    "ok": bool(refresh_out.get("ok", True)),
-                    "scope": str(refresh_out.get("scope") or ""),
-                    "enqueued": bool(refresh_out.get("enqueued")),
+                _defer_settings_post_save_work("placeholder-refresh", _apply_now_placeholder_refresh)
+                deferred_summary = {
+                    "ok": True,
+                    "scope": "now",
+                    "enqueued": True,
+                    "deferred": True,
+                    "pending": True,
                 }
-            if isinstance(refresh_out.get("art_backfill"), dict):
-                art_backfill_summary = dict(refresh_out["art_backfill"])
+                if do_metadata:
+                    backfill_summary = dict(deferred_summary)
+                if do_art:
+                    art_backfill_summary = dict(deferred_summary)
+                logger.info(
+                    f"Placeholder refresh after settings save deferred scope=now "
+                    f"metadata_keys={nfo_backfill_keys_changed} art_keys={art_backfill_keys_changed}",
+                    extra={"emoji_type": "processing"},
+                )
             else:
-                art_backfill_summary = {
-                    "ok": bool(refresh_out.get("ok", True)),
-                    "scope": str(refresh_out.get("scope") or ""),
-                    "enqueued": bool(refresh_out.get("enqueued")),
-                    "pending": bool(refresh_out.get("pending")),
-                }
-            logger.info(
-                f"Placeholder refresh after settings save scope={effective_scope} "
-                f"metadata_keys={nfo_backfill_keys_changed} art_keys={art_backfill_keys_changed}",
-                extra={"emoji_type": "processing"},
-            )
+                refresh_out = execute_placeholder_refresh_apply_scope(
+                    apply_scope=effective_scope,
+                    metadata=do_metadata,
+                    art=do_art,
+                    templates=False,
+                    art_scope=art_scope,
+                    source="settings_save",
+                    task_run_trigger=None,
+                )
+                if isinstance(refresh_out.get("nfo_backfill"), dict):
+                    backfill_summary = dict(refresh_out["nfo_backfill"])
+                else:
+                    backfill_summary = {
+                        "ok": bool(refresh_out.get("ok", True)),
+                        "scope": str(refresh_out.get("scope") or ""),
+                        "enqueued": bool(refresh_out.get("enqueued")),
+                    }
+                if isinstance(refresh_out.get("art_backfill"), dict):
+                    art_backfill_summary = dict(refresh_out["art_backfill"])
+                else:
+                    art_backfill_summary = {
+                        "ok": bool(refresh_out.get("ok", True)),
+                        "scope": str(refresh_out.get("scope") or ""),
+                        "enqueued": bool(refresh_out.get("enqueued")),
+                        "pending": bool(refresh_out.get("pending")),
+                    }
+                logger.info(
+                    f"Placeholder refresh after settings save scope={effective_scope} "
+                    f"metadata_keys={nfo_backfill_keys_changed} art_keys={art_backfill_keys_changed}",
+                    extra={"emoji_type": "processing"},
+                )
 
         destination_rematerialize_summary: dict[str, Any] | None = None
         if destination_rematerialize_keys_changed and apply_scope:
             effective_dest_scope = str(apply_scope)
             if effective_dest_scope == "future":
                 effective_dest_scope = "next_full_sync"
-            try:
-                from services.library_destination_rematerialize import enqueue_destination_rematerialize
+            if effective_dest_scope == "now":
+                def _apply_now_destination() -> None:
+                    from services.library_destination_rematerialize import enqueue_destination_rematerialize
 
-                destination_rematerialize_summary = enqueue_destination_rematerialize(
-                    source="settings_save:destination_map",
-                    apply_now=(effective_dest_scope == "now"),
-                )
-                logger.info(
-                    f"Destination rematerialize after settings save scope={effective_dest_scope} "
-                    f"keys={destination_rematerialize_keys_changed}",
-                    extra={"emoji_type": "processing"},
-                )
-            except Exception as dest_exc:
-                logger.warning(
-                    f"Destination rematerialize after settings save failed: {dest_exc}",
-                    extra={"emoji_type": "warning"},
-                )
-                destination_rematerialize_summary = {"ok": False, "error": str(dest_exc)}
+                    out = enqueue_destination_rematerialize(
+                        source="settings_save:destination_map",
+                        apply_now=True,
+                    )
+                    logger.info(
+                        f"Destination rematerialize after settings save (deferred) scope=now "
+                        f"keys={destination_rematerialize_keys_changed} out={out}",
+                        extra={"emoji_type": "processing"},
+                    )
+
+                _defer_settings_post_save_work("destination-rematerialize", _apply_now_destination)
+                destination_rematerialize_summary = {
+                    "ok": True,
+                    "scope": "now",
+                    "enqueued": True,
+                    "deferred": True,
+                    "pending": True,
+                }
+            else:
+                try:
+                    from services.library_destination_rematerialize import enqueue_destination_rematerialize
+
+                    destination_rematerialize_summary = enqueue_destination_rematerialize(
+                        source="settings_save:destination_map",
+                        apply_now=False,
+                    )
+                    logger.info(
+                        f"Destination rematerialize after settings save scope={effective_dest_scope} "
+                        f"keys={destination_rematerialize_keys_changed}",
+                        extra={"emoji_type": "processing"},
+                    )
+                except Exception as dest_exc:
+                    logger.warning(
+                        f"Destination rematerialize after settings save failed: {dest_exc}",
+                        extra={"emoji_type": "warning"},
+                    )
+                    destination_rematerialize_summary = {"ok": False, "error": str(dest_exc)}
 
         tv_density_rematerialize_summary: dict[str, Any] | None = None
         if tv_density_rematerialize_keys_changed and apply_scope:
             effective_density_scope = str(apply_scope)
             if effective_density_scope == "future":
                 effective_density_scope = "next_full_sync"
-            try:
-                from services.source_of_truth.tv_density_rematerialize import (
-                    execute_tv_density_rematerialize_apply_scope,
-                )
+            if effective_density_scope == "now":
+                def _apply_now_density() -> None:
+                    from services.source_of_truth.tv_density_rematerialize import (
+                        execute_tv_density_rematerialize_apply_scope,
+                    )
 
-                tv_density_rematerialize_summary = execute_tv_density_rematerialize_apply_scope(
-                    effective_density_scope,
-                    source="settings_save:tv_density",
-                )
-                logger.info(
-                    f"TV density rematerialize after settings save scope={effective_density_scope} "
-                    f"keys={tv_density_rematerialize_keys_changed}",
-                    extra={"emoji_type": "processing"},
-                )
-            except Exception as dens_exc:
-                logger.warning(
-                    f"TV density rematerialize after settings save failed: {dens_exc}",
-                    extra={"emoji_type": "warning"},
-                )
-                tv_density_rematerialize_summary = {"ok": False, "error": str(dens_exc)}
+                    out = execute_tv_density_rematerialize_apply_scope(
+                        "now",
+                        source="settings_save:tv_density",
+                    )
+                    logger.info(
+                        f"TV density rematerialize after settings save (deferred) scope=now "
+                        f"keys={tv_density_rematerialize_keys_changed} out={out}",
+                        extra={"emoji_type": "processing"},
+                    )
+
+                _defer_settings_post_save_work("tv-density-rematerialize", _apply_now_density)
+                tv_density_rematerialize_summary = {
+                    "ok": True,
+                    "scope": "now",
+                    "enqueued": True,
+                    "deferred": True,
+                    "pending": True,
+                }
+            else:
+                try:
+                    from services.source_of_truth.tv_density_rematerialize import (
+                        execute_tv_density_rematerialize_apply_scope,
+                    )
+
+                    tv_density_rematerialize_summary = execute_tv_density_rematerialize_apply_scope(
+                        effective_density_scope,
+                        source="settings_save:tv_density",
+                    )
+                    logger.info(
+                        f"TV density rematerialize after settings save scope={effective_density_scope} "
+                        f"keys={tv_density_rematerialize_keys_changed}",
+                        extra={"emoji_type": "processing"},
+                    )
+                except Exception as dens_exc:
+                    logger.warning(
+                        f"TV density rematerialize after settings save failed: {dens_exc}",
+                        extra={"emoji_type": "warning"},
+                    )
+                    tv_density_rematerialize_summary = {"ok": False, "error": str(dens_exc)}
 
         logger.info(
             "Settings saved"

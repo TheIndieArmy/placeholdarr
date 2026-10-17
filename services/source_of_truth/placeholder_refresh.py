@@ -19,15 +19,54 @@ PLACEHOLDER_REFRESH_SUBSTEP_KEY = "placeholder_refresh_substep"
 from services.task_run_history import begin_task_run, finish_task_run, update_task_run_summary
 
 
+_VALID_ART_SCOPES = frozenset({"all", "coming_soon", "tv_new_ep", "coming_soon_and_tv"})
+
+
 def _empty_intent(*, source: str | None = None) -> dict[str, Any]:
     return {
         "version": PENDING_REFRESH_VERSION,
         "metadata": False,
         "art": False,
         "templates": False,
+        # Narrow art refresh: all | coming_soon | tv_new_ep | coming_soon_and_tv
+        "art_scope": "all",
         "source": str(source or "").strip(),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def _normalize_art_scope(raw: Any, *, art: bool) -> str:
+    if not art:
+        return "all"
+    scope = str(raw.get("art_scope") if isinstance(raw, dict) else raw or "").strip().lower()
+    if not scope and isinstance(raw, dict) and raw.get("art_coming_soon_only"):
+        scope = "coming_soon"
+    return scope if scope in _VALID_ART_SCOPES else "all"
+
+
+def _merge_art_scopes(prior: str, new: str) -> str:
+    """Combine pending narrow art scopes; ``all`` always wins."""
+    left = str(prior or "all").strip().lower() or "all"
+    right = str(new or "all").strip().lower() or "all"
+    if left == "all" or right == "all":
+        return "all"
+    parts: set[str] = set()
+    for scope in (left, right):
+        if scope == "coming_soon":
+            parts.add("cs")
+        elif scope == "tv_new_ep":
+            parts.add("tv")
+        elif scope == "coming_soon_and_tv":
+            parts.update({"cs", "tv"})
+        else:
+            return "all"
+    if parts == {"cs"}:
+        return "coming_soon"
+    if parts == {"tv"}:
+        return "tv_new_ep"
+    if parts == {"cs", "tv"}:
+        return "coming_soon_and_tv"
+    return "all"
 
 
 def _normalize_intent(raw: Any) -> dict[str, Any]:
@@ -38,6 +77,7 @@ def _normalize_intent(raw: Any) -> dict[str, Any]:
     out["metadata"] = bool(raw.get("metadata"))
     out["art"] = bool(raw.get("art"))
     out["templates"] = bool(raw.get("templates"))
+    out["art_scope"] = _normalize_art_scope(raw, art=bool(out["art"]))
     if isinstance(raw.get("updated_at"), str) and str(raw.get("updated_at")).strip():
         out["updated_at"] = str(raw["updated_at"]).strip()
     return out
@@ -111,6 +151,8 @@ def merge_pending_intent(
     metadata: bool = False,
     art: bool = False,
     templates: bool = False,
+    art_coming_soon_only: bool = False,
+    art_scope: str | None = None,
     source: str | None = None,
 ) -> dict[str, Any]:
     session = get_session()
@@ -118,9 +160,25 @@ def merge_pending_intent(
         row = _get_pending_row(session)
         merged = _normalize_intent(row.value if row else None)
         legacy = _legacy_intent_flags(session)
+        had_art = bool(merged["art"] or legacy["art"])
+        prior_scope = str(merged.get("art_scope") or "all")
+        incoming_scope = str(art_scope or "").strip().lower()
+        if not incoming_scope and art_coming_soon_only:
+            incoming_scope = "coming_soon"
+        if not incoming_scope:
+            incoming_scope = "all"
+        if incoming_scope not in _VALID_ART_SCOPES:
+            incoming_scope = "all"
         merged["metadata"] = bool(merged["metadata"] or legacy["metadata"] or metadata)
-        merged["art"] = bool(merged["art"] or legacy["art"] or art)
+        merged["art"] = bool(had_art or art)
         merged["templates"] = bool(merged["templates"] or legacy["templates"] or templates)
+        if art:
+            if not had_art:
+                merged["art_scope"] = incoming_scope
+            else:
+                merged["art_scope"] = _merge_art_scopes(prior_scope, incoming_scope)
+        elif not merged["art"]:
+            merged["art_scope"] = "all"
         merged["source"] = str(source or merged.get("source") or "").strip()
         merged["updated_at"] = datetime.now(timezone.utc).isoformat()
         _set_pending_intent(session, merged)
@@ -139,12 +197,13 @@ def clear_pending_intent() -> dict[str, Any]:
     try:
         _set_pending_intent(session, intent)
         session.commit()
-        return intent
     except Exception:
         session.rollback()
         raise
     finally:
         session.close()
+    # Legacy AppConfig flags are OR'd into get_pending_intent(); clear them after the
+    # unified row commit (must run after finally, not before a return in try).
     try:
         from services.source_of_truth.template_backfill import clear_pending_template_backfill
 
@@ -166,11 +225,18 @@ def clear_pending_intent() -> dict[str, Any]:
     return intent
 
 
+def _refresh_was_cancelled(result: Any) -> bool:
+    return isinstance(result, dict) and bool(result.get("cancelled"))
+
+
 def _refresh_enqueue_committed(result: Any) -> bool:
     """True when an enqueue helper completed successfully (work queued or nothing to do)."""
     if not isinstance(result, dict):
         return False
     if not bool(result.get("ok")):
+        return False
+    # User Stop during determination: not a successful empty enqueue.
+    if _refresh_was_cancelled(result):
         return False
     if bool(result.get("enqueued")):
         return True
@@ -189,6 +255,37 @@ def _refresh_enqueue_committed(result: Any) -> bool:
         return False
 
 
+def _finalize_placeholder_refresh_stopped(
+    *,
+    task_run_id: int,
+    summary: dict[str, Any],
+    out: dict[str, Any],
+    reason: str = "stopped_by_user",
+) -> dict[str, Any]:
+    """Close a refresh run after cooperative cancel (or no-op if abandon already stopped it)."""
+    from services.task_run_history import mark_summary_interrupted
+
+    stop_reason = str(reason or "stopped_by_user").strip() or "stopped_by_user"
+    merged = mark_summary_interrupted(
+        dict(summary),
+        ended_at=datetime.now(timezone.utc),
+        reason=stop_reason,
+    )
+    out = {**out, "ok": True, "cancelled": True, "reason": stop_reason, "enqueued": False}
+    merged = _persist_placeholder_refresh_progress(
+        task_run_id,
+        {**merged, **out},
+        overall_status="STOPPED",
+    )
+    finish_task_run(
+        task_run_id,
+        status="stopped",
+        summary=merged,
+        error_message=stop_reason,
+    )
+    return out
+
+
 def _finalize_placeholder_refresh_enqueue(
     *,
     task_run_id: int,
@@ -200,6 +297,14 @@ def _finalize_placeholder_refresh_enqueue(
     art_committed: bool,
 ) -> dict[str, Any]:
     """Close the task run only when every requested domain failed to enqueue; otherwise stay working."""
+    # Cancelled determination must not be reported as enqueue_failed.
+    if _refresh_was_cancelled(out.get("art_backfill")) or _refresh_was_cancelled(out.get("nfo_backfill")):
+        return _finalize_placeholder_refresh_stopped(
+            task_run_id=task_run_id,
+            summary=summary,
+            out=out,
+        )
+
     metadata_failed = bool(metadata and not metadata_committed)
     art_failed = bool(art and not art_committed)
     if not metadata_failed and not art_failed:
@@ -249,6 +354,7 @@ def clear_pending_intent_domains(
             merged["templates"] = False
         if art:
             merged["art"] = False
+            merged["art_scope"] = "all"
         merged["updated_at"] = datetime.now(timezone.utc).isoformat()
         _set_pending_intent(session, merged)
         session.commit()
@@ -287,6 +393,8 @@ def execute_placeholder_refresh_apply_scope(
     metadata: bool = False,
     art: bool = False,
     templates: bool = False,
+    art_coming_soon_only: bool = False,
+    art_scope: str | None = None,
     source: str = "settings_save",
     task_run_trigger: str | None = None,
 ) -> dict[str, Any]:
@@ -297,6 +405,15 @@ def execute_placeholder_refresh_apply_scope(
     requested_templates = bool(templates)
     requested_metadata = bool(metadata or templates)
     requested_art = bool(art)
+    requested_art_scope = str(art_scope or "").strip().lower()
+    if not requested_art_scope and art_coming_soon_only:
+        requested_art_scope = "coming_soon"
+    if not requested_art_scope:
+        requested_art_scope = "all"
+    if requested_art_scope not in _VALID_ART_SCOPES:
+        requested_art_scope = "all"
+    if not requested_art:
+        requested_art_scope = "all"
     if not requested_metadata and not requested_art:
         return {
             "ok": True,
@@ -323,6 +440,7 @@ def execute_placeholder_refresh_apply_scope(
             metadata=requested_metadata,
             art=requested_art,
             templates=bool(templates),
+            art_scope=requested_art_scope,
             source=source,
         )
         out.update({"ok": True, "scope": "next_full_sync", "enqueued": False, "pending": True})
@@ -335,6 +453,20 @@ def execute_placeholder_refresh_apply_scope(
     task_summary: dict[str, Any] | None = None
     track_task_run = bool(str(task_run_trigger or "").strip())
     if track_task_run:
+        from services.task_run_history import get_working_run
+
+        # Match routes/tasks.py: do not stack a second tracked refresh while one
+        # (or a full sync) is already working.
+        if get_working_run("placeholder_refresh") or get_working_run("full_sync"):
+            return {
+                "ok": False,
+                "scope": "now",
+                "enqueued": False,
+                "reason": "task_already_running",
+                "pending": has_pending_intent(),
+                "metadata_requested": requested_metadata,
+                "art_requested": requested_art,
+            }
         trigger = str(task_run_trigger).strip().lower()
         task_run_id = begin_task_run(task_key="placeholder_refresh", trigger=trigger)
         task_summary = _initial_refresh_summary(
@@ -369,8 +501,22 @@ def execute_placeholder_refresh_apply_scope(
     if requested_art:
         from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_backfill_all
 
-        art_out = enqueue_placeholder_art_backfill_all(source=f"{source}:apply_now", **enqueue_kwargs)
+        # Settings overlay / language Apply now already knows art must change; skip the
+        # multi-minute per-file sidecar scan so batches exist before Tasks reconcile runs.
+        skip_art_determination = str(source or "").strip().lower().startswith("settings_save")
+        art_out = enqueue_placeholder_art_backfill_all(
+            source=f"{source}:apply_now",
+            art_scope=requested_art_scope,
+            skip_determination=skip_art_determination,
+            **enqueue_kwargs,
+        )
         out["art_backfill"] = art_out
+        if task_run_id is not None and task_summary is not None and _refresh_was_cancelled(art_out):
+            return _finalize_placeholder_refresh_stopped(
+                task_run_id=task_run_id,
+                summary=task_summary,
+                out=out,
+            )
         art_committed = _refresh_enqueue_committed(art_out)
         out["enqueued"] = bool(out["enqueued"] or art_committed and bool(art_out.get("enqueued")))
 
@@ -416,10 +562,10 @@ def execute_placeholder_refresh_apply_scope(
             )
             finish_task_run(task_run_id, status="done", summary=done_summary)
             return out
-        merged = _persist_placeholder_refresh_progress(
-            task_run_id, {**task_summary, **out}, overall_status="WORKING"
-        )
-        update_task_run_summary(task_run_id, merged)
+        # begin_*_backfill_phase already wrote phases, progress, and art_backfill.run_id.
+        # Do not re-persist the pre-enqueue summary or the enqueue result dict under
+        # art_backfill / nfo_backfill — that wiped metrics and broke accumulate updates.
+        _merge_placeholder_refresh_enqueue_flags(task_run_id, out)
 
     if (requested_metadata and not metadata_committed) or (requested_art and not art_committed):
         out["ok"] = False
@@ -452,6 +598,17 @@ def placeholder_refresh_task_label(summary: dict[str, Any] | None) -> str:
     if art:
         return "Art refresh"
     return "Placeholder refresh"
+
+
+def _merge_placeholder_refresh_enqueue_flags(task_run_id: int, out: dict[str, Any]) -> None:
+    """Attach enqueue result flags without clobbering begin_* phase metrics / run ids."""
+    from services.task_run_history import update_task_run_summary
+    from services.task_run_phases import _load_summary
+
+    live = _load_summary(int(task_run_id)) or {}
+    skip = {"art_backfill", "nfo_backfill", "phases", "progress"}
+    safe = {k: v for k, v in out.items() if k not in skip}
+    update_task_run_summary(int(task_run_id), {**live, **safe, "enqueued": bool(out.get("enqueued"))})
 
 
 def _persist_placeholder_refresh_progress(
@@ -533,6 +690,14 @@ def run_placeholder_refresh_task(
             finish_task_run(task_run_id, status="done", summary=summary)
             return {"ok": True, "task_run_id": task_run_id, "enqueued": False, "reason": "no_active_placeholders"}
 
+        if art:
+            try:
+                from services.task_live_progress import seed_art_refresh_live_phases
+
+                seed_art_refresh_live_phases(int(task_run_id), skip_determination=False)
+            except Exception:
+                pass
+
         run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
         out: dict[str, Any] = {"ok": True, "task_run_id": task_run_id, "enqueued": False, "run_id": run_id}
         metadata_committed = False
@@ -589,19 +754,33 @@ def run_placeholder_refresh_task(
                 payload_extras=art_extras,
             )
             out["art_backfill"] = art_out
+            if _refresh_was_cancelled(art_out):
+                return _finalize_placeholder_refresh_stopped(
+                    task_run_id=task_run_id,
+                    summary=summary,
+                    out=out,
+                )
             art_committed = _refresh_enqueue_committed(art_out)
             out["enqueued"] = bool(out["enqueued"] or (art_committed and bool(art_out.get("enqueued"))))
             if art_committed:
-                from services.task_run_phases import begin_art_backfill_phase
+                from services.task_run_phases import begin_art_backfill_phase, finalize_art_backfill_phase
 
                 batch_count = int(art_out.get("jobs_created") or art_out.get("batch_count") or 0)
+                # Updating totals are post-determination (enqueued) ids, not the full library scan size.
+                queued_count = int(art_out.get("placeholder_count") or 0)
+                art_run_id = f"placeholder_refresh:{run_id}"
                 begin_art_backfill_phase(
                     int(task_run_id),
-                    art_run_id=f"placeholder_refresh:{run_id}",
-                    placeholder_count=len(ids),
+                    art_run_id=art_run_id,
+                    placeholder_count=queued_count,
                     batch_count=batch_count,
                     source=source,
+                    determination_skipped=False,
                 )
+                if batch_count <= 0:
+                    # Determination found nothing: Updating is skipped (not 0/0 done).
+                    finalize_art_backfill_phase(int(task_run_id), art_run_id)
+                    try_complete_placeholder_refresh_task_run(int(task_run_id))
 
         if (metadata and not metadata_committed) or (art and not art_committed):
             return _finalize_placeholder_refresh_enqueue(
@@ -613,8 +792,8 @@ def run_placeholder_refresh_task(
                 metadata_committed=metadata_committed,
                 art_committed=art_committed,
             )
-        merged = _persist_placeholder_refresh_progress(task_run_id, {**summary, **out}, overall_status="WORKING")
-        update_task_run_summary(task_run_id, merged)
+        # begin_* already persisted metrics; keep them (see execute_placeholder_refresh_apply_scope).
+        _merge_placeholder_refresh_enqueue_flags(task_run_id, out)
         return out
     except Exception as exc:
         session.rollback()
@@ -761,6 +940,28 @@ def _linked_refresh_fail_details(
     return "linked_refresh_job_failed", failed_types
 
 
+def _backfill_batches_still_open(meta: Any) -> bool:
+    """True while a begun art/NFO backfill still has unfinished batches.
+
+    Used by try_complete so Tasks reconcile cannot flip the parent row to DONE
+    after ``run_id`` is set but before linked jobs are visible or finished
+    (art-only refresh race: empty statuses + enqueue started ⇒ premature DONE).
+    """
+    if not isinstance(meta, dict):
+        return False
+    status = str(meta.get("status") or "").strip().lower()
+    if status in ("done", "failed", "skipped"):
+        return False
+    try:
+        batch_count = int(meta.get("batch_count") or 0)
+        batches_done = int(meta.get("batches_done") or 0)
+    except (TypeError, ValueError):
+        return False
+    if batch_count <= 0:
+        return False
+    return batches_done < batch_count
+
+
 def try_complete_placeholder_refresh_task_run(
     task_run_id: int,
     *,
@@ -788,6 +989,27 @@ def try_complete_placeholder_refresh_task_run(
         if not row or str(row.status or "").lower() != "working":
             return False
         summary = row.summary if isinstance(row.summary, dict) else {}
+        art_requested = bool(summary.get("art_requested"))
+        metadata_requested = bool(summary.get("metadata_requested"))
+        art_meta = summary.get("art_backfill") if isinstance(summary.get("art_backfill"), dict) else {}
+        nfo_meta = summary.get("nfo_backfill") if isinstance(summary.get("nfo_backfill"), dict) else {}
+        # Apply-now enqueue can take a while (or runs deferred after the HTTP response).
+        # Tasks reconcile must not treat "no linked jobs yet" as finished, or the row
+        # flips to done before batches exist and the refresh looks like a no-op.
+        # Also: once run_id is set with batch_count > 0, empty statuses must wait until
+        # batches_done catches up (jobs may not be visible to this query yet).
+        if not failed:
+            if art_requested and _backfill_batches_still_open(art_meta):
+                return False
+            if metadata_requested and _backfill_batches_still_open(nfo_meta):
+                return False
+            if not statuses:
+                art_enqueue_started = bool(str(art_meta.get("run_id") or "").strip())
+                nfo_enqueue_started = bool(str(nfo_meta.get("run_id") or "").strip())
+                if (art_requested and not art_enqueue_started) or (
+                    metadata_requested and not nfo_enqueue_started
+                ):
+                    return False
         has_failed_job = any(s == "FAILED" for s in statuses)
         if failed or has_failed_job:
             linked_reason, failed_types = _linked_refresh_fail_details(
@@ -862,7 +1084,11 @@ def run_placeholder_refresh_if_pending(*, source: str, task_run_id: int) -> dict
     if art:
         from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_backfill_all
 
-        art_out = enqueue_placeholder_art_backfill_all(source=source, task_run_id=task_run_id)
+        art_out = enqueue_placeholder_art_backfill_all(
+            source=source,
+            task_run_id=task_run_id,
+            art_scope=str(intent.get("art_scope") or "all"),
+        )
         out["art_backfill"] = art_out
         art_committed = _refresh_enqueue_committed(art_out)
         out["enqueued"] = bool(out["enqueued"] or art_committed and bool(art_out.get("enqueued")))
