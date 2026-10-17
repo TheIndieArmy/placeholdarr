@@ -7171,8 +7171,8 @@ function PosterLanguageSettingsDescription(props: {
           props.omitHeading ? "" : props.spacing === "settings" ? "mt-1" : "mt-1 mb-0"
         }`}
       >
-        By default (disabled), Placeholdarr uses poster data already captured during Radarr/Sonarr syncs. Enable Fetch
-        from TMDB to look up posters by language; syncs and art refreshes will take longer.
+        When disabled, Placeholdarr uses poster data already captured during Radarr/Sonarr syncs. Enabled, fetches
+        posters from TMDB to look up posters by language; syncs and art refreshes will take longer.
       </p>
       <p className={`ui-field-description leading-relaxed mt-2 ${props.spacing === "wizard" ? "mb-0" : ""}`}>
         Lookup order: each title&apos;s original language (if Original language first is enabled), then Language below,
@@ -8660,7 +8660,7 @@ function SettingsPanel(props: {
                     values={props.values}
                     controls={
                       <SettingsDensityFrame
-                        legend="Layers"
+                        legend="Overlays"
                         intro={
                           <p>
                             Compose grayscale, badge, and text banners independently. The preview updates as you
@@ -12083,7 +12083,7 @@ function OnboardingWizard(props: {
                     compact
                     controls={
                       <SettingsDensityFrame
-                        legend="Layers"
+                        legend="Overlays"
                         intro={
                           <p>
                             Compose grayscale, badge, and text banners independently. The preview updates as you
