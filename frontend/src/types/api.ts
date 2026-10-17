@@ -17,6 +17,42 @@ export interface ScheduledTaskRow {
   last_status: string | null;
 }
 
+/** Generic live progress blob from ``scheduled_task_run.summary.live``. */
+export interface TaskRunLiveProgress {
+  seq?: number;
+  updated_at?: string;
+  kind?: string;
+  label?: string;
+  /** e.g. determining | updating (current headline stage; bars live under ``phases``). */
+  stage?: string;
+  stage_label?: string;
+  overall_pct?: number;
+  units_done?: number;
+  units_total?: number;
+  unit_label?: string;
+  /** Durable per-pipeline-step bars; completed phases stay for the whole run. */
+  phases?: Array<{
+    key: string;
+    label?: string;
+    done?: number;
+    total?: number;
+    status?: string;
+  }>;
+  active_units?: Array<{
+    index: number;
+    done?: number;
+    total?: number;
+    status?: string;
+    label?: string;
+    finished_at?: string;
+  }>;
+  detail_sections?: Array<{
+    name?: string;
+    status?: string;
+    metrics?: Array<{ label?: string; value?: string | number }>;
+  }>;
+}
+
 export interface TaskRunRow {
   id: number;
   task_key: TaskKey | string;
@@ -33,6 +69,7 @@ export interface TaskRunRow {
   skip_reason?: string | null;
   details?: string | null;
   progress?: ActivityRow["progress"];
+  live?: TaskRunLiveProgress | null;
 }
 
 export interface TaskRunStatusResponse {

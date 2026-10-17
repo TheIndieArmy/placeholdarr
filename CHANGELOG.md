@@ -22,7 +22,9 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Coming Soon drives New Ep.**: One banner toggle for date strips and series/season New Ep. text.
 - **Settings Density framing**: Settings pages use stacked accent framed groups.
 - **Smarter art refresh**: Skip matching posters; refresh on calendar dates and Coming Soon toggles without always scanning the whole library.
+- **Faster art determination**: One catalog load and one overlay check per movie/show before episode stills.
 - **Settings Apply now**: Save returns immediately; art work queues in the background and Tasks shows progress.
+- **Live task progress**: Art refresh shows determination and updating progress in Tasks and a sidebar pill while the run is working.
 
 ### Added
 
@@ -30,6 +32,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Live overlay preview**: Settings and onboarding show the composed Movie / TV / Episode stack.
 - **Banner position**: Top or bottom text bars (default top). Badge corners stay independent.
 - **Poster Art**: TMDB language and overlays under Settings → Poster Art.
+- **Live task progress**: Working art refresh publishes shared live progress (determination, then updating) for Tasks and an expand-up sidebar pill.
 - **What's new (0.11.3)**: Startup ack for layered overlays pointing at Poster Art.
 
 ### Changed
@@ -37,6 +40,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Coming Soon drives New Ep.**: Enabling Coming Soon also shows New Ep. on series/season posters.
 - **Settings Density framing**: Paths, Media, Arr, Optional APIs, Playback, Library sync, Calendar, Status Updates, Poster Art, Dummy Video, Advanced, and Security use Density-style framed groups.
 - **Art determination**: Art enqueue skips placeholders whose on-disk overlay already matches.
+- **Art determination scan**: Bulk-loads catalog rows and checks each movie/show overlay once per pass.
 - **Date-driven and toggle art**: Calendar date changes and Coming Soon toggles refresh the affected posters (narrow path refresh when possible).
 - **Materializer art after status**: Initial Coming Soon status is applied before the first local poster write.
 - **Local art player refresh**: After rewriting posters, refresh those titles on Plex/Jellyfin/Emby.
@@ -47,6 +51,9 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Plex item metadata refresh**: Use PUT for `/library/metadata/{id}/refresh` (GET was 404ing).
 - **Settings art-change detection**: Saving an unchanged off bool no longer forces a full art refresh.
 - **NFO batch player push**: Mixed rewrite/no-op NFO batches still project every active placeholder in the batch.
+- **Art refresh empty Updating**: Updating totals use enqueued placeholders (not the full scan); 0 needed finishes at 100% with Determination kept.
+- **Live phase bars**: Task live progress shows a durable bar per pipeline phase (not only the current stage); completed bars stay green at 100%.
+- **Art phase skip states**: Settings Apply skips Determining; a full scan with nothing to rewrite skips Updating (`—% · —/—`).
 
 ## [0.11.2] - 2026-10-15
 

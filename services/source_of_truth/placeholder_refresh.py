@@ -623,6 +623,14 @@ def run_placeholder_refresh_task(
             finish_task_run(task_run_id, status="done", summary=summary)
             return {"ok": True, "task_run_id": task_run_id, "enqueued": False, "reason": "no_active_placeholders"}
 
+        if art:
+            try:
+                from services.task_live_progress import seed_art_refresh_live_phases
+
+                seed_art_refresh_live_phases(int(task_run_id), skip_determination=False)
+            except Exception:
+                pass
+
         run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
         out: dict[str, Any] = {"ok": True, "task_run_id": task_run_id, "enqueued": False, "run_id": run_id}
         metadata_committed = False
@@ -682,16 +690,24 @@ def run_placeholder_refresh_task(
             art_committed = _refresh_enqueue_committed(art_out)
             out["enqueued"] = bool(out["enqueued"] or (art_committed and bool(art_out.get("enqueued"))))
             if art_committed:
-                from services.task_run_phases import begin_art_backfill_phase
+                from services.task_run_phases import begin_art_backfill_phase, finalize_art_backfill_phase
 
                 batch_count = int(art_out.get("jobs_created") or art_out.get("batch_count") or 0)
+                # Updating totals are post-determination (enqueued) ids, not the full library scan size.
+                queued_count = int(art_out.get("placeholder_count") or 0)
+                art_run_id = f"placeholder_refresh:{run_id}"
                 begin_art_backfill_phase(
                     int(task_run_id),
-                    art_run_id=f"placeholder_refresh:{run_id}",
-                    placeholder_count=len(ids),
+                    art_run_id=art_run_id,
+                    placeholder_count=queued_count,
                     batch_count=batch_count,
                     source=source,
+                    determination_skipped=False,
                 )
+                if batch_count <= 0:
+                    # Determination found nothing: Updating is skipped (not 0/0 done).
+                    finalize_art_backfill_phase(int(task_run_id), art_run_id)
+                    try_complete_placeholder_refresh_task_run(int(task_run_id))
 
         if (metadata and not metadata_committed) or (art and not art_committed):
             return _finalize_placeholder_refresh_enqueue(

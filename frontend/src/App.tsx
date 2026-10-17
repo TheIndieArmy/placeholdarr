@@ -104,6 +104,7 @@ import { useActivityTasks } from "./activity/useActivityTasks";
 import { useActivityFeed } from "./activity/useActivityFeed";
 import { PlaceholdersPanel } from "./activity/PlaceholdersPanel";
 import { TasksPanel } from "./activity/TasksPanel";
+import { TaskStatusPillPrototype } from "./activity/TaskStatusPillPrototype";
 import { useActiveSearches } from "./activity/useActiveSearches";
 import { useCalendarData } from "./calendar/useCalendarData";
 import { useLogsStream } from "./logs/useLogsStream";
@@ -894,9 +895,8 @@ export function App() {
       }
     },
     onTaskRunsVersion: () => {
-      if (currentTabRef.current === "activity") {
-        void refreshTasksRef.current();
-      }
+      // Keep task live progress fresh for sidebar pills on every route.
+      void refreshTasksRef.current();
     },
   });
 
@@ -948,7 +948,9 @@ export function App() {
     taskHistory,
     refreshTasks,
   } = useActivityTasks({
-    enabled: authReady && currentTab === "activity" && activitySubPage === "tasks",
+    // Always on when authed so sidebar live pills update outside /activity/tasks.
+    enabled: authReady,
+    chromeOnRefresh: currentTab === "activity" && activitySubPage === "tasks",
     onSuccess: markTabDataFresh,
     onError: markTabDataError,
     onRefreshing: setDashboardRefreshing,
@@ -2485,8 +2487,8 @@ export function App() {
             />
           </div>
 
-          {/* Nav */}
-          <nav className="flex-1 space-y-1.5 font-brand-label pt-4 pb-6">
+          {/* Nav (scrolls above sticky bottom chrome / task progress) */}
+          <nav className="min-h-0 flex-1 space-y-1.5 overflow-y-auto font-brand-label pt-4 pb-6">
             {(() => {
               const navItemBase =
                 "nav-item flex items-center w-full px-6 py-3 gap-4 font-brand-label text-[16px] uppercase tracking-widest transition-all duration-200";
@@ -2693,6 +2695,7 @@ export function App() {
           </nav>
 
           <div className="mt-auto w-full shrink-0">
+            <TaskStatusPillPrototype isStudioGlass={isStudioGlass} taskRuns={taskHistory} />
             <button
               type="button"
               onClick={() => void openWhatsNewCatalog()}
@@ -2705,7 +2708,12 @@ export function App() {
             >
               v{appVersionLabel || "…"}
             </button>
-            <LibraryReconcileSidebarFooter isStudioGlass={isStudioGlass} />
+            <LibraryReconcileSidebarFooter
+              isStudioGlass={isStudioGlass}
+              yieldToTaskLive={taskHistory.some(
+                (run) => String(run.status || "").toUpperCase() === "WORKING" && Boolean(run.live),
+              )}
+            />
           </div>
         </aside>
 

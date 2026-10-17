@@ -3,6 +3,13 @@ import type { Brand, ThemeMode } from "../brandTypes";
 import { getBrandSemanticTokens } from "../brandSemanticTheme";
 import type { ActiveSearchItem, ActiveSearchesResponse } from "../api/dashboard";
 import type { ActivityRow, ScheduledTaskRow, TaskRunRow } from "../types/api";
+import {
+  TaskLiveDetailSections,
+  TaskLiveProgress,
+  type LiveDetailSection,
+  type TaskLiveProgressModel,
+} from "./TaskLiveProgress";
+import { taskLiveFromApi } from "./taskLiveProgress";
 import { formatTaskDuration, formatTaskTrigger, timeAgo, timeUntil } from "./formatActivityTime";
 
 type StripAccent = { hex: string; text: string; icon: string; hoverHex: string };
@@ -15,6 +22,37 @@ function taskRunProgressSections(progress: ActivityRow["progress"] | undefined):
   else if (Array.isArray((progress as any).sections)) sections = (progress as any).sections;
   // Hide follow-up phases that were never requested (legacy full-sync rows).
   return sections.filter((section) => !isUnrequestedFollowUpSection(section));
+}
+
+/** Drop phase cards already represented by ``summary.live`` (avoids duplicate Art refresh blocks). */
+function sectionsNotCoveredByLive(sections: Array<any>, live: TaskLiveProgressModel | null): Array<any> {
+  if (!live) return sections;
+  const kind = String(live.kind || "").toLowerCase();
+  return sections.filter((section) => {
+    const key = String(section?.key || section?.name || "")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, "_");
+    if (kind === "art_refresh" && (key === "art_refresh" || key === "art refresh")) return false;
+    if (kind === "metadata_refresh" && (key === "metadata_refresh" || key === "metadata refresh")) return false;
+    return true;
+  });
+}
+
+function legacySectionToLiveDetail(section: any): LiveDetailSection {
+  const statusRaw = String(section?.status || "pending").toLowerCase();
+  const status = (["working", "done", "pending", "failed"].includes(statusRaw)
+    ? statusRaw
+    : "pending") as LiveDetailSection["status"];
+  const metrics = Array.isArray(section?.metrics) ? section.metrics : [];
+  return {
+    name: String(section?.name || section?.key || "Step"),
+    status,
+    metrics: metrics.map((metric: any) => ({
+      label: String(metric?.label || "Metric"),
+      value: (metric?.value ?? "--") as string | number,
+    })),
+  };
 }
 
 function isUnrequestedFollowUpSection(section: any): boolean {
@@ -136,7 +174,9 @@ export function TasksPanel(props: {
       const next = { ...prev };
       for (const run of props.history) {
         const key = `task-run-${run.id}`;
-        const hasProgress = taskRunProgressSections(run.progress).length > 0;
+        const live = taskLiveFromApi(run.live);
+        const leftover = sectionsNotCoveredByLive(taskRunProgressSections(run.progress), live);
+        const hasProgress = leftover.length > 0 || Boolean(live);
         if (!hasProgress) continue;
         if (String(run.status).toUpperCase() === "WORKING" && next[key] === undefined) {
           next[key] = true;
@@ -302,7 +342,10 @@ export function TasksPanel(props: {
                 {props.history.map((run) => {
                   const rowKey = `task-run-${run.id}`;
                   const sections = taskRunProgressSections(run.progress);
-                  const hasProgress = sections.length > 0;
+                  const liveModel = taskLiveFromApi(run.live);
+                  const leftoverSections = sectionsNotCoveredByLive(sections, liveModel);
+                  const leftoverDetails = leftoverSections.map(legacySectionToLiveDetail);
+                  const hasProgress = leftoverDetails.length > 0 || Boolean(liveModel);
                   const isExpanded = !!historyExpanded[rowKey];
                   return (
                     <Fragment key={run.id}>
@@ -351,31 +394,22 @@ export function TasksPanel(props: {
                       {hasProgress && isExpanded ? (
                         <tr>
                           <td colSpan={6} className="px-4 py-3" style={{ backgroundColor: isLight ? semantic.surfaceMuted : "#1a2028" }}>
-                            <div className="space-y-2">
-                              {sections.map((section: any, sidx: number) => (
-                                <div
-                                  key={`sec-${sidx}`}
-                                  className="rounded border p-3"
-                                  style={{ borderColor: semantic.border, backgroundColor: isLight ? semantic.surfacePanel : "#1b2431" }}
-                                >
-                                  <div className="flex justify-between gap-2 mb-1">
-                                    <span className="text-[12px] font-headline uppercase tracking-wider" style={{ color: semantic.fg }}>
-                                      {String(section?.name || "Step")}
-                                    </span>
-                                    <span className="text-[11px] uppercase" style={{ color: semantic.fgMuted }}>
-                                      {String(section?.status || "pending")}
-                                    </span>
-                                  </div>
-                                  {Array.isArray(section?.metrics)
-                                    ? section.metrics.map((metric: any, midx: number) => (
-                                        <div key={midx} className="flex justify-between text-[13px]" style={{ color: semantic.fgMuted }}>
-                                          <span>{String(metric?.label || "Metric")}</span>
-                                          <span style={{ color: semantic.fg }}>{String(metric?.value ?? "--")}</span>
-                                        </div>
-                                      ))
-                                    : null}
-                                </div>
-                              ))}
+                            <div className="space-y-3">
+                              {liveModel ? (
+                                <TaskLiveProgress
+                                  model={liveModel}
+                                  density="comfortable"
+                                  isStudioGlass={!isLight}
+                                  showFullDetails
+                                />
+                              ) : null}
+                              {leftoverDetails.length ? (
+                                <TaskLiveDetailSections
+                                  sections={leftoverDetails}
+                                  density="comfortable"
+                                  isStudioGlass={!isLight}
+                                />
+                              ) : null}
                             </div>
                           </td>
                         </tr>

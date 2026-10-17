@@ -520,16 +520,18 @@ def begin_art_backfill_phase(
     placeholder_count: int,
     batch_count: int,
     source: str,
+    determination_skipped: bool = False,
 ) -> None:
     now = _utc_now()
     summary = _load_summary(task_run_id)
     phases = phases_from_summary(summary)
     if not phases and isinstance(summary.get("phases"), list):
         phases = list(summary["phases"])
+    empty_queue = int(placeholder_count or 0) <= 0 and int(batch_count or 0) <= 0
     phase = {
         "key": "art_refresh",
         "name": "Art refresh",
-        "status": "working",
+        "status": "done" if empty_queue else "working",
         "started_at": _iso(now),
         "metrics": [
             {"label": "Placeholders queued", "value": placeholder_count},
@@ -537,17 +539,39 @@ def begin_art_backfill_phase(
             {"label": "Source", "value": source},
         ],
     }
+    if empty_queue:
+        phase["ended_at"] = _iso(now)
+        phase["metrics"] = [
+            {"label": "Placeholders queued", "value": 0},
+            {"label": "Batches", "value": 0},
+            {"label": "Source", "value": source},
+            {"label": "Reason", "value": "Nothing needed a refresh"},
+        ]
     phases = [p for p in phases if p.get("key") != "art_refresh"] + [phase]
     reopen_task_run(task_run_id)
     summary = {**summary, "art_backfill": {
         "run_id": art_run_id,
         "batch_count": batch_count,
-        "batches_done": 0,
-        "status": "working",
+        "batches_done": 0 if not empty_queue else 0,
+        "items_total": int(placeholder_count),
+        "items_done": 0,
+        "status": "done" if empty_queue else "working",
+        "source": source,
+        "determination_skipped": bool(determination_skipped),
         "counts": empty_art_counts(),
     }}
     _save_phases(task_run_id, phases, extra=summary)
-    refresh_full_sync_task_progress(task_run_id, phases=phases, overall_status="WORKING")
+    refresh_full_sync_task_progress(
+        task_run_id,
+        phases=phases,
+        overall_status="DONE" if empty_queue else "WORKING",
+    )
+    try:
+        from services.task_live_progress import publish_art_refresh_live
+
+        publish_art_refresh_live(int(task_run_id), replace_active_units=True)
+    except Exception as exc:
+        logger.debug("art live progress begin skipped: %s", exc, extra={"emoji_type": "debug"})
 
 
 def begin_nfo_backfill_phase(
@@ -623,6 +647,7 @@ def accumulate_art_backfill_counts(
     batch_counts: dict[str, Any],
     *,
     exclude_job_id: int | None = None,
+    items_processed: int | None = None,
 ) -> None:
     summary = _load_summary(task_run_id)
     if not isinstance(summary, dict):
@@ -635,6 +660,12 @@ def accumulate_art_backfill_counts(
     merge_art_counts(counts, batch_counts)
     art["counts"] = counts
     art["batches_done"] = int(art.get("batches_done", 0)) + 1
+    try:
+        delta = int(items_processed) if items_processed is not None else 0
+    except Exception:
+        delta = 0
+    if delta > 0:
+        art["items_done"] = int(art.get("items_done") or 0) + delta
     summary["art_backfill"] = art
     phases = phases_from_summary(summary)
     for phase in phases:
@@ -655,6 +686,12 @@ def accumulate_art_backfill_counts(
                 if not phase.get("ended_at"):
                     phase["ended_at"] = _iso(_utc_now())
     _save_phases(task_run_id, phases, extra=summary)
+    try:
+        from services.task_live_progress import publish_art_refresh_live
+
+        publish_art_refresh_live(int(task_run_id))
+    except Exception as exc:
+        logger.debug("art live progress accumulate skipped: %s", exc, extra={"emoji_type": "debug"})
     batch_total = int(art.get("batch_count", 0))
     batch_done = int(art.get("batches_done", 0))
     run_id = str(art.get("run_id") or "").strip()
@@ -826,6 +863,13 @@ def finalize_art_backfill_phase(
     art["status"] = "failed" if failed else "done"
     summary = {**summary, "art_backfill": art}
     _save_phases(task_run_id, phases, extra=summary)
+    try:
+        from services.task_live_progress import publish_art_refresh_live
+
+        # Drop ephemeral batch bars from the stored live payload (no further publishes to prune them).
+        publish_art_refresh_live(int(task_run_id), replace_active_units=True)
+    except Exception as exc:
+        logger.debug("art live progress finalize skipped: %s", exc, extra={"emoji_type": "debug"})
     if not try_complete_linked_task_run(task_run_id, failed=failed, exclude_job_id=exclude_job_id):
         logger.info(
             f"task_run_id={task_run_id} art phase closed; task row still open "

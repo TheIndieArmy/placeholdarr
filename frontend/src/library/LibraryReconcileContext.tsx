@@ -138,9 +138,14 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
   );
 }
 
-export function LibraryReconcileSidebarFooter(props: { isStudioGlass: boolean }) {
+export function LibraryReconcileSidebarFooter(props: {
+  isStudioGlass: boolean;
+  /** When a task live-progress pill is active, hide reconcile chrome so they do not stack. */
+  yieldToTaskLive?: boolean;
+}) {
   const ctx = useContext(LibraryReconcileContext);
   const { message, kind, busy } = ctx?.status ?? { message: null, kind: "info" as const, busy: false };
+  if (props.yieldToTaskLive) return null;
   if (!message && !busy) return null;
 
   const textClass =
