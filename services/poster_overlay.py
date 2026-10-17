@@ -31,14 +31,14 @@ _VALID_MODES = frozenset({"off", "grayscale", "top_banner", "corner_logo", COMPO
 _VALID_BANNER_POSITIONS = frozenset({"top", "bottom"})
 _VALID_BADGE_POSITIONS = frozenset({"bottom_right", "bottom_left", "top_right", "top_left"})
 # Bumped for Coming Soon / date-label banner text (auto-fit width).
-_TOP_BANNER_LAYOUT = "top-banner-space-grotesk-v6"  # landscape 18%; higher bar opacity
+_TOP_BANNER_LAYOUT = "top-banner-space-grotesk-v7"  # restore pre-compose bar opacity (0.65)
 # Layered compose: independent grayscale / text bar / badge (badge corners).
-_COMPOSE_LAYOUT = "compose-layers-v8"  # badge always sized to banner bar height
+_COMPOSE_LAYOUT = "compose-layers-v9"  # lighter banner bar; badge stays fully opaque
 # Corner logo + Coming Soon uses a bottom strip with the logo embedded in the bar.
 _CORNER_BOTTOM_BANNER_LAYOUT = "corner-bottom-banner-v1"
 
-# Banner fill alpha. Higher so the full bar height reads on dark episode stills (top/bottom same px).
-_BANNER_BAR_ALPHA = int(255 * 0.88)
+# Banner fill alpha (pre-compose top_banner used 0.65). Badge / logo stay fully opaque.
+_BANNER_BAR_ALPHA = int(255 * 0.65)
 
 
 def _asset_digest(path: Path) -> str | None:

@@ -18,55 +18,35 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 ### Summary
 
 - **Layered poster overlays**: Grayscale, badge, and banner compose independently (replaces exclusive overlay mode).
-- **Coming Soon drives New Ep.**: One banner toggle covers movie/episode dates and series/season New Ep. text.
-- **Poster Art**: One Settings page for TMDB language plus overlay layers; live previews sit beside overlay controls.
-- **Settings Density framing**: Settings pages use stacked accent framed groups (Density & Lookahead style).
-- **Art determination**: Art refresh enqueue compares desired overlay to `.poster-overlay.json` and skips matching titles.
-- **Coming Soon date-driven art**: Calendar date refresh enqueues poster art when release/air dates change, even if status/reason stay the same.
-- **New Ep. calendar/import art**: Episode air-date shifts and import-grace finalize refresh series/season New Ep. banners.
-- **Materializer art after status**: Placeholder art is written after initial Coming Soon status so the first poster has the correct banner.
-- **Banner position**: Top or bottom text bars (default top); badge corners are independent with auto inset on shared edges.
-- **Coming Soon date banner**: Opt-in poster strip (default off); Settings and onboarding previews update with the toggles.
-- **Coming Soon banner art refresh**: Toggle-only saves refresh Coming Soon titles, not the whole library.
-- **Narrow banner Plex refresh**: Coming Soon / New Ep. applies use path refresh, not full-library metadata.
-- **Local art player refresh**: Rewritten posters trigger per-title metadata refresh so Plex shows the new art.
-- **Plex item metadata refresh**: PUT instead of GET so item refreshes succeed.
-- **Settings art-change detection**: Unchanged off bools no longer force a full art refresh.
-- **What's new (0.11.3)**: Startup ack for layered poster overlays and date banners (Poster Art CTA).
-- **NFO batch player push**: Mixed rewrite/no-op NFO jobs still project every active placeholder in the batch.
+- **Poster Art**: Language and overlay settings on one page, with live Movie / TV / Episode previews.
+- **Coming Soon drives New Ep.**: One banner toggle for date strips and series/season New Ep. text.
+- **Settings Density framing**: Settings pages use stacked accent framed groups.
+- **Smarter art refresh**: Skip matching posters; refresh on calendar dates and Coming Soon toggles without always scanning the whole library.
+- **Settings Apply now**: Save returns immediately; art work queues in the background and Tasks shows progress.
 
 ### Added
 
-- **Layered poster overlays**: `PLACEHOLDER_POSTER_GRAYSCALE`, `PLACEHOLDER_POSTER_BADGE` (+ position), `PLACEHOLDER_POSTER_PLACEHOLDER_BANNER`, and `PLACEHOLDER_POSTER_COMING_SOON_BANNER` compose together. Legacy exclusive `PLACEHOLDER_POSTER_OVERLAY_MODE` migrates on startup.
-- **Live overlay preview**: `/api/settings/poster-overlay-preview` (`kind=movie|series|episode`) returns a JPEG of the current layer stack for Settings and onboarding.
-- **Banner position**: `PLACEHOLDER_POSTER_BANNER_POSITION` (`top` / `bottom`, default `top`) places date / PLACEHOLDER text bars. Badge position is separate; text insets when both share an edge.
-- **Poster Art**: TMDB language and overlay layer settings share Settings → Poster Art (`/settings/poster-art`; old `/settings/poster-overlay` and `/settings/poster-language` redirect).
-- **Coming Soon date banner**: `PLACEHOLDER_POSTER_COMING_SOON_BANNER` (default off) adds a date strip on Coming Soon movie posters and episode thumbs. Series and season posters show New Ep. when this is enabled.
-- **What's new (0.11.3)**: Startup ack for layered overlays and date banners pointing at Settings → Poster Art.
+- **Layered poster overlays**: Independent grayscale, badge (+ corner), PLACEHOLDER banner, and Coming Soon banner settings. Legacy exclusive overlay mode migrates on startup.
+- **Live overlay preview**: Settings and onboarding show the composed Movie / TV / Episode stack.
+- **Banner position**: Top or bottom text bars (default top). Badge corners stay independent.
+- **Poster Art**: TMDB language and overlays under Settings → Poster Art.
+- **What's new (0.11.3)**: Startup ack for layered overlays pointing at Poster Art.
 
 ### Changed
 
-- **Overlay badge size**: Corner badge always matches banner bar height so it fits the strip whether or not it shares an edge.
-- **Poster Art page**: Renames Poster Overlay; language settings are full width above overlay controls; Movie / TV / Episode previews sit beside overlays with correct aspect ratios.
-- **Settings Density framing**: Paths, Media, Arr, Optional APIs, Playback, Library sync, Calendar, Status Updates, Poster Art, Dummy Video, Advanced, and Security use stacked Density-style framed groups.
-- **Coming Soon drives New Ep.**: Enabling Coming Soon banner also shows New Ep. on series/season posters. The old `PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER` setting migrates into Coming Soon.
-- **Art determination**: `enqueue_placeholder_art_refresh` filters to placeholders whose on-disk overlay sidecar does not match the desired banner text (and related art inputs).
-- **Coming Soon date-driven art**: After Arr calendar date refresh updates movie or episode dates, enqueue art for those placeholders so absolute date strips stay current without a status change.
-- **New Ep. calendar/import art**: Episode air-date updates enqueue one series-scoped art refresh; import-grace finalize does the same when an episode becomes available so next-unaired banners advance.
-- **Materializer art after status**: Movie and episode materialization applies initial lifecycle status before writing local poster/still art.
-- **Coming Soon banner art refresh**: Turning only the Coming Soon date-banner setting on or off refreshes Coming Soon placeholders, not the whole library.
-- **Narrow banner Plex refresh**: Coming Soon / New Ep. toggle applies use path refresh only; they no longer force a full-library Plex metadata refresh.
-- **Local art player refresh**: After rewriting posters, refresh those titles' metadata on Plex/Jellyfin/Emby so new art appears without a manual Refresh Metadata.
-- **Plex item metadata refresh**: Use PUT (not GET) for `/library/metadata/{id}/refresh`; GET was 404ing while path scans still ran.
-- **Settings art-change detection**: Bool settings no longer look “changed” when saved as `false` (was compared as blank), which wrongly forced a full poster art refresh.
-- **Settings Apply now**: Art / NFO / destination / density Apply-now work runs after the save response so the Settings UI unblocks immediately.
-- **Settings Apply now art enqueue**: Overlay Apply now skips the multi-minute sidecar scan and queues batches immediately; Tasks reconcile no longer marks the refresh done before jobs exist.
-- **Settings Apply now after next full sync**: Choosing Apply now consumes a pending art/metadata refresh left from an earlier “next full sync” save.
-- **Placeholder refresh Tasks metrics**: Enqueue no longer overwrites art/metadata phase metrics, so Placeholders queued and Batches completed keep updating while Apply now / Refresh art runs.
+- **Coming Soon drives New Ep.**: Enabling Coming Soon also shows New Ep. on series/season posters.
+- **Settings Density framing**: Paths, Media, Arr, Optional APIs, Playback, Library sync, Calendar, Status Updates, Poster Art, Dummy Video, Advanced, and Security use Density-style framed groups.
+- **Art determination**: Art enqueue skips placeholders whose on-disk overlay already matches.
+- **Date-driven and toggle art**: Calendar date changes and Coming Soon toggles refresh the affected posters (narrow path refresh when possible).
+- **Materializer art after status**: Initial Coming Soon status is applied before the first local poster write.
+- **Local art player refresh**: After rewriting posters, refresh those titles on Plex/Jellyfin/Emby.
+- **Settings Apply now**: Overlay Apply now returns after save, queues batches quickly, consumes a pending next-full-sync refresh, and keeps Tasks metrics updating.
 
 ### Fixed
 
-- **NFO batch player push**: When a batched NFO follow-up rewrites some sidecars and leaves others unchanged, player metadata projection includes both sets (refreshed first on entity dedupe), so an unchanged REQUEST NFO no longer skips Plex/Jellyfin/Emby push because a sibling row was rewritten.
+- **Plex item metadata refresh**: Use PUT for `/library/metadata/{id}/refresh` (GET was 404ing).
+- **Settings art-change detection**: Saving an unchanged off bool no longer forces a full art refresh.
+- **NFO batch player push**: Mixed rewrite/no-op NFO batches still project every active placeholder in the batch.
 
 ## [0.11.2] - 2026-10-15
 
