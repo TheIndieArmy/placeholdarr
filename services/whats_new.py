@@ -259,20 +259,14 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
     WhatsNewNotice(
         id="layered-poster-overlays-0-11-3",
         since_version="0.11.3",
-        title="Customizable poster overlays",
+        title="Release date banners on posters",
         body=(
-            "Poster overlays are no longer one exclusive style. Under Settings → Poster Art you can mix "
-            "layers independently:\n\n"
-            "• Grayscale dims placeholder posters in the library grid.\n"
-            "• Placeholdarr badge can sit in any corner (top/bottom, left/right).\n"
-            "• PLACEHOLDER banner and Coming Soon / New Ep. date banners can each be on or off.\n"
-            "• Banner text can sit at the top or bottom of the poster.\n\n"
-            "Coming Soon movies and episodes can show Theatrical / Digital / Physical or Airing dates. "
-            "Series and season posters can show New Ep. for the next unaired episode when Coming Soon "
-            "banner is enabled. Live Movie, TV title, and Episode previews update as you change options.\n\n"
-            "On Plex, the unwatched count indicator sits in the top right and can cover badge or banner "
-            "text. Prefer a bottom banner and avoid placing the Placeholdarr badge in the top right.\n\n"
-            "TMDB poster language settings live on the same Poster Art page above the overlay controls."
+            "New placeholder poster banner options let you show release dates for upcoming content. "
+            "Movies show the date for your preferred movie release type. Series posters show the next "
+            "airing episode's date. Episode thumb art shows the air date for that episode.\n\n"
+            "Poster overlays are now more flexible: apply grayscale, Placeholdarr badging, and banners "
+            "independently so you can mix the elements to your liking. Find these settings on the "
+            "updated Poster Art page."
         ),
         cta_label="Open Poster Art",
         cta_path="/settings/poster-art",
