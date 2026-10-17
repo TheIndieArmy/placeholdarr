@@ -1667,14 +1667,19 @@ export function App() {
     }
     // Merge partial values into baseline so UI no longer flags them as unsaved
     setBaselineValues((prev) => ({ ...prev, ...partialValues }));
-    const payload = await getSettingsCurrent();
-    setSettingsPayload(payload);
-    setSetupStatus(payload.status);
     setSettingsFeedback(formatSettingsSaveSuccessMessage(result.restart_required_keys));
     setSettingsFeedbackKind("success");
     if (result.restart_required_keys && result.restart_required_keys.length > 0) {
       setRestartAvailable(true);
     }
+    void getSettingsCurrent()
+      .then((payload) => {
+        setSettingsPayload(payload);
+        setSetupStatus(payload.status);
+      })
+      .catch(() => {
+        /* Keep the saved draft; next Settings visit reloads current. */
+      });
   }
 
   async function handleRestartNow() {
@@ -2200,22 +2205,28 @@ export function App() {
                   setSettingsFeedback(saveMsg);
                 }
                 setSettingsFeedbackKind("success");
+                // Leave-without-saving is clear once baseline matches. Refresh payload/tasks in the
+                // background so a slow library reload does not keep the user stuck on Settings.
                 if (backfillQueuedNow || applyScope === "now") {
                   void refreshTasks();
                 }
                 invalidateLibraryAfterCatalogChange();
-                const payload = await getSettingsCurrent();
-                setSettingsPayload(payload);
-                setSetupStatus(payload.status);
-                setOnboardingVisible(!payload.status.setup_complete);
-                // Re-apply redacted ARR JSON so per-instance api_key_saved flags match the server.
-                const arrField = payload.sections
-                  .flatMap((section) => section.fields)
-                  .find((field) => field.key === "ARR_INSTANCES_JSON");
-                if (arrField) {
-                  setFieldValues((prev) => ({ ...prev, ARR_INSTANCES_JSON: arrField.value }));
-                  setBaselineValues((prev) => ({ ...prev, ARR_INSTANCES_JSON: arrField.value }));
-                }
+                void getSettingsCurrent()
+                  .then((payload) => {
+                    setSettingsPayload(payload);
+                    setSetupStatus(payload.status);
+                    setOnboardingVisible(!payload.status.setup_complete);
+                    const arrField = payload.sections
+                      .flatMap((section) => section.fields)
+                      .find((field) => field.key === "ARR_INSTANCES_JSON");
+                    if (arrField) {
+                      setFieldValues((prev) => ({ ...prev, ARR_INSTANCES_JSON: arrField.value }));
+                      setBaselineValues((prev) => ({ ...prev, ARR_INSTANCES_JSON: arrField.value }));
+                    }
+                  })
+                  .catch(() => {
+                    /* Keep the saved draft; next Settings visit reloads current. */
+                  });
               } else if (messagesDirty && statusMessagesSaveRef.current) {
                 await statusMessagesSaveRef.current(applyScope);
                 setSettingsFeedback("Saved");
@@ -2410,10 +2421,15 @@ export function App() {
                 if (result.restart_required_keys && result.restart_required_keys.length > 0) {
                   setRestartAvailable(true);
                 }
-                const payload = await getSettingsCurrent();
-                setSettingsPayload(payload);
-                setSetupStatus(payload.status);
-                setOnboardingVisible(!payload.status.setup_complete);
+                void getSettingsCurrent()
+                  .then((payload) => {
+                    setSettingsPayload(payload);
+                    setSetupStatus(payload.status);
+                    setOnboardingVisible(!payload.status.setup_complete);
+                  })
+                  .catch(() => {
+                    /* Keep the saved draft; next Settings visit reloads current. */
+                  });
               }
         }
       />

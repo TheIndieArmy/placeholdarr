@@ -59,6 +59,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Local art player refresh**: After rewriting posters, refresh those titles' metadata on Plex/Jellyfin/Emby so new art appears without a manual Refresh Metadata.
 - **Plex item metadata refresh**: Use PUT (not GET) for `/library/metadata/{id}/refresh`; GET was 404ing while path scans still ran.
 - **Settings art-change detection**: Bool settings no longer look “changed” when saved as `false` (was compared as blank), which wrongly forced a full poster art refresh.
+- **Settings Apply now**: Art / NFO / destination / density Apply-now work runs after the save response so the Settings UI unblocks immediately.
 
 ### Fixed
 
