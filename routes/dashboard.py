@@ -5313,6 +5313,40 @@ async def settings_current():
     return JSONResponse(content=get_settings_payload())
 
 
+@router.get("/api/settings/poster-overlay-preview")
+async def settings_poster_overlay_preview(
+    kind: str = "movie",
+    grayscale: bool = False,
+    badge: bool = False,
+    badge_position: str = "bottom_right",
+    placeholder_banner: bool = False,
+    coming_soon_banner: bool = False,
+    banner_position: str = "top",
+):
+    """Live JPEG preview of composited poster overlay layers for Settings / onboarding."""
+    from services.poster_overlay import render_overlay_preview_jpeg
+
+    data = render_overlay_preview_jpeg(
+        kind=str(kind or "movie"),
+        grayscale=bool(grayscale),
+        badge=bool(badge),
+        badge_position=str(badge_position or "bottom_right"),
+        placeholder_banner=bool(placeholder_banner),
+        coming_soon_banner=bool(coming_soon_banner),
+        banner_position=str(banner_position or "top"),
+    )
+    if not data:
+        return JSONResponse(
+            {"ok": False, "message": "Preview unavailable (Pillow or sample art missing)"},
+            status_code=503,
+        )
+    return StreamingResponse(
+        iter([data]),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @router.get("/api/settings/arr-root-folders")
 async def settings_arr_root_folders():
     """Live Arr root folders per configured instance (for destination map UX)."""

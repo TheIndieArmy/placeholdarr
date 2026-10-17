@@ -174,8 +174,8 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
             "selected Language, then the Arr poster if neither is available. Episode stills are unchanged.\n\n"
             "This needs a TMDB API key under Optional APIs."
         ),
-        cta_label="Open Poster Overlay",
-        cta_path="/settings/poster-overlay",
+        cta_label="Open Poster Art",
+        cta_path="/settings/poster-art",
         requires_ack=True,
     ),
     WhatsNewNotice(
@@ -257,18 +257,25 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         requires_ack=True,
     ),
     WhatsNewNotice(
-        id="coming-soon-poster-banner-0-11-3",
+        id="layered-poster-overlays-0-11-3",
         since_version="0.11.3",
-        title="Release date banners on posters",
+        title="Customizable poster overlays",
         body=(
-            "Placeholder posters can show date banners. Coming Soon titles can use your preferred "
-            "movie release type (Theatrical, Digital, or Physical), or Airing on episode thumbs, "
-            "and Coming Soon when the date is unknown. Series and season posters can show "
-            "New Ep. - date for the next unaired episode (including premieres). Both are off by "
-            "default under Settings → Poster Overlay."
+            "Poster overlays are no longer one exclusive style. Under Settings → Poster Art you can mix "
+            "layers independently:\n\n"
+            "• Grayscale dims placeholder posters in the library grid.\n"
+            "• Placeholdarr badge can sit in any corner (top/bottom, left/right).\n"
+            "• PLACEHOLDER banner and Coming Soon / New Ep. date banners can each be on or off.\n"
+            "• Banner text can sit at the top or bottom of the poster.\n\n"
+            "Coming Soon movies and episodes can show Theatrical / Digital / Physical or Airing dates. "
+            "Series and season posters can show New Ep. for the next unaired episode when Coming Soon "
+            "banner is enabled. Live Movie, TV title, and Episode previews update as you change options.\n\n"
+            "On Plex, the unwatched count indicator sits in the top right and can cover badge or banner "
+            "text. Prefer a bottom banner and avoid placing the Placeholdarr badge in the top right.\n\n"
+            "TMDB poster language settings live on the same Poster Art page above the overlay controls."
         ),
-        cta_label="Open Poster Overlay",
-        cta_path="/settings/poster-overlay",
+        cta_label="Open Poster Art",
+        cta_path="/settings/poster-art",
         requires_ack=True,
     ),
 )

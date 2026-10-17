@@ -164,7 +164,7 @@ function DummyMediaRow(props: {
   );
 }
 
-export default function DummyMediaSettings(props: { accentHex: string }) {
+export default function DummyMediaSettings(props: { accentHex: string; embedded?: boolean }) {
   const [status, setStatus] = useState<StatusMap>({ primary: undefined, coming_soon: undefined });
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -188,13 +188,15 @@ export default function DummyMediaSettings(props: { accentHex: string }) {
 
   return (
     <div className="space-y-4">
-      <p className="ui-field-description text-slate-300 leading-relaxed">
-        Replace the video files placeholders link to when a title is browsed or scrubbed before it is downloaded.
-      </p>
+      {props.embedded ? null : (
+        <p className="ui-field-description text-slate-300 leading-relaxed">
+          Replace the video files placeholders link to when a title is browsed or scrubbed before it is downloaded.
+        </p>
+      )}
       {loadError ? (
         <div className="text-[13px] text-red-400">{loadError}</div>
       ) : (
-        <div className="overflow-hidden divide-y divide-[#424753]/20 rounded-lg border border-[#424753]/40 bg-[#0b111b]/40">
+        <div className="overflow-hidden divide-y divide-[#424753]/20 rounded-xl border border-[#424753]/50 bg-[#0b111b]/45">
           <DummyMediaRow kind="primary" info={status.primary} accentHex={props.accentHex} onChanged={handleChanged} />
           <DummyMediaRow kind="coming_soon" info={status.coming_soon} accentHex={props.accentHex} onChanged={handleChanged} />
         </div>

@@ -215,7 +215,7 @@ const SETTINGS_SECTION_ORDER = [
   "Library sync",
   "Calendar",
   "Status Updates",
-  "Poster Overlay",
+  "Poster Art",
   "Dummy Video",
   "Advanced",
   "Security",
@@ -232,7 +232,7 @@ const SETTINGS_SECTION_ICONS: Record<string, string> = {
   "Density & Lookahead": "fast_forward",
   Playback: "play_circle",
   "Status Updates": "edit_notifications",
-  "Poster Overlay": "image",
+  "Poster Art": "image",
   "Dummy Video": "movie",
   Advanced: "tune",
 };
@@ -247,10 +247,25 @@ const SETTINGS_SECTION_SLUGS: Record<string, string> = {
   "Density & Lookahead": "density-lookahead",
   Playback: "playback",
   "Status Updates": "status-updates",
-  "Poster Overlay": "poster-overlay",
+  "Poster Art": "poster-art",
   "Dummy Video": "dummy-video",
   Advanced: "advanced",
 };
+
+/** Overlay layer toggles (not poster language). */
+const POSTER_OVERLAY_LAYER_KEYS = [
+  "PLACEHOLDER_POSTER_GRAYSCALE",
+  "PLACEHOLDER_POSTER_BADGE",
+] as const;
+const POSTER_OVERLAY_BANNER_KEYS = [
+  "PLACEHOLDER_POSTER_PLACEHOLDER_BANNER",
+  "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
+] as const;
+const POSTER_LANGUAGE_FIELD_KEYS = [
+  "ENABLE_PREFERRED_POSTER_LANGUAGE",
+  "PREFER_ORIGINAL_POSTER_LANGUAGE",
+  "PREFERRED_POSTER_LANGUAGE",
+] as const;
 
 function settingsFieldInteractionDisabled(field: SettingsField, values: Record<string, unknown>): boolean {
   const disabledWhen = field.disabled_when;
@@ -315,6 +330,8 @@ function resolveSettingsSectionFromSlug(slug: string): string | undefined {
   if (slug === "collection-sources") return "Optional APIs";
   // Former Lookahead settings URL (bookmarks / What's New CTAs).
   if (slug === "lookahead") return "Density & Lookahead";
+  // Former Poster Overlay / Poster Language URLs.
+  if (slug === "poster-overlay" || slug === "poster-language") return "Poster Art";
   return SETTINGS_SECTION_ORDER.find((name) => SETTINGS_SECTION_SLUGS[name] === slug);
 }
 const BEHAVIOR_WIZARD_SECTIONS = [
@@ -334,12 +351,32 @@ const ONBOARDING_SECTION_TITLE_CLASS =
  * Grouped settings / onboarding section surface: see {@link UI_SECTION_FRAME_CLASS} in uiSectionFrame.ts.
  */
 
+/** Density & Lookahead micro-heading used on stacked framed groups. */
+const SETTINGS_DENSITY_LEGEND_CLASS =
+  "text-[12px] font-headline font-semibold uppercase tracking-wider text-white";
+
 /**
  * Media / ARR service tiles (wizard + settings grids): same accent rail and surface fill as
  * {@link UI_SECTION_FRAME_CLASS}, with the taller rounded-2xl silhouette.
  */
 const UI_INTEGRATION_CARD_SURFACE_CLASS =
   "rounded-2xl border border-[var(--brand-accent-3)] bg-[color:color-mix(in_srgb,var(--brand-surface-panel)_92%,var(--brand-accent-3)_8%)] shadow-lg shadow-black/15 backdrop-blur-md transition hover:shadow-[0_0_36px_-14px_color-mix(in_srgb,var(--brand-accent-3)_28%,transparent)]";
+
+/** Stacked topic panel matching Density & Lookahead framing. */
+function SettingsDensityFrame(props: {
+  legend: string;
+  intro?: ReactNode;
+  children?: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div className={`${UI_SECTION_FRAME_CLASS} space-y-3 p-4 ${props.className ?? ""}`}>
+      <p className={SETTINGS_DENSITY_LEGEND_CLASS}>{props.legend}</p>
+      {props.intro ? <div className="text-[14px] leading-relaxed text-slate-300">{props.intro}</div> : null}
+      {props.children ? <div className="space-y-5">{props.children}</div> : null}
+    </div>
+  );
+}
 
 /** Red circle with ! for sticky Media/ARR connectivity failures (nav + cards). */
 function IntegrationFailureBadge(props: { title?: string; size?: "sm" | "md" }) {
@@ -389,77 +426,16 @@ type WizardStepDef = { key: string; name: string };
 const LOOK_AND_FEEL_FIELD_KEYS = [
   "PLACEHOLDER_STATUS_UPDATES",
   "PLACEHOLDER_STATUS_PROJECTION_MODE",
-  "PLACEHOLDER_POSTER_OVERLAY_MODE",
-  "PLACEHOLDER_POSTER_BANNER_POSITION",
+  "PLACEHOLDER_POSTER_GRAYSCALE",
+  "PLACEHOLDER_POSTER_BADGE",
+  "PLACEHOLDER_POSTER_BADGE_POSITION",
+  "PLACEHOLDER_POSTER_PLACEHOLDER_BANNER",
   "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
-  "PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER",
+  "PLACEHOLDER_POSTER_BANNER_POSITION",
   "ENABLE_PREFERRED_POSTER_LANGUAGE",
   "PREFER_ORIGINAL_POSTER_LANGUAGE",
   "PREFERRED_POSTER_LANGUAGE",
 ] as const;
-
-const POSTER_OVERLAY_EXAMPLES_BASE = `${import.meta.env.BASE_URL}overlay-examples/`.replace(/(?<!:)\/{2,}/g, "/");
-
-type PosterOverlayExampleMode = {
-  mode: string;
-  resolve: (opts: { comingSoon: boolean; bannerBottom: boolean }) => { label: string; image: string };
-};
-
-const POSTER_OVERLAY_EXAMPLE_MODES: PosterOverlayExampleMode[] = [
-  {
-    mode: "grayscale",
-    resolve: ({ comingSoon, bannerBottom }) => {
-      if (!comingSoon) {
-        return {
-          label: "Grayscale poster",
-          image: `${POSTER_OVERLAY_EXAMPLES_BASE}grayscale.jpg`,
-        };
-      }
-      return {
-        label: bannerBottom ? "Grayscale + Coming Soon (bottom)" : "Grayscale + Coming Soon (top)",
-        image: bannerBottom
-          ? `${POSTER_OVERLAY_EXAMPLES_BASE}grayscale-coming-soon-bottom.jpg`
-          : `${POSTER_OVERLAY_EXAMPLES_BASE}grayscale-coming-soon.jpg`,
-      };
-    },
-  },
-  {
-    mode: "top_banner",
-    resolve: ({ comingSoon, bannerBottom }) => {
-      if (comingSoon) {
-        return {
-          label: bannerBottom ? "Bottom banner: Digital - Oct 22" : "Top banner: Digital - Oct 22",
-          image: bannerBottom
-            ? `${POSTER_OVERLAY_EXAMPLES_BASE}top_banner-coming-soon-bottom.jpg`
-            : `${POSTER_OVERLAY_EXAMPLES_BASE}top_banner-coming-soon.jpg`,
-        };
-      }
-      return {
-        label: bannerBottom ? "Bottom banner: PLACEHOLDER" : "Top banner: PLACEHOLDER",
-        image: bannerBottom
-          ? `${POSTER_OVERLAY_EXAMPLES_BASE}top_banner-bottom.jpg`
-          : `${POSTER_OVERLAY_EXAMPLES_BASE}top_banner.jpg`,
-      };
-    },
-  },
-  {
-    mode: "corner_logo",
-    resolve: ({ comingSoon, bannerBottom }) => {
-      if (!comingSoon) {
-        return {
-          label: "Corner badge: Placeholdarr logo",
-          image: `${POSTER_OVERLAY_EXAMPLES_BASE}corner_logo.jpg`,
-        };
-      }
-      return {
-        label: bannerBottom ? "Corner + Coming Soon (bottom)" : "Corner + Coming Soon (top)",
-        image: bannerBottom
-          ? `${POSTER_OVERLAY_EXAMPLES_BASE}corner_logo-coming-soon.jpg`
-          : `${POSTER_OVERLAY_EXAMPLES_BASE}corner_logo-coming-soon-top.jpg`,
-      };
-    },
-  },
-];
 
 const TMDB_POSTER_IMG_BASE = "https://image.tmdb.org/t/p/w300";
 
@@ -526,7 +502,22 @@ const SETTINGS_UI_HIDDEN_FIELD_KEYS = new Set<string>([
   // Superseded by ALWAYS + FALLBACK lists.
   "MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES",
   "TV_PLAY_PLACEHOLDER_ALSO_INSTANCES",
+  // Inlined next to badge / Banner heading (preview shows the effect).
+  "PLACEHOLDER_POSTER_BADGE_POSITION",
+  "PLACEHOLDER_POSTER_BANNER_POSITION",
 ]);
+
+const POSTER_BADGE_POSITION_OPTIONS = [
+  { value: "bottom_right", label: "Bottom right" },
+  { value: "bottom_left", label: "Bottom left" },
+  { value: "top_right", label: "Top right" },
+  { value: "top_left", label: "Top left" },
+] as const;
+
+const POSTER_BANNER_POSITION_OPTIONS = [
+  { value: "top", label: "Top" },
+  { value: "bottom", label: "Bottom" },
+] as const;
 
 const ARR_CONFIGURATION_KEYS = new Set<string>([
   "ARR_INSTANCES_JSON",
@@ -5101,18 +5092,24 @@ function buildPersistableSettingsValues(values: FieldValueMap, payload: Settings
     }
   }
 
-  if ("PLACEHOLDER_POSTER_OVERLAY_MODE" in cleaned) {
-    const om = String(cleaned.PLACEHOLDER_POSTER_OVERLAY_MODE ?? "off").trim().toLowerCase();
-    if (!["off", "grayscale", "top_banner", "corner_logo"].includes(om)) {
-      cleaned.PLACEHOLDER_POSTER_OVERLAY_MODE = "off";
-    } else {
-      cleaned.PLACEHOLDER_POSTER_OVERLAY_MODE = om;
-    }
-  }
-
   if ("PLACEHOLDER_POSTER_BANNER_POSITION" in cleaned) {
     const pos = String(cleaned.PLACEHOLDER_POSTER_BANNER_POSITION ?? "top").trim().toLowerCase();
     cleaned.PLACEHOLDER_POSTER_BANNER_POSITION = pos === "bottom" ? "bottom" : "top";
+  }
+
+  if ("PLACEHOLDER_POSTER_BADGE_POSITION" in cleaned) {
+    const pos = String(cleaned.PLACEHOLDER_POSTER_BADGE_POSITION ?? "bottom_right")
+      .trim()
+      .toLowerCase()
+      .replace(/-/g, "_");
+    cleaned.PLACEHOLDER_POSTER_BADGE_POSITION = [
+      "bottom_right",
+      "bottom_left",
+      "top_right",
+      "top_left",
+    ].includes(pos)
+      ? pos
+      : "bottom_right";
   }
 
   return cleaned;
@@ -6592,7 +6589,7 @@ function LibraryPathsForm(props: {
     const test = props.testResults?.[field.key];
     const testTarget = URL_TEST_TARGET[field.key];
     return (
-      <div key={field.key} className="px-6 py-5">
+      <div key={field.key} className="space-y-2">
         <div className="flex items-start gap-3 mb-2">
           <div className="flex-1">
             <div className="flex items-center gap-2 flex-wrap">
@@ -6921,18 +6918,20 @@ function LibraryPathsForm(props: {
   }
 
   return (
-    <>
-      {root ? (
-        <div className="px-6 py-5">{rootBlock}</div>
+    <div className="px-6 py-5 space-y-6">
+      {root ? rootBlock : null}
+      {plexDefaults.length ? plexDefaultsBlock : null}
+      {destinationMap ? destinationMapBlock : null}
+      {profiles.length ? profileBlock : null}
+      {overrides.length ? overridesBlock : null}
+      {rest.length ? (
+        <SettingsDensityFrame legend="Other paths">
+          {rest.map((field) => (
+            <Fragment key={field.key}>{renderSettingsRestField(field)}</Fragment>
+          ))}
+        </SettingsDensityFrame>
       ) : null}
-      {plexDefaults.length ? <div className="px-6 py-5">{plexDefaultsBlock}</div> : null}
-      {destinationMap ? (
-        <div className="px-6 py-5">{destinationMapBlock}</div>
-      ) : null}
-      {profiles.length ? <div className="px-6 py-5">{profileBlock}</div> : null}
-      {overrides.length ? <div className="px-6 py-5">{overridesBlock}</div> : null}
-      {rest.map((field) => renderSettingsRestField(field))}
-    </>
+    </div>
   );
 }
 
@@ -7081,21 +7080,48 @@ function LookAndFeelSectionIntro(props: { embedded?: boolean }) {
   return (
     <div className={wrapClass}>
       <p className="ui-field-description text-slate-300 leading-relaxed">
-        Choose how placeholders look in Plex, Jellyfin, and Emby: status text in the player and optional poster overlays on
-        library art. Changes to poster overlays apply on the next NFO refresh. Use the previews below to compare styles
-        without refreshing your whole library.
+        Choose how placeholders look in Plex, Jellyfin, and Emby: status text in the player, optional TMDB poster
+        language, and poster overlays on library art. Overlay previews update as you change those options.
       </p>
     </div>
   );
 }
 
+/** Overlay controls on the left; live previews on the right (aspect ratios preserved). */
+function PosterOverlayControlsWithPreview(props: {
+  values: FieldValueMap;
+  controls: ReactNode;
+  compact?: boolean;
+}) {
+  return (
+    <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:gap-8">
+      <div className="min-w-0 flex-1">{props.controls}</div>
+      <aside className="w-full shrink-0 lg:sticky lg:top-4 lg:w-[22.5rem]">
+        <div className={`mb-3 ${SETTINGS_DENSITY_LEGEND_CLASS}`}>Preview</div>
+        <PosterOverlayLivePreview values={props.values} compact={props.compact} layout="gallery" />
+        <PlexUnwatchedPreviewWarning />
+      </aside>
+    </div>
+  );
+}
+
 /** Shared copy for TMDB poster language (shown once above the master gate). */
-function PosterLanguageSettingsDescription(props: { spacing: "settings" | "wizard" }) {
-  const top = props.spacing === "settings" ? "mt-2" : "mb-2";
+function PosterLanguageSettingsDescription(props: {
+  spacing: "settings" | "wizard";
+  /** When true, omit the inner heading (Density frame already provides the legend). */
+  omitHeading?: boolean;
+}) {
+  const top = props.omitHeading ? "" : props.spacing === "settings" ? "mt-2" : "mb-2";
   return (
     <div className={top}>
-      <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500">Poster language</div>
-      <p className={`ui-field-description leading-relaxed ${props.spacing === "settings" ? "mt-1" : "mt-1 mb-0"}`}>
+      {props.omitHeading ? null : (
+        <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500">Poster language</div>
+      )}
+      <p
+        className={`ui-field-description leading-relaxed ${
+          props.omitHeading ? "" : props.spacing === "settings" ? "mt-1" : "mt-1 mb-0"
+        }`}
+      >
         By default (disabled), Placeholdarr uses poster data already captured during Radarr/Sonarr syncs. Enable Fetch
         from TMDB to look up posters by language; syncs and art refreshes will take longer.
       </p>
@@ -7110,47 +7136,46 @@ function PosterLanguageSettingsDescription(props: { spacing: "settings" | "wizar
   );
 }
 
-function PlaceholderPosterOverlayDescription(props: { spacing: "settings" | "wizard" }) {
+function PosterGrayscaleDescription(props: { spacing: "settings" | "wizard" }) {
   const top = props.spacing === "settings" ? "mt-1" : "mb-2";
   return (
-    <ul className={`list-disc space-y-2 pl-5 text-[14px] text-slate-400 leading-relaxed ${top}`}>
-      <li>
-        <span className="font-medium text-slate-200">Off</span>
-        {": "}Use remote poster URLs only (no composited local art).
-      </li>
-      <li>
-        <span className="font-medium text-slate-200">Grayscale</span>
-        {": "}Dimmed grayscale poster so placeholders stand out in the library grid.
-      </li>
-      <li>
-        <span className="font-medium text-slate-200">Banner</span>
-        {": "}Original poster with a PLACEHOLDER text bar (position set below).
-      </li>
-      <li>
-        <span className="font-medium text-slate-200">Corner badge</span>
-        {": "}Placeholdarr logo badge in the bottom-right corner.
-      </li>
-    </ul>
+    <p className={`ui-field-description leading-relaxed ${top}`}>
+      Dim the poster so placeholders stand out in the library grid.
+    </p>
   );
 }
 
-function PosterBannerPositionDescription(props: { spacing: "settings" | "wizard" }) {
+function PosterBadgeDescription(props: { spacing: "settings" | "wizard" }) {
   const top = props.spacing === "settings" ? "mt-1" : "mb-2";
   return (
-    <ul className={`list-disc space-y-2 pl-5 text-[14px] text-slate-400 leading-relaxed ${top}`}>
-      <li>
-        <span className="font-medium text-slate-200">Top</span>
-        {": "}Default. Text bar across the top for Banner, Grayscale date strips, and Corner date strips.
-      </li>
-      <li>
-        <span className="font-medium text-slate-200">Bottom</span>
-        {": "}Moves those bars to the bottom so Plex unwatched counts (and similar badges) do not cover dates.
-      </li>
-      <li>
-        <span className="font-medium text-slate-200">Corner logo badge</span>
-        {": "}The Placeholdarr badge stays bottom-right on its own; it is not part of the text bar.
-      </li>
-    </ul>
+    <p className={`ui-field-description leading-relaxed ${top}`}>
+      Placeholdarr logo badge on the poster. Position is independent of the text bar.
+    </p>
+  );
+}
+
+/** Plex unwatched-count tip shown under the overlay preview column. */
+function PlexUnwatchedPreviewWarning() {
+  return (
+    <div className="mt-3 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-3 py-2.5 text-[13px] leading-snug text-yellow-100/95">
+      <p className="font-headline font-semibold uppercase tracking-wider text-yellow-200/90 text-[11px] mb-1">
+        Plex tip
+      </p>
+      <p>
+        On Plex, the unwatched count indicator sits in the top right and can cover Placeholdarr badge and banner text. To
+        avoid conflict, use a bottom banner and do not put the Placeholdarr badge in the top right corner.
+      </p>
+    </div>
+  );
+}
+
+function PosterPlaceholderBannerDescription(props: { spacing: "settings" | "wizard" }) {
+  const top = props.spacing === "settings" ? "mt-1" : "mb-2";
+  return (
+    <p className={`ui-field-description leading-relaxed ${top}`}>
+      Show a PLACEHOLDER text bar on titles that are not using a Coming Soon / New Ep. date.
+      Alone, this puts PLACEHOLDER on every placeholder poster.
+    </p>
   );
 }
 
@@ -7160,95 +7185,187 @@ function ComingSoonPosterBannerDescription(props: { spacing: "settings" | "wizar
     <ul className={`list-disc space-y-2 pl-5 text-[14px] text-slate-400 leading-relaxed ${top}`}>
       <li>
         <span className="font-medium text-slate-200">Enabled</span>
-        {": "}Coming Soon titles show a date banner using your preferred movie release type
-        (Theatrical, Digital, or Physical) or Airing on episode thumbs, or Coming Soon when the date
-        is unknown. See the overlay style examples above for how each style looks.
+        {": "}Coming Soon movies and episodes show a date bar (Theatrical / Digital / Physical or
+        Airing). Series and season posters show New Ep. for the next unaired episode. Alone, only
+        those titles get a text bar (no PLACEHOLDER elsewhere).
       </li>
       <li>
         <span className="font-medium text-slate-200">Disabled</span>
-        {": "}Overlay styles only; no calendar date text on movie posters or episode thumbs.
+        {": "}No calendar date text on posters.
       </li>
     </ul>
   );
 }
 
-function SeriesNewEpPosterBannerDescription(props: { spacing: "settings" | "wizard" }) {
-  const top = props.spacing === "settings" ? "mt-1" : "mb-2";
-  return (
-    <ul className={`list-disc space-y-2 pl-5 text-[14px] text-slate-400 leading-relaxed ${top}`}>
-      <li>
-        <span className="font-medium text-slate-200">Enabled</span>
-        {": "}Series and season posters show New Ep. - date for the next unaired episode (including
-        premieres). Useful for season and series density where those posters are the main art.
-      </li>
-      <li>
-        <span className="font-medium text-slate-200">Disabled</span>
-        {": "}Series and season posters keep the base overlay style only.
-      </li>
-    </ul>
-  );
+function posterOverlaySettingOn(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  const raw = String(value ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
 }
 
-function PosterOverlayExamples(props: {
-  selectedMode: string;
-  comingSoonBanner?: boolean;
-  bannerPosition?: string;
-  compact?: boolean;
+function PosterOverlayPreviewTile(props: {
+  src: string;
+  label: string;
+  aspect: string;
+  /** Fixed width class (e.g. ``w-[14rem]``). Required so absolute-fit images do not collapse. */
+  widthClass: string;
 }) {
-  const selected = String(props.selectedMode ?? "off").trim().toLowerCase();
-  const comingSoon = Boolean(props.comingSoonBanner);
-  const bannerBottom = String(props.bannerPosition ?? "top").trim().toLowerCase() === "bottom";
-  const gridClass = props.compact
-    ? "grid grid-cols-1 sm:grid-cols-3 gap-3 max-w-xl"
-    : "grid grid-cols-1 sm:grid-cols-3 gap-4 max-w-2xl";
+  const [currentSrc, setCurrentSrc] = useState(props.src);
+  const [nextSrc, setNextSrc] = useState<string | null>(null);
+  const [nextVisible, setNextVisible] = useState(false);
+  const currentSrcRef = useRef(props.src);
+
+  useEffect(() => {
+    currentSrcRef.current = currentSrc;
+  }, [currentSrc]);
+
+  useEffect(() => {
+    if (props.src === currentSrcRef.current) return;
+    let cancelled = false;
+    let timer: number | null = null;
+    const preload = new Image();
+    preload.onload = () => {
+      if (cancelled) return;
+      setNextSrc(props.src);
+      setNextVisible(false);
+      requestAnimationFrame(() => {
+        if (cancelled) return;
+        setNextVisible(true);
+        timer = window.setTimeout(() => {
+          if (cancelled) return;
+          currentSrcRef.current = props.src;
+          setCurrentSrc(props.src);
+          setNextSrc(null);
+          setNextVisible(false);
+        }, 280);
+      });
+    };
+    preload.onerror = () => {
+      if (cancelled) return;
+      currentSrcRef.current = props.src;
+      setCurrentSrc(props.src);
+      setNextSrc(null);
+      setNextVisible(false);
+    };
+    preload.src = props.src;
+    return () => {
+      cancelled = true;
+      if (timer != null) window.clearTimeout(timer);
+      preload.onload = null;
+      preload.onerror = null;
+    };
+  }, [props.src]);
+
   return (
-    <details className="mt-3 group rounded-lg border border-[#424753]/40 bg-[#0b111b]/40">
-      <summary className="cursor-pointer select-none list-none px-4 py-3 text-[14px] font-headline uppercase tracking-wider text-slate-300 flex items-center gap-2">
-        <span
-          className="material-symbols-outlined text-slate-500 transition-transform group-open:rotate-90"
-          style={{ fontSize: 18 }}
-        >
-          chevron_right
-        </span>
-        Overlay style examples
-        {comingSoon ? (
-          <span className="ml-auto text-[11px] font-headline uppercase tracking-wide text-[var(--brand-accent)]">
-            Coming Soon on
-          </span>
+    <figure
+      className={`shrink-0 rounded-lg overflow-hidden border border-[#424753]/40 bg-[#0f1419]/80 ${props.widthClass}`}
+    >
+      <div className={`relative w-full ${props.aspect} bg-[#0b111b]`}>
+        <img
+          src={currentSrc}
+          alt={`${props.label} overlay preview`}
+          className="absolute inset-0 h-full w-full object-cover"
+        />
+        {nextSrc ? (
+          <img
+            src={nextSrc}
+            alt=""
+            aria-hidden
+            className={`absolute inset-0 h-full w-full object-cover transition-opacity duration-300 ease-out ${
+              nextVisible ? "opacity-100" : "opacity-0"
+            }`}
+          />
         ) : null}
-      </summary>
-      <div className="px-4 pb-4 border-t border-[#424753]/30 pt-4 space-y-3">
-        <div className={gridClass}>
-          {POSTER_OVERLAY_EXAMPLE_MODES.map((item) => {
-            const active = selected === item.mode;
-            const { label, image } = item.resolve({ comingSoon, bannerBottom });
-            return (
-              <figure
-                key={`${item.mode}-${comingSoon ? "cs" : "base"}-${bannerBottom ? "bottom" : "top"}`}
-                className={`rounded-lg overflow-hidden border bg-[#0f1419]/80 ${
-                  active ? "border-[var(--brand-accent)] ring-1 ring-[var(--brand-accent)]/40" : "border-[#424753]/40"
-                }`}
-              >
-                <img
-                  src={image}
-                  alt={`${label} overlay example`}
-                  className="w-full aspect-[2/3] object-cover bg-[#0b111b]"
-                  loading="lazy"
-                />
-                <figcaption className="px-2 py-2 text-[12px] text-slate-400 leading-snug">
-                  <span className={active ? "font-medium text-slate-200" : ""}>{label}</span>
-                  {active ? (
-                    <span className="ml-1.5 text-[11px] font-headline uppercase tracking-wide text-[var(--brand-accent)]">
-                      Selected
-                    </span>
-                  ) : null}
-                </figcaption>
-              </figure>
-            );
-          })}
-        </div>
       </div>
-    </details>
+      <figcaption className="px-2 py-1.5 text-[11px] text-slate-400 leading-snug">{props.label}</figcaption>
+    </figure>
+  );
+}
+
+function PosterOverlayLivePreview(props: {
+  values: FieldValueMap;
+  compact?: boolean;
+  /** ``gallery``: posters side-by-side then episode; ``rail`` stacks; ``row`` wraps. */
+  layout?: "row" | "rail" | "gallery";
+}) {
+  const grayscale = posterOverlaySettingOn(props.values.PLACEHOLDER_POSTER_GRAYSCALE);
+  const badge = posterOverlaySettingOn(props.values.PLACEHOLDER_POSTER_BADGE);
+  const badgePosition = String(props.values.PLACEHOLDER_POSTER_BADGE_POSITION ?? "bottom_right");
+  const placeholderBanner = posterOverlaySettingOn(props.values.PLACEHOLDER_POSTER_PLACEHOLDER_BANNER);
+  const comingSoonBanner = posterOverlaySettingOn(props.values.PLACEHOLDER_POSTER_COMING_SOON_BANNER);
+  const bannerPosition = String(props.values.PLACEHOLDER_POSTER_BANNER_POSITION ?? "top");
+  const layerQs = new URLSearchParams({
+    grayscale: grayscale ? "true" : "false",
+    badge: badge ? "true" : "false",
+    badge_position: badgePosition,
+    placeholder_banner: placeholderBanner ? "true" : "false",
+    coming_soon_banner: comingSoonBanner ? "true" : "false",
+    banner_position: bannerPosition,
+  });
+  const gallery = props.layout === "gallery";
+  const rail = props.layout === "rail";
+  const posterW = gallery
+    ? "w-[10.5rem]"
+    : rail
+      ? "w-full"
+      : props.compact
+        ? "w-[11rem]"
+        : "w-[14rem]";
+  const episodeW = gallery
+    ? "w-full max-w-[22rem]"
+    : rail
+      ? "w-full"
+      : props.compact
+        ? "w-[16rem]"
+        : "w-[20rem]";
+  const items: Array<{ kind: string; label: string; aspect: string; widthClass: string }> = [
+    {
+      kind: "movie",
+      label: "Movie",
+      aspect: "aspect-[2/3]",
+      widthClass: posterW,
+    },
+    {
+      kind: "series",
+      label: "TV title",
+      aspect: "aspect-[2/3]",
+      widthClass: posterW,
+    },
+    {
+      kind: "episode",
+      label: "Episode",
+      aspect: "aspect-video",
+      widthClass: episodeW,
+    },
+  ];
+  const tile = (item: (typeof items)[number]) => {
+    const qs = new URLSearchParams(layerQs);
+    qs.set("kind", item.kind);
+    const src = `/api/settings/poster-overlay-preview?${qs.toString()}`;
+    return (
+      <PosterOverlayPreviewTile
+        key={item.kind}
+        src={src}
+        label={item.label}
+        aspect={item.aspect}
+        widthClass={item.widthClass}
+      />
+    );
+  };
+  if (gallery) {
+    const posters = items.filter((i) => i.kind !== "episode");
+    const episode = items.find((i) => i.kind === "episode");
+    return (
+      <div className="flex w-full flex-col gap-3">
+        <div className="flex flex-wrap items-end gap-3">{posters.map((item) => tile(item))}</div>
+        {episode ? tile(episode) : null}
+      </div>
+    );
+  }
+  return (
+    <div className={rail ? "flex flex-col gap-3" : "flex flex-wrap items-end gap-4"}>
+      {items.map((item) => tile(item))}
+    </div>
   );
 }
 
@@ -7361,149 +7478,157 @@ function SecurityAccountControls(props: {
   const webhookDestinations = collectWebhookDestinations(props.values);
 
   return (
-    <div className="px-6 py-5 space-y-5">
-      <div>
-        <p className="text-[13px] font-semibold text-slate-400 mb-1">Signed in</p>
-        <p className="text-[16px] text-white font-headline">
-          {mode === "disabled"
-            ? "Authentication disabled"
-            : mode === "forward_auth"
-              ? username
-                ? `Proxy user: ${username}`
-                : "Forward-auth mode"
-              : username
-                ? `Admin: ${username}`
-                : "Admin account"}
-        </p>
-      </div>
-      {mode !== "disabled" ? (
-        <div className="space-y-3 max-w-xl">
-          <p className="text-[13px] font-semibold text-slate-400 mb-1">Webhook API key</p>
-          <p className="text-[14px] text-slate-400 leading-relaxed">
-            Required as <span className="font-mono text-slate-300">?apikey=</span> on every Radarr/Sonarr/Tautulli/Jellyfin/Emby
-            webhook URL; those services are not browser sessions and cannot log in. Setup screens include it automatically and
-            hide it until you reveal.
+    <div className="px-6 py-5 space-y-6">
+      <SettingsDensityFrame legend="Account">
+        <div>
+          <p className="text-[13px] font-semibold text-slate-400 mb-1">Signed in</p>
+          <p className="text-[16px] text-white font-headline">
+            {mode === "disabled"
+              ? "Authentication disabled"
+              : mode === "forward_auth"
+                ? username
+                  ? `Proxy user: ${username}`
+                  : "Forward-auth mode"
+                : username
+                  ? `Admin: ${username}`
+                  : "Admin account"}
           </p>
-          <div className="flex flex-wrap items-center gap-2">
-            <code className="min-w-0 flex-1 break-all rounded-lg border border-[#424753]/40 bg-[#0b111b] px-3 py-2 font-mono text-[13px] text-slate-300">
-              {webhookKeyRevealed ? webhookKey || "(none yet)" : "•".repeat(Math.min(40, webhookKey.length || 40))}
-            </code>
-            <button
-              type="button"
-              className="px-3 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
-              onClick={() => setWebhookKeyRevealed((v) => !v)}
-            >
-              {webhookKeyRevealed ? "Hide" : "Reveal"}
-            </button>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {!webhookRegenConfirming ? (
+        </div>
+      </SettingsDensityFrame>
+      {mode !== "disabled" ? (
+        <SettingsDensityFrame
+          legend="Webhook API key"
+          intro={
+            <p>
+              Required as <span className="font-mono text-slate-200">?apikey=</span> on every
+              Radarr/Sonarr/Tautulli/Jellyfin/Emby webhook URL; those services are not browser sessions and cannot log
+              in. Setup screens include it automatically and hide it until you reveal.
+            </p>
+          }
+        >
+          <div className="space-y-3 max-w-xl">
+            <div className="flex flex-wrap items-center gap-2">
+              <code className="min-w-0 flex-1 break-all rounded-lg border border-[#424753]/40 bg-[#0b111b] px-3 py-2 font-mono text-[13px] text-slate-300">
+                {webhookKeyRevealed ? webhookKey || "(none yet)" : "•".repeat(Math.min(40, webhookKey.length || 40))}
+              </code>
               <button
                 type="button"
-                className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
-                onClick={() => setWebhookRegenConfirming(true)}
+                className="px-3 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
+                onClick={() => setWebhookKeyRevealed((v) => !v)}
               >
-                Regenerate
+                {webhookKeyRevealed ? "Hide" : "Reveal"}
               </button>
-            ) : null}
-            <button
-              type="button"
-              className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
-              onClick={() => setWebhookUrlsModalOpen(true)}
-            >
-              Webhook URLs
-            </button>
-          </div>
-          {webhookRegenConfirming ? (
-            <div className="space-y-2 rounded-lg border border-amber-500/40 bg-amber-950/30 p-3">
-              <p className="text-[14px] text-amber-200 leading-relaxed">
-                This immediately invalidates the current key. Every already-configured Radarr/Sonarr/Tautulli/Jellyfin/Emby
-                webhook will start failing until you re-paste the updated URL from Webhook URLs into each of them.
-              </p>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  disabled={webhookRegenBusy}
-                  className={`px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
-                  style={accentFilledStyle(props.accentHex)}
-                  onClick={() => void onRegenerateWebhookKey()}
-                >
-                  {webhookRegenBusy ? "Regenerating…" : "Yes, regenerate"}
-                </button>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {!webhookRegenConfirming ? (
                 <button
                   type="button"
                   className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
-                  onClick={() => setWebhookRegenConfirming(false)}
+                  onClick={() => setWebhookRegenConfirming(true)}
                 >
-                  Cancel
+                  Regenerate
                 </button>
-              </div>
+              ) : null}
+              <button
+                type="button"
+                className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
+                onClick={() => setWebhookUrlsModalOpen(true)}
+              >
+                Webhook URLs
+              </button>
             </div>
-          ) : null}
-          {webhookRegenError ? <p className="text-[14px] text-red-400">{webhookRegenError}</p> : null}
-          {webhookRegenMessage ? <p className="text-[14px] text-emerald-400">{webhookRegenMessage}</p> : null}
-        </div>
+            {webhookRegenConfirming ? (
+              <div className="space-y-2 rounded-lg border border-amber-500/40 bg-amber-950/30 p-3">
+                <p className="text-[14px] text-amber-200 leading-relaxed">
+                  This immediately invalidates the current key. Every already-configured Radarr/Sonarr/Tautulli/Jellyfin/Emby
+                  webhook will start failing until you re-paste the updated URL from Webhook URLs into each of them.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={webhookRegenBusy}
+                    className={`px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
+                    style={accentFilledStyle(props.accentHex)}
+                    onClick={() => void onRegenerateWebhookKey()}
+                  >
+                    {webhookRegenBusy ? "Regenerating…" : "Yes, regenerate"}
+                  </button>
+                  <button
+                    type="button"
+                    className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
+                    onClick={() => setWebhookRegenConfirming(false)}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : null}
+            {webhookRegenError ? <p className="text-[14px] text-red-400">{webhookRegenError}</p> : null}
+            {webhookRegenMessage ? <p className="text-[14px] text-emerald-400">{webhookRegenMessage}</p> : null}
+          </div>
+        </SettingsDensityFrame>
       ) : null}
       {mode === "builtin" ? (
-        <form onSubmit={(e) => void onChangePassword(e)} className="space-y-3 max-w-md">
-          <p className="text-[14px] text-slate-400">Change password</p>
-          <input
-            type="password"
-            className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
-            placeholder="Current password"
-            value={currentPassword}
-            onChange={(e) => setCurrentPassword(e.target.value)}
-            required
-            disabled={busy}
-          />
-          <input
-            type="password"
-            className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
-            placeholder="New password (min 8 characters)"
-            value={newPassword}
-            onChange={(e) => setNewPassword(e.target.value)}
-            required
-            minLength={8}
-            disabled={busy}
-          />
-          <input
-            type="password"
-            className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
-            placeholder="Confirm new password"
-            value={confirmPassword}
-            onChange={(e) => setConfirmPassword(e.target.value)}
-            required
-            minLength={8}
-            disabled={busy}
-          />
-          {error ? <p className="text-[14px] text-red-400">{error}</p> : null}
-          {message ? <p className="text-[14px] text-emerald-400">{message}</p> : null}
-          <button
-            type="submit"
-            disabled={busy}
-            className={`px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
-            style={accentFilledStyle(props.accentHex)}
-          >
-            {busy ? "Updating…" : "Update password"}
-          </button>
-        </form>
-      ) : null}
-      {mode === "builtin" ? (
-        <div>
-          <button
-            type="button"
-            className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
-            onClick={() => void props.onLogout()}
-          >
-            Log out
-          </button>
-        </div>
+        <SettingsDensityFrame legend="Password">
+          <form onSubmit={(e) => void onChangePassword(e)} className="space-y-3 max-w-md">
+            <input
+              type="password"
+              className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
+              placeholder="Current password"
+              value={currentPassword}
+              onChange={(e) => setCurrentPassword(e.target.value)}
+              required
+              disabled={busy}
+            />
+            <input
+              type="password"
+              className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
+              placeholder="New password (min 8 characters)"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              required
+              minLength={8}
+              disabled={busy}
+            />
+            <input
+              type="password"
+              className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
+              placeholder="Confirm new password"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              required
+              minLength={8}
+              disabled={busy}
+            />
+            {error ? <p className="text-[14px] text-red-400">{error}</p> : null}
+            {message ? <p className="text-[14px] text-emerald-400">{message}</p> : null}
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="submit"
+                disabled={busy}
+                className={`px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
+                style={accentFilledStyle(props.accentHex)}
+              >
+                {busy ? "Updating…" : "Update password"}
+              </button>
+              <button
+                type="button"
+                className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
+                onClick={() => void props.onLogout()}
+              >
+                Log out
+              </button>
+            </div>
+          </form>
+        </SettingsDensityFrame>
       ) : null}
       {mode === "disabled" ? (
-        <p className="text-[14px] text-amber-300">
-          Authentication is disabled. Anyone who can reach this port has full access. Prefer builtin or forward_auth unless the
-          instance is on a private network with no published port.
-        </p>
+        <SettingsDensityFrame legend="Authentication">
+          <p className="text-[14px] text-amber-300">
+            Authentication is disabled. Anyone who can reach this port has full access. Prefer builtin or forward_auth
+            unless the instance is on a private network with no published port.
+          </p>
+        </SettingsDensityFrame>
       ) : null}
       {webhookUrlsModalOpen ? (
         <div className="fixed inset-0 z-[85] flex items-center justify-center bg-[#0f1419]/85 backdrop-blur-sm p-6">
@@ -7788,8 +7913,9 @@ function SettingsPanel(props: {
     }
   }
 
-  function renderStandardField(field: SettingsField) {
+  function renderStandardField(field: SettingsField, opts?: { density?: boolean }) {
     if (HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) || SETTINGS_UI_HIDDEN_FIELD_KEYS.has(field.key)) return null;
+    const density = Boolean(opts?.density);
     const value = props.values[field.key];
     const test = testResults[field.key];
     const testTarget = URL_TEST_TARGET[field.key];
@@ -7810,13 +7936,17 @@ function SettingsPanel(props: {
     const isNested = settingsFieldIsNested(field);
     const interactionLocked =
       projectionFieldLocked || lookaheadRangeLocked || densityRetireLocked || parentDisabled || tmdbKeyMissing;
+    const rowPad = density
+      ? isNested
+        ? "pl-4 border-l border-[#424753]/40 space-y-2"
+        : "space-y-2"
+      : isNested
+        ? "pl-10 pr-6 py-4 ml-6 border-l border-[#424753]/40"
+        : "px-6 py-5";
 
     return (
-      <div
-        key={field.key}
-        className={`${isNested ? "pl-10 pr-6 py-4 ml-6 border-l border-[#424753]/40" : "px-6 py-5"} ${rowMuted ? "opacity-50" : ""}`}
-      >
-        {field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" ? (
+      <div key={field.key} className={`${rowPad} ${rowMuted ? "opacity-50" : ""}`}>
+        {field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" && !density ? (
           <PosterLanguageSettingsDescription spacing="settings" />
         ) : null}
         {tmdbKeyMissing && field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" ? (
@@ -7843,7 +7973,14 @@ function SettingsPanel(props: {
             )}
           </div>
         ) : null}
-        <div className={`flex items-start gap-3 mb-2 ${field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" ? "mt-4" : ""}`}>
+        {field.key === "PLACEHOLDER_POSTER_PLACEHOLDER_BANNER" && !density ? (
+          <p className="mb-3 text-[12px] font-headline uppercase tracking-wider text-slate-500">Banner</p>
+        ) : null}
+        <div
+          className={`flex items-start gap-3 mb-2 ${
+            field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" && !density ? "mt-4" : ""
+          }`}
+        >
           <div className="flex-1">
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-[16px] font-semibold text-white font-headline">{field.label}</span>
@@ -7859,14 +7996,14 @@ function SettingsPanel(props: {
                 <PlaceholderStatusUpdatesDescription spacing="settings" />
               ) : field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" ? (
                 <ProjectStatusIntoDescription spacing="settings" />
-              ) : field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
-                <PlaceholderPosterOverlayDescription spacing="settings" />
-              ) : field.key === "PLACEHOLDER_POSTER_BANNER_POSITION" ? (
-                <PosterBannerPositionDescription spacing="settings" />
+              ) : field.key === "PLACEHOLDER_POSTER_GRAYSCALE" ? (
+                <PosterGrayscaleDescription spacing="settings" />
+              ) : field.key === "PLACEHOLDER_POSTER_BADGE" ? (
+                <PosterBadgeDescription spacing="settings" />
+              ) : field.key === "PLACEHOLDER_POSTER_PLACEHOLDER_BANNER" ? (
+                <PosterPlaceholderBannerDescription spacing="settings" />
               ) : field.key === "PLACEHOLDER_POSTER_COMING_SOON_BANNER" ? (
                 <ComingSoonPosterBannerDescription spacing="settings" />
-              ) : field.key === "PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER" ? (
-                <SeriesNewEpPosterBannerDescription spacing="settings" />
               ) : field.key === "ENABLE_COMING_SOON_COUNTDOWN" ? (
                 <ComingSoonCountdownDescription spacing="settings" />
               ) : field.description && !isPlexSectionIdField(field.key) && !isPosterLanguageFieldKey(field.key) ? (
@@ -7881,18 +8018,43 @@ function SettingsPanel(props: {
         </div>
 
         {field.type === "bool" ? (
-          <label className={`flex items-center gap-3 select-none w-fit ${interactionLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
-            <ToggleSwitch
-              checked={settingsBoolUiChecked(field, value)}
-              onChange={(v) => handleSettingsValueChange(field.key, settingsBoolStoredFromUi(field, v))}
-              accentHex={accent.hex}
-              disabled={interactionLocked}
-              ariaLabel={field.label}
-            />
-            <span className={`text-[16px] ${interactionLocked ? "text-slate-500" : "text-slate-300"}`}>
-              {settingsBoolUiChecked(field, value) ? "Enabled" : "Disabled"}
-            </span>
-          </label>
+          <div className="flex flex-wrap items-center gap-3">
+            <label className={`flex items-center gap-3 select-none w-fit ${interactionLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
+              <ToggleSwitch
+                checked={settingsBoolUiChecked(field, value)}
+                onChange={(v) => handleSettingsValueChange(field.key, settingsBoolStoredFromUi(field, v))}
+                accentHex={accent.hex}
+                disabled={interactionLocked}
+                ariaLabel={field.label}
+              />
+              <span
+                className={`inline-block min-w-[4.75rem] text-[16px] ${interactionLocked ? "text-slate-500" : "text-slate-300"}`}
+              >
+                {settingsBoolUiChecked(field, value) ? "Enabled" : "Disabled"}
+              </span>
+            </label>
+            {field.key === "PLACEHOLDER_POSTER_BADGE" ? (
+              <select
+                className={`min-w-[9.5rem] bg-[#0f1419] border border-[#424753]/40 rounded-lg pl-2.5 pr-8 py-1.5 text-[13px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${interactionLocked || !settingsBoolUiChecked(field, value) ? "cursor-not-allowed opacity-50" : ""}`}
+                aria-label="Badge position"
+                disabled={interactionLocked || !settingsBoolUiChecked(field, value)}
+                value={(() => {
+                  const raw = String(props.values.PLACEHOLDER_POSTER_BADGE_POSITION ?? "bottom_right")
+                    .trim()
+                    .toLowerCase()
+                    .replace(/-/g, "_");
+                  return POSTER_BADGE_POSITION_OPTIONS.some((o) => o.value === raw) ? raw : "bottom_right";
+                })()}
+                onChange={(e) => handleSettingsValueChange("PLACEHOLDER_POSTER_BADGE_POSITION", e.target.value)}
+              >
+                {POSTER_BADGE_POSITION_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            ) : null}
+          </div>
         ) : field.type === "choice" && field.options?.length ? (
           <select
             className={`w-full max-w-xl bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${interactionLocked ? "cursor-not-allowed" : ""}`}
@@ -7935,12 +8097,30 @@ function SettingsPanel(props: {
           </div>
         )}
 
-        {field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
-          <PosterOverlayExamples
-            selectedMode={String(value ?? "off")}
-            comingSoonBanner={Boolean(props.values.PLACEHOLDER_POSTER_COMING_SOON_BANNER)}
-            bannerPosition={String(props.values.PLACEHOLDER_POSTER_BANNER_POSITION ?? "top")}
-          />
+        {field.key === "PLACEHOLDER_POSTER_COMING_SOON_BANNER" ? (
+          (() => {
+            const bannerPositionActive =
+              posterOverlaySettingOn(props.values.PLACEHOLDER_POSTER_PLACEHOLDER_BANNER) ||
+              posterOverlaySettingOn(props.values.PLACEHOLDER_POSTER_COMING_SOON_BANNER);
+            return (
+              <div className={`mt-4 ${bannerPositionActive ? "" : "opacity-50"}`}>
+                <div className="mb-2 text-[16px] font-semibold text-white font-headline">Position</div>
+                <select
+                  className={`min-w-[6.5rem] bg-[#0f1419] border border-[#424753]/40 rounded-lg pl-2.5 pr-8 py-1.5 text-[13px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${bannerPositionActive ? "" : "cursor-not-allowed"}`}
+                  aria-label="Banner position"
+                  disabled={!bannerPositionActive}
+                  value={String(props.values.PLACEHOLDER_POSTER_BANNER_POSITION ?? "top") === "bottom" ? "bottom" : "top"}
+                  onChange={(e) => handleSettingsValueChange("PLACEHOLDER_POSTER_BANNER_POSITION", e.target.value)}
+                >
+                  {POSTER_BANNER_POSITION_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            );
+          })()
         ) : null}
 
         {field.key === "TMDB_API_KEY" ? (
@@ -7971,21 +8151,42 @@ function SettingsPanel(props: {
     );
   }
 
-  function renderOnboardingStyleSectionRows(fields: SettingsField[], opts?: { intro?: ReactNode }) {
+  function renderOnboardingStyleSectionRows(
+    fields: SettingsField[],
+    opts?: { intro?: ReactNode; legend?: string },
+  ) {
     const hasTagPolicies = fields.some((field) => field.key === "PLACEHOLDER_POLICY_NEVER_TAGS");
+    const beforeTags: SettingsField[] = [];
+    const tagFields: SettingsField[] = [];
+    let seenTags = false;
+    for (const field of fields) {
+      if (hasTagPolicies && field.key === "PLACEHOLDER_POLICY_NEVER_TAGS") seenTags = true;
+      if (seenTags) tagFields.push(field);
+      else beforeTags.push(field);
+    }
     return (
-      <div className="px-6 py-5">
-        <div className={`${UI_SECTION_FRAME_CLASS} overflow-hidden divide-y divide-[#424753]/20`}>
-          {opts?.intro ? <div className="px-6 py-5">{opts.intro}</div> : null}
-          {fields.map((field) => (
-            <Fragment key={field.key}>
-              {hasTagPolicies && field.key === "PLACEHOLDER_POLICY_NEVER_TAGS" ? (
-                <TagPoliciesIntro spacing="settings" />
-              ) : null}
-              {renderStandardField(field)}
-            </Fragment>
+      <div className="px-6 py-5 space-y-6">
+        <SettingsDensityFrame legend={opts?.legend ?? "Settings"} intro={opts?.intro}>
+          {(hasTagPolicies ? beforeTags : fields).map((field) => (
+            <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
           ))}
-        </div>
+        </SettingsDensityFrame>
+        {hasTagPolicies && tagFields.length ? (
+          <SettingsDensityFrame
+            legend="Tag policies"
+            intro={
+              <p>
+                Use Radarr movie tags or Sonarr series tags to control placeholders on sync: never create them for a
+                title, or always keep them. Matching tags override every other create or delete rule for that title.
+                Defaults are included below; you can add any tags you already use in Arr.
+              </p>
+            }
+          >
+            {tagFields.map((field) => (
+              <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
+            ))}
+          </SettingsDensityFrame>
+        ) : null}
       </div>
     );
   }
@@ -8093,7 +8294,16 @@ function SettingsPanel(props: {
                 (() => {
                   const fieldByKey = new Map(active.fields.map((f) => [f.key, f]));
                   return (
-                    <div className="space-y-5 px-6 py-5">
+                    <div className="space-y-6 px-6 py-5">
+                      <SettingsDensityFrame
+                        legend="Media players"
+                        intro={
+                          <p>
+                            Connect Plex, Jellyfin, or Emby so Placeholdarr can place titles in your libraries and hear
+                            playback. Configure each service after connecting.
+                          </p>
+                        }
+                      >
                       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                         {ONBOARDING_MEDIA_CARDS.map((card) => {
                           const enabled = Boolean(props.values[card.enabledKey]);
@@ -8239,6 +8449,7 @@ function SettingsPanel(props: {
                           );
                         })}
                       </div>
+                      </SettingsDensityFrame>
                       {(() => {
                         const remaining = active.fields.filter(
                           (field) =>
@@ -8249,13 +8460,15 @@ function SettingsPanel(props: {
                               [card.enabledKey, ...card.keys].includes(field.key),
                             ),
                         );
-                        return remaining.length ? renderOnboardingStyleSectionRows(remaining) : null;
+                        return remaining.length
+                          ? renderOnboardingStyleSectionRows(remaining, { legend: "More media settings" })
+                          : null;
                       })()}
                     </div>
                   );
                 })()
               ) : active.name === "ARR Integrations" ? (
-                <>
+                <div className="px-6 py-5 space-y-6">
                   {active.fields
                     .filter(
                       (field) =>
@@ -8263,11 +8476,13 @@ function SettingsPanel(props: {
                         !ARR_BEHAVIOR_KEYS.has(field.key) &&
                         !HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key),
                     )
-                    .map((field) => renderStandardField(field))}
-                  <div className="px-6 py-5">
-                    <div className="mb-3">
-                      <h3 className="text-[18px] font-bold text-white font-headline">ARR Instances</h3>
-                      <p className="ui-field-description mt-1">
+                    .map((field) => (
+                      <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
+                    ))}
+                  <SettingsDensityFrame
+                    legend="ARR instances"
+                    intro={
+                      <p>
                         Configure up to 4 Radarr and 4 Sonarr instances. Use the arrows to set list order. On{" "}
                         {props.onOpenPlayback ? (
                           <button
@@ -8283,7 +8498,8 @@ function SettingsPanel(props: {
                         , instances set to Fallback are tried in this order when the path-matched Arr does not resolve
                         in time. These entries also power webhook labels and instance-aware routing.
                       </p>
-                    </div>
+                    }
+                  >
                     <ArrInstancesEditor
                       layout="slots"
                       values={props.values}
@@ -8295,9 +8511,8 @@ function SettingsPanel(props: {
                         setArrSecondaryTestStatus((prev) => ({ ...prev, [arrType]: ok }));
                       }}
                     />
-                  </div>
-
-                </>
+                  </SettingsDensityFrame>
+                </div>
               ) : active.name === "Density & Lookahead" ? (
                 <div className="px-6 py-5">
                   <LookaheadDensityPanel
@@ -8319,8 +8534,17 @@ function SettingsPanel(props: {
                 </div>
               ) : active.name === "Playback" ? (
                 <div className="px-6 py-5 space-y-6">
-                  <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
-                    <PlaybackSectionIntro variant="onboarding" embedded />
+                  <SettingsDensityFrame
+                    legend="Playback monitoring and searching"
+                    intro={
+                      <p>
+                        When a placeholder or real file is played, choose which library destinations each filter applies
+                        to. Use them to monitor only, allow re-searching already-monitored titles, or search titles that
+                        are not released yet (TV air dates; movie preferred release date from Calendar). Destinations
+                        are listed under Movies and TV by folder path.
+                      </p>
+                    }
+                  >
                     <PlaybackDestFilterControls
                       values={props.values}
                       options={
@@ -8333,9 +8557,9 @@ function SettingsPanel(props: {
                     {active.fields
                       .filter((field) => !isPlaybackDestFilterKey(field.key))
                       .map((field) => (
-                        <Fragment key={field.key}>{renderStandardField(field)}</Fragment>
+                        <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
                       ))}
-                  </div>
+                  </SettingsDensityFrame>
                   {canUseAnySecondaryBehavior ? (
                     <ArrMultiInstanceBehaviorStack
                       values={props.values}
@@ -8353,10 +8577,21 @@ function SettingsPanel(props: {
                   ) : null}
                 </div>
               ) : active.name === "Status Updates" ? (
-                <>
-                  {renderOnboardingStyleSectionRows(active.fields, {
-                    intro: <StatusUpdatesSectionIntro variant="onboarding" embedded />,
-                  })}
+                <div className="px-6 py-5 space-y-6">
+                  <SettingsDensityFrame
+                    legend="Player status"
+                    intro={
+                      <p>
+                        Use these settings to adjust how Placeholdarr updates content so users can track request progress
+                        right from media players. Plex typically updates automatically while Emby and Jellyfin typically
+                        require page refreshes.
+                      </p>
+                    }
+                  >
+                    {active.fields.map((field) => (
+                      <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
+                    ))}
+                  </SettingsDensityFrame>
                   <StatusMessagesPanel
                     brand={props.brand}
                     themeMode={props.themeMode}
@@ -8369,27 +8604,84 @@ function SettingsPanel(props: {
                     registerSaveFlow={props.registerStatusMessagesSaveFlow}
                     embedded
                   />
-                </>
-              ) : active.name === "Poster Overlay" ? (
-                renderOnboardingStyleSectionRows(active.fields, {
-                  intro: (
-                    <div className="space-y-3">
-                      <p className="ui-field-description text-slate-300 leading-relaxed">
-                        Choose how placeholder posters look in your library, including optional overlays and TMDB language
-                        lookup.
-                      </p>
-                    </div>
-                  ),
-                })
+                </div>
+              ) : active.name === "Poster Art" ? (
+                <div className="px-6 py-5 space-y-6">
+                  <SettingsDensityFrame
+                    legend="Poster language"
+                    intro={<PosterLanguageSettingsDescription spacing="settings" omitHeading />}
+                  >
+                    {POSTER_LANGUAGE_FIELD_KEYS.map((key) => {
+                      const field = active.fields.find((f) => f.key === key);
+                      return field ? (
+                        <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
+                      ) : null;
+                    })}
+                  </SettingsDensityFrame>
+                  <PosterOverlayControlsWithPreview
+                    values={props.values}
+                    controls={
+                      <div className="space-y-6">
+                        <SettingsDensityFrame
+                          legend="Layers"
+                          intro={
+                            <p>
+                              Compose grayscale and badge layers independently. The preview updates as you change
+                              options.
+                            </p>
+                          }
+                        >
+                          {POSTER_OVERLAY_LAYER_KEYS.map((key) => {
+                            const field = active.fields.find((f) => f.key === key);
+                            return field ? (
+                              <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
+                            ) : null;
+                          })}
+                        </SettingsDensityFrame>
+                        <SettingsDensityFrame
+                          legend="Banner"
+                          intro={
+                            <p>
+                              Date and PLACEHOLDER text bars. Position applies when either banner is enabled.
+                            </p>
+                          }
+                        >
+                          {POSTER_OVERLAY_BANNER_KEYS.map((key) => {
+                            const field = active.fields.find((f) => f.key === key);
+                            return field ? (
+                              <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
+                            ) : null;
+                          })}
+                        </SettingsDensityFrame>
+                      </div>
+                    }
+                  />
+                </div>
               ) : active.name === "Dummy Video" ? (
-                <div className="px-6 py-5">
-                  <DummyMediaSettings accentHex={accent.hex} />
+                <div className="px-6 py-5 space-y-6">
+                  <SettingsDensityFrame
+                    legend="Placeholder videos"
+                    intro={
+                      <p>
+                        Replace the video files placeholders link to when a title is browsed or scrubbed before it is
+                        downloaded.
+                      </p>
+                    }
+                  >
+                    <DummyMediaSettings accentHex={accent.hex} embedded />
+                  </SettingsDensityFrame>
                 </div>
               ) : active.name === "Library sync" ? (
-                renderOnboardingStyleSectionRows(active.fields)
+                renderOnboardingStyleSectionRows(active.fields, { legend: "Library sync" })
               ) : active.name === "Calendar" ? (
                 renderOnboardingStyleSectionRows(active.fields, {
-                  intro: <CalendarSectionIntro variant="onboarding" embedded />,
+                  legend: "Calendar",
+                  intro: (
+                    <p>
+                      Calendar controls Coming Soon placeholders for titles that are not available yet. Choose how far
+                      ahead to show future titles and related countdown options.
+                    </p>
+                  ),
                 })
               ) : active.name === "Optional APIs" ? (
                 (() => {
@@ -8414,10 +8706,10 @@ function SettingsPanel(props: {
                     },
                   ];
                   return (
-                    <div className="space-y-5 px-6 py-5">
-                      <p className="ui-field-description">
-                        Optional credentials for TMDB poster language and Collections list sources (TMDB,
-                        Trakt, Tautulli). Separate from media player connections and playback webhooks.
+                    <div className="space-y-6 px-6 py-5">
+                      <p className="text-[14px] leading-relaxed text-slate-300">
+                        Optional credentials for TMDB poster language and Collections list sources (TMDB, Trakt,
+                        Tautulli). Separate from media player connections and playback webhooks.
                       </p>
                       {groups.map((group) => {
                         const groupFields = group.keys
@@ -8425,24 +8717,18 @@ function SettingsPanel(props: {
                           .filter(Boolean) as SettingsField[];
                         if (!groupFields.length) return null;
                         return (
-                          <div key={group.title} className={`${UI_SECTION_FRAME_CLASS} overflow-hidden`}>
-                            <div className="border-b border-[#424753]/30 px-6 py-4">
-                              <h3 className="text-[15px] font-headline font-bold uppercase tracking-wide text-white">
-                                {group.title}
-                              </h3>
-                              <p className="ui-field-description mt-1">{group.blurb}</p>
-                            </div>
-                            <div className="divide-y divide-[#424753]/20">
-                              {groupFields.map((field) => renderStandardField(field))}
-                            </div>
-                          </div>
+                          <SettingsDensityFrame key={group.title} legend={group.title} intro={<p>{group.blurb}</p>}>
+                            {groupFields.map((field) => (
+                              <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
+                            ))}
+                          </SettingsDensityFrame>
                         );
                       })}
                     </div>
                   );
                 })()
               ) : (
-                renderOnboardingStyleSectionRows(active.fields)
+                renderOnboardingStyleSectionRows(active.fields, { legend: active.name })
               )}
             </div>
           </div>
@@ -8579,10 +8865,12 @@ type ApplyScope = NfoBackfillApplyScope;
 const NFO_BACKFILL_SETTING_KEYS = [
   "PLACEHOLDER_STATUS_UPDATES",
   "PLACEHOLDER_STATUS_PROJECTION_MODE",
-  "PLACEHOLDER_POSTER_OVERLAY_MODE",
+  "PLACEHOLDER_POSTER_GRAYSCALE",
+  "PLACEHOLDER_POSTER_BADGE",
+  "PLACEHOLDER_POSTER_BADGE_POSITION",
+  "PLACEHOLDER_POSTER_PLACEHOLDER_BANNER",
   "PLACEHOLDER_POSTER_BANNER_POSITION",
   "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
-  "PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER",
   "ENABLE_PREFERRED_POSTER_LANGUAGE",
   "PREFERRED_POSTER_LANGUAGE",
   "PREFER_ORIGINAL_POSTER_LANGUAGE",
@@ -8859,13 +9147,11 @@ function LineRequestLivePreview(props: {
   }
 
   return (
-    <div className={`${UI_SECTION_FRAME_CLASS} px-5 py-4 mb-4`}>
-      <h3 className="text-[14px] font-headline uppercase tracking-wider text-slate-400 mb-1">
-        Live preview (sample data · REQUEST placeholder)
-      </h3>
-      <p className="text-[12px] text-slate-500 mb-3">
-        Reflects projection targets and status-update scope from the section above (including unsaved changes). REQUEST text comes from
-        Request line (synopsis); movie and TV episode samples use Movie / Episode title suffix templates.
+    <div className={`${UI_SECTION_FRAME_CLASS} space-y-3 p-4`}>
+      <p className={SETTINGS_DENSITY_LEGEND_CLASS}>Live preview (sample data)</p>
+      <p className="text-[14px] leading-relaxed text-slate-300">
+        Reflects projection targets and status-update scope from the section above (including unsaved changes). REQUEST
+        text comes from Request line (synopsis); movie and TV episode samples use Movie / Episode title suffix templates.
       </p>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-[13px]">
         {renderSampleColumn("Movie", movie)}
@@ -9172,7 +9458,7 @@ function StatusMessagesPanel(props: {
 
   const scopeUpper = String(props.statusUpdatesScope ?? "").toUpperCase();
   const panelInner = (
-    <div className={props.embedded ? "min-h-[40vh] px-2 py-5 space-y-5" : "min-h-[40vh] px-6 py-5 space-y-5"}>
+    <div className={props.embedded ? "min-h-[40vh] space-y-6" : "min-h-[40vh] px-6 py-5 space-y-6"}>
       <LineRequestLivePreview
         synopsisTemplate={values["line.request"] ?? ""}
         projectionDraft={props.projectionDraft}
@@ -9180,7 +9466,8 @@ function StatusMessagesPanel(props: {
         themeMode={props.themeMode}
       />
       {/* Top toolbar: separator + case + wrapper + status + reset (one row, wraps on narrow viewports) */}
-      <div className={`${UI_SECTION_FRAME_CLASS} px-5 py-4`}>
+      <div className={`${UI_SECTION_FRAME_CLASS} space-y-3 p-4`}>
+        <p className={SETTINGS_DENSITY_LEGEND_CLASS}>Message templates</p>
         <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
             <div className="flex flex-col gap-1">
               <label className="text-[12px] font-headline uppercase tracking-wider text-slate-400">Separator</label>
@@ -9298,10 +9585,10 @@ function StatusMessagesPanel(props: {
           <div key={group.name} className={`${UI_SECTION_FRAME_CLASS} overflow-hidden`}>
             <button
               type="button"
-              className="w-full flex items-center justify-between px-5 py-3 border-b border-[#424753]/30 text-left"
+              className="w-full flex items-center justify-between px-4 py-3 border-b border-[#424753]/30 text-left"
               onClick={() => setCollapsedGroups((p) => ({ ...p, [group.name]: !p[group.name] }))}
             >
-              <h3 className="text-[16px] font-bold text-white font-headline">{group.name}</h3>
+              <h3 className={SETTINGS_DENSITY_LEGEND_CLASS}>{group.name}</h3>
               <span className="material-symbols-outlined text-slate-400" style={{ fontSize: 18 }}>
                 {collapsed ? "expand_more" : "expand_less"}
               </span>
@@ -9309,7 +9596,7 @@ function StatusMessagesPanel(props: {
             {!collapsed && (
               <div className="divide-y divide-[#424753]/20">
                 {Array.from(groupedBySubgroup.entries()).map(([sub, rows]) => (
-                  <div key={sub || "_"} className="px-5 py-4 space-y-4">
+                  <div key={sub || "_"} className="px-4 py-4 space-y-4">
                     {sub && <h4 className="text-[13px] font-headline uppercase tracking-wider text-slate-400">{sub}</h4>}
                     {rows.map((row) => {
                       const value = values[row.key] ?? "";
@@ -11177,8 +11464,9 @@ function OnboardingWizard(props: {
     return partial;
   }
 
-  function wizardFieldRow(field: SettingsField) {
+  function wizardFieldRow(field: SettingsField, opts?: { density?: boolean }) {
     if (HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) || SETTINGS_UI_HIDDEN_FIELD_KEYS.has(field.key)) return null;
+    const density = Boolean(opts?.density);
     const displayValue = props.values[field.key];
     const test = testResults[field.key];
     const testTarget = URL_TEST_TARGET[field.key];
@@ -11205,7 +11493,7 @@ function OnboardingWizard(props: {
         key={field.key}
         className={`${isNested ? "pl-8 ml-4 border-l border-[#424753]/40" : ""} ${rowMuted ? "opacity-50" : ""}`}
       >
-        {field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" ? (
+        {field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" && !density ? (
           <PosterLanguageSettingsDescription spacing="wizard" />
         ) : null}
         {tmdbKeyMissing && field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" ? (
@@ -11214,9 +11502,12 @@ function OnboardingWizard(props: {
             Placeholdarr keeps using Radarr/Sonarr posters.
           </p>
         ) : null}
+        {field.key === "PLACEHOLDER_POSTER_PLACEHOLDER_BANNER" && !density ? (
+          <p className="mb-2 text-[12px] font-headline uppercase tracking-wider text-slate-500">Banner</p>
+        ) : null}
         <label
           className={`block text-[16px] font-semibold text-white font-headline mb-1 ${
-            field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" ? "mt-3" : ""
+            field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" && !density ? "mt-3" : ""
           }`}
         >
           {field.label}
@@ -11228,14 +11519,14 @@ function OnboardingWizard(props: {
             <PlaceholderStatusUpdatesDescription spacing="wizard" />
           ) : field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" ? (
             <ProjectStatusIntoDescription spacing="wizard" />
-          ) : field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
-            <PlaceholderPosterOverlayDescription spacing="wizard" />
-          ) : field.key === "PLACEHOLDER_POSTER_BANNER_POSITION" ? (
-            <PosterBannerPositionDescription spacing="wizard" />
+          ) : field.key === "PLACEHOLDER_POSTER_GRAYSCALE" ? (
+            <PosterGrayscaleDescription spacing="wizard" />
+          ) : field.key === "PLACEHOLDER_POSTER_BADGE" ? (
+            <PosterBadgeDescription spacing="wizard" />
+          ) : field.key === "PLACEHOLDER_POSTER_PLACEHOLDER_BANNER" ? (
+            <PosterPlaceholderBannerDescription spacing="wizard" />
           ) : field.key === "PLACEHOLDER_POSTER_COMING_SOON_BANNER" ? (
             <ComingSoonPosterBannerDescription spacing="wizard" />
-          ) : field.key === "PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER" ? (
-            <SeriesNewEpPosterBannerDescription spacing="wizard" />
           ) : field.key === "ENABLE_COMING_SOON_COUNTDOWN" ? (
             <ComingSoonCountdownDescription spacing="wizard" />
           ) : field.description && !isPosterLanguageFieldKey(field.key) ? (
@@ -11247,18 +11538,43 @@ function OnboardingWizard(props: {
           </p>
         ) : null}
         {field.type === "bool" ? (
-          <label className={`flex items-center gap-3 select-none w-fit ${interactionLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
-            <ToggleSwitch
-              checked={settingsBoolUiChecked(field, displayValue)}
-              onChange={(v) => handleWizardValueChange(field.key, settingsBoolStoredFromUi(field, v))}
-              accentHex={accent.hex}
-              disabled={interactionLocked}
-              ariaLabel={field.label}
-            />
-            <span className={`text-[16px] ${interactionLocked ? "text-slate-500" : "text-slate-300"}`}>
-              {settingsBoolUiChecked(field, displayValue) ? "Enabled" : "Disabled"}
-            </span>
-          </label>
+          <div className="flex flex-wrap items-center gap-3">
+            <label className={`flex items-center gap-3 select-none w-fit ${interactionLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
+              <ToggleSwitch
+                checked={settingsBoolUiChecked(field, displayValue)}
+                onChange={(v) => handleWizardValueChange(field.key, settingsBoolStoredFromUi(field, v))}
+                accentHex={accent.hex}
+                disabled={interactionLocked}
+                ariaLabel={field.label}
+              />
+              <span
+                className={`inline-block min-w-[4.75rem] text-[16px] ${interactionLocked ? "text-slate-500" : "text-slate-300"}`}
+              >
+                {settingsBoolUiChecked(field, displayValue) ? "Enabled" : "Disabled"}
+              </span>
+            </label>
+            {field.key === "PLACEHOLDER_POSTER_BADGE" ? (
+              <select
+                className={`min-w-[9.5rem] bg-[#0f1419] border border-[#424753]/40 rounded-lg pl-2.5 pr-8 py-1.5 text-[13px] text-slate-200 outline-none transition-colors ${focus} ${interactionLocked || !settingsBoolUiChecked(field, displayValue) ? "cursor-not-allowed opacity-50" : ""}`}
+                aria-label="Badge position"
+                disabled={interactionLocked || !settingsBoolUiChecked(field, displayValue)}
+                value={(() => {
+                  const raw = String(props.values.PLACEHOLDER_POSTER_BADGE_POSITION ?? "bottom_right")
+                    .trim()
+                    .toLowerCase()
+                    .replace(/-/g, "_");
+                  return POSTER_BADGE_POSITION_OPTIONS.some((o) => o.value === raw) ? raw : "bottom_right";
+                })()}
+                onChange={(e) => handleWizardValueChange("PLACEHOLDER_POSTER_BADGE_POSITION", e.target.value)}
+              >
+                {POSTER_BADGE_POSITION_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            ) : null}
+          </div>
         ) : field.type === "choice" && field.options?.length ? (
           <select
             className={`w-full bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${focus} ${interactionLocked ? "cursor-not-allowed" : ""}`}
@@ -11300,13 +11616,30 @@ function OnboardingWizard(props: {
             )}
           </div>
         )}
-        {field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
-          <PosterOverlayExamples
-            selectedMode={String(props.values[field.key] ?? "off")}
-            comingSoonBanner={Boolean(props.values.PLACEHOLDER_POSTER_COMING_SOON_BANNER)}
-            bannerPosition={String(props.values.PLACEHOLDER_POSTER_BANNER_POSITION ?? "top")}
-            compact
-          />
+        {field.key === "PLACEHOLDER_POSTER_COMING_SOON_BANNER" ? (
+          (() => {
+            const bannerPositionActive =
+              posterOverlaySettingOn(props.values.PLACEHOLDER_POSTER_PLACEHOLDER_BANNER) ||
+              posterOverlaySettingOn(props.values.PLACEHOLDER_POSTER_COMING_SOON_BANNER);
+            return (
+              <div className={`mt-3 ${bannerPositionActive ? "" : "opacity-50"}`}>
+                <div className="mb-1 text-[16px] font-semibold text-white font-headline">Position</div>
+                <select
+                  className={`min-w-[6.5rem] bg-[#0f1419] border border-[#424753]/40 rounded-lg pl-2.5 pr-8 py-1.5 text-[13px] text-slate-200 outline-none transition-colors ${focus} ${bannerPositionActive ? "" : "cursor-not-allowed"}`}
+                  aria-label="Banner position"
+                  disabled={!bannerPositionActive}
+                  value={String(props.values.PLACEHOLDER_POSTER_BANNER_POSITION ?? "top") === "bottom" ? "bottom" : "top"}
+                  onChange={(e) => handleWizardValueChange("PLACEHOLDER_POSTER_BANNER_POSITION", e.target.value)}
+                >
+                  {POSTER_BANNER_POSITION_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            );
+          })()
         ) : null}
         {testTarget ? (
           <div
@@ -11340,7 +11673,11 @@ function OnboardingWizard(props: {
       >
         <div className="relative z-10 flex flex-1 min-h-0 w-full flex-col items-center pb-5 sm:pb-8">
           <OnboardingWizardHeroBanner footerBlendHex={wizardSemantic.chromePage} />
-          <div className="flex w-full max-w-3xl flex-1 min-h-0 flex-col px-3">
+          <div
+            className={`flex w-full flex-1 min-h-0 flex-col px-3 ${
+              step.key === "look_and_feel" ? "max-w-5xl" : "max-w-3xl"
+            }`}
+          >
           <div className="flex flex-1 min-h-0 flex-col rounded-2xl border border-white/10 bg-[#121722]/93 backdrop-blur-md shadow-2xl overflow-hidden max-h-[min(900px,calc(100vh-7rem))]">
         <div className="px-6 sm:px-8 py-4 sm:py-5 border-b border-[#424753]/30 shrink-0">
           {previewMode ? (
@@ -11686,14 +12023,73 @@ function OnboardingWizard(props: {
           ) : !fields.length ? (
             <div className="text-center text-slate-500 text-[16px] py-8">No fields for this step.</div>
           ) : step.key === "look_and_feel" ? (
-            <div className="space-y-6">
-              <div className={WIZARD_ONBOARDING_SECTION_SURFACE_CLASS}>
-                <LookAndFeelSectionIntro embedded />
-                <div className="mt-4 border-t border-[#424753]/25 pt-4 space-y-5">
-                  {fields.map((field) => wizardFieldRow(field))}
+            (() => {
+              const fieldByKey = new Map(fields.map((f) => [f.key, f]));
+              const statusFields = fields.filter(
+                (f) => f.key === "PLACEHOLDER_STATUS_UPDATES" || f.key === "PLACEHOLDER_STATUS_PROJECTION_MODE",
+              );
+              const layerFields = POSTER_OVERLAY_LAYER_KEYS.map((k) => fieldByKey.get(k)).filter(
+                Boolean,
+              ) as SettingsField[];
+              const bannerFields = POSTER_OVERLAY_BANNER_KEYS.map((k) => fieldByKey.get(k)).filter(
+                Boolean,
+              ) as SettingsField[];
+              const languageFields = POSTER_LANGUAGE_FIELD_KEYS.map((k) => fieldByKey.get(k)).filter(
+                Boolean,
+              ) as SettingsField[];
+              return (
+                <div className="space-y-6">
+                  <LookAndFeelSectionIntro embedded />
+                  {statusFields.length ? (
+                    <SettingsDensityFrame
+                      legend="Player status"
+                      intro={
+                        <p>
+                          Choose how much request progress Placeholdarr shows in the player while Arr works.
+                        </p>
+                      }
+                    >
+                      {statusFields.map((field) => wizardFieldRow(field, { density: true }))}
+                    </SettingsDensityFrame>
+                  ) : null}
+                  {languageFields.length ? (
+                    <SettingsDensityFrame
+                      legend="Poster language"
+                      intro={<PosterLanguageSettingsDescription spacing="wizard" omitHeading />}
+                    >
+                      {languageFields.map((field) => wizardFieldRow(field, { density: true }))}
+                    </SettingsDensityFrame>
+                  ) : null}
+                  <PosterOverlayControlsWithPreview
+                    values={props.values}
+                    compact
+                    controls={
+                      <div className="space-y-6">
+                        <SettingsDensityFrame
+                          legend="Layers"
+                          intro={
+                            <p>
+                              Compose grayscale and badge layers independently. The preview updates as you change
+                              options.
+                            </p>
+                          }
+                        >
+                          {layerFields.map((field) => wizardFieldRow(field, { density: true }))}
+                        </SettingsDensityFrame>
+                        <SettingsDensityFrame
+                          legend="Banner"
+                          intro={
+                            <p>Date and PLACEHOLDER text bars. Position applies when either banner is enabled.</p>
+                          }
+                        >
+                          {bannerFields.map((field) => wizardFieldRow(field, { density: true }))}
+                        </SettingsDensityFrame>
+                      </div>
+                    }
+                  />
                 </div>
-              </div>
-            </div>
+              );
+            })()
           ) : step.key === "behavior" ? (
             <div className="space-y-6">
               {BEHAVIOR_WIZARD_SECTIONS.map((sectionName) => {

@@ -110,29 +110,27 @@ def overlay_banner_text(
 
 def resolve_draw_overlay_text(
     *,
-    mode: str,
-    coming_soon_banner_enabled: bool,
-    coming_soon_label: str | None,
+    mode: str | None = None,
+    coming_soon_banner_enabled: bool = False,
+    coming_soon_label: str | None = None,
+    placeholder_banner_enabled: bool | None = None,
 ) -> str | None:
     """Text passed into compositing.
 
-    - ``top_banner``: always draws text (date label or PLACEHOLDER).
-    - ``grayscale`` / ``corner_logo``: date strip only when the setting is on
-      and ``coming_soon_label`` is set; otherwise None (style only).
-    - ``off``: None.
+    Prefer layered flags: Coming Soon / New Ep. date label when applicable,
+    else PLACEHOLDER when the placeholder-banner toggle is on.
 
-    ``coming_soon_label`` is also used for series/season ``New Ep. - …`` strips.
+    Legacy ``mode == top_banner`` still implies PLACEHOLDER when the placeholder
+    flag is omitted (older call sites).
     """
-    want = str(mode or "off").strip().lower()
-    if want == "off":
-        return None
-    if want == "top_banner":
-        if coming_soon_banner_enabled and coming_soon_label:
-            return coming_soon_label
-        return OVERLAY_BANNER_PLACEHOLDER
-    # grayscale / corner_logo
+    want = str(mode or "").strip().lower()
     if coming_soon_banner_enabled and coming_soon_label:
         return coming_soon_label
+    ph_on = placeholder_banner_enabled
+    if ph_on is None:
+        ph_on = want == "top_banner"
+    if ph_on:
+        return OVERLAY_BANNER_PLACEHOLDER
     return None
 
 

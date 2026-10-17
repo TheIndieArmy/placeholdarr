@@ -11,13 +11,17 @@ from typing import Any
 
 from core.logger import logger
 from services.poster_overlay import (
+    COMPOSE_MODE,
     OVERLAY_META_FILENAME,
     coming_soon_banner_enabled,
     composite_poster_from_url,
     logo_asset_stamp,
     normalize_poster_url,
+    overlay_layer_fingerprint,
     poster_banner_position,
+    poster_overlay_enabled,
     poster_overlay_mode,
+    poster_placeholder_banner_enabled,
     save_jpeg,
     save_raw_poster_from_url,
     series_new_ep_banner_enabled,
@@ -132,8 +136,8 @@ def _normalize_outputs_map(raw: Any) -> dict[str, dict[str, str]]:
 def _effective_overlay_text(mode: str, overlay_text: str | None) -> str:
     """Canonical overlay_text for meta comparison.
 
-    ``top_banner`` always stores text (Coming Soon label or PLACEHOLDER).
-    Other modes store text only when a Coming Soon strip is drawn; empty means style only.
+    Legacy ``top_banner`` always stores text (Coming Soon label or PLACEHOLDER).
+    Compose / other modes store text only when a bar is drawn; empty means style only.
     """
     want = str(mode or "").strip().lower()
     text = str(overlay_text or "").strip()
@@ -144,8 +148,8 @@ def _effective_overlay_text(mode: str, overlay_text: str | None) -> str:
     return text
 
 
-def _movie_or_episode_overlay_text(mode: str, *, movie: Any = None, episode: Any = None) -> str | None:
-    """Resolve draw text for movie posters / episode thumbs from status + Coming Soon setting."""
+def _movie_or_episode_overlay_text(mode: str | None = None, *, movie: Any = None, episode: Any = None) -> str | None:
+    """Resolve draw text for movie posters / episode thumbs from banner settings."""
     from services.poster_overlay_text import (
         lookup_active_placeholder_display_status,
         resolve_draw_overlay_text,
@@ -153,8 +157,7 @@ def _movie_or_episode_overlay_text(mode: str, *, movie: Any = None, episode: Any
         resolve_movie_coming_soon_label,
     )
 
-    want = str(mode or "off").strip().lower()
-    if want == "off":
+    if not poster_overlay_enabled() and str(mode or "").strip().lower() in {"", "off", COMPOSE_MODE}:
         return None
     cs_on = coming_soon_banner_enabled()
     cs_label: str | None = None
@@ -176,30 +179,31 @@ def _movie_or_episode_overlay_text(mode: str, *, movie: Any = None, episode: Any
             )
             cs_label = resolve_episode_coming_soon_label(episode, display_status=status)
     return resolve_draw_overlay_text(
-        mode=want,
+        mode=mode,
         coming_soon_banner_enabled=cs_on,
         coming_soon_label=cs_label,
+        placeholder_banner_enabled=poster_placeholder_banner_enabled(),
     )
 
 
 def _series_or_season_overlay_text(
-    mode: str,
+    mode: str | None = None,
     *,
     series: Any,
     season: Any | None = None,
 ) -> str | None:
-    """Resolve draw text for series/season posters from the New Ep. setting."""
+    """Resolve draw text for series/season posters (New Ep. via Coming Soon setting)."""
     from services.poster_overlay_text import resolve_draw_overlay_text, resolve_series_new_ep_label
 
-    want = str(mode or "off").strip().lower()
-    if want == "off":
+    if not poster_overlay_enabled() and str(mode or "").strip().lower() in {"", "off", COMPOSE_MODE}:
         return None
     new_ep_on = series_new_ep_banner_enabled()
     label = resolve_series_new_ep_label(series, season=season) if new_ep_on else None
     return resolve_draw_overlay_text(
-        mode=want,
+        mode=mode,
         coming_soon_banner_enabled=new_ep_on,
         coming_soon_label=label,
+        placeholder_banner_enabled=poster_placeholder_banner_enabled(),
     )
 
 
@@ -271,12 +275,17 @@ def _write_meta(
     if desired_text:
         entry["overlay_text"] = desired_text
     outputs[meta_key] = entry
+    layers = overlay_layer_fingerprint()
     payload = {
-        "mode": mode,
+        "mode": mode if mode in {"off", "grayscale", "top_banner", "corner_logo"} else COMPOSE_MODE,
         "outputs": outputs,
         "logo_stamp": logo_asset_stamp(),
-        "coming_soon_banner": bool(coming_soon_banner_enabled()),
-        "banner_position": poster_banner_position(),
+        "coming_soon_banner": bool(layers.get("coming_soon_banner")),
+        "banner_position": str(layers.get("banner_position") or poster_banner_position()),
+        "grayscale": bool(layers.get("grayscale")),
+        "badge": bool(layers.get("badge")),
+        "badge_position": str(layers.get("badge_position") or "bottom_right"),
+        "placeholder_banner": bool(layers.get("placeholder_banner")),
     }
     from services.placeholders import _apply_dir_chain_permissions, _ensure_open_permissions
 
@@ -307,14 +316,30 @@ def _needs_regenerate(
     meta = _read_meta(meta_path)
     if not meta:
         return True
-    if str(meta.get("mode") or "") != mode:
+    want_mode = COMPOSE_MODE if str(mode or "").strip().lower() in {COMPOSE_MODE, ""} else str(mode or "")
+    if want_mode == COMPOSE_MODE or poster_overlay_enabled():
+        want_mode = COMPOSE_MODE
+    stored_mode = str(meta.get("mode") or "")
+    # Legacy exclusive-mode sidecars always rewrite once under compose layers.
+    if want_mode == COMPOSE_MODE and stored_mode not in {COMPOSE_MODE, ""}:
+        return True
+    if want_mode != COMPOSE_MODE and stored_mode != want_mode:
         return True
     if str(meta.get("logo_stamp") or "") != logo_asset_stamp():
         return True
-    # Text banner placement (top_banner / grayscale strips). Legacy meta without the
-    # key is treated as top so existing libraries do not mass-rewrite until position changes.
+    layers = overlay_layer_fingerprint()
+    if bool(meta.get("grayscale")) != bool(layers.get("grayscale")):
+        return True
+    if bool(meta.get("badge")) != bool(layers.get("badge")):
+        return True
+    stored_badge_pos = str(meta.get("badge_position") or "bottom_right").strip().lower().replace("-", "_")
+    if stored_badge_pos != str(layers.get("badge_position") or "bottom_right"):
+        return True
+    if bool(meta.get("placeholder_banner")) != bool(layers.get("placeholder_banner")):
+        return True
+    # Text banner placement. Legacy meta without the key is treated as top.
     stored_pos = str(meta.get("banner_position") or "top").strip().lower() or "top"
-    if stored_pos != poster_banner_position():
+    if stored_pos != str(layers.get("banner_position") or poster_banner_position()):
         return True
     # Do not invalidate on coming_soon_banner setting alone: overlay_text already
     # captures whether a date strip is drawn. Non-Coming-Soon titles stay unchanged.

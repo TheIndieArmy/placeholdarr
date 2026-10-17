@@ -43,10 +43,12 @@ NFO_BACKFILL_SETTING_KEYS = frozenset(
 # Settings that re-download / re-composite on-disk poster art (decoupled from NFO).
 ART_BACKFILL_SETTING_KEYS = frozenset(
     {
-        "PLACEHOLDER_POSTER_OVERLAY_MODE",
+        "PLACEHOLDER_POSTER_GRAYSCALE",
+        "PLACEHOLDER_POSTER_BADGE",
+        "PLACEHOLDER_POSTER_BADGE_POSITION",
+        "PLACEHOLDER_POSTER_PLACEHOLDER_BANNER",
         "PLACEHOLDER_POSTER_BANNER_POSITION",
         "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
-        "PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER",
         "ENABLE_PREFERRED_POSTER_LANGUAGE",
         "PREFERRED_POSTER_LANGUAGE",
         "PREFER_ORIGINAL_POSTER_LANGUAGE",
@@ -54,10 +56,10 @@ ART_BACKFILL_SETTING_KEYS = frozenset(
 )
 
 # Art settings that can use a narrow placeholder refresh instead of the whole library.
+# Coming Soon also drives New Ep. series/season banners → coming_soon_and_tv.
 NARROW_ART_BACKFILL_SETTING_KEYS = frozenset(
     {
         "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
-        "PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER",
     }
 )
 
@@ -809,31 +811,72 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
-            "PLACEHOLDER_POSTER_OVERLAY_MODE",
+            "PLACEHOLDER_POSTER_GRAYSCALE",
             {
-                "section": "Poster Overlay",
-                "label": "Placeholder poster overlay",
-                "description": (
-                    "How placeholder posters appear in Plex, Jellyfin, and Emby. Always writes local poster.jpg, "
-                    "seasonNN-poster.jpg at the series root, and episode thumb JPEGs (composited when a style is "
-                    "selected, raw download when Off). NFOs do not include art tags; players pick up files from "
-                    "disk after a library refresh. Changing this can trigger an art placeholder refresh now or "
-                    "at the next full sync."
-                ),
+                "section": "Poster Art",
+                "label": "Grayscale",
+                "description": "",
+                "type": "bool",
+                "restart_required": False,
+                "default": False,
+            },
+        ),
+        (
+            "PLACEHOLDER_POSTER_BADGE",
+            {
+                "section": "Poster Art",
+                "label": "Placeholdarr badge",
+                "description": "",
+                "type": "bool",
+                "restart_required": False,
+                "default": False,
+            },
+        ),
+        (
+            "PLACEHOLDER_POSTER_BADGE_POSITION",
+            {
+                "section": "Poster Art",
+                "label": "Badge position",
+                "description": "",
                 "type": "choice",
                 "restart_required": False,
+                "default": "bottom_right",
+                "depends_on": "PLACEHOLDER_POSTER_BADGE",
+                "nested": True,
                 "options": [
-                    {"value": "off", "label": "Off (raw download, no overlay)"},
-                    {"value": "grayscale", "label": "Grayscale poster"},
-                    {"value": "top_banner", "label": "Banner: PLACEHOLDER"},
-                    {"value": "corner_logo", "label": "Corner badge: Placeholdarr logo"},
+                    {"value": "bottom_right", "label": "Bottom right"},
+                    {"value": "bottom_left", "label": "Bottom left"},
+                    {"value": "top_right", "label": "Top right"},
+                    {"value": "top_left", "label": "Top left"},
                 ],
+            },
+        ),
+        (
+            "PLACEHOLDER_POSTER_PLACEHOLDER_BANNER",
+            {
+                "section": "Poster Art",
+                "label": "PLACEHOLDER banner",
+                "description": "",
+                "type": "bool",
+                "restart_required": False,
+                "default": False,
+            },
+        ),
+        (
+            "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
+            {
+                "section": "Poster Art",
+                "label": "Coming Soon banner",
+                "description": "",
+                "type": "bool",
+                "restart_required": False,
+                "default": False,
             },
         ),
         (
             "PLACEHOLDER_POSTER_BANNER_POSITION",
             {
-                "section": "Poster Overlay",
+                "section": "Poster Art",
                 "label": "Banner position",
                 "description": "",
                 "type": "choice",
@@ -846,31 +889,9 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
-            "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
-            {
-                "section": "Poster Overlay",
-                "label": "Coming Soon date banner",
-                "description": "",
-                "type": "bool",
-                "restart_required": False,
-                "default": False,
-            },
-        ),
-        (
-            "PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER",
-            {
-                "section": "Poster Overlay",
-                "label": "New episode banner on series posters",
-                "description": "",
-                "type": "bool",
-                "restart_required": False,
-                "default": False,
-            },
-        ),
-        (
             "ENABLE_PREFERRED_POSTER_LANGUAGE",
             {
-                "section": "Poster Overlay",
+                "section": "Poster Art",
                 "label": "Fetch from TMDB",
                 "description": "",
                 "type": "bool",
@@ -881,7 +902,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "PREFER_ORIGINAL_POSTER_LANGUAGE",
             {
-                "section": "Poster Overlay",
+                "section": "Poster Art",
                 "label": "Original language first",
                 "description": "",
                 "type": "bool",
@@ -894,7 +915,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "PREFERRED_POSTER_LANGUAGE",
             {
-                "section": "Poster Overlay",
+                "section": "Poster Art",
                 "label": "Language",
                 "description": "",
                 "type": "choice",
@@ -2463,6 +2484,108 @@ def migrate_play_also_instances_from_legacy(session=None) -> dict[str, Any]:
             session.close()
 
 
+def _upsert_bool_config(session, key: str, value: bool) -> None:
+    meta = SETTINGS_SCHEMA.get(key) or {}
+    stored = bool(value)
+    row = _get_row(session, key)
+    if not row:
+        session.add(
+            AppConfig(
+                key=key,
+                value=stored,
+                value_type=str(meta.get("type") or "bool"),
+                restart_required=bool(meta.get("restart_required", False)),
+                description=str(meta.get("description") or ""),
+            )
+        )
+    else:
+        row.value = stored
+        row.value_type = str(meta.get("type") or row.value_type or "bool")
+        session.add(row)
+
+
+def _upsert_string_config(session, key: str, value: str) -> None:
+    meta = SETTINGS_SCHEMA.get(key) or {}
+    stored = str(value or "")
+    row = _get_row(session, key)
+    if not row:
+        session.add(
+            AppConfig(
+                key=key,
+                value=stored,
+                value_type=str(meta.get("type") or "choice"),
+                description=str(meta.get("description") or ""),
+            )
+        )
+    else:
+        row.value = stored
+        row.value_type = str(meta.get("type") or row.value_type or "choice")
+        session.add(row)
+
+
+def migrate_poster_overlay_layers(session=None) -> dict[str, Any]:
+    """Map legacy exclusive overlay mode (+ New Ep. toggle) onto layered settings."""
+    owns_session = session is None
+    session = session or get_session()
+    wrote: list[str] = []
+    try:
+        layer_keys = (
+            "PLACEHOLDER_POSTER_GRAYSCALE",
+            "PLACEHOLDER_POSTER_BADGE",
+            "PLACEHOLDER_POSTER_PLACEHOLDER_BANNER",
+        )
+        existing_layers = (
+            session.query(AppConfig.key)
+            .filter(AppConfig.key.in_(layer_keys))
+            .all()
+        )
+        has_layers = bool(existing_layers)
+
+        def _bool_row(key: str) -> bool:
+            row = _get_row(session, key)
+            if row is None or row.value is None:
+                return False
+            return str(row.value).strip().lower() in {"1", "true", "yes", "on"}
+
+        if not has_layers:
+            mode_row = session.query(AppConfig).filter(AppConfig.key == "PLACEHOLDER_POSTER_OVERLAY_MODE").first()
+            mode = str(getattr(mode_row, "value", None) or "off").strip().lower()
+            gs = mode == "grayscale"
+            badge = mode == "corner_logo"
+            ph = mode == "top_banner"
+            _upsert_bool_config(session, "PLACEHOLDER_POSTER_GRAYSCALE", gs)
+            _upsert_bool_config(session, "PLACEHOLDER_POSTER_BADGE", badge)
+            _upsert_bool_config(session, "PLACEHOLDER_POSTER_PLACEHOLDER_BANNER", ph)
+            if badge and _get_row(session, "PLACEHOLDER_POSTER_BADGE_POSITION") is None:
+                _upsert_string_config(session, "PLACEHOLDER_POSTER_BADGE_POSITION", "bottom_right")
+            wrote.extend(layer_keys)
+
+        # Fold legacy New Ep. into Coming Soon.
+        if _bool_row("PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER") and not _bool_row(
+            "PLACEHOLDER_POSTER_COMING_SOON_BANNER"
+        ):
+            _upsert_bool_config(session, "PLACEHOLDER_POSTER_COMING_SOON_BANNER", True)
+            wrote.append("PLACEHOLDER_POSTER_COMING_SOON_BANNER")
+
+        if wrote:
+            session.commit()
+            logger.info(
+                f"Poster overlay layers migration wrote: {', '.join(wrote)}",
+                extra={"emoji_type": "info"},
+            )
+        return {"ok": True, "wrote": wrote, "migrated_from_mode": not has_layers}
+    except Exception as exc:
+        session.rollback()
+        logger.warning(
+            f"Poster overlay layers migration failed: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+        return {"ok": False, "wrote": wrote, "error": str(exc)}
+    finally:
+        if owns_session:
+            session.close()
+
+
 def apply_persisted_settings(session=None) -> dict[str, Any]:
     owns_session = session is None
     session = session or get_session()
@@ -2478,6 +2601,7 @@ def apply_persisted_settings(session=None) -> dict[str, Any]:
         migrate_playback_future_search_suppress_default()
         migrate_playback_filters_to_dest_lists()
         migrate_play_also_instances_from_legacy()
+        migrate_poster_overlay_layers()
         rows = session.query(AppConfig).filter(AppConfig.key.in_(tuple(SETTINGS_SCHEMA.keys()))).all()
         for row in rows:
             if row.key not in SETTINGS_SCHEMA:
@@ -3091,18 +3215,11 @@ def save_settings(
             if language_keys_changed and effective_scope == "future":
                 effective_scope = "next_full_sync"
 
-            # Narrow poster-banner toggles only need matching titles rewritten.
+            # Narrow Coming Soon toggle also refreshes series/season New Ep. posters.
             changed_art = set(art_backfill_keys_changed)
             art_scope = "all"
             if changed_art and changed_art <= NARROW_ART_BACKFILL_SETTING_KEYS:
-                want_cs = "PLACEHOLDER_POSTER_COMING_SOON_BANNER" in changed_art
-                want_tv = "PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER" in changed_art
-                if want_cs and want_tv:
-                    art_scope = "coming_soon_and_tv"
-                elif want_cs:
-                    art_scope = "coming_soon"
-                else:
-                    art_scope = "tv_new_ep"
+                art_scope = "coming_soon_and_tv"
             refresh_out = execute_placeholder_refresh_apply_scope(
                 apply_scope=effective_scope,
                 metadata=bool(nfo_backfill_keys_changed),

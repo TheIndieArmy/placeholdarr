@@ -334,20 +334,39 @@ class Settings(BaseSettings):
         os.getenv("SONARR_SHARED_PLACEHOLDER_CLEANUP", "protect_siblings").split("#")[0].strip()
         or "protect_siblings"
     )
-    # Composited local poster art for placeholders in Plex/Jellyfin/Emby (off = remote URLs in NFO only).
+    # Legacy exclusive overlay mode (migrated to layered toggles below; kept for env/DB migrate).
     PLACEHOLDER_POSTER_OVERLAY_MODE: Literal["off", "grayscale", "top_banner", "corner_logo"] = (
         os.getenv("PLACEHOLDER_POSTER_OVERLAY_MODE", "off").split("#")[0].strip().lower() or "off"
     )
-    # Text-banner bar placement for Banner, Grayscale, and Corner date strips (badge stays bottom-right).
+    # Layered poster overlay (compose independently).
+    PLACEHOLDER_POSTER_GRAYSCALE: bool = (
+        os.getenv("PLACEHOLDER_POSTER_GRAYSCALE", "false").split("#")[0].strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    PLACEHOLDER_POSTER_BADGE: bool = (
+        os.getenv("PLACEHOLDER_POSTER_BADGE", "false").split("#")[0].strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    PLACEHOLDER_POSTER_BADGE_POSITION: Literal[
+        "bottom_right", "bottom_left", "top_right", "top_left"
+    ] = (
+        os.getenv("PLACEHOLDER_POSTER_BADGE_POSITION", "bottom_right").split("#")[0].strip().lower().replace("-", "_")
+        or "bottom_right"
+    )
+    PLACEHOLDER_POSTER_PLACEHOLDER_BANNER: bool = (
+        os.getenv("PLACEHOLDER_POSTER_PLACEHOLDER_BANNER", "false").split("#")[0].strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    # Text-banner bar placement (PLACEHOLDER / Coming Soon / New Ep.).
     PLACEHOLDER_POSTER_BANNER_POSITION: Literal["top", "bottom"] = (
         os.getenv("PLACEHOLDER_POSTER_BANNER_POSITION", "top").split("#")[0].strip().lower() or "top"
     )
-    # Opt-in Coming Soon date / Coming Soon strip on top of the selected overlay style (default off).
+    # Coming Soon dates on movies/episodes and New Ep. on series/season posters.
     PLACEHOLDER_POSTER_COMING_SOON_BANNER: bool = (
         os.getenv("PLACEHOLDER_POSTER_COMING_SOON_BANNER", "false").split("#")[0].strip().lower()
         in {"1", "true", "yes", "on"}
     )
-    # Opt-in New Ep. date strip on series/season posters from the next unaired episode (default off).
+    # Legacy New Ep. toggle (migrated into Coming Soon; kept for DB migrate only).
     PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER: bool = (
         os.getenv("PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER", "false").split("#")[0].strip().lower()
         in {"1", "true", "yes", "on"}
@@ -600,6 +619,13 @@ class Settings(BaseSettings):
     def normalize_placeholder_poster_banner_position(cls, v):
         raw = str(v or "top").strip().lower()
         return "bottom" if raw == "bottom" else "top"
+
+    @validator("PLACEHOLDER_POSTER_BADGE_POSITION", pre=True)
+    def normalize_placeholder_poster_badge_position(cls, v):
+        raw = str(v or "bottom_right").strip().lower().replace("-", "_")
+        if raw in {"bottom_right", "bottom_left", "top_right", "top_left"}:
+            return raw
+        return "bottom_right"
 
     @validator('COMING_SOON_DUMMY_FILE_PATH')
     def validate_coming_soon_dummy_file_path(cls, v):

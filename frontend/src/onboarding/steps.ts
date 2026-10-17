@@ -97,7 +97,7 @@ export const ONBOARDING_STEP_GUIDES: Record<OnboardingWizardStepKey, OnboardingS
   look_and_feel: {
     title: "How placeholders look while downloading",
     paragraphs: [
-      "Last, let's choose how placeholders look in your player while Arr is working. Status text and poster overlays show request progress. Defaults are enough to finish setup; you can refine templates in Settings anytime.",
+      "Last, let's choose how placeholders look in your player while Arr is working. Status text, poster overlays, and optional poster language show request progress. Defaults are enough to finish setup; you can refine templates in Settings anytime.",
     ],
   },
 };

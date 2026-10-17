@@ -9,25 +9,6 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
-### Summary
-
-- **Art determination**: Art refresh enqueue compares desired overlay to `.poster-overlay.json` and skips matching titles.
-- **Coming Soon date-driven art**: Calendar date refresh enqueues poster art when release/air dates change, even if status/reason stay the same.
-- **New Ep. calendar/import art**: Episode air-date shifts and import-grace finalize refresh series/season New Ep. banners.
-- **Materializer art after status**: Placeholder art is written after initial Coming Soon status so the first poster has the correct banner.
-- **Banner position**: Top or bottom text bars for all overlay styles (default top).
-
-### Added
-
-- **Banner position**: `PLACEHOLDER_POSTER_BANNER_POSITION` (`top` / `bottom`, default `top`) places date / PLACEHOLDER text bars for Banner, Grayscale, and Corner overlays. Bottom keeps dates clear of Plex unwatched counts. The Corner logo badge itself stays bottom-right and is not part of the bar.
-
-### Changed
-
-- **Art determination**: `enqueue_placeholder_art_refresh` filters to placeholders whose on-disk overlay sidecar does not match the desired banner text (and related art inputs).
-- **Coming Soon date-driven art**: After Arr calendar date refresh updates movie or episode dates, enqueue art for those placeholders so absolute date strips stay current without a status change.
-- **New Ep. calendar/import art**: Episode air-date updates enqueue one series-scoped art refresh; import-grace finalize does the same when an episode becomes available so next-unaired banners advance.
-- **Materializer art after status**: Movie and episode materialization applies initial lifecycle status before writing local poster/still art.
-
 ## Pre-release
 
 ## Released
@@ -36,27 +17,44 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ### Summary
 
-- **Coming Soon date banner**: Opt-in poster strip (default off) across overlay styles; Settings examples swap when the toggle changes.
-- **New Ep. series posters**: Optional next-unaired date strip on series and season posters.
+- **Layered poster overlays**: Grayscale, badge, and banner compose independently (replaces exclusive overlay mode).
+- **Coming Soon drives New Ep.**: One banner toggle covers movie/episode dates and series/season New Ep. text.
+- **Poster Art**: One Settings page for TMDB language plus overlay layers; live previews sit beside overlay controls.
+- **Settings Density framing**: Settings pages use stacked accent framed groups (Density & Lookahead style).
+- **Art determination**: Art refresh enqueue compares desired overlay to `.poster-overlay.json` and skips matching titles.
+- **Coming Soon date-driven art**: Calendar date refresh enqueues poster art when release/air dates change, even if status/reason stay the same.
+- **New Ep. calendar/import art**: Episode air-date shifts and import-grace finalize refresh series/season New Ep. banners.
+- **Materializer art after status**: Placeholder art is written after initial Coming Soon status so the first poster has the correct banner.
+- **Banner position**: Top or bottom text bars (default top); badge corners are independent with auto inset on shared edges.
+- **Coming Soon date banner**: Opt-in poster strip (default off); Settings and onboarding previews update with the toggles.
 - **Coming Soon banner art refresh**: Toggle-only saves refresh Coming Soon titles, not the whole library.
-- **New Ep. banner art refresh**: Toggle-only saves refresh series/season posters only.
 - **Narrow banner Plex refresh**: Coming Soon / New Ep. applies use path refresh, not full-library metadata.
 - **Local art player refresh**: Rewritten posters trigger per-title metadata refresh so Plex shows the new art.
 - **Plex item metadata refresh**: PUT instead of GET so item refreshes succeed.
 - **Settings art-change detection**: Unchanged off bools no longer force a full art refresh.
-- **What's new (0.11.3)**: Startup ack for Coming Soon and New Ep. date banners (Poster Overlay CTA).
+- **What's new (0.11.3)**: Startup ack for layered poster overlays and date banners (Poster Art CTA).
 - **NFO batch player push**: Mixed rewrite/no-op NFO jobs still project every active placeholder in the batch.
 
 ### Added
 
-- **Coming Soon date banner**: `PLACEHOLDER_POSTER_COMING_SOON_BANNER` (default off) adds a date strip on Coming Soon movie posters and episode thumbs for every overlay style: top banner replaces PLACEHOLDER; grayscale gets a top strip; corner badge uses a bottom strip with the logo. Previews in Settings and onboarding update when the toggle is on or off.
-- **New Ep. series posters**: `PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER` (default off) shows `New Ep. - Oct 22` on series and season posters for the next unaired episode (including premieres).
-- **What's new (0.11.3)**: Startup ack for Coming Soon and New Ep. banners pointing at Settings → Poster Overlay.
+- **Layered poster overlays**: `PLACEHOLDER_POSTER_GRAYSCALE`, `PLACEHOLDER_POSTER_BADGE` (+ position), `PLACEHOLDER_POSTER_PLACEHOLDER_BANNER`, and `PLACEHOLDER_POSTER_COMING_SOON_BANNER` compose together. Legacy exclusive `PLACEHOLDER_POSTER_OVERLAY_MODE` migrates on startup.
+- **Live overlay preview**: `/api/settings/poster-overlay-preview` (`kind=movie|series|episode`) returns a JPEG of the current layer stack for Settings and onboarding.
+- **Banner position**: `PLACEHOLDER_POSTER_BANNER_POSITION` (`top` / `bottom`, default `top`) places date / PLACEHOLDER text bars. Badge position is separate; text insets when both share an edge.
+- **Poster Art**: TMDB language and overlay layer settings share Settings → Poster Art (`/settings/poster-art`; old `/settings/poster-overlay` and `/settings/poster-language` redirect).
+- **Coming Soon date banner**: `PLACEHOLDER_POSTER_COMING_SOON_BANNER` (default off) adds a date strip on Coming Soon movie posters and episode thumbs. Series and season posters show New Ep. when this is enabled.
+- **What's new (0.11.3)**: Startup ack for layered overlays and date banners pointing at Settings → Poster Art.
 
 ### Changed
 
+- **Overlay badge size**: Corner badge always matches banner bar height so it fits the strip whether or not it shares an edge.
+- **Poster Art page**: Renames Poster Overlay; language settings are full width above overlay controls; Movie / TV / Episode previews sit beside overlays with correct aspect ratios.
+- **Settings Density framing**: Paths, Media, Arr, Optional APIs, Playback, Library sync, Calendar, Status Updates, Poster Art, Dummy Video, Advanced, and Security use stacked Density-style framed groups.
+- **Coming Soon drives New Ep.**: Enabling Coming Soon banner also shows New Ep. on series/season posters. The old `PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER` setting migrates into Coming Soon.
+- **Art determination**: `enqueue_placeholder_art_refresh` filters to placeholders whose on-disk overlay sidecar does not match the desired banner text (and related art inputs).
+- **Coming Soon date-driven art**: After Arr calendar date refresh updates movie or episode dates, enqueue art for those placeholders so absolute date strips stay current without a status change.
+- **New Ep. calendar/import art**: Episode air-date updates enqueue one series-scoped art refresh; import-grace finalize does the same when an episode becomes available so next-unaired banners advance.
+- **Materializer art after status**: Movie and episode materialization applies initial lifecycle status before writing local poster/still art.
 - **Coming Soon banner art refresh**: Turning only the Coming Soon date-banner setting on or off refreshes Coming Soon placeholders, not the whole library.
-- **New Ep. banner art refresh**: Turning only the series New Ep. setting on or off refreshes series/season posters (one placeholder per show), not episode thumbs or the whole library.
 - **Narrow banner Plex refresh**: Coming Soon / New Ep. toggle applies use path refresh only; they no longer force a full-library Plex metadata refresh.
 - **Local art player refresh**: After rewriting posters, refresh those titles' metadata on Plex/Jellyfin/Emby so new art appears without a manual Refresh Metadata.
 - **Plex item metadata refresh**: Use PUT (not GET) for `/library/metadata/{id}/refresh`; GET was 404ing while path scans still ran.
