@@ -430,18 +430,19 @@ def metrics_from_pipeline(pipeline: dict[str, Any]) -> dict[str, list[dict[str, 
     scan_info = scan.get("info") if isinstance(scan.get("info"), dict) else {}
     out["fs_scan"] = _fs_scan_metrics(scan, scan_info)
     det = pipeline.get("determination") if isinstance(pipeline.get("determination"), dict) else {}
+    # Same card set for full (library walk) and lite (scoped) determination.
     out["determination"] = [
         {"label": "Movies evaluated", "value": int(det.get("movies_total") or 0)},
         {"label": "Episodes evaluated", "value": int(det.get("episodes_total") or 0)},
         {"label": "Already has placeholder", "value": int(det.get("placeholder_exists") or 0)},
         {"label": "Not yet aired", "value": int(det.get("not_needed_not_yet_aired") or det.get("not_needed") or 0)},
+        {"label": "Air date unknown", "value": int(det.get("not_needed_air_date_unknown") or 0)},
+        {
+            "label": "Tombstones skipped",
+            "value": int(det.get("movies_skipped_tombstone") or 0)
+            + int(det.get("episodes_skipped_tombstone") or 0),
+        },
     ]
-    skipped_movies = int(det.get("movies_skipped_tombstone") or 0)
-    skipped_episodes = int(det.get("episodes_skipped_tombstone") or 0)
-    if skipped_movies or skipped_episodes:
-        out["determination"].append(
-            {"label": "Tombstones skipped", "value": skipped_movies + skipped_episodes}
-        )
     mat = pipeline.get("materialization") if isinstance(pipeline.get("materialization"), dict) else {}
     out["materialization"] = [
         {"label": "Placeholders created", "value": int(mat.get("created") or 0)},
@@ -459,7 +460,15 @@ def metrics_from_pipeline(pipeline: dict[str, Any]) -> dict[str, list[dict[str, 
     ]
     cal = pipeline.get("calendar") if isinstance(pipeline.get("calendar"), dict) else {}
     out["calendar"] = [
-        {"label": "Calendar updates", "value": int(cal.get("updated") or cal.get("changed") or 0)},
+        {
+            "label": "Calendar updates",
+            "value": int(
+                cal.get("updated")
+                or cal.get("changed")
+                or cal.get("status_applied")
+                or 0
+            ),
+        },
     ]
     out["discovery"] = metrics_from_lite_discovery(
         pipeline.get("discovery") if isinstance(pipeline.get("discovery"), dict) else pipeline.get("startup_sync")
@@ -503,10 +512,7 @@ def empty_live_metrics_for_phase(phase_key: str) -> list[dict[str, Any]]:
             {"label": "Created total", "value": 0},
         ]
     shells = metrics_from_pipeline({})
-    metrics = list(shells.get(key) or [])
-    if key == "determination":
-        metrics.append({"label": "Tombstones skipped", "value": 0})
-    return metrics
+    return list(shells.get(key) or [])
 
 
 ART_COUNT_KEYS = ("movie", "series", "season", "episode")
