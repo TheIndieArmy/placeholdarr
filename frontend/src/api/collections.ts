@@ -60,8 +60,12 @@ export function toggleCollectionRecipe(id: number, enabled: boolean): Promise<{ 
   return postJson(`/api/collections/${id}/toggle`, { enabled });
 }
 
-export async function deleteCollectionRecipe(id: number): Promise<{ ok: boolean }> {
-  return fetchJson(`/api/collections/${id}`, { method: "DELETE" });
+export async function deleteCollectionRecipe(
+  id: number,
+  options?: { deletePlex?: boolean },
+): Promise<{ ok: boolean; delete_plex?: boolean; plex_deleted?: number }> {
+  const qs = options?.deletePlex ? "?delete_plex=true" : "";
+  return fetchJson(`/api/collections/${id}${qs}`, { method: "DELETE" });
 }
 
 export function runCollectionRecipe(id: number): Promise<{ ok: boolean; recipe_id: number; message: string }> {

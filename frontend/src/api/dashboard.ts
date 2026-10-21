@@ -171,7 +171,9 @@ export function getSeriesDetail(seriesId: number): Promise<DetailResponse> {
 export type EntityReconcileStartResponse = {
   ok: boolean;
   job_id?: number;
+  step?: string;
   step_label?: string;
+  display_title?: string;
   reused?: boolean;
   message?: string;
 };
@@ -181,6 +183,7 @@ export type EntityReconcileStatusResponse = {
   status: "working" | "done" | "failed";
   step?: string;
   step_label?: string;
+  display_title?: string;
   error_message?: string | null;
   entity_type?: string;
   entity_id?: number;

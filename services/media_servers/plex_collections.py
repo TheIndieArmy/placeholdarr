@@ -476,6 +476,30 @@ def resolve_owned_collection(
         ) from exc
 
 
+def apply_collection_visibility(collection, visible_on: dict[str, Any] | None) -> None:
+    """Apply Plex Visible On hub promotion (Library Recommended / Home / Shared Home).
+
+    Requires admin Plex Pass. Failures are logged and do not raise so membership
+    sync still succeeds when Pass or the hubs API is unavailable.
+    """
+    if collection is None:
+        return
+    flags = visible_on if isinstance(visible_on, dict) else {}
+    recommended = bool(flags.get("library"))
+    home = bool(flags.get("home"))
+    shared = bool(flags.get("shared"))
+    try:
+        hub = collection.visibility()
+        hub.updateVisibility(recommended=recommended, home=home, shared=shared)
+    except Exception as exc:
+        logger.warning(
+            f"Collections: Visible On update failed for "
+            f"{getattr(collection, 'title', '')!r} "
+            f"(library={recommended}, home={home}, shared={shared}): {exc}",
+            extra={"emoji_type": "warning"},
+        )
+
+
 def _apply_custom_item_order(collection, items: list[Any]) -> None:
     """Force Plex custom sort so membership order matches Placeholdarr arrange order."""
     if not items or collection is None or getattr(collection, "smart", False):
@@ -521,6 +545,7 @@ def sync_collection(
     set_value: str | None = None,
     known_rating_key: str | None = None,
     adopt_unlabeled: bool = False,
+    visible_on: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create or update a Placeholdarr-owned Plex collection.
 
@@ -598,6 +623,7 @@ def sync_collection(
             ) from exc
         ensure_ownership_markers(created, recipe_id, set_value)
         _apply_custom_item_order(created, items)
+        apply_collection_visibility(created, visible_on)
         rating_key = str(getattr(created, "ratingKey", "") or "") or None
         logger.info(
             f"Collections: created Plex collection {collection_title!r} "
@@ -640,6 +666,7 @@ def sync_collection(
             f"Failed to update collection {collection_title!r} membership: {exc}"
         ) from exc
 
+    apply_collection_visibility(existing, visible_on)
     rating_key = str(getattr(existing, "ratingKey", "") or "") or None
     logger.info(
         f"Collections: {'adopted' if adopted else 'synced'} Plex collection {collection_title!r} "

@@ -298,7 +298,7 @@ export function ArrAddModal(props: {
       <div
         role="dialog"
         aria-modal="true"
-        className={`w-full max-w-xl max-h-[90vh] overflow-y-auto rounded-xl border p-4 ${theme.blockCard}`}
+        className={`w-full max-w-xl max-h-[90vh] overflow-y-auto p-4 ${theme.blockCard}`}
       >
         <div className="flex items-start justify-between gap-3">
           <div>

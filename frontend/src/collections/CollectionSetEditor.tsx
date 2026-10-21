@@ -15,6 +15,7 @@ import type {
   CollectionPreviewResponse,
   CollectionRecipe,
   CollectionSetConfig,
+  CollectionVisibleOn,
   PlexSectionOption,
 } from "../types/api";
 import { ToggleSwitch } from "../ToggleSwitch";
@@ -105,7 +106,11 @@ function defaultSetConfig(category: SetCategory = "genre"): CollectionSetConfig 
   };
 }
 
-function setDefinition(config: CollectionSetConfig, adoptExisting = false): CollectionDefinition {
+function setDefinition(
+  config: CollectionSetConfig,
+  adoptExisting = false,
+  visibleOn: CollectionVisibleOn | null = null,
+): CollectionDefinition {
   return {
     mode: "collection_set",
     collection_set: config,
@@ -115,6 +120,11 @@ function setDefinition(config: CollectionSetConfig, adoptExisting = false): Coll
     sort: config.sort ?? "title",
     pins: { include: [], exclude: [] },
     ...(adoptExisting ? { adopt_existing: true } : {}),
+    visible_on: {
+      library: Boolean(visibleOn?.library),
+      home: Boolean(visibleOn?.home),
+      shared: Boolean(visibleOn?.shared),
+    },
   };
 }
 
@@ -160,6 +170,11 @@ export function CollectionSetEditor(props: {
     props.recipe?.active_window ?? null,
   );
   const [adoptExisting, setAdoptExisting] = useState(Boolean(props.recipe?.definition?.adopt_existing));
+  const [visibleOn, setVisibleOn] = useState<CollectionVisibleOn>(() => ({
+    library: Boolean(props.recipe?.definition?.visible_on?.library),
+    home: Boolean(props.recipe?.definition?.visible_on?.home),
+    shared: Boolean(props.recipe?.definition?.visible_on?.shared),
+  }));
   const [nameCheck, setNameCheck] = useState<
     | { status: "idle" }
     | { status: "loading" }
@@ -183,6 +198,7 @@ export function CollectionSetEditor(props: {
         runIntervalHours,
         activeWindow,
         adoptExisting,
+        visibleOn,
         setConfig: {
           category: setConfig.category,
           selection_mode: setConfig.selection_mode,
@@ -195,7 +211,7 @@ export function CollectionSetEditor(props: {
           release_basis: setConfig.release_basis,
         },
       }),
-    [name, enabled, sectionIds, runIntervalHours, activeWindow, adoptExisting, setConfig],
+    [name, enabled, sectionIds, runIntervalHours, activeWindow, adoptExisting, visibleOn, setConfig],
   );
   const initialRef = useRef(snapshot);
   const dirty = snapshot !== initialRef.current;
@@ -238,7 +254,7 @@ export function CollectionSetEditor(props: {
         plex_section_ids: sectionIds,
         plex_section_type: sectionType,
         collection_title: pattern,
-        definition: setDefinition(config, adoptExisting),
+        definition: setDefinition(config, adoptExisting, visibleOn),
         recipe_id: props.recipe?.id ?? null,
       });
       const blocking = (result.conflicts || []).filter((c) => c.reason !== "ours");
@@ -345,7 +361,7 @@ export function CollectionSetEditor(props: {
         plex_section_id: sectionId,
         plex_section_ids: sectionIds,
         plex_section_type: sectionType,
-        definition: setDefinition(setConfig),
+        definition: setDefinition(setConfig, adoptExisting, visibleOn),
       });
       setPreview(result);
     } catch (err) {
@@ -354,7 +370,7 @@ export function CollectionSetEditor(props: {
     } finally {
       setPreviewLoading(false);
     }
-  }, [sectionId, sectionIds, sectionType, setConfig]);
+  }, [sectionId, sectionIds, sectionType, setConfig, adoptExisting, visibleOn]);
 
   useEffect(() => {
     if (!sectionId) return;
@@ -422,7 +438,7 @@ export function CollectionSetEditor(props: {
       plex_section_ids: sectionIds,
       plex_section_type: sectionType,
       collection_title: pattern,
-      definition: setDefinition(config, adoptExisting),
+      definition: setDefinition(config, adoptExisting, visibleOn),
       run_interval_hours: runIntervalHours,
       active_window: activeWindow,
     });
@@ -600,20 +616,17 @@ export function CollectionSetEditor(props: {
         </div>
       </div>
 
-      <div className={`${theme.blockCard} overflow-hidden`}>
+      <div className={`${theme.blockCard} space-y-3 overflow-hidden p-4`}>
         <div className={theme.blockHeader}>
-          <span
-            className="material-symbols-outlined inline-flex h-8 w-8 items-center justify-center rounded-full"
-            style={{ fontSize: 18, color: accentHex, backgroundColor: `${accentHex}1f` }}
-          >
+          <span className="material-symbols-outlined mt-0.5 shrink-0" style={{ fontSize: 16, color: accentHex }} aria-hidden>
             category
           </span>
-          <div>
+          <div className="min-w-0 flex-1 space-y-1">
             <div className={theme.blockTitle}>Category</div>
             <div className={theme.blockSubtitle}>{categoryMeta.description}</div>
           </div>
         </div>
-        <div className="px-4 py-3 flex flex-col gap-3">
+        <div className="flex flex-col gap-3">
           <div className="flex flex-wrap gap-2">
             {CATEGORY_OPTIONS.map((opt) => {
               const active = setConfig.category === opt.value;
@@ -828,15 +841,63 @@ export function CollectionSetEditor(props: {
         </div>
       </div>
 
-      <div className={`${theme.blockCard} overflow-hidden`}>
+      <div className={`${theme.blockCard} space-y-3 overflow-hidden p-4`}>
         <div className={theme.blockHeader}>
-          <span
-            className="material-symbols-outlined inline-flex h-8 w-8 items-center justify-center rounded-full"
-            style={{ fontSize: 18, color: accentHex, backgroundColor: `${accentHex}1f` }}
-          >
+          <span className="material-symbols-outlined mt-0.5 shrink-0" style={{ fontSize: 16, color: accentHex }} aria-hidden>
+            display_settings
+          </span>
+          <div className="min-w-0 flex-1 space-y-1">
+            <div className={theme.blockTitle}>Display</div>
+            <div className={theme.blockSubtitle}>Where each set collection appears in Plex</div>
+          </div>
+        </div>
+        <div>
+          <div className={`mb-1 ${theme.blockTitle}`}>
+            Visible on
+          </div>
+          <p className={`mb-3 text-[13px] leading-relaxed ${theme.muted}`}>
+            Promote every collection in this set as a row in Plex (same as Visible On in Plex).{" "}
+            <span className={isLight ? "text-amber-800" : "text-amber-200"}>Plex Pass required.</span> Collections
+            still sync into the library&apos;s Collections list when all are off.
+          </p>
+          <div className="flex flex-col gap-2">
+            {(
+              [
+                { key: "library" as const, label: "Library Recommended" },
+                { key: "home" as const, label: "Home" },
+                { key: "shared" as const, label: "Shared users' Home" },
+              ] as const
+            ).map((opt) => {
+              const checked = Boolean(visibleOn[opt.key]);
+              return (
+                <label
+                  key={opt.key}
+                  className={`flex items-center gap-2 text-[13px] cursor-pointer ${theme.label}`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() =>
+                      setVisibleOn((prev) => ({
+                        ...prev,
+                        [opt.key]: !checked,
+                      }))
+                    }
+                  />
+                  <span>{opt.label}</span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      <div className={`${theme.blockCard} space-y-3 overflow-hidden p-4`}>
+        <div className={theme.blockHeader}>
+          <span className="material-symbols-outlined mt-0.5 shrink-0" style={{ fontSize: 16, color: accentHex }} aria-hidden>
             preview
           </span>
-          <div>
+          <div className="min-w-0 flex-1 space-y-1">
             <div className={theme.blockTitle}>Preview</div>
             <div className={theme.blockSubtitle}>
               Titles in each selected Plex library that would join each collection. Row counts are unique across
@@ -845,14 +906,14 @@ export function CollectionSetEditor(props: {
           </div>
           <button
             type="button"
-            className={`${theme.cancelButton} ml-auto`}
+            className={`${theme.cancelButton} shrink-0`}
             onClick={() => void runPreview()}
             disabled={previewLoading}
           >
             {previewLoading ? "Refreshing…" : "Refresh"}
           </button>
         </div>
-        <div className="px-4 py-3">
+        <div>
           {previewError ? <p className="text-[13px] text-red-400 mb-2">{previewError}</p> : null}
           {preview?.plex_error ? (
             <p className="text-[13px] text-amber-400 mb-2">{preview.plex_error}</p>

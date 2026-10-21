@@ -403,15 +403,16 @@ function BlockCard(props: {
 }) {
   const theme = useCollectionTheme();
   return (
-    <div className={`${theme.blockCard} ${props.overflowVisible ? "" : "overflow-hidden"}`}>
-      <div className={`${theme.blockHeader} ${props.overflowVisible ? "rounded-t-[11px]" : ""}`}>
+    <div className={`${theme.blockCard} space-y-3 p-4 ${props.overflowVisible ? "" : "overflow-hidden"}`}>
+      <div className={theme.blockHeader}>
         <span
-          className="material-symbols-outlined rounded-md p-1"
-          style={{ fontSize: 18, color: props.accentHex, backgroundColor: `${props.accentHex}1f` }}
+          className="material-symbols-outlined mt-0.5 shrink-0"
+          style={{ fontSize: 16, color: props.accentHex }}
+          aria-hidden
         >
           {props.icon}
         </span>
-        <div className="flex-1 min-w-0">
+        <div className="min-w-0 flex-1 space-y-1">
           <div className={theme.blockTitle}>{props.title}</div>
           {props.subtitle ? <div className={theme.blockSubtitle}>{props.subtitle}</div> : null}
         </div>
@@ -419,7 +420,7 @@ function BlockCard(props: {
           <button
             type="button"
             onClick={props.onRemove}
-            className={`material-symbols-outlined transition-colors ${theme.iconAction}`}
+            className={`material-symbols-outlined shrink-0 transition-colors ${theme.iconAction}`}
             style={{ fontSize: 18 }}
             title="Remove block"
           >
@@ -427,20 +428,21 @@ function BlockCard(props: {
           </button>
         ) : null}
       </div>
-      {props.children ? <div className="px-4 py-3">{props.children}</div> : null}
+      {props.children ? <div className="space-y-3">{props.children}</div> : null}
     </div>
   );
 }
 
+/** Compact AND/OR (and similar) join between nested filter rules; not used between major sections. */
 function PipelineConnector(props: { label: string; accentHex: string }) {
   const theme = useCollectionTheme();
   return (
     <div className="flex flex-col items-center py-1">
-      <div className={`w-px h-3 ${theme.connectorLine}`} />
+      <div className={`h-2 w-px ${theme.connectorLine}`} />
       <span className={theme.connectorPill} style={{ color: props.accentHex }}>
         {props.label}
       </span>
-      <div className={`w-px h-3 ${theme.connectorLine}`} />
+      <div className={`h-2 w-px ${theme.connectorLine}`} />
     </div>
   );
 }
@@ -1871,7 +1873,7 @@ export function CollectionEditor(props: {
               </select>
             </label>
             <div>
-              <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500 mb-1.5">Genres</div>
+              <div className={`${theme.blockTitle} mb-1.5`}>Genres</div>
               <MultiChipPicker
                 options={(regionMeta?.genres ?? []).map((g) => ({ key: String(g.id), label: g.name }))}
                 selected={(block.genre_ids ?? []).map(String)}
@@ -1919,7 +1921,7 @@ export function CollectionEditor(props: {
             </div>
             <div>
               <div className="flex items-center gap-2 mb-1.5">
-                <span className="text-[12px] font-headline uppercase tracking-widest text-slate-500">
+                <span className={theme.blockTitle}>
                   Streaming services
                 </span>
                 <select
@@ -2439,8 +2441,8 @@ export function CollectionEditor(props: {
   return (
     <CollectionThemeProvider value={theme}>
     <div className="flex flex-col gap-6 lg:flex-row lg:items-start">
-      {/* Pipeline column — capped so leftover width goes to the preview rail instead of stretching cards */}
-      <div className="flex-1 min-w-0 lg:max-w-3xl flex flex-col">
+      {/* Recipe column — capped so leftover width goes to the preview rail instead of stretching cards */}
+      <div className="flex flex-1 min-w-0 flex-col gap-4 lg:max-w-3xl">
         {/* Recipe identity + target — picking the library first drives media type, genres, pins, and preview */}
         <div className={`${theme.identityCard} flex flex-col gap-3`}>
           <div className="flex flex-wrap items-center gap-4">
@@ -2757,14 +2759,12 @@ export function CollectionEditor(props: {
           />
         </div>
 
-        <PipelineConnector label="then filter" accentHex={accentHex} />
-
         {/* Filters — simple mode: AND within a group, OR between groups; Advanced: full nesting */}
         <div className="flex flex-col gap-2.5">
           <div className="flex items-center gap-3">
             <div className={theme.sectionLabel}>
               Filters{" "}
-              <span className="normal-case tracking-normal opacity-80">
+              <span className={`normal-case tracking-normal font-normal ${theme.muted}`}>
                 {advancedFilters
                   ? "(advanced filtering: nest AND/OR groups up to 3 levels)"
                   : filterGroups.length > 1
@@ -2876,12 +2876,10 @@ export function CollectionEditor(props: {
           )}
         </div>
 
-        <PipelineConnector label="then pin" accentHex={accentHex} />
-
         {/* Pins */}
         <div className="flex flex-col gap-2.5">
           <div className={theme.sectionLabel}>
-            Pins <span className="normal-case tracking-normal opacity-80">(manual overrides)</span>
+            Pins <span className={`normal-case tracking-normal font-normal ${theme.muted}`}>(manual overrides)</span>
           </div>
           {!pinsExpanded ? (
             <button type="button" onClick={() => setPinsExpanded(true)} className={`${theme.dashedButton} py-3`}>
@@ -2930,74 +2928,134 @@ export function CollectionEditor(props: {
           )}
         </div>
 
-        <PipelineConnector label="then arrange" accentHex={accentHex} />
-
-        {/* Output */}
-        <BlockCard icon="sort" title="Arrange" subtitle="Order and cap the final selection" accentHex={accentHex}>
-          <div className="flex flex-wrap items-center gap-4">
-            <label className={`flex items-center gap-2 ${theme.label}`}>
-              Sort by
-              <select
-                className={theme.selectField}
-                value={definition.sort ?? "popularity"}
-                onChange={(e) => {
-                  const next = e.target.value as CollectionDefinition["sort"];
-                  setDefinition((prev) => ({
-                    ...prev,
-                    sort: next,
-                    sort_provider:
-                      next === "rating"
-                        ? sectionType === "movie"
-                          ? (prev.sort_provider ?? "imdb")
-                          : null
-                        : null,
-                  }));
-                }}
-              >
-                <option value="popularity">Popularity / list rank</option>
-                <option value="release_date">Release date (newest)</option>
-                <option value="latest_aired">Newest content first{sectionType === "show" ? " (latest aired episode)" : ""}</option>
-                <option value="rating">Rating (highest first)</option>
-        <option value="title">Title (A–Z, ignoring a/an/the)</option>
-              </select>
-            </label>
-            {definition.sort === "rating" ? (
-              sectionType === "movie" ? (
+        {/* Display: arrange + Plex Visible On */}
+        <BlockCard
+          icon="display_settings"
+          title="Display"
+          subtitle="Order the selection and where it appears in Plex"
+          accentHex={accentHex}
+        >
+          <div className="flex flex-col gap-5">
+            <div>
+              <div className={`mb-2 ${theme.blockTitle}`}>
+                Arrange
+              </div>
+              <div className="flex flex-wrap items-center gap-4">
                 <label className={`flex items-center gap-2 ${theme.label}`}>
-                  Source
+                  Sort by
                   <select
                     className={theme.selectField}
-                    value={definition.sort_provider ?? "imdb"}
-                    onChange={(e) =>
+                    value={definition.sort ?? "popularity"}
+                    onChange={(e) => {
+                      const next = e.target.value as CollectionDefinition["sort"];
                       setDefinition((prev) => ({
                         ...prev,
-                        sort_provider: e.target.value as CollectionRatingProvider,
-                      }))
-                    }
+                        sort: next,
+                        sort_provider:
+                          next === "rating"
+                            ? sectionType === "movie"
+                              ? (prev.sort_provider ?? "imdb")
+                              : null
+                            : null,
+                      }));
+                    }}
                   >
-                    {MOVIE_RATING_PROVIDERS.map((p) => (
-                      <option key={p.value} value={p.value}>
-                        {p.label}
-                      </option>
-                    ))}
+                    <option value="popularity">Popularity / list rank</option>
+                    <option value="release_date">Release date (newest)</option>
+                    <option value="latest_aired">
+                      Newest content first{sectionType === "show" ? " (latest aired episode)" : ""}
+                    </option>
+                    <option value="rating">Rating (highest first)</option>
+                    <option value="title">Title (A–Z, ignoring a/an/the)</option>
                   </select>
                 </label>
-              ) : (
-                <span className="text-[13px] text-slate-500" title="Sonarr exposes a single score from Skyhook (usually IMDb when mapped)">
-                  Sonarr rating
-                </span>
-              )
-            ) : null}
-            <label className={`flex items-center gap-2 ${theme.label}`}>
-              Max items
-              <NumberInput
-                value={definition.limit ?? null}
-                min={1}
-                max={500}
-                placeholder="50"
-                onChange={(v) => setDefinition((prev) => ({ ...prev, limit: v }))}
-              />
-            </label>
+                {definition.sort === "rating" ? (
+                  sectionType === "movie" ? (
+                    <label className={`flex items-center gap-2 ${theme.label}`}>
+                      Source
+                      <select
+                        className={theme.selectField}
+                        value={definition.sort_provider ?? "imdb"}
+                        onChange={(e) =>
+                          setDefinition((prev) => ({
+                            ...prev,
+                            sort_provider: e.target.value as CollectionRatingProvider,
+                          }))
+                        }
+                      >
+                        {MOVIE_RATING_PROVIDERS.map((p) => (
+                          <option key={p.value} value={p.value}>
+                            {p.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : (
+                    <span
+                      className="text-[13px] text-slate-500"
+                      title="Sonarr exposes a single score from Skyhook (usually IMDb when mapped)"
+                    >
+                      Sonarr rating
+                    </span>
+                  )
+                ) : null}
+                <label className={`flex items-center gap-2 ${theme.label}`}>
+                  Max items
+                  <NumberInput
+                    value={definition.limit ?? null}
+                    min={1}
+                    max={500}
+                    placeholder="50"
+                    onChange={(v) => setDefinition((prev) => ({ ...prev, limit: v }))}
+                  />
+                </label>
+              </div>
+            </div>
+
+            <div className={`border-t pt-4 ${theme.divider}`}>
+              <div className={`mb-1 ${theme.blockTitle}`}>
+                Visible on
+              </div>
+              <p className={`mb-3 text-[13px] leading-relaxed ${theme.muted}`}>
+                Promote this collection as a row in Plex (same as Visible On in Plex).{" "}
+                <span className={isLight ? "text-amber-800" : "text-amber-200"}>Plex Pass required.</span> The
+                collection still syncs into the library&apos;s Collections list when all are off.
+              </p>
+              <div className="flex flex-col gap-2">
+                {(
+                  [
+                    { key: "library" as const, label: "Library Recommended" },
+                    { key: "home" as const, label: "Home" },
+                    { key: "shared" as const, label: "Shared users' Home" },
+                  ] as const
+                ).map((opt) => {
+                  const checked = Boolean(definition.visible_on?.[opt.key]);
+                  return (
+                    <label
+                      key={opt.key}
+                      className={`flex items-center gap-2 text-[13px] cursor-pointer ${theme.label}`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() =>
+                          setDefinition((prev) => ({
+                            ...prev,
+                            visible_on: {
+                              library: Boolean(prev.visible_on?.library),
+                              home: Boolean(prev.visible_on?.home),
+                              shared: Boolean(prev.visible_on?.shared),
+                              [opt.key]: !checked,
+                            },
+                          }))
+                        }
+                      />
+                      <span>{opt.label}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
           </div>
         </BlockCard>
 

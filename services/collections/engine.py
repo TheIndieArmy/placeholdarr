@@ -180,6 +180,16 @@ def _normalize_filters(filters: Any) -> dict[str, Any]:
     raise RecipeValidationError("filters must be a list of rules or a group object")
 
 
+def _normalize_visible_on(raw: Any) -> dict[str, bool]:
+    """Plex Visible On hub flags (Library Recommended / Home / Shared Home)."""
+    flags = raw if isinstance(raw, dict) else {}
+    return {
+        "library": bool(flags.get("library")),
+        "home": bool(flags.get("home")),
+        "shared": bool(flags.get("shared")),
+    }
+
+
 def validate_definition(definition: dict[str, Any]) -> dict[str, Any]:
     """Validate and normalize a recipe definition. Raises RecipeValidationError."""
     if not isinstance(definition, dict):
@@ -208,6 +218,7 @@ def validate_definition(definition: dict[str, Any]) -> dict[str, Any]:
             "sort_provider": None,
             "pins": {"include": [], "exclude": []},
             "adopt_existing": bool(definition.get("adopt_existing")),
+            "visible_on": _normalize_visible_on(definition.get("visible_on")),
         }
 
     sources = definition.get("sources") or []
@@ -317,6 +328,7 @@ def validate_definition(definition: dict[str, Any]) -> dict[str, Any]:
         "sort_provider": sort_provider,
         "pins": normalized_pins,
         "adopt_existing": bool(definition.get("adopt_existing")),
+        "visible_on": _normalize_visible_on(definition.get("visible_on")),
     }
 
 
@@ -2451,6 +2463,7 @@ def run_collection_set_recipe(
                 set_value=value_label,
                 known_rating_key=known_key,
                 adopt_unlabeled=adopt,
+                visible_on=normalized.get("visible_on"),
             )
             keys_map = plex_collections.set_stored_key(
                 keys_map, sid, title, sync_stats.get("rating_key")
@@ -2613,6 +2626,7 @@ def run_recipe(recipe_id: int) -> dict[str, Any]:
                     recipe_id=recipe_id,
                     known_rating_key=known_key,
                     adopt_unlabeled=adopt,
+                    visible_on=definition.get("visible_on"),
                 )
                 keys_map = plex_collections.set_stored_key(
                     keys_map, sid, collection_title, sync_stats.get("rating_key")
@@ -2884,6 +2898,7 @@ def _clear_recipe_collection(recipe_id: int) -> dict[str, Any]:
                         recipe_id=recipe_id,
                         known_rating_key=known_key,
                         adopt_unlabeled=bool(definition.get("adopt_existing")),
+                        visible_on=definition.get("visible_on"),
                     )
                     keys_map = plex_collections.set_stored_key(
                         keys_map, sid, title, sync_stats.get("rating_key")
@@ -2912,6 +2927,7 @@ def _clear_recipe_collection(recipe_id: int) -> dict[str, Any]:
                     recipe_id=recipe_id,
                     known_rating_key=known_key,
                     adopt_unlabeled=bool(definition.get("adopt_existing")),
+                    visible_on=definition.get("visible_on"),
                 )
                 keys_map = plex_collections.set_stored_key(
                     keys_map, sid, collection_title, sync_stats.get("rating_key")
@@ -2950,8 +2966,15 @@ def _clear_recipe_collection(recipe_id: int) -> dict[str, Any]:
     return summary
 
 
-def _delete_recipe_collection(recipe_id: int) -> dict[str, Any]:
-    """Delete Placeholdarr-owned Plex collections for a recipe leaving its window."""
+def delete_owned_plex_collections_for_recipe(
+    recipe_id: int,
+) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
+    """Delete Placeholdarr-owned Plex collections for a recipe.
+
+    Does not modify or delete the recipe row. Returns ``(summary, keys_map)`` where
+    ``keys_map`` is the cleared ownership map when status is ``removed``, else None.
+    Unlabeled same-title Plex collections are left alone.
+    """
     with session_scope() as session:
         recipe = session.query(CollectionRecipe).filter(CollectionRecipe.id == recipe_id).first()
         if recipe is None:
@@ -2990,12 +3013,11 @@ def _delete_recipe_collection(recipe_id: int) -> dict[str, Any]:
                         section_deleted += 1
                 libraries.append({"plex_section_id": sid, "deleted_titles": titles, "deleted": section_deleted})
                 deleted += section_deleted
-            summary = {
+            summary: dict[str, Any] = {
                 "status": "removed",
                 "mode": "collection_set",
                 "libraries": libraries,
                 "deleted": deleted,
-                "when_inactive_applied": "delete",
             }
         else:
             for sid in section_ids:
@@ -3015,25 +3037,27 @@ def _delete_recipe_collection(recipe_id: int) -> dict[str, Any]:
                 "status": "removed",
                 "libraries": libraries,
                 "deleted": deleted,
-                "when_inactive_applied": "delete",
             }
         logger.info(
-            f"Collections: recipe {recipe_name!r} left its active window — collection deleted "
+            f"Collections: deleted Plex collection(s) for recipe {recipe_name!r} "
             f"(libraries={len(section_ids)}, deleted={deleted})",
             extra={"emoji_type": "info"},
         )
+        return summary, keys_map
     except plex_collections.PlexCollectionsError as exc:
-        summary = {"status": "error", "error": str(exc)}
         logger.error(
-            f"Collections: failed to delete collection for dormant recipe {recipe_name!r}: {exc}",
+            f"Collections: failed to delete Plex collection(s) for recipe {recipe_name!r}: {exc}",
             extra={"emoji_type": "error"},
         )
+        return {"status": "error", "error": str(exc)}, None
 
-    return _persist_inactive_summary(
-        recipe_id,
-        summary,
-        keys_map=keys_map if summary.get("status") == "removed" else None,
-    )
+
+def _delete_recipe_collection(recipe_id: int) -> dict[str, Any]:
+    """Delete Placeholdarr-owned Plex collections for a recipe leaving its window."""
+    summary, keys_map = delete_owned_plex_collections_for_recipe(recipe_id)
+    if summary.get("status") == "removed":
+        summary = {**summary, "when_inactive_applied": "delete"}
+    return _persist_inactive_summary(recipe_id, summary, keys_map=keys_map)
 
 
 def run_all_enabled_recipes(*, force: bool = False, default_interval_hours: int = 24) -> dict[str, Any]:

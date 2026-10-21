@@ -22,6 +22,9 @@ import { CollectionEditor } from "./CollectionEditor";
 import { CollectionSetEditor, isCollectionSetRecipe } from "./CollectionSetEditor";
 import { getCollectionTheme } from "./collectionTheme";
 
+/** Scale with main until this floor, then horizontal scroll on main (header, card, footnote move together). */
+const COLLECTIONS_LIST_LAYOUT_CLASS = "w-full min-w-[max(100%,52rem)]";
+
 function formatSchedule(recipe: CollectionRecipe): string {
   const hours = recipe.run_interval_hours;
   if (hours == null) return "App default";
@@ -81,6 +84,9 @@ export function CollectionsPanel(props: {
   } | null>(null);
   const [runningIds, setRunningIds] = useState<Set<number>>(new Set());
   const [actionError, setActionError] = useState<string | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<CollectionRecipe | null>(null);
+  const [deletePlexToo, setDeletePlexToo] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [ioBusy, setIoBusy] = useState(false);
   const [ioMessage, setIoMessage] = useState<string | null>(null);
@@ -256,16 +262,27 @@ export function CollectionsPanel(props: {
     }
   };
 
-  const handleDelete = async (recipe: CollectionRecipe) => {
-    if (!window.confirm(`Delete collection recipe "${recipe.name}"? The Plex collection itself is not removed.`)) {
-      return;
-    }
+  const confirmDeleteRecipe = async () => {
+    if (!deleteConfirm || deleting) return;
+    setDeleting(true);
     setActionError(null);
     try {
-      await deleteCollectionRecipe(recipe.id);
+      await deleteCollectionRecipe(deleteConfirm.id, { deletePlex: deletePlexToo });
+      setDeleteConfirm(null);
+      setDeletePlexToo(false);
+      setSelectedIds((prev) => {
+        if (!prev.has(deleteConfirm.id)) return prev;
+        const next = new Set(prev);
+        next.delete(deleteConfirm.id);
+        return next;
+      });
       await refresh();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Failed to delete collection");
+      setDeleteConfirm(null);
+      setDeletePlexToo(false);
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -509,22 +526,109 @@ export function CollectionsPanel(props: {
     );
   }
 
+  if (sectionsLoaded && !plexReady) {
+    return (
+      <div>
+        <div className="flex items-center gap-2 mb-1">
+          <div className="w-2 h-2 rounded-full bg-green-500" />
+          <span className={`text-[12px] font-headline uppercase tracking-widest ${theme.iconMuted}`}>
+            Rule-Based Plex Collections
+          </span>
+        </div>
+        <h1 className={`mb-6 text-[32px] font-black tracking-tight font-headline ${isLight ? "text-slate-900" : "text-white"}`}>
+          Collections
+        </h1>
+        <div className={`${theme.blockCard} overflow-hidden`}>
+          <div className="p-12 text-center">
+            <span className={`material-symbols-outlined ${theme.iconMuted}`} style={{ fontSize: 44 }}>
+              video_library
+            </span>
+            <p className={`mt-3 text-[18px] font-headline ${isLight ? "text-slate-900" : "text-white"}`}>
+              Collections is Plex only
+            </p>
+            <p className={`mt-2 text-[14px] max-w-lg mx-auto leading-relaxed ${theme.muted}`}>
+              This feature builds and syncs collections in Plex libraries. Connect Plex under Settings → Media
+              Integrations to use it.
+            </p>
+            {props.onOpenPlexSettings ? (
+              <button
+                type="button"
+                onClick={props.onOpenPlexSettings}
+                className={`mt-5 inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS}`}
+                style={accentFilledStyle(accentHex)}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
+                  settings
+                </span>
+                Connect Plex
+              </button>
+            ) : null}
+            {sectionsError ? (
+              <p className={`mt-4 text-[12px] max-w-md mx-auto ${theme.muted}`}>{sectionsError}</p>
+            ) : null}
+            {recipes.length > 0 ? (
+              <p className={`mt-4 text-[13px] max-w-md mx-auto ${theme.muted}`}>
+                {recipes.length} saved recipe{recipes.length === 1 ? "" : "s"} will be available again after Plex is
+                connected.
+              </p>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div>
-      <div className="flex items-center gap-2 mb-1">
+    <div className={COLLECTIONS_LIST_LAYOUT_CLASS}>
+      {deleteConfirm ? (
+        <ConfirmModal
+          title="Delete recipe?"
+          message={`Delete "${deleteConfirm.name}" from Placeholdarr?`}
+          confirmLabel={deleting ? "Deleting…" : "Delete"}
+          cancelLabel="Cancel"
+          accentHex={accentHex}
+          themeMode={props.themeMode}
+          onCancel={() => {
+            if (deleting) return;
+            setDeleteConfirm(null);
+            setDeletePlexToo(false);
+          }}
+          onConfirm={() => void confirmDeleteRecipe()}
+        >
+          <label
+            className={`flex cursor-pointer items-start gap-2.5 text-[14px] leading-snug ${
+              isLight ? "text-slate-700" : "text-slate-300"
+            }`}
+          >
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={deletePlexToo}
+              disabled={deleting}
+              onChange={(e) => setDeletePlexToo(e.target.checked)}
+            />
+            <span>
+              {isCollectionSetRecipe(deleteConfirm)
+                ? "Also delete the Plex collections this set manages"
+                : "Also delete the collection from Plex"}
+              <span className={`mt-1 block text-[13px] ${theme.muted}`}>
+                Only collections Placeholdarr owns are removed. Unlabeled same-title collections stay.
+              </span>
+            </span>
+          </label>
+        </ConfirmModal>
+      ) : null}
+      <div className="mb-1 flex items-center gap-2">
         <div className="w-2 h-2 rounded-full bg-green-500" />
         <span className={`text-[12px] font-headline uppercase tracking-widest ${theme.iconMuted}`}>
           Rule-Based Plex Collections
         </span>
       </div>
-      <div className="flex justify-between items-center mb-6">
-        <h1 className={`text-[32px] font-black tracking-tight font-headline flex items-center gap-3 ${isLight ? "text-slate-900" : "text-white"}`}>
+      <div className="mb-6 flex flex-col gap-3">
+        <h1 className={`text-[32px] font-black tracking-tight font-headline ${isLight ? "text-slate-900" : "text-white"}`}>
           Collections
-          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">
-            Beta
-          </span>
         </h1>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <input
             ref={importInputRef}
             type="file"
@@ -646,7 +750,7 @@ export function CollectionsPanel(props: {
         </div>
       ) : null}
 
-      <div className={`${theme.blockCard} overflow-hidden`}>
+      <div className={`${theme.blockCard} w-full overflow-hidden`}>
         {loading ? (
           <div className={`p-10 text-center text-[16px] ${theme.muted}`}>Loading collections…</div>
         ) : !recipes.length ? (
@@ -661,13 +765,25 @@ export function CollectionsPanel(props: {
             </p>
           </div>
         ) : (
-          <table className="w-full">
+          <table className="w-full table-fixed">
+            <colgroup>
+              <col className="w-12" />
+              <col />
+              <col className="w-[16%]" />
+              <col className="w-[7%]" />
+              <col className="w-[11%]" />
+              <col className="w-[17%]" />
+              <col className="w-[9%]" />
+              <col className="w-[9.5rem]" />
+            </colgroup>
             <thead>
               <tr className={`border-b ${theme.divider}`}>
                 {["", "Collection", "Target Library", "Items", "Schedule", "Last Run", "Enabled", "Actions"].map((h) => (
                   <th
                     key={h || "select"}
-                    className={`px-5 py-3 text-left text-[12px] font-headline uppercase tracking-widest font-normal ${theme.muted}`}
+                    className={`px-5 py-3 text-left text-[12px] font-headline uppercase tracking-widest font-normal ${theme.muted} ${
+                      h === "Enabled" || h === "Actions" ? "whitespace-nowrap" : ""
+                    }`}
                   >
                     {h === "" ? (
                       <input
@@ -708,14 +824,14 @@ export function CollectionsPanel(props: {
                           setSaveError(null);
                           setEditing(recipe);
                         }}
-                        className="text-left"
+                        className="max-w-full text-left"
                       >
                         <span
-                          className={`block text-[16px] transition-colors ${isLight ? "text-slate-900 hover:text-sky-800" : "text-slate-200 hover:text-white"}`}
+                          className={`block truncate text-[16px] transition-colors ${isLight ? "text-slate-900 hover:text-sky-800" : "text-slate-200 hover:text-white"}`}
                         >
                           {recipe.name}
                         </span>
-                        <span className={`block text-[13px] ${theme.muted}`}>
+                        <span className={`block truncate text-[13px] ${theme.muted}`}>
                           {isCollectionSetRecipe(recipe)
                             ? `→ Set · ${
                                 recipe.definition.collection_set?.category ??
@@ -740,7 +856,7 @@ export function CollectionsPanel(props: {
                         </span>
                       ) : null}
                     </td>
-                    <td className={`px-5 py-4 text-[15px] ${isLight ? "text-slate-600" : "text-slate-400"}`}>
+                    <td className={`max-w-0 truncate px-5 py-4 text-[15px] ${isLight ? "text-slate-600" : "text-slate-400"}`}>
                       {(() => {
                         const ids = recipe.plex_section_ids?.length ? recipe.plex_section_ids : [recipe.plex_section_id];
                         const names = ids.map((id) => sections.find((s) => s.id === id)?.title ?? `Section ${id}`);
@@ -767,7 +883,7 @@ export function CollectionsPanel(props: {
                     </td>
                     <td className="px-5 py-4">
                       <span className={`block text-[14px] ${isLight ? "text-slate-600" : "text-slate-400"}`}>
-                        {running ? "Running…" : formatLastRun(recipe)}
+                        {formatLastRun(recipe)}
                       </span>
                       {summary ? (
                         summary.status === "ok" ? (
@@ -800,7 +916,7 @@ export function CollectionsPanel(props: {
                         )
                       ) : null}
                     </td>
-                    <td className="px-5 py-4">
+                    <td className="whitespace-nowrap px-5 py-4">
                       <ToggleSwitch
                         checked={recipe.enabled}
                         onChange={(enabled) => void handleToggle(recipe, enabled)}
@@ -809,17 +925,36 @@ export function CollectionsPanel(props: {
                         ariaLabel={recipe.enabled ? "Disable scheduled runs" : "Enable scheduled runs"}
                       />
                     </td>
-                    <td className="px-5 py-4">
-                      <div className="flex items-center gap-1">
+                    <td className="whitespace-nowrap px-5 py-4">
+                      <div className="flex items-center gap-1.5">
                         <button
                           type="button"
                           disabled={running || !plexReady}
                           onClick={() => void handleRun(recipe)}
-                          className={`material-symbols-outlined rounded-md p-1.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${theme.iconMuted} ${isLight ? "hover:text-slate-900 hover:bg-slate-100" : "hover:text-white hover:bg-[#1e2430]"}`}
-                          style={{ fontSize: 18 }}
-                          title={!plexReady ? "Configure Plex before running" : "Run now"}
+                          className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                            running
+                              ? isLight
+                                ? "border-sky-400/40 bg-sky-50 text-sky-600"
+                                : "border-sky-400/30 bg-sky-500/10 text-sky-300"
+                              : isLight
+                                ? "border-slate-300 bg-slate-100 text-slate-700 hover:border-slate-400 hover:bg-slate-200"
+                                : "border-white/15 bg-white/[0.05] text-slate-200 hover:border-white/25 hover:bg-white/[0.09]"
+                          }`}
+                          title={
+                            !plexReady
+                              ? "Configure Plex before running"
+                              : running
+                                ? "Running…"
+                                : "Run now"
+                          }
+                          aria-label={running ? "Running" : "Run now"}
                         >
-                          play_arrow
+                          <span
+                            className={`material-symbols-outlined leading-none ${running ? "animate-spin" : ""}`}
+                            style={{ fontSize: 20 }}
+                          >
+                            {running ? "progress_activity" : "play_arrow"}
+                          </span>
                         </button>
                         <button
                           type="button"
@@ -827,20 +962,35 @@ export function CollectionsPanel(props: {
                             setSaveError(null);
                             setEditing(recipe);
                           }}
-                          className={`material-symbols-outlined rounded-md p-1.5 transition-colors ${theme.iconMuted} ${isLight ? "hover:text-slate-900 hover:bg-slate-100" : "hover:text-white hover:bg-[#1e2430]"}`}
-                          style={{ fontSize: 18 }}
+                          className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border transition ${
+                            isLight
+                              ? "border-slate-200 bg-transparent text-slate-500 hover:border-slate-300 hover:text-slate-800"
+                              : "border-white/10 bg-transparent text-slate-400 hover:border-white/20 hover:text-slate-200"
+                          }`}
                           title="Edit"
+                          aria-label="Edit"
                         >
-                          edit
+                          <span className="material-symbols-outlined leading-none" style={{ fontSize: 20 }}>
+                            edit
+                          </span>
                         </button>
                         <button
                           type="button"
-                          onClick={() => void handleDelete(recipe)}
-                          className={`material-symbols-outlined rounded-md p-1.5 transition-colors ${theme.iconMuted} ${isLight ? "hover:text-red-600 hover:bg-red-50" : "hover:text-red-400 hover:bg-[#1e2430]"}`}
-                          style={{ fontSize: 18 }}
+                          onClick={() => {
+                            setDeletePlexToo(false);
+                            setDeleteConfirm(recipe);
+                          }}
+                          className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border transition ${
+                            isLight
+                              ? "border-red-300/50 bg-transparent text-red-600 hover:border-red-400 hover:bg-red-50 hover:text-red-700"
+                              : "border-red-400/20 bg-transparent text-red-400 hover:border-red-400/35 hover:bg-red-500/10 hover:text-red-300"
+                          }`}
                           title="Delete"
+                          aria-label="Delete"
                         >
-                          delete
+                          <span className="material-symbols-outlined leading-none" style={{ fontSize: 20 }}>
+                            delete
+                          </span>
                         </button>
                       </div>
                     </td>

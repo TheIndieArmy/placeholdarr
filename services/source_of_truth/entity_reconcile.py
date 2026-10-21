@@ -11,7 +11,7 @@ from sqlalchemy import or_
 from core.config import settings
 from core.logger import logger, start_verbose_stall_heartbeat
 from services.media_servers.player_metadata_refresh import push_placeholder_batch_player_metadata
-from services.media_servers.refresh import refresh_all_paths
+from services.media_servers.refresh import refresh_all_paths, refresh_players_after_local_art_rewrite
 from services.placeholder_poster_art import (
     ensure_episode_still_art,
     ensure_movie_art,
@@ -389,6 +389,13 @@ def _placeholders_for_scope(session, *, movie_row_ids: list[int], episode_row_id
     return q.all()
 
 
+@dataclass
+class _SidecarPassResult:
+    refresh_paths: set[str]
+    rewritten_movies: list[Any]
+    rewritten_series: list[Any]
+
+
 def _run_sidecars_and_collect_paths(
     session,
     placeholders: list[Placeholder],
@@ -396,8 +403,10 @@ def _run_sidecars_and_collect_paths(
     entity_type: str,
     display_title: str,
     job_id: int | None = None,
-) -> set[str]:
+) -> _SidecarPassResult:
     refresh_paths: set[str] = set()
+    rewritten_movies: list[Any] = []
+    rewritten_series: list[Any] = []
     processed_movies: set[int] = set()
     processed_series: set[int] = set()
     player_push: list[Placeholder] = []
@@ -423,6 +432,7 @@ def _run_sidecars_and_collect_paths(
                 result = ensure_movie_art(movie, path)
                 if result.wrote_any:
                     refresh_paths.add(os.path.dirname(os.path.abspath(path)))
+                    rewritten_movies.append(movie)
             if getattr(placeholder, "has_placeholder", False) or getattr(movie, "has_placeholder", False):
                 player_push.append(placeholder)
             continue
@@ -450,6 +460,7 @@ def _run_sidecars_and_collect_paths(
             series_result = ensure_series_art(series, series_folder=series_folder)
             if series_result.wrote_any and series_folder:
                 refresh_paths.add(os.path.abspath(series_folder))
+                rewritten_series.append(series)
         still_result = ensure_episode_still_art(episode, season, series, path)
         if still_result.wrote_any:
             refresh_paths.add(os.path.dirname(os.path.abspath(path)))
@@ -489,7 +500,11 @@ def _run_sidecars_and_collect_paths(
                 job_id=job_id,
             )
 
-    return refresh_paths
+    return _SidecarPassResult(
+        refresh_paths=refresh_paths,
+        rewritten_movies=rewritten_movies,
+        rewritten_series=rewritten_series,
+    )
 
 
 def enqueue_entity_reconcile(
@@ -527,6 +542,7 @@ def enqueue_entity_reconcile(
                 "followup_job_id": followup_job_id,
                 "step": payload.get("step") or STEP_QUEUED,
                 "step_label": payload.get("step_label") or _step_label_for(STEP_QUEUED),
+                "display_title": str(payload.get("display_title") or display_title),
             }
 
         body: dict[str, Any] = {
@@ -554,6 +570,7 @@ def enqueue_entity_reconcile(
             "reused": False,
             "step": STEP_QUEUED,
             "step_label": body["step_label"],
+            "display_title": display_title,
         }
     finally:
         session.close()
@@ -575,6 +592,7 @@ def reconcile_job_status_view(job: Job) -> dict[str, Any]:
         "status": status,
         "step": payload.get("step"),
         "step_label": payload.get("step_label"),
+        "display_title": payload.get("display_title"),
         "error_message": getattr(job, "error_message", None),
         "entity_type": payload.get("entity_type"),
         "entity_id": payload.get("entity_id"),
@@ -720,13 +738,14 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
             movie_row_ids=targets.movie_row_ids,
             episode_row_ids=targets.episode_row_ids,
         )
-        refresh_paths = _run_sidecars_and_collect_paths(
+        sidecar = _run_sidecars_and_collect_paths(
             session,
             placeholders,
             entity_type=entity_type,
             display_title=title,
             job_id=int(job.id),
         )
+        refresh_paths = sidecar.refresh_paths
 
         _step("player")
         if refresh_paths:
@@ -743,6 +762,26 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
                 include_jellyfin=True,
                 include_emby=True,
             )
+        # Path scans do not update Plex posters; match bulk art refresh.
+        if sidecar.rewritten_movies or sidecar.rewritten_series:
+            try:
+                _log_reconcile_info(
+                    entity_type,
+                    title,
+                    "Refreshing player posters for rewritten art",
+                    job_id=int(job.id),
+                )
+                refresh_players_after_local_art_rewrite(
+                    movies=sidecar.rewritten_movies,
+                    series_rows=sidecar.rewritten_series,
+                )
+            except Exception as exc:
+                _log_reconcile_warning(
+                    entity_type,
+                    title,
+                    f"Player poster refresh after art rewrite failed: {exc}",
+                    job_id=int(job.id),
+                )
 
         _set_job_step(session, job, STEP_DONE, arr_label=targets.arr_label)
         folder_word = "folder" if len(refresh_paths) == 1 else "folders"

@@ -12,10 +12,26 @@ import {
   type EntityReconcileStartResponse,
 } from "../api/dashboard";
 
+/** Ordered pipeline steps for the sidebar progress bar (matches entity_reconcile). */
+const RECONCILE_STEPS = [
+  "queued",
+  "arr_refresh",
+  "arr_wait_refresh",
+  "sync_catalog",
+  "filesystem",
+  "determination",
+  "materialization",
+  "sidecars",
+  "player",
+  "done",
+] as const;
+
 type LibraryReconcileSidebarStatus = {
   message: string | null;
   kind: "info" | "success" | "error";
   busy: boolean;
+  step: string | null;
+  title: string | null;
 };
 
 type LibraryReconcileContextValue = {
@@ -25,6 +41,14 @@ type LibraryReconcileContextValue = {
 
 const LibraryReconcileContext = createContext<LibraryReconcileContextValue | null>(null);
 
+const IDLE_STATUS: LibraryReconcileSidebarStatus = {
+  message: null,
+  kind: "info",
+  busy: false,
+  step: null,
+  title: null,
+};
+
 export function useLibraryReconcile(): LibraryReconcileContextValue {
   const ctx = useContext(LibraryReconcileContext);
   if (!ctx) {
@@ -33,18 +57,24 @@ export function useLibraryReconcile(): LibraryReconcileContextValue {
   return ctx;
 }
 
+function stepProgressPct(step: string | null, kind: LibraryReconcileSidebarStatus["kind"]): number {
+  if (kind === "success") return 100;
+  if (kind === "error") return 0;
+  const key = String(step || "queued").trim().toLowerCase();
+  const idx = RECONCILE_STEPS.indexOf(key as (typeof RECONCILE_STEPS)[number]);
+  if (idx < 0) return 0;
+  // Leave room under 100% until done so the bar does not look finished mid-run.
+  return Math.round((idx / Math.max(1, RECONCILE_STEPS.length - 1)) * 100);
+}
+
 export function LibraryReconcileProvider(props: { children: ReactNode }) {
-  const [status, setStatus] = useState<LibraryReconcileSidebarStatus>({
-    message: null,
-    kind: "info",
-    busy: false,
-  });
+  const [status, setStatus] = useState<LibraryReconcileSidebarStatus>(IDLE_STATUS);
   const [pollingJobId, setPollingJobId] = useState<number | null>(null);
 
   useEffect(() => {
     if (status.kind !== "success" || !status.message) return;
     const clearTimer = window.setTimeout(() => {
-      setStatus({ message: null, kind: "info", busy: false });
+      setStatus(IDLE_STATUS);
     }, 3000);
     return () => window.clearTimeout(clearTimer);
   }, [status.kind, status.message]);
@@ -59,12 +89,16 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
         const jobStatus = await getEntityReconcileStatus(pollingJobId);
         if (stopped) return;
 
+        const title = String(jobStatus.display_title || "").trim() || null;
+
         if (jobStatus.status === "failed") {
           setPollingJobId(null);
           setStatus({
             busy: false,
             kind: "error",
             message: jobStatus.error_message || "Refresh failed",
+            step: jobStatus.step || null,
+            title,
           });
           return;
         }
@@ -75,6 +109,8 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
             busy: false,
             kind: "success",
             message: "Refresh complete",
+            step: "done",
+            title,
           });
           return;
         }
@@ -83,6 +119,8 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
           busy: true,
           kind: "info",
           message: jobStatus.step_label || "Working…",
+          step: jobStatus.step || null,
+          title,
         });
       } catch (e) {
         if (!stopped) {
@@ -91,6 +129,8 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
             busy: false,
             kind: "error",
             message: e instanceof Error ? e.message : "Could not load refresh status",
+            step: null,
+            title: null,
           });
         }
       }
@@ -108,7 +148,13 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
 
   const runReconcile = useCallback(async (startReconcile: () => Promise<EntityReconcileStartResponse>) => {
     setPollingJobId(null);
-    setStatus({ busy: true, kind: "info", message: "Refresh queued…" });
+    setStatus({
+      busy: true,
+      kind: "info",
+      message: "Refresh queued…",
+      step: "queued",
+      title: null,
+    });
     try {
       const out = await startReconcile();
       if (!out.ok || out.job_id == null) {
@@ -118,6 +164,8 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
         busy: true,
         kind: "info",
         message: out.step_label || "Refresh queued…",
+        step: out.step || "queued",
+        title: String(out.display_title || "").trim() || null,
       });
       setPollingJobId(out.job_id);
     } catch (e) {
@@ -125,6 +173,8 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
         busy: false,
         kind: "error",
         message: e instanceof Error ? e.message : "Failed to start refresh",
+        step: null,
+        title: null,
       });
     }
   }, []);
@@ -144,39 +194,88 @@ export function LibraryReconcileSidebarFooter(props: {
   yieldToTaskLive?: boolean;
 }) {
   const ctx = useContext(LibraryReconcileContext);
-  const { message, kind, busy } = ctx?.status ?? { message: null, kind: "info" as const, busy: false };
+  const status = ctx?.status ?? IDLE_STATUS;
+  const { message, kind, busy, step, title } = status;
   if (props.yieldToTaskLive) return null;
   if (!message && !busy) return null;
 
-  const textClass =
-    kind === "error"
-      ? "text-red-400"
-      : kind === "success"
-        ? "text-emerald-400"
-        : props.isStudioGlass
-          ? "text-slate-400"
-          : "text-slate-600";
+  const glass = props.isStudioGlass;
+  const queued = busy && String(step || "").toLowerCase() === "queued";
+  const pct = stepProgressPct(step, kind);
+  const track = glass ? "bg-[#2a3340]" : "bg-slate-200";
+  const fill = glass ? "bg-sky-400" : "bg-sky-600";
+  const fillDone = glass ? "bg-emerald-400" : "bg-emerald-600";
+  const fillError = glass ? "bg-rose-400" : "bg-rose-500";
+  const muted = glass ? "text-slate-400" : "text-slate-600";
+  const fg = glass ? "text-slate-100" : "text-slate-900";
+  const barFill =
+    kind === "error" ? fillError : kind === "success" || pct >= 100 ? fillDone : queued ? track : fill;
+  const label = title || "Title refresh";
+  const stageText =
+    kind === "success" ? "Done" : kind === "error" ? "Failed" : queued ? "Queued" : message || "Working…";
+  const countsText =
+    kind === "success"
+      ? "100%"
+      : kind === "error"
+        ? message || "Failed"
+        : queued
+          ? "Waiting for a worker"
+          : `${pct}%`;
 
   return (
-    <div
-      className={`w-full shrink-0 border-t px-4 pt-3 pb-6 ${props.isStudioGlass ? "border-[#424753]/40 bg-[#141a24]" : "border-[#d7e2f0] bg-[#eef3f8]"}`}
-      aria-live="polite"
-    >
-      <div className={`flex min-h-[2.75rem] items-center gap-2 text-[14px] leading-snug ${textClass}`}>
-        {busy ? (
-          <span className="material-symbols-outlined shrink-0 animate-spin" style={{ fontSize: 16 }}>
-            progress_activity
+    <div className="relative w-full shrink-0 px-4 pb-2" aria-live="polite">
+      <div
+        className={`w-full rounded-lg border px-3 py-2.5 text-left ${
+          glass
+            ? "border-[#424753]/55 bg-[#1e2430]/90 text-slate-200"
+            : "border-[#c5d0de] bg-white/90 text-slate-700"
+        }`}
+      >
+        <div className="flex items-start gap-2">
+          <span
+            className={`material-symbols-outlined mt-0.5 shrink-0 ${
+              kind === "success"
+                ? glass
+                  ? "text-emerald-400"
+                  : "text-emerald-600"
+                : kind === "error"
+                  ? glass
+                    ? "text-rose-400"
+                    : "text-rose-600"
+                  : queued
+                    ? glass
+                      ? "text-slate-400"
+                      : "text-slate-500"
+                    : `animate-spin ${glass ? "text-sky-400" : "text-sky-600"}`
+            }`}
+            style={{ fontSize: 16 }}
+          >
+            {kind === "success"
+              ? "check_circle"
+              : kind === "error"
+                ? "error"
+                : queued
+                  ? "schedule"
+                  : "progress_activity"}
           </span>
-        ) : kind === "success" ? (
-          <span className="material-symbols-outlined shrink-0" style={{ fontSize: 16 }}>
-            check_circle
+          <span className="min-w-0 flex-1">
+            <span className={`block font-headline text-[12px] uppercase tracking-wider ${fg}`}>
+              {label}
+            </span>
+            <span className={`mt-0.5 block font-headline text-[11px] uppercase tracking-wider ${muted} line-clamp-2`}>
+              {stageText}
+            </span>
+            <span className={`mt-0.5 block tabular-nums text-[11px] ${muted} line-clamp-2`}>
+              {countsText}
+            </span>
+            <div className={`mt-2 h-1.5 w-full overflow-hidden rounded-full ${track}`}>
+              <div
+                className={`h-full rounded-full transition-[width] duration-500 ease-out ${barFill}`}
+                style={{ width: queued ? "0%" : `${Math.max(0, Math.min(100, pct))}%` }}
+              />
+            </div>
           </span>
-        ) : kind === "error" ? (
-          <span className="material-symbols-outlined shrink-0" style={{ fontSize: 16 }}>
-            error
-          </span>
-        ) : null}
-        <span className="line-clamp-3">{message || "Working…"}</span>
+        </div>
       </div>
     </div>
   );
