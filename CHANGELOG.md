@@ -40,7 +40,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Collections list Run now**: Last Run keeps the prior timestamp while a run is in progress; the play control shows a spinner instead of replacing the date with Running….
 - **Collections list actions**: Play, edit, and delete use the same bordered icon-button chrome as Arr integration slots.
 - **Collections delete confirm**: Recipe delete opens ConfirmModal with an optional Also delete from Plex checkbox.
-- **Collections list narrow width**: List fills the viewport when there is room; below ~64rem the page scrolls horizontally with header and table together.
+- **Collections list narrow width**: List uses full main width with a fluid table; main scrolls horizontally when content exceeds the viewport (no fixed min-width canvas).
 - **Collections Beta label**: Removed from sidebar nav and Collections page header; What's New intro copy no longer calls the feature Beta.
 
 ## [0.11.3] - 2026-10-17

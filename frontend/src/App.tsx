@@ -2908,7 +2908,7 @@ export function App() {
           {/* Content — Settings owns its own scroll so the Save header can stay pinned */}
           <main
             ref={(el) => { contentScrollRef.current = el; }}
-            className={`flex-1 min-h-0 ${
+            className={`min-h-0 min-w-0 flex-1 ${
               currentTab === "settings"
                 ? "flex flex-col overflow-hidden p-0"
                 : "overflow-auto p-6"
