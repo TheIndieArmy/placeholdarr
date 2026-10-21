@@ -183,7 +183,14 @@ def _delete_placeholders(
 def _purge_movie_ids(session, movie_ids: list[int], stats: dict[str, int]) -> None:
     if not movie_ids:
         return
-    rows = session.query(Movie).filter(Movie.id.in_(list(movie_ids))).all()
+    # Lock catalog rows for the rest of this transaction so a concurrent re-add
+    # cannot clear is_deleted after readiness and still lose the row to DELETE.
+    rows = (
+        session.query(Movie)
+        .filter(Movie.id.in_(list(movie_ids)))
+        .with_for_update()
+        .all()
+    )
     ready_ids: list[int] = []
     for movie in rows:
         if movie_ready_to_purge(session, movie):
@@ -194,9 +201,14 @@ def _purge_movie_ids(session, movie_ids: list[int], stats: dict[str, int]) -> No
         return
     stats["subflows_removed"] += _delete_subflows(session, movie_ids=ready_ids)
     stats["placeholders_removed"] += _delete_placeholders(session, movie_ids=ready_ids)
+    # Conditional delete: never remove a row that was revived under the lock.
     deleted = (
         session.query(Movie)
-        .filter(Movie.id.in_(ready_ids))
+        .filter(
+            Movie.id.in_(ready_ids),
+            Movie.is_deleted == True,  # noqa: E712
+            Movie.has_placeholder == False,  # noqa: E712
+        )
         .delete(synchronize_session=False)
         or 0
     )
@@ -207,7 +219,12 @@ def _purge_episode_ids(session, episode_ids: list[int], stats: dict[str, int]) -
     """Purge ready episodes; return season_ids that may now be empty."""
     if not episode_ids:
         return []
-    rows = session.query(Episode).filter(Episode.id.in_(list(episode_ids))).all()
+    rows = (
+        session.query(Episode)
+        .filter(Episode.id.in_(list(episode_ids)))
+        .with_for_update()
+        .all()
+    )
     ready_ids: list[int] = []
     season_ids: set[int] = set()
     for episode in rows:
@@ -223,7 +240,11 @@ def _purge_episode_ids(session, episode_ids: list[int], stats: dict[str, int]) -
     stats["placeholders_removed"] += _delete_placeholders(session, episode_ids=ready_ids)
     deleted = (
         session.query(Episode)
-        .filter(Episode.id.in_(ready_ids))
+        .filter(
+            Episode.id.in_(ready_ids),
+            Episode.is_deleted == True,  # noqa: E712
+            Episode.has_placeholder == False,  # noqa: E712
+        )
         .delete(synchronize_session=False)
         or 0
     )
@@ -235,7 +256,12 @@ def _purge_season_ids(session, season_ids: list[int], stats: dict[str, int]) -> 
     """Purge ready empty deleted seasons; return series_ids that may now be empty."""
     if not season_ids:
         return []
-    rows = session.query(Season).filter(Season.id.in_(list(season_ids))).all()
+    rows = (
+        session.query(Season)
+        .filter(Season.id.in_(list(season_ids)))
+        .with_for_update()
+        .all()
+    )
     ready_ids: list[int] = []
     series_ids: set[int] = set()
     for season in rows:
@@ -252,7 +278,10 @@ def _purge_season_ids(session, season_ids: list[int], stats: dict[str, int]) -> 
     stats["placeholders_removed"] += _delete_placeholders(session, season_ids=ready_ids)
     deleted = (
         session.query(Season)
-        .filter(Season.id.in_(ready_ids))
+        .filter(
+            Season.id.in_(ready_ids),
+            Season.is_deleted == True,  # noqa: E712
+        )
         .delete(synchronize_session=False)
         or 0
     )
@@ -263,7 +292,12 @@ def _purge_season_ids(session, season_ids: list[int], stats: dict[str, int]) -> 
 def _purge_series_ids(session, series_ids: list[int], stats: dict[str, int]) -> None:
     if not series_ids:
         return
-    rows = session.query(Series).filter(Series.id.in_(list(series_ids))).all()
+    rows = (
+        session.query(Series)
+        .filter(Series.id.in_(list(series_ids)))
+        .with_for_update()
+        .all()
+    )
     ready_ids: list[int] = []
     for series in rows:
         if series_ready_to_purge(session, series):
@@ -276,7 +310,10 @@ def _purge_series_ids(session, series_ids: list[int], stats: dict[str, int]) -> 
     stats["placeholders_removed"] += _delete_placeholders(session, series_ids=ready_ids)
     deleted = (
         session.query(Series)
-        .filter(Series.id.in_(ready_ids))
+        .filter(
+            Series.id.in_(ready_ids),
+            Series.is_deleted == True,  # noqa: E712
+        )
         .delete(synchronize_session=False)
         or 0
     )

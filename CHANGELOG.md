@@ -9,6 +9,15 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Fixed
+
+- **Movie delete activity vs purge**: Movie-deleted result history is written before catalog tombstone purge so the activity row can keep its movie FK.
+- **Series delete after purge**: Series delete no longer fails (and retries) when materialization hard-purges the series before the webhook return; already-absent deletes complete as done.
+- **Title refresh sidebar pill**: Manual single-item refresh keeps the sidebar progress pill across page reloads (resumes polling the in-flight job).
+- **Delete then quick re-add**: Pending movie-deleted materialization is superseded when the same title is re-added; stale obsolete teardown skips live rows; series bulk cleanup skips when the series is no longer soft-deleted.
+- **Catalog purge vs re-add**: Tombstone purge locks catalog rows and only hard-deletes when still soft-deleted, so a re-add mid-purge cannot lose the revived row.
+- **Title refresh phase bars**: Manual single-item refresh publishes per-phase live bars (Arr, catalog, placeholders, artwork, players) with expandable sidebar progress like other tasks.
+
 ## Pre-release
 
 ## Released

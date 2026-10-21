@@ -739,6 +739,20 @@ def apply_movie_materialization(movie_id: int, session=None, activity_reason: st
             }
 
         if determination == DETERMINATION_OBSOLETE:
+            # Quick delete-then-readd can leave a stale obsolete determination after
+            # upsert clears is_deleted. Do not tear down a live title's placeholder.
+            try:
+                session.refresh(movie)
+            except Exception:
+                pass
+            if not bool(getattr(movie, "has_file", False)) and not bool(
+                getattr(movie, "is_deleted", False)
+            ):
+                return {
+                    "ok": True,
+                    "action": "noop_stale_obsolete",
+                    "movie_id": movie.id,
+                }
             candidate_paths = _mark_placeholder_rows_deleted(
                 session,
                 movie_id=movie.id,
@@ -866,6 +880,23 @@ def apply_episode_materialization(episode_id: int, session=None, activity_reason
             }
 
         if determination == DETERMINATION_OBSOLETE:
+            try:
+                session.refresh(episode)
+                if series is not None:
+                    session.refresh(series)
+            except Exception:
+                pass
+            series_deleted = bool(getattr(series, "is_deleted", False)) if series is not None else False
+            if (
+                not bool(getattr(episode, "has_file", False))
+                and not bool(getattr(episode, "is_deleted", False))
+                and not series_deleted
+            ):
+                return {
+                    "ok": True,
+                    "action": "noop_stale_obsolete",
+                    "episode_id": episode.id,
+                }
             candidate_paths = _mark_placeholder_rows_deleted(
                 session,
                 movie_id=None,
@@ -1412,6 +1443,18 @@ def _run_materialization_for_ids(
             for episode_id in ids:
                 _process_single_episode_materialization(episode_id)
             return
+        # Quick delete-then-readd: another worker may have cleared is_deleted already.
+        try:
+            session.refresh(series)
+        except Exception:
+            pass
+        if not bool(getattr(series, "is_deleted", False)):
+            logger.info(
+                f"Series bulk tombstone cleanup skipped for series_id={int(series_id)} "
+                f"(no longer soft-deleted; likely re-added)",
+                extra={"emoji_type": "info"},
+            )
+            return
 
         candidate_paths = _mark_placeholder_rows_deleted_for_episodes(
             session,
@@ -1749,11 +1792,17 @@ def run_materialization_for_entities(
     episode_ids: list[int] | None = None,
     observation_source: str = "event_materialization",
     log_subject: str | None = None,
+    *,
+    purge_catalog_tombstones: bool = True,
 ) -> dict[str, Any]:
     """Run materialization only for targeted entities.
 
     This is used by webhook/event workflows so only affected content is
     materialized, refreshed, and observed.
+
+    When ``purge_catalog_tombstones`` is False, soft-deleted catalog rows are
+    left in place after placeholder teardown so callers can still write
+    activity history (or other FK-bound rows) before hard-purge.
     """
     movie_ids = [int(mid) for mid in (movie_ids or []) if mid is not None]
     episode_ids = [int(eid) for eid in (episode_ids or []) if eid is not None]
@@ -1815,20 +1864,21 @@ def run_materialization_for_entities(
             extra={"emoji_type": "success"},
         )
         # After placeholder teardown, hard-purge cleaned soft-deleted catalog rows for this scope.
-        try:
-            from services.source_of_truth.catalog_tombstone_purge import purge_cleaned_deleted_catalog
+        if purge_catalog_tombstones:
+            try:
+                from services.source_of_truth.catalog_tombstone_purge import purge_cleaned_deleted_catalog
 
-            purge_stats = purge_cleaned_deleted_catalog(
-                movie_ids=movie_ids,
-                episode_ids=episode_ids,
-            )
-            if isinstance(stats, dict) and isinstance(purge_stats, dict):
-                stats["catalog_tombstone_purge"] = purge_stats
-        except Exception as purge_exc:
-            logger.debug(
-                f"Scoped catalog tombstone purge skipped{subject_part}: {purge_exc}",
-                extra={"emoji_type": "debug"},
-            )
+                purge_stats = purge_cleaned_deleted_catalog(
+                    movie_ids=movie_ids,
+                    episode_ids=episode_ids,
+                )
+                if isinstance(stats, dict) and isinstance(purge_stats, dict):
+                    stats["catalog_tombstone_purge"] = purge_stats
+            except Exception as purge_exc:
+                logger.debug(
+                    f"Scoped catalog tombstone purge skipped{subject_part}: {purge_exc}",
+                    extra={"emoji_type": "debug"},
+                )
         return stats
     except Exception as e:
         session.rollback()
