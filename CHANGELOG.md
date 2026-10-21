@@ -13,6 +13,36 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## Released
 
+## [0.11.4] - 2026-10-20
+
+### Summary
+
+- **Collections**: Leaves Beta with Plex hub Visible on, optional owned-collection delete when removing a recipe, Density-style recipe editor, and list/empty-state polish.
+- **Manual title refresh**: After art rewrite, players get an item metadata refresh; the reconcile sidebar uses the same live progress pill as Tasks.
+
+### Added
+
+- **Collections delete from Plex**: Recipe delete confirm can also remove owned Plex collection(s) via `DELETE /api/collections/{id}?delete_plex=true`.
+- **Collections Visible on**: Per-recipe (and Collection Set) checkboxes for Plex Visible On; applied on sync via hub promotion. Plex Pass required tip in the UI.
+- **What's new (Collections)**: Version-chip notice for Display Visible on and optional delete from Plex when removing a recipe (`since_version` 0.11.4).
+
+### Fixed
+
+- **Manual title refresh posters**: Entity reconcile now calls `refresh_players_after_local_art_rewrite` after rewriting art (path folder scans alone do not update Plex posters).
+
+### Changed
+
+- **Manual title refresh sidebar**: Library reconcile status uses the live-task pill chrome (title, stage, progress bar) instead of the plain footer message.
+- **Collections Arrange → Display**: Last recipe card is Display (Arrange plus Visible on).
+- **Collections without Plex**: Empty state instead of a disabled recipe list when Plex is not configured.
+- **Collections recipe chrome**: Editor blocks use Settings Density framing (shared accent panel, micro-legend titles); major then-filter/pin/display connectors removed.
+- **Section legends**: Nested control-group headers (Arrange, Visible on, Settings frame legends) use white instead of muted slate.
+- **Collections list Run now**: Last Run keeps the prior timestamp while a run is in progress; the play control shows a spinner instead of replacing the date with Running….
+- **Collections list actions**: Play, edit, and delete use the same bordered icon-button chrome as Arr integration slots.
+- **Collections delete confirm**: Recipe delete opens ConfirmModal with an optional Also delete from Plex checkbox.
+- **Collections list narrow width**: List fills the viewport when there is room; below ~64rem the page scrolls horizontally with header and table together.
+- **Collections Beta label**: Removed from sidebar nav and Collections page header; What's New intro copy no longer calls the feature Beta.
+
 ## [0.11.3] - 2026-10-17
 
 ### Summary

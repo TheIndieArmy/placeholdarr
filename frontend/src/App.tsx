@@ -61,7 +61,8 @@ import {
   isPlaybackDestFilterKey,
   playbackDestOptionsFromValues,
 } from "./settings/PlaybackDestFilterControls";
-import { UI_SECTION_FRAME_CLASS } from "./uiSectionFrame";
+import { UI_SECTION_FRAME_CLASS, UI_SECTION_LEGEND_CLASS } from "./uiSectionFrame";
+
 import { TmdbAttribution } from "./TmdbAttribution";
 import { getBrandSemanticTokens, semanticTokensToCssVars, type BrandSemanticTokens } from "./brandSemanticTheme";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "./brandAccentUi";
@@ -353,8 +354,7 @@ const ONBOARDING_SECTION_TITLE_CLASS =
  */
 
 /** Density & Lookahead micro-heading used on stacked framed groups. */
-const SETTINGS_DENSITY_LEGEND_CLASS =
-  "text-[12px] font-headline font-semibold uppercase tracking-wider text-white";
+const SETTINGS_DENSITY_LEGEND_CLASS = UI_SECTION_LEGEND_CLASS;
 
 /**
  * Media / ARR service tiles (wizard + settings grids): same accent rail and surface fill as
@@ -2599,7 +2599,7 @@ export function App() {
                   ) : null}
 
                   {[
-                    { icon: "video_library", label: "Collections", path: "/collections", beta: true },
+                    { icon: "video_library", label: "Collections", path: "/collections", beta: false },
                     { icon: "calendar_month", label: "Calendar", path: "/calendar", beta: false },
                     { icon: "terminal", label: "Logs", path: "/logs", beta: false },
                     { icon: "settings", label: "Settings", path: "/settings", beta: false },
@@ -2721,6 +2721,12 @@ export function App() {
                 }
               }}
             />
+            <LibraryReconcileSidebarFooter
+              isStudioGlass={isStudioGlass}
+              yieldToTaskLive={taskHistory.some(
+                (run) => String(run.status || "").toUpperCase() === "WORKING" && Boolean(run.live),
+              )}
+            />
             <button
               type="button"
               onClick={() => void openWhatsNewCatalog()}
@@ -2733,12 +2739,6 @@ export function App() {
             >
               v{appVersionLabel || "…"}
             </button>
-            <LibraryReconcileSidebarFooter
-              isStudioGlass={isStudioGlass}
-              yieldToTaskLive={taskHistory.some(
-                (run) => String(run.status || "").toUpperCase() === "WORKING" && Boolean(run.live),
-              )}
-            />
           </div>
         </aside>
 
@@ -2911,7 +2911,7 @@ export function App() {
             className={`flex-1 min-h-0 ${
               currentTab === "settings"
                 ? "flex flex-col overflow-hidden p-0"
-                : "overflow-y-auto p-6"
+                : "overflow-auto p-6"
             } ${isStudioGlass ? "bg-transparent" : ""}`}
             style={!isStudioGlass ? { backgroundColor: studioLightChrome.main } : undefined}
           >
@@ -6152,7 +6152,7 @@ function ArrInstancesEditor(props: {
                       const warn = arrSlotWarning(item);
                       return (
                         <div key={`${arrType}-seat-${slotIndex}`} className="flex min-h-0 flex-col">
-                          <div className="mb-2 text-[12px] font-headline uppercase tracking-[0.14em] text-slate-500">
+                          <div className={`mb-2 ${SETTINGS_DENSITY_LEGEND_CLASS}`}>
                             Slot {slotIndex + 1}
                           </div>
                           <div
@@ -6232,7 +6232,7 @@ function ArrInstancesEditor(props: {
 
                     return (
                       <div key={`${arrType}-seat-${slotIndex}`} className="flex min-h-0 flex-col">
-                        <div className="mb-2 text-[12px] font-headline uppercase tracking-[0.14em] text-slate-500">
+                        <div className={`mb-2 ${SETTINGS_DENSITY_LEGEND_CLASS}`}>
                           Slot {slotIndex + 1}
                         </div>
                         {canFill ? (
@@ -6892,7 +6892,7 @@ function LibraryPathsForm(props: {
 
   const profileBlock = profiles.length ? (
     <div className={`${UI_SECTION_FRAME_CLASS} px-4 py-4`}>
-      <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500 mb-2">Folder Profiles</div>
+      <div className={`${SETTINGS_DENSITY_LEGEND_CLASS} mb-2`}>Folder Profiles</div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         {profiles.map((field) => (
           <div key={field.key} className="rounded-lg border border-[#424753]/35 bg-[#0b111b] px-3 py-2">
@@ -6915,7 +6915,7 @@ function LibraryPathsForm(props: {
         className="flex w-full items-start justify-between gap-3 text-left rounded-md outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-[#171c22] focus-visible:ring-emerald-500/40"
       >
         <div className="min-w-0">
-          <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500 mb-0.5">Optional overrides</div>
+          <div className={`${SETTINGS_DENSITY_LEGEND_CLASS} mb-0.5`}>Optional overrides</div>
           <div className="text-[16px] font-medium text-slate-400 font-headline">Custom folder per library</div>
           <p className="ui-field-description mt-1">
             Use when a library path is not under Library Root (or you use no root and set each path manually).
@@ -7164,7 +7164,7 @@ function PosterLanguageSettingsDescription(props: {
   return (
     <div className={top}>
       {props.omitHeading ? null : (
-        <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500">Poster language</div>
+        <div className={SETTINGS_DENSITY_LEGEND_CLASS}>Poster language</div>
       )}
       <p
         className={`ui-field-description leading-relaxed ${
@@ -10632,7 +10632,7 @@ function PlaybackWebhookSetupModal(props: {
         </p>
 
         <fieldset className="space-y-2">
-          <legend className="text-[12px] font-headline uppercase tracking-wider text-slate-500">How we hear about playback</legend>
+          <legend className={SETTINGS_DENSITY_LEGEND_CLASS}>How we hear about playback</legend>
           <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-[#424753]/40 bg-[#0a0d11]/60 px-3 py-3 hover:border-[#424753]/70">
             <input
               type="radio"

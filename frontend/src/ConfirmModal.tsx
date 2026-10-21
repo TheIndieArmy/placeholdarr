@@ -1,10 +1,12 @@
-import { useEffect } from "react";
+import { useEffect, type ReactNode } from "react";
 import type { ThemeMode } from "./brandTypes";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "./brandAccentUi";
 
 export function ConfirmModal(props: {
   title: string;
   message: string;
+  /** Optional controls under the message (e.g. a checkbox). */
+  children?: ReactNode;
   /** Optional failure text shown under the message (e.g. Stop request failed). */
   error?: string | null;
   confirmLabel?: string;
@@ -52,6 +54,7 @@ export function ConfirmModal(props: {
           <p className={`mt-2 text-[15px] leading-relaxed ${isLight ? "text-slate-600" : "text-slate-300"}`}>
             {props.message}
           </p>
+          {props.children ? <div className="mt-4">{props.children}</div> : null}
           {errorText ? (
             <p className="mt-3 text-[14px] leading-snug text-red-400" role="alert">
               {errorText}

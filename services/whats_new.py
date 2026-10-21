@@ -48,13 +48,12 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
     WhatsNewNotice(
         id="collections-beta",
         since_version="0.9.16",
-        title="Collections (Beta)",
+        title="Collections",
         body=(
-            "You can now build Plex collections from saved recipes. Pull titles from TMDB, "
-            "MDBList, Trakt, or your Placeholdarr catalog, filter and sort them, then sync "
-            "membership into a Plex collection on a schedule. Open the Collections tab to "
-            "create a recipe, preview matches, and run or schedule updates. The feature is "
-            "Beta while we keep tightening edge cases."
+            "Build Plex collections from saved recipes. Pull titles from TMDB, MDBList, Trakt, "
+            "or your Placeholdarr catalog, filter and sort them, then sync membership into a "
+            "Plex collection on a schedule. Open the Collections tab to create a recipe, preview "
+            "matches, and run or schedule updates."
         ),
         cta_label="Open Collections",
         cta_path="/collections",
@@ -271,6 +270,22 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         cta_label="Open Poster Art",
         cta_path="/settings/poster-art",
         requires_ack=True,
+    ),
+    WhatsNewNotice(
+        id="collections-visible-on-delete-plex-0-11-4",
+        since_version="0.11.4",
+        title="Collections: Visible on and delete from Plex",
+        body=(
+            "Recipe and Collection Set editors include a Display section with Visible on "
+            "checkboxes for Library Recommended, Home, and Shared users' Home. Placeholdarr "
+            "applies your choices when it syncs the collection to Plex. Plex Pass is required "
+            "for hub promotion. The collection still appears in the library Collections list "
+            "when all are off.\n\n"
+            "When you delete a recipe, the confirm dialog can also remove Placeholdarr-owned "
+            "Plex collection(s). Unlabeled same-title shelves in Plex are left unchanged."
+        ),
+        cta_label="Open Collections",
+        cta_path="/collections",
     ),
 )
 

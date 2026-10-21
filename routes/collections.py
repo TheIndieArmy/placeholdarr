@@ -21,6 +21,7 @@ from core.logger import logger
 from services import list_sources, tmdb_client
 from services.collections.engine import (
     RecipeValidationError,
+    delete_owned_plex_collections_for_recipe,
     explain_definition_item,
     normalize_section_ids,
     preview_definition,
@@ -843,14 +844,34 @@ async def toggle_recipe(recipe_id: int, body: RecipeToggleRequest):
 
 
 @router.delete("/api/collections/{recipe_id}")
-async def delete_recipe(recipe_id: int):
+async def delete_recipe(
+    recipe_id: int,
+    delete_plex: bool = Query(
+        False,
+        description="Also delete Placeholdarr-owned Plex collection(s) for this recipe",
+    ),
+):
+    plex_deleted = 0
+    if delete_plex:
+        try:
+            summary, _keys = delete_owned_plex_collections_for_recipe(recipe_id)
+        except RecipeValidationError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if summary.get("status") == "error":
+            raise HTTPException(
+                status_code=502,
+                detail=str(summary.get("error") or "Failed to delete Plex collection(s)"),
+            )
+        plex_deleted = int(summary.get("deleted") or 0)
+
     with session_scope() as session:
         row = session.query(CollectionRecipe).filter(CollectionRecipe.id == recipe_id).first()
         if row is None:
             raise HTTPException(status_code=404, detail=f"Collection recipe {recipe_id} not found")
         session.delete(row)
         session.commit()
-    return {"ok": True}
+    _refresh_collections_schedule()
+    return {"ok": True, "delete_plex": bool(delete_plex), "plex_deleted": plex_deleted}
 
 
 @router.post("/api/collections/{recipe_id}/run")

@@ -815,6 +815,16 @@ export interface CollectionSetConfig {
   managed_by_section?: Record<string, string[]>;
 }
 
+/** Plex Visible On hub promotion (Library Recommended / Home / Shared users' Home). */
+export interface CollectionVisibleOn {
+  /** Library Recommended row. */
+  library?: boolean;
+  /** Server owner Home. */
+  home?: boolean;
+  /** Shared users' / friends' Home. */
+  shared?: boolean;
+}
+
 export interface CollectionDefinition {
   /** "collection_set" for one-config → many Plex collections; omit / "recipe" for normal recipes. */
   mode?: "recipe" | "collection_set";
@@ -831,6 +841,8 @@ export interface CollectionDefinition {
    * title (per library) instead of refusing. Membership then follows the recipe.
    */
   adopt_existing?: boolean;
+  /** Promote the collection as a Plex hub row (Plex Pass). Defaults all off. */
+  visible_on?: CollectionVisibleOn | null;
 }
 
 export interface CollectionRunSummary {
