@@ -116,9 +116,12 @@ def _build_startup_sync_row(
     if error_message:
         details = f"{details} • Error {error_message}"
 
+    # Keys align with live phase bars so Tasks folds these into expandable phase cards
+    # (discovery / determination / materialization) instead of a floating footer strip.
     sections: list[dict[str, Any]] = [
         {
-            "name": "Scope Checked",
+            "key": "discovery",
+            "name": "Catalog discovery",
             "status": discovery_status,
             "metrics": [
                 {"label": "Movies checked", "value": movies_discovered if bool(startup_sync_stats) else "--"},
@@ -127,7 +130,8 @@ def _build_startup_sync_row(
             ],
         },
         {
-            "name": "What Changed",
+            "key": "materialization",
+            "name": "Placeholder materialization",
             "status": materialization_status,
             "metrics": [
                 {
@@ -145,7 +149,8 @@ def _build_startup_sync_row(
             ],
         },
         {
-            "name": "Why Items Were Skipped",
+            "key": "determination",
+            "name": "Status determination",
             "status": determination_status,
             "metrics": [
                 {

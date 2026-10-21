@@ -9,6 +9,18 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Changed
+
+- **Live task progress (full/lite/calendar)**: Full sync, lite sync, and calendar-only runs publish phase bars on `summary.live` (sidebar pill + Tasks). Art follow-up on a full sync keeps sync bars and merges Determining/Updating instead of replacing live. Collections sync stays off live.
+- **Expandable phase counts**: Each live phase bar expands to show that phase’s count cards. Tasks no longer list bars and then a separate last-phase-only metrics strip.
+- **Sync phase bar counts**: Full sync ARR / filesystem / determination publish real done/total (and finished metrics drive the bar) instead of coarse 1/1.
+- **Determination skip cleaned tombstones**: Full determination no longer walks soft-deleted movies/episodes that have no placeholder left (and are not stuck on obsolete). Delete-path scoped determination is unchanged.
+- **ARR sync instance bars**: Full sync ARR catalog progress shows one nested bar per Radarr/Sonarr instance instead of a single jumping total.
+- **Catalog tombstone purge**: Soft-deleted movies/series/seasons/episodes are hard-removed after placeholders are cleared (scoped materialization and a full-sync Catalog cleanup phase).
+- **Live phase count cards**: Full/lite/calendar sync phases seed zeroed expandable count cards at run start so every phase can be opened before the first progress tick. Phases stay collapsed until expanded.
+- **Stop full sync**: Working full sync runs show Stop in Tasks and the sidebar pill (same abandon path as art refresh; stops at the next cancel checkpoint).
+- **Restart vs Stop task reason**: Both stay ``stopped``. Restart shows ``interrupted_by_restart`` under the badge; user Stop omits the redundant ``stopped_by_user`` line.
+
 ## Pre-release
 
 ## Released

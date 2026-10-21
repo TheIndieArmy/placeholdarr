@@ -37,6 +37,16 @@ export interface TaskRunLiveProgress {
     done?: number;
     total?: number;
     status?: string;
+    /** Count cards shown when the phase bar is expanded. */
+    metrics?: Array<{ label?: string; value?: string | number }>;
+    /** Nested bars (e.g. one per ARR instance under ARR catalog sync). */
+    units?: Array<{
+      key?: string;
+      label?: string;
+      done?: number;
+      total?: number;
+      status?: string;
+    }>;
   }>;
   active_units?: Array<{
     index: number;

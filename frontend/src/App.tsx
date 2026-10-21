@@ -896,7 +896,7 @@ export function App() {
     },
     onTaskRunsVersion: () => {
       // Keep task live progress fresh for sidebar pills on every route.
-      void refreshTasksRef.current();
+        void refreshTasksRef.current();
     },
   });
 
@@ -2124,7 +2124,7 @@ export function App() {
               if (needsBackfillPrompt) {
                 const densityOnly =
               densityChanged && !statusKeysChanged && !messagesDirty && !destinationChanged;
-            const modalCopy =
+                const modalCopy =
               densityOnly
                     ? {
                         title: "Apply TV placeholder density to existing files",
@@ -2171,12 +2171,12 @@ export function App() {
                                 ? "Moving to Season or Series density deletes many per-episode placeholder files and replaces them with fewer season or series placeholders. Choose Apply now or wait for the next full sync."
                                 : "Changing TV placeholder density or retire-when rematerializes existing TV placeholders on disk. Choose Apply now or wait for the next full sync.",
                               countMedia: "tv" as const,
-                            }
-                          : {
-                              title: "Apply template changes",
-                              description:
-                                "Choose when these template updates should affect existing placeholders. New placeholders always use the saved templates.",
-                            };
+                        }
+                      : {
+                          title: "Apply template changes",
+                          description:
+                            "Choose when these template updates should affect existing placeholders. New placeholders always use the saved templates.",
+                        };
                 const chosen = await requestNfoBackfillApplyScopeChoice(modalCopy);
                 if (chosen === null) {
                   setSettingsFeedback("");
@@ -2225,9 +2225,9 @@ export function App() {
                 invalidateLibraryAfterCatalogChange();
                 void getSettingsCurrent()
                   .then((payload) => {
-                    setSettingsPayload(payload);
-                    setSetupStatus(payload.status);
-                    setOnboardingVisible(!payload.status.setup_complete);
+                setSettingsPayload(payload);
+                setSetupStatus(payload.status);
+                setOnboardingVisible(!payload.status.setup_complete);
                     const arrField = payload.sections
                       .flatMap((section) => section.fields)
                       .find((field) => field.key === "ARR_INSTANCES_JSON");
@@ -2435,9 +2435,9 @@ export function App() {
                 }
                 void getSettingsCurrent()
                   .then((payload) => {
-                    setSettingsPayload(payload);
-                    setSetupStatus(payload.status);
-                    setOnboardingVisible(!payload.status.setup_complete);
+                setSettingsPayload(payload);
+                setSetupStatus(payload.status);
+                setOnboardingVisible(!payload.status.setup_complete);
                   })
                   .catch(() => {
                     /* Keep the saved draft; next Settings visit reloads current. */
@@ -2693,7 +2693,7 @@ export function App() {
                               ? "Media connection problem"
                               : arrInstancesHaveMissingApiKey(fieldValues)
                                 ? "ARR API key missing"
-                                : "ARR connection problem"
+                              : "ARR connection problem"
                           }
                         />
                       ) : null}
@@ -4145,30 +4145,30 @@ function parseArrInstancesFromValues(values: FieldValueMap): ArrInstanceDraft[] 
           });
         const rankByType: Record<"radarr" | "sonarr", number> = { radarr: 0, sonarr: 0 };
         const items = rough.map(({ obj, index, arrType, label }) => {
-          const rank = rankByType[arrType];
-          rankByType[arrType] = rank + 1;
+            const rank = rankByType[arrType];
+            rankByType[arrType] = rank + 1;
           const instanceKey =
             normalizeInstanceKey(String(obj.instance_key || obj.key || obj.name || "")) ||
             defaultInstanceKeyForSlot(arrType, rank);
-          const rawInstanceId = String(obj.instance_id || obj.id || "").trim().toLowerCase();
+            const rawInstanceId = String(obj.instance_id || obj.id || "").trim().toLowerCase();
           const instanceId = rawInstanceId || newArrInstanceId();
-          const aliasRaw = Array.isArray(obj.instance_key_aliases) ? obj.instance_key_aliases : [];
-          const instance_key_aliases = aliasRaw
-            .map((a) => normalizeInstanceKey(String(a)))
-            .filter((a) => a && a !== instanceKey);
-          return {
+            const aliasRaw = Array.isArray(obj.instance_key_aliases) ? obj.instance_key_aliases : [];
+            const instance_key_aliases = aliasRaw
+              .map((a) => normalizeInstanceKey(String(a)))
+              .filter((a) => a && a !== instanceKey);
+            return {
             id: instanceId,
             instance_id: instanceId,
-            label,
-            arr_type: arrType,
-            instance_key: instanceKey,
-            instance_key_aliases,
-            url: String(obj.url || ""),
-            api_key: String(obj.api_key || obj.apikey || ""),
-            api_key_saved: Boolean(obj.api_key_saved) || Boolean(String(obj.api_key || obj.apikey || "").trim()),
+              label,
+              arr_type: arrType,
+              instance_key: instanceKey,
+              instance_key_aliases,
+              url: String(obj.url || ""),
+              api_key: String(obj.api_key || obj.apikey || ""),
+              api_key_saved: Boolean(obj.api_key_saved) || Boolean(String(obj.api_key || obj.apikey || "").trim()),
             priority: rank,
-          } satisfies ArrInstanceDraft;
-        });
+            } satisfies ArrInstanceDraft;
+          });
         if (items.length) return items;
       }
     } catch {
@@ -5425,7 +5425,7 @@ function ArrInstancesEditor(props: {
       setPrimaryConnectionOk((prev) => ({ ...prev, [arrType]: false }));
       props.onPrimaryTestStatusChange?.(arrType, false);
       if (remaining.length <= 1) {
-        props.onSecondaryTestStatusChange?.(arrType, false);
+      props.onSecondaryTestStatusChange?.(arrType, false);
       }
       update([...otherRows, ...remaining]);
       return;
@@ -5861,16 +5861,16 @@ function ArrInstancesEditor(props: {
           <div className="flex items-center justify-between gap-2">
             <div className="flex-1 min-w-0">
               <div className="flex items-center justify-between gap-2">
-                <input
+              <input
                   className="bg-transparent text-[16px] font-semibold text-white font-headline outline-none w-full min-w-0"
-                  value={item.label}
-                  onChange={(e) => {
-                    const value = e.target.value;
-                    upsertSlot(arrType, slotIndex, { label: value });
-                  }}
+                value={item.label}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  upsertSlot(arrType, slotIndex, { label: value });
+                }}
                   placeholder="Instance name (e.g. Sonarr, Sonarr 2)"
-                  disabled={isDisabled}
-                />
+                disabled={isDisabled}
+              />
                 {(namePeer || keyPeer) && !isDisabled ? (
                   <span className="shrink-0 text-[12px] font-medium text-red-400">Name already in use</span>
                 ) : null}
@@ -6159,22 +6159,22 @@ function ArrInstancesEditor(props: {
                             className={`flex h-[8.25rem] items-stretch gap-2 overflow-hidden rounded-xl border border-white/[0.08] bg-[#0a0f18]/95 px-4 py-2.5 ${motionClass}`}
                           >
                             <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-2">
-                              <div className="min-w-0">
+                        <div className="min-w-0">
                                 <div className="flex min-w-0 items-center gap-2">
                                   <div className="truncate text-[15px] font-semibold text-white font-headline">{item.label}</div>
                                   {warn ? <IntegrationFailureBadge size="sm" title={warn.title} /> : null}
-                                </div>
+                          </div>
                                 <div className="truncate font-mono text-[12px] text-slate-500">{String(item.url || "").trim() || "—"}</div>
                                 <div
                                   className={`mt-0.5 min-h-[1rem] truncate text-[12px] ${warn ? "text-red-300" : "text-transparent"}`}
                                   title={warn?.message || undefined}
                                 >
                                   {warn?.message || "—"}
-                                </div>
-                              </div>
+                            </div>
+                        </div>
                               <div className="mt-auto flex items-center gap-1.5">
-                                <button
-                                  type="button"
+                            <button
+                              type="button"
                                   onClick={() => openSlotPanel({ arrType, slotIndex, isNew: false })}
                                   className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-white/15 bg-white/[0.05] text-slate-200 transition hover:border-white/25 hover:bg-white/[0.09] disabled:opacity-40"
                                   disabled={busy}
@@ -6184,48 +6184,48 @@ function ArrInstancesEditor(props: {
                                   <span className="material-symbols-outlined leading-none" style={{ fontSize: 18 }}>
                                     settings
                                   </span>
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setWebhookSetupDialog({
-                                      arrType,
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setWebhookSetupDialog({
+                                  arrType,
                                       instance_key: normalizeInstanceKey(String(item.instance_key || "")),
                                       instance_id: String(item.instance_id || ""),
                                       label: String(item.label || ""),
-                                    });
-                                  }}
+                                });
+                              }}
                                   className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-white/10 bg-transparent text-slate-400 transition hover:border-white/20 hover:text-slate-200 disabled:opacity-40"
                                   disabled={busy}
                                   title="Webhook"
                                   aria-label="Webhook"
-                                >
+                            >
                                   <span className="material-symbols-outlined leading-none" style={{ fontSize: 18 }}>
                                     webhook
                                   </span>
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setDisconnectDialog({
-                                      arrType,
+                            </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setDisconnectDialog({
+                                arrType,
                                       slotIndex,
                                       label: String(item.label || arrType),
-                                    })
-                                  }
+                              })
+                            }
                                   className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-red-400/20 bg-transparent text-red-400 transition hover:border-red-400/35 hover:bg-red-500/10 hover:text-red-300 disabled:opacity-40"
                                   disabled={busy}
                                   title="Remove"
                                   aria-label="Remove"
-                                >
+                          >
                                   <span className="material-symbols-outlined leading-none" style={{ fontSize: 18 }}>
                                     delete
                                   </span>
-                                </button>
-                              </div>
-                            </div>
+                          </button>
+                        </div>
+                      </div>
                             {instanceReorderControls(arrType, slotIndex, connectedCount)}
-                          </div>
+                  </div>
                         </div>
                       );
                     }
@@ -6251,18 +6251,18 @@ function ArrInstancesEditor(props: {
                             {isNextEmpty && gateBlocks ? (
                               <>
                                 <span className="material-symbols-outlined opacity-35" style={{ fontSize: 22 }}>
-                                  lock
-                                </span>
+                              lock
+                            </span>
                                 <p className="ui-field-description-compact mt-2 text-center text-slate-600">
                                   Pass a Slot 1 connection test to unlock.
-                                </p>
-                              </>
-                            ) : (
+                            </p>
+                          </>
+                        ) : (
                               <p className="ui-field-description-compact text-center text-slate-600">Reserved</p>
-                            )}
-                          </div>
                         )}
                       </div>
+                    )}
+                  </div>
                     );
                   })}
                 </div>
@@ -7214,29 +7214,29 @@ function PlexUnwatchedPreviewWarning() {
         On Plex, the unwatched count indicator sits in the top right and can cover Placeholdarr badge and banner text. To
         avoid conflict, use a bottom banner and do not put the Placeholdarr badge in the top right corner.
       </p>
-    </div>
+        </div>
   );
 }
 
 function PosterPlaceholderBannerDescription(props: { spacing: "settings" | "wizard" }) {
   const top = props.spacing === "settings" ? "mt-1" : "mb-2";
-  return (
-    <p className={`ui-field-description leading-relaxed ${top}`}>
+    return (
+      <p className={`ui-field-description leading-relaxed ${top}`}>
       A PLACEHOLDER text bar on the poster. If Coming Soon is also enabled, unreleased titles use that
       date bar instead.
-    </p>
-  );
-}
+      </p>
+    );
+  }
 
 function ComingSoonPosterBannerDescription(props: { spacing: "settings" | "wizard" }) {
   const top = props.spacing === "settings" ? "mt-1" : "mb-2";
-  return (
-    <p className={`ui-field-description leading-relaxed ${top}`}>
+    return (
+      <p className={`ui-field-description leading-relaxed ${top}`}>
       A date or New Ep. text bar on unreleased titles (Theatrical, Digital, Physical, or Airing; series
       and seasons show New Ep.). Replaces the PLACEHOLDER bar on those posters when both are enabled.
-    </p>
-  );
-}
+      </p>
+    );
+  }
 
 function posterOverlaySettingOn(value: unknown): boolean {
   if (typeof value === "boolean") return value;
@@ -7521,20 +7521,20 @@ function SecurityAccountControls(props: {
   return (
     <div className="px-6 py-5 space-y-6">
       <SettingsDensityFrame legend="Account">
-        <div>
-          <p className="text-[13px] font-semibold text-slate-400 mb-1">Signed in</p>
-          <p className="text-[16px] text-white font-headline">
-            {mode === "disabled"
-              ? "Authentication disabled"
-              : mode === "forward_auth"
-                ? username
-                  ? `Proxy user: ${username}`
-                  : "Forward-auth mode"
-                : username
-                  ? `Admin: ${username}`
-                  : "Admin account"}
-          </p>
-        </div>
+      <div>
+        <p className="text-[13px] font-semibold text-slate-400 mb-1">Signed in</p>
+        <p className="text-[16px] text-white font-headline">
+          {mode === "disabled"
+            ? "Authentication disabled"
+            : mode === "forward_auth"
+              ? username
+                ? `Proxy user: ${username}`
+                : "Forward-auth mode"
+              : username
+                ? `Admin: ${username}`
+                : "Admin account"}
+        </p>
+      </div>
       </SettingsDensityFrame>
       {mode !== "disabled" ? (
         <SettingsDensityFrame
@@ -7548,127 +7548,127 @@ function SecurityAccountControls(props: {
           }
         >
           <div className="space-y-3 max-w-xl">
-            <div className="flex flex-wrap items-center gap-2">
-              <code className="min-w-0 flex-1 break-all rounded-lg border border-[#424753]/40 bg-[#0b111b] px-3 py-2 font-mono text-[13px] text-slate-300">
-                {webhookKeyRevealed ? webhookKey || "(none yet)" : "•".repeat(Math.min(40, webhookKey.length || 40))}
-              </code>
-              <button
-                type="button"
-                className="px-3 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
-                onClick={() => setWebhookKeyRevealed((v) => !v)}
-              >
-                {webhookKeyRevealed ? "Hide" : "Reveal"}
-              </button>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {!webhookRegenConfirming ? (
-                <button
-                  type="button"
-                  className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
-                  onClick={() => setWebhookRegenConfirming(true)}
-                >
-                  Regenerate
-                </button>
-              ) : null}
+          <div className="flex flex-wrap items-center gap-2">
+            <code className="min-w-0 flex-1 break-all rounded-lg border border-[#424753]/40 bg-[#0b111b] px-3 py-2 font-mono text-[13px] text-slate-300">
+              {webhookKeyRevealed ? webhookKey || "(none yet)" : "•".repeat(Math.min(40, webhookKey.length || 40))}
+            </code>
+            <button
+              type="button"
+              className="px-3 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
+              onClick={() => setWebhookKeyRevealed((v) => !v)}
+            >
+              {webhookKeyRevealed ? "Hide" : "Reveal"}
+            </button>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {!webhookRegenConfirming ? (
               <button
                 type="button"
                 className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
-                onClick={() => setWebhookUrlsModalOpen(true)}
+                onClick={() => setWebhookRegenConfirming(true)}
               >
-                Webhook URLs
+                Regenerate
               </button>
-            </div>
-            {webhookRegenConfirming ? (
-              <div className="space-y-2 rounded-lg border border-amber-500/40 bg-amber-950/30 p-3">
-                <p className="text-[14px] text-amber-200 leading-relaxed">
-                  This immediately invalidates the current key. Every already-configured Radarr/Sonarr/Tautulli/Jellyfin/Emby
-                  webhook will start failing until you re-paste the updated URL from Webhook URLs into each of them.
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    disabled={webhookRegenBusy}
-                    className={`px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
-                    style={accentFilledStyle(props.accentHex)}
-                    onClick={() => void onRegenerateWebhookKey()}
-                  >
-                    {webhookRegenBusy ? "Regenerating…" : "Yes, regenerate"}
-                  </button>
-                  <button
-                    type="button"
-                    className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
-                    onClick={() => setWebhookRegenConfirming(false)}
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </div>
             ) : null}
-            {webhookRegenError ? <p className="text-[14px] text-red-400">{webhookRegenError}</p> : null}
-            {webhookRegenMessage ? <p className="text-[14px] text-emerald-400">{webhookRegenMessage}</p> : null}
+            <button
+              type="button"
+              className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
+              onClick={() => setWebhookUrlsModalOpen(true)}
+            >
+              Webhook URLs
+            </button>
           </div>
+          {webhookRegenConfirming ? (
+            <div className="space-y-2 rounded-lg border border-amber-500/40 bg-amber-950/30 p-3">
+              <p className="text-[14px] text-amber-200 leading-relaxed">
+                This immediately invalidates the current key. Every already-configured Radarr/Sonarr/Tautulli/Jellyfin/Emby
+                webhook will start failing until you re-paste the updated URL from Webhook URLs into each of them.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={webhookRegenBusy}
+                  className={`px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
+                  style={accentFilledStyle(props.accentHex)}
+                  onClick={() => void onRegenerateWebhookKey()}
+                >
+                  {webhookRegenBusy ? "Regenerating…" : "Yes, regenerate"}
+                </button>
+                <button
+                  type="button"
+                  className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
+                  onClick={() => setWebhookRegenConfirming(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : null}
+          {webhookRegenError ? <p className="text-[14px] text-red-400">{webhookRegenError}</p> : null}
+          {webhookRegenMessage ? <p className="text-[14px] text-emerald-400">{webhookRegenMessage}</p> : null}
+        </div>
         </SettingsDensityFrame>
       ) : null}
       {mode === "builtin" ? (
         <SettingsDensityFrame legend="Password">
-          <form onSubmit={(e) => void onChangePassword(e)} className="space-y-3 max-w-md">
-            <input
-              type="password"
-              className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
-              placeholder="Current password"
-              value={currentPassword}
-              onChange={(e) => setCurrentPassword(e.target.value)}
-              required
-              disabled={busy}
-            />
-            <input
-              type="password"
-              className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
-              placeholder="New password (min 8 characters)"
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              required
-              minLength={8}
-              disabled={busy}
-            />
-            <input
-              type="password"
-              className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
-              placeholder="Confirm new password"
-              value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
-              required
-              minLength={8}
-              disabled={busy}
-            />
-            {error ? <p className="text-[14px] text-red-400">{error}</p> : null}
-            {message ? <p className="text-[14px] text-emerald-400">{message}</p> : null}
+        <form onSubmit={(e) => void onChangePassword(e)} className="space-y-3 max-w-md">
+          <input
+            type="password"
+            className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
+            placeholder="Current password"
+            value={currentPassword}
+            onChange={(e) => setCurrentPassword(e.target.value)}
+            required
+            disabled={busy}
+          />
+          <input
+            type="password"
+            className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
+            placeholder="New password (min 8 characters)"
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+            required
+            minLength={8}
+            disabled={busy}
+          />
+          <input
+            type="password"
+            className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
+            placeholder="Confirm new password"
+            value={confirmPassword}
+            onChange={(e) => setConfirmPassword(e.target.value)}
+            required
+            minLength={8}
+            disabled={busy}
+          />
+          {error ? <p className="text-[14px] text-red-400">{error}</p> : null}
+          {message ? <p className="text-[14px] text-emerald-400">{message}</p> : null}
             <div className="flex flex-wrap gap-2">
-              <button
-                type="submit"
-                disabled={busy}
-                className={`px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
-                style={accentFilledStyle(props.accentHex)}
-              >
-                {busy ? "Updating…" : "Update password"}
-              </button>
-              <button
-                type="button"
-                className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
-                onClick={() => void props.onLogout()}
-              >
-                Log out
-              </button>
-            </div>
+          <button
+            type="submit"
+            disabled={busy}
+            className={`px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
+            style={accentFilledStyle(props.accentHex)}
+          >
+            {busy ? "Updating…" : "Update password"}
+          </button>
+          <button
+            type="button"
+            className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
+            onClick={() => void props.onLogout()}
+          >
+            Log out
+          </button>
+        </div>
           </form>
         </SettingsDensityFrame>
       ) : null}
       {mode === "disabled" ? (
         <SettingsDensityFrame legend="Authentication">
-          <p className="text-[14px] text-amber-300">
+        <p className="text-[14px] text-amber-300">
             Authentication is disabled. Anyone who can reach this port has full access. Prefer builtin or forward_auth
             unless the instance is on a private network with no published port.
-          </p>
+        </p>
         </SettingsDensityFrame>
       ) : null}
       {webhookUrlsModalOpen ? (
@@ -8057,20 +8057,20 @@ function SettingsPanel(props: {
 
         {field.type === "bool" ? (
           <div className="flex flex-wrap items-center gap-3">
-            <label className={`flex items-center gap-3 select-none w-fit ${interactionLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
-              <ToggleSwitch
+          <label className={`flex items-center gap-3 select-none w-fit ${interactionLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
+            <ToggleSwitch
                 checked={settingsBoolUiChecked(field, value)}
                 onChange={(v) => handleSettingsValueChange(field.key, settingsBoolStoredFromUi(field, v))}
-                accentHex={accent.hex}
-                disabled={interactionLocked}
-                ariaLabel={field.label}
-              />
+              accentHex={accent.hex}
+              disabled={interactionLocked}
+              ariaLabel={field.label}
+            />
               <span
                 className={`inline-block min-w-[4.75rem] text-[16px] ${interactionLocked ? "text-slate-500" : "text-slate-300"}`}
               >
                 {settingsBoolUiChecked(field, value) ? "Enabled" : "Disabled"}
               </span>
-            </label>
+          </label>
             {field.key === "PLACEHOLDER_POSTER_BADGE" ? (
               <select
                 className={`min-w-[9.5rem] bg-[#0f1419] border border-[#424753]/40 rounded-lg pl-2.5 pr-8 py-1.5 text-[13px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${interactionLocked || !settingsBoolUiChecked(field, value) ? "cursor-not-allowed opacity-50" : ""}`}
@@ -8373,7 +8373,7 @@ function SettingsPanel(props: {
                                     }
                                     aria-hidden
                                   />
-                                </div>
+                                    </div>
                               </div>
                               <h4 className="mt-5 flex w-full items-center justify-center gap-2 text-center text-[20px] font-bold tracking-tight text-white font-headline">
                                 <span>{card.title}</span>
@@ -8390,7 +8390,7 @@ function SettingsPanel(props: {
                               <div className="mt-2 flex min-h-[2.75rem] items-start justify-center">
                                 {"note" in card && card.note ? (
                                   <p className="text-center text-[13px] leading-snug text-slate-400">{card.note}</p>
-                                ) : null}
+                              ) : null}
                               </div>
                               {!hasConnection ? (
                                 <button
@@ -8424,7 +8424,7 @@ function SettingsPanel(props: {
                                     <p className="truncate font-mono text-slate-200" title={address || undefined}>
                                       {address || "—"}
                                     </p>
-                                  </div>
+                                    </div>
                                   <div className="mt-2 flex min-h-[2.5rem] flex-col justify-center text-[14px]">
                                     {!enabled ? (
                                       <p className="ui-field-description">Integration paused. Placeholdarr will not sync to {card.title} until re-enabled.</p>
@@ -8550,13 +8550,13 @@ function SettingsPanel(props: {
                       }}
                     />
                   </SettingsDensityFrame>
-                </div>
+                  </div>
               ) : active.name === "Density & Lookahead" ? (
                 <div className="px-6 py-5">
                   <LookaheadDensityPanel
                     variant="settings"
-                    values={props.values}
-                    onChange={props.onValueChange}
+                      values={props.values}
+                      onChange={props.onValueChange}
                     accentHex={accent.hex}
                   />
                   {(() => {
@@ -8569,7 +8569,7 @@ function SettingsPanel(props: {
                       </div>
                     ) : null;
                   })()}
-                </div>
+                        </div>
               ) : active.name === "Playback" ? (
                 <div className="px-6 py-5 space-y-6">
                   <SettingsDensityFrame
@@ -8613,7 +8613,7 @@ function SettingsPanel(props: {
                       onOpenArrIntegrations={props.onOpenArrIntegrations}
                     />
                   ) : null}
-                </div>
+                          </div>
               ) : active.name === "Status Updates" ? (
                 <div className="px-6 py-5 space-y-6">
                   <SettingsDensityFrame
@@ -11557,20 +11557,20 @@ function OnboardingWizard(props: {
         ) : null}
         {field.type === "bool" ? (
           <div className="flex flex-wrap items-center gap-3">
-            <label className={`flex items-center gap-3 select-none w-fit ${interactionLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
-              <ToggleSwitch
+          <label className={`flex items-center gap-3 select-none w-fit ${interactionLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
+            <ToggleSwitch
                 checked={settingsBoolUiChecked(field, displayValue)}
                 onChange={(v) => handleWizardValueChange(field.key, settingsBoolStoredFromUi(field, v))}
-                accentHex={accent.hex}
-                disabled={interactionLocked}
-                ariaLabel={field.label}
-              />
+              accentHex={accent.hex}
+              disabled={interactionLocked}
+              ariaLabel={field.label}
+            />
               <span
                 className={`inline-block min-w-[4.75rem] text-[16px] ${interactionLocked ? "text-slate-500" : "text-slate-300"}`}
               >
                 {settingsBoolUiChecked(field, displayValue) ? "Enabled" : "Disabled"}
               </span>
-            </label>
+          </label>
             {field.key === "PLACEHOLDER_POSTER_BADGE" ? (
               <select
                 className={`min-w-[9.5rem] bg-[#0f1419] border border-[#424753]/40 rounded-lg pl-2.5 pr-8 py-1.5 text-[13px] text-slate-200 outline-none transition-colors ${focus} ${interactionLocked || !settingsBoolUiChecked(field, displayValue) ? "cursor-not-allowed opacity-50" : ""}`}
@@ -11788,16 +11788,16 @@ function OnboardingWizard(props: {
             <WelcomeStep />
           ) : step.key === "paths" ? (
             playFirstMode ? (
-              <LibraryPathsForm
-                fields={fields}
-                values={props.values}
-                brand={props.brand}
-                themeMode={wizardUiTheme}
-                accent={accent}
-                layout="wizard"
+            <LibraryPathsForm
+              fields={fields}
+              values={props.values}
+              brand={props.brand}
+              themeMode={wizardUiTheme}
+              accent={accent}
+              layout="wizard"
                 hideSectionTitle
-                onValueChange={props.onChange}
-              />
+              onValueChange={props.onChange}
+            />
             ) : (
               <LibraryPathsForm
                 fields={fields}
@@ -11861,10 +11861,10 @@ function OnboardingWizard(props: {
                         className={`group relative flex min-h-[260px] flex-col ${UI_INTEGRATION_CARD_SURFACE_CLASS} p-6 duration-200 ${hasConnection && !enabled ? "opacity-75" : ""}`}
                       >
                         <div className="flex h-[5.25rem] w-full shrink-0 items-center justify-center" aria-hidden>
-                          <div
+                              <div
                             className="flex h-[5.25rem] w-[5.25rem] items-center justify-center rounded-2xl px-2"
-                            style={vis.well}
-                          >
+                                style={vis.well}
+                              >
                             <img
                               src={vis.iconSrc}
                               alt=""
@@ -11876,13 +11876,13 @@ function OnboardingWizard(props: {
                               }
                               aria-hidden
                             />
-                          </div>
+                              </div>
                         </div>
                         <h4 className="mt-5 w-full text-center text-[20px] font-bold tracking-tight text-white font-headline">{card.title}</h4>
                         <div className="mt-2 flex min-h-[2.75rem] items-start justify-center">
                           {"note" in card && card.note ? (
                             <p className="text-center text-[13px] leading-snug text-slate-400">{card.note}</p>
-                          ) : null}
+                        ) : null}
                         </div>
 
                         {!hasConnection ? (
@@ -11903,24 +11903,24 @@ function OnboardingWizard(props: {
                         ) : (
                           <div className="mt-5 flex min-h-0 flex-1 flex-col text-left">
                             {playFirstMode ? null : (
-                              <label className="mb-3 flex items-center justify-between gap-3 select-none">
-                                <span className="text-[14px] font-semibold text-slate-300">
-                                  {enabled ? "Enabled" : "Paused"}
-                                </span>
-                                <ToggleSwitch
-                                  checked={enabled}
-                                  onChange={(v) => props.onChange(card.enabledKey, v)}
-                                  accentHex={accent.hex}
-                                  size="sm"
-                                  ariaLabel={`${card.title} ${enabled ? "enabled" : "paused"}`}
-                                />
-                              </label>
+                            <label className="mb-3 flex items-center justify-between gap-3 select-none">
+                              <span className="text-[14px] font-semibold text-slate-300">
+                                {enabled ? "Enabled" : "Paused"}
+                              </span>
+                              <ToggleSwitch
+                                checked={enabled}
+                                onChange={(v) => props.onChange(card.enabledKey, v)}
+                                accentHex={accent.hex}
+                                size="sm"
+                                ariaLabel={`${card.title} ${enabled ? "enabled" : "paused"}`}
+                              />
+                            </label>
                             )}
                             <div className="min-w-0 rounded-xl border border-white/[0.06] bg-black/20 p-3 text-[13px] leading-snug">
                               <p className="truncate font-mono text-slate-200" title={address || undefined}>
-                                {address || "—"}
+                                  {address || "—"}
                               </p>
-                            </div>
+                              </div>
                             <div className="mt-2 flex min-h-[2.5rem] flex-col justify-center text-[14px]">
                               {!playFirstMode && !enabled ? (
                                 <p className="ui-field-description">Integration paused. Placeholdarr will not sync to {card.title} until re-enabled.</p>
@@ -12036,7 +12036,7 @@ function OnboardingWizard(props: {
                 sonarrInstances={sonarrInstances}
                 stackColumns
               />
-            </div>
+                </div>
             )
           ) : !fields.length ? (
             <div className="text-center text-slate-500 text-[16px] py-8">No fields for this step.</div>
@@ -12097,7 +12097,7 @@ function OnboardingWizard(props: {
                       </SettingsDensityFrame>
                     }
                   />
-                </div>
+                    </div>
               );
             })()
           ) : step.key === "behavior" ? (

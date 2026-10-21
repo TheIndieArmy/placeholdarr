@@ -649,6 +649,7 @@ def _run_startup_lite_snapshot_for_instances(
     seed_movie_row_ids: set[int] | None = None,
     seed_episode_row_ids: set[int] | None = None,
     lite_reconciliation_pre: dict | None = None,
+    on_instance_progress=None,
 ) -> dict:
     stats = {
         'instances': 0,
@@ -678,10 +679,22 @@ def _run_startup_lite_snapshot_for_instances(
     touched_movie_row_ids: set[int] = set(seed_movie_row_ids or ())
     touched_series_row_ids: set[int] = set()
     touched_episode_row_ids: set[int] = set(seed_episode_row_ids or ())
+
+    def _emit_instance(index: int, status: str, *, done: int = 0, total: int = 0) -> None:
+        if not callable(on_instance_progress):
+            return
+        try:
+            on_instance_progress(index, status, int(done or 0), int(total or 0))
+        except Exception:
+            pass
+
     try:
-        for instance in instances:
+        for inst_idx, instance in enumerate(instances):
             stats['instances'] += 1
             instance_key = instance['instance_key']
+            _emit_instance(inst_idx, "working", done=0, total=0)
+            instance_done = 0
+            instance_total = 0
             try:
                 row = _get_or_create_arr_state(session, instance_key, instance['arr_type'])
                 t0 = time.monotonic()
@@ -698,8 +711,11 @@ def _run_startup_lite_snapshot_for_instances(
                             f"skipping catalog diff (will not treat titles as removed)",
                             extra={'emoji_type': 'warning'},
                         )
+                        _emit_instance(inst_idx, "failed", done=0, total=0)
                         continue
                     stats['snapshot_rows_seen'] += len(api_movies)
+                    instance_total = len(api_movies)
+                    _emit_instance(inst_idx, "working", done=0, total=instance_total)
                     drift_ids = _radarr_path_drift_movie_ids(session, instance_key=instance_key, api_movies=api_movies)
                     removed_ids = _radarr_movie_ids_removed_from_catalog(session, instance_key=instance_key, api_movies=api_movies)
                     api_by_id: dict[int, dict] = {}
@@ -804,6 +820,13 @@ def _run_startup_lite_snapshot_for_instances(
                                 .all()
                             ]
                             touched_movie_row_ids.update(row_ids)
+                        seen = int(sync_stats.get("movies_seen", 0) or 0)
+                        instance_done = seen if seen else len(target_ids)
+                        instance_total = max(instance_total, instance_done)
+                        _emit_instance(inst_idx, "working", done=instance_done, total=instance_total)
+                    else:
+                        instance_done = instance_total
+                        _emit_instance(inst_idx, "working", done=instance_done, total=instance_total)
                 else:
                     api_series = fetch_sonarr_series(instance['base_url'], instance['api_key'], bypass_cache=True)
                     if api_series is None:
@@ -812,8 +835,11 @@ def _run_startup_lite_snapshot_for_instances(
                             f"skipping catalog diff (will not treat series as removed)",
                             extra={'emoji_type': 'warning'},
                         )
+                        _emit_instance(inst_idx, "failed", done=0, total=0)
                         continue
                     stats['snapshot_rows_seen'] += len(api_series)
+                    instance_total = len(api_series)
+                    _emit_instance(inst_idx, "working", done=0, total=instance_total)
                     drift_ids = _sonarr_path_drift_series_ids(session, instance_key=instance_key, api_series=api_series)
                     removed_ids = _sonarr_series_ids_removed_from_catalog(session, instance_key=instance_key, api_series=api_series)
                     api_by_id: dict[int, dict] = {}
@@ -1035,11 +1061,23 @@ def _run_startup_lite_snapshot_for_instances(
                                 .all()
                             ]
                             touched_episode_row_ids.update(episode_row_ids)
+                        seen = int(sync_stats.get("series_seen", 0) or 0) + int(
+                            sync_stats.get("episodes_seen", 0) or 0
+                        )
+                        instance_done = seen if seen else len(target_ids)
+                        instance_total = max(instance_total, instance_done)
+                        _emit_instance(inst_idx, "working", done=instance_done, total=instance_total)
+                    else:
+                        instance_done = instance_total
+                        _emit_instance(inst_idx, "working", done=instance_done, total=instance_total)
 
                 row.last_history_checked_at = datetime.now(timezone.utc)
                 row.updated_at = datetime.now(timezone.utc)
                 session.add(row)
                 session.commit()
+                final_done = max(instance_done, instance_total)
+                final_total = max(final_done, instance_total)
+                _emit_instance(inst_idx, "done", done=final_total, total=final_total)
             except Exception as e:
                 session.rollback()
                 stats['instances_failed'] += 1
@@ -1047,6 +1085,7 @@ def _run_startup_lite_snapshot_for_instances(
                     f"Startup lite snapshot sync failed for {instance_key}: {e}",
                     extra={'emoji_type': 'warning'},
                 )
+                _emit_instance(inst_idx, "failed", done=instance_done, total=instance_total)
 
         stats["movie_row_ids"] = sorted(touched_movie_row_ids)
         stats["series_row_ids"] = sorted(touched_series_row_ids)

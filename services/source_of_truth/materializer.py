@@ -1814,6 +1814,21 @@ def run_materialization_for_entities(
             f"Scoped materialization complete{subject_part}: {stats}",
             extra={"emoji_type": "success"},
         )
+        # After placeholder teardown, hard-purge cleaned soft-deleted catalog rows for this scope.
+        try:
+            from services.source_of_truth.catalog_tombstone_purge import purge_cleaned_deleted_catalog
+
+            purge_stats = purge_cleaned_deleted_catalog(
+                movie_ids=movie_ids,
+                episode_ids=episode_ids,
+            )
+            if isinstance(stats, dict) and isinstance(purge_stats, dict):
+                stats["catalog_tombstone_purge"] = purge_stats
+        except Exception as purge_exc:
+            logger.debug(
+                f"Scoped catalog tombstone purge skipped{subject_part}: {purge_exc}",
+                extra={"emoji_type": "debug"},
+            )
         return stats
     except Exception as e:
         session.rollback()

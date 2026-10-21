@@ -234,25 +234,104 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
         "task_run_started_at": started_at.isoformat(),
     }
     try:
+        from services.task_live_progress import FULL_SYNC_CORE_PHASES, seed_sync_live_phases
+
+        seed_sync_live_phases(
+            task_run_id,
+            kind="full_sync",
+            label="Full sync",
+            phase_defs=FULL_SYNC_CORE_PHASES,
+        )
+    except Exception as live_exc:
+        logger.debug("full_sync live seed skipped: %s", live_exc, extra={"emoji_type": "debug"})
+    try:
       with task_run_cancel_scope(task_run_id):
         phases.begin("arr_sync", "ARR catalog sync")
         sync_stats: dict[str, Any] = {}
-        for instance in _configured_arr_instances():
+
+        def _arr_instance_label(inst: dict[str, Any]) -> str:
+            arr_type = str(inst.get("arr_type") or "").strip().lower()
+            instance_key = str(inst.get("instance_key") or "").strip().lower()
+            kind = "Radarr" if arr_type == "radarr" else "Sonarr" if arr_type == "sonarr" else "ARR"
+            if not instance_key or instance_key == arr_type:
+                return kind
+            return f"{kind} · {instance_key}"
+
+        arr_instances = [
+            inst
+            for inst in _configured_arr_instances()
+            if str(inst.get("arr_type") or "").strip().lower() in {"radarr", "sonarr"}
+        ]
+        arr_units: list[dict[str, Any]] = [
+            {
+                "key": str(inst.get("instance_key") or inst.get("arr_type") or f"arr_{idx}").strip().lower(),
+                "label": _arr_instance_label(inst),
+                "done": 0,
+                "total": 0,
+                "status": "pending",
+            }
+            for idx, inst in enumerate(arr_instances)
+        ]
+        if arr_units:
+            phases.progress("arr_sync", units=list(arr_units), unit_label="titles")
+
+        for inst_idx, instance in enumerate(arr_instances):
             ensure_task_run_not_cancelled(task_run_id)
             arr_type = str(instance.get("arr_type") or "").strip().lower()
-            if arr_type not in {"radarr", "sonarr"}:
-                continue
+            arr_units[inst_idx] = {
+                **arr_units[inst_idx],
+                "status": "working",
+                "done": 0,
+                "total": int(arr_units[inst_idx].get("total") or 0),
+            }
+            phases.progress("arr_sync", units=list(arr_units), unit_label="titles")
+
+            def _on_arr_progress(done: int, total: int, *, _idx: int = inst_idx) -> None:
+                arr_units[_idx] = {
+                    **arr_units[_idx],
+                    "status": "working",
+                    "done": max(0, int(done or 0)),
+                    "total": max(0, int(total or 0)),
+                }
+                phases.progress("arr_sync", units=list(arr_units), unit_label="titles")
+
             key = _run_full_sync_with_deadlock_retry(
                 dry_run=False,
                 batch_size=50,
                 types=("movie",) if arr_type == "radarr" else ("series",),
                 instance_key=str(instance.get("instance_key") or "").strip().lower() or None,
                 run_template_backfill=False,
+                on_progress=_on_arr_progress,
             )
             sync_stats[str(instance.get("instance_key") or arr_type)] = key
+            try:
+                final_done = int(
+                    (key or {}).get("movies_seen")
+                    or (key or {}).get("movies_updated")
+                    or 0
+                ) + int(
+                    (key or {}).get("series_seen")
+                    or (key or {}).get("series_updated")
+                    or 0
+                )
+            except Exception:
+                final_done = int(arr_units[inst_idx].get("done") or 0)
+            final_total = max(final_done, int(arr_units[inst_idx].get("total") or 0))
+            arr_units[inst_idx] = {
+                **arr_units[inst_idx],
+                "status": "done",
+                "done": final_total if final_total > 0 else final_done,
+                "total": final_total if final_total > 0 else final_done,
+            }
+            phases.progress("arr_sync", units=list(arr_units), unit_label="titles")
 
         result["arr_sync"] = sync_stats
-        phases.end("arr_sync", metrics=metrics_from_arr_sync(sync_stats))
+        phases.end(
+            "arr_sync",
+            metrics=metrics_from_arr_sync(sync_stats),
+            units=list(arr_units) if arr_units else None,
+            unit_label="titles",
+        )
         ensure_task_run_not_cancelled(task_run_id)
 
         pipeline_stats: dict[str, Any] = {"run_id": run_id}
@@ -263,7 +342,20 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
 
             ensure_task_run_not_cancelled(task_run_id)
             phases.begin("fs_scan", "Filesystem scan")
-            scan_result = scan_once_if_needed(run_id, prefer_incremental=False)
+
+            def _on_fs_progress(files_seen: int, _media_candidates: int) -> None:
+                phases.progress(
+                    "fs_scan",
+                    done=int(files_seen or 0),
+                    total=0,
+                    unit_label="files",
+                )
+
+            scan_result = scan_once_if_needed(
+                run_id,
+                prefer_incremental=False,
+                on_progress=_on_fs_progress,
+            )
             if isinstance(scan_result, tuple):
                 scan_count, scan_info = scan_result
             else:
@@ -274,7 +366,16 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
 
             ensure_task_run_not_cancelled(task_run_id)
             phases.begin("determination", "Status determination")
-            pipeline_stats["determination"] = run_determination_pass()
+
+            def _on_det_progress(done: int, total: int) -> None:
+                phases.progress(
+                    "determination",
+                    done=int(done or 0),
+                    total=int(total or 0),
+                    unit_label="rows",
+                )
+
+            pipeline_stats["determination"] = run_determination_pass(on_progress=_on_det_progress)
             phases.end("determination", metrics=metrics_from_pipeline(pipeline_stats).get("determination"))
 
             ensure_task_run_not_cancelled(task_run_id)
@@ -311,7 +412,43 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
                 )
 
             ensure_task_run_not_cancelled(task_run_id)
+            phases.begin("catalog_gc", "Catalog cleanup")
+            # Seed count cards immediately so the phase is expandable while working.
+            phases.progress(
+                "catalog_gc",
+                done=0,
+                total=0,
+                unit_label="rows",
+                metrics=metrics_from_pipeline({"catalog_gc": {}}).get("catalog_gc"),
+            )
+
+            def _on_catalog_gc_progress(done: int, total: int, stats: dict | None = None) -> None:
+                phases.progress(
+                    "catalog_gc",
+                    done=int(done or 0),
+                    total=int(total or 0),
+                    unit_label="rows",
+                    metrics=metrics_from_pipeline({"catalog_gc": stats or {}}).get("catalog_gc"),
+                )
+
+            from services.source_of_truth.catalog_tombstone_purge import (
+                purge_cleaned_deleted_catalog_batch,
+            )
+
+            pipeline_stats["catalog_gc"] = purge_cleaned_deleted_catalog_batch(
+                on_progress=_on_catalog_gc_progress,
+            )
+            phases.end(
+                "catalog_gc",
+                metrics=metrics_from_pipeline(pipeline_stats).get("catalog_gc"),
+            )
+
+            ensure_task_run_not_cancelled(task_run_id)
             phases.begin("calendar", "Calendar status")
+            phases.progress(
+                "calendar",
+                metrics=metrics_from_pipeline({"calendar": {}}).get("calendar"),
+            )
             pipeline_stats["calendar"] = run_calendar_phase()
             pipeline_stats["orphan_placeholders"] = run_orphan_placeholder_cleanup()
             phases.end("calendar", metrics=metrics_from_pipeline(pipeline_stats).get("calendar"))
@@ -446,6 +583,34 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
 
     started_at = datetime.now(timezone.utc)
     result: dict[str, Any] = {"task_run_id": task_run_id}
+
+    def _lite_live(phase_key: str, status: str, *, phase_label: str | None = None) -> None:
+        if task_run_id is None:
+            return
+        try:
+            from services.task_live_progress import publish_sync_phase_live
+
+            publish_sync_phase_live(
+                int(task_run_id),
+                kind="lite_sync",
+                phase_key=phase_key,
+                phase_label=phase_label,
+                status=status,
+            )
+        except Exception as live_exc:
+            logger.debug("lite_sync live publish skipped: %s", live_exc, extra={"emoji_type": "debug"})
+
+    try:
+        from services.task_live_progress import LITE_SYNC_CORE_PHASES, seed_sync_live_phases
+
+        seed_sync_live_phases(
+            int(task_run_id),
+            kind="lite_sync",
+            label="Lite sync",
+            phase_defs=LITE_SYNC_CORE_PHASES,
+        )
+    except Exception as live_exc:
+        logger.debug("lite_sync live seed skipped: %s", live_exc, extra={"emoji_type": "debug"})
     try:
       with task_run_cancel_scope(task_run_id):
         instances = _configured_arr_instances()
@@ -458,6 +623,7 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
             determination_stats=None,
             materialization_stats=None,
         )
+        _lite_live("discovery", "working", phase_label="Catalog discovery")
 
         from services.source_of_truth.lite_reconcile import (
             run_lite_startup_reconciliation_pre_discovery,
@@ -498,6 +664,8 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
         )
 
         ensure_task_run_not_cancelled(task_run_id)
+        _lite_live("discovery", "done", phase_label="Catalog discovery")
+        _lite_live("calendar_dates", "working", phase_label="Calendar dates")
         phase_started = time.monotonic()
         result["calendar_date_refresh"] = run_calendar_date_refresh()
         logger.info(
@@ -505,6 +673,7 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
             time.monotonic() - phase_started,
             extra={"emoji_type": "info"},
         )
+        _lite_live("calendar_dates", "done", phase_label="Calendar dates")
 
         ensure_task_run_not_cancelled(task_run_id)
         _record_progress(
@@ -516,6 +685,7 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
             determination_stats=None,
             materialization_stats=None,
         )
+        _lite_live("determination", "working", phase_label="Status determination")
 
         if movie_row_ids or episode_row_ids:
             determination_stats = run_determination_for_entities(
@@ -528,6 +698,7 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
                 "reason": "no_lite_changes_detected",
             }
         result["determination"] = determination_stats
+        _lite_live("determination", "done", phase_label="Status determination")
 
         ensure_task_run_not_cancelled(task_run_id)
         _record_progress(
@@ -539,6 +710,7 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
             determination_stats=determination_stats,
             materialization_stats=None,
         )
+        _lite_live("materialization", "working", phase_label="Placeholder materialization")
 
         if movie_row_ids or episode_row_ids:
             materialization_stats = run_materialization_for_entities(
@@ -555,6 +727,7 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
             startup_sync_stats.get("tag_policies") if isinstance(startup_sync_stats, dict) else None,
         )
         result["materialization"] = materialization_stats
+        _lite_live("materialization", "done", phase_label="Placeholder materialization")
 
         ensure_task_run_not_cancelled(task_run_id)
         _record_progress(
@@ -568,8 +741,10 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
             completed_at=datetime.now(timezone.utc),
         )
 
+        _lite_live("calendar", "working", phase_label="Calendar status")
         result["calendar"] = run_calendar_phase()
         result["orphan_placeholders"] = run_orphan_placeholder_cleanup()
+        _lite_live("calendar", "done", phase_label="Calendar status")
 
         try:
             from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_refresh
@@ -579,6 +754,7 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
                 episode_row_ids=episode_row_ids,
             )
             if ph_ids:
+                # Lite art enqueue has no task_run_id; leave art off this run's live (plan v1).
                 result["placeholder_art_refresh"] = enqueue_placeholder_art_refresh(ph_ids)
         except Exception as art_exc:
             logger.warning(f"Lite sync art refresh enqueue failed: {art_exc}", extra={"emoji_type": "warning"})
@@ -622,6 +798,24 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
             failed=True,
             error_message=str(exc),
         )
+        try:
+            from services.task_live_progress import LIVE_KEY, _load_summary
+
+            live = _load_summary(int(task_run_id)).get(LIVE_KEY)
+            if isinstance(live, dict):
+                for phase in live.get("phases") or []:
+                    if not isinstance(phase, dict):
+                        continue
+                    if str(phase.get("status") or "").lower() != "working":
+                        continue
+                    _lite_live(
+                        str(phase.get("key") or "discovery"),
+                        "failed",
+                        phase_label=str(phase.get("label") or None),
+                    )
+                    break
+        except Exception:
+            pass
         if own_run:
             finish_task_run(task_run_id, status="failed", summary=result, error_message=str(exc))
         raise
@@ -649,13 +843,44 @@ def run_calendar_only_maintenance(*, trigger: TaskTrigger = "manual") -> dict[st
 
     task_run_id = begin_task_run(task_key="calendar_only", trigger=trigger)
     result: dict[str, Any] = {"task_run_id": task_run_id}
+
+    def _cal_live(phase_key: str, status: str, *, phase_label: str | None = None) -> None:
+        try:
+            from services.task_live_progress import publish_sync_phase_live
+
+            publish_sync_phase_live(
+                int(task_run_id),
+                kind="calendar_only",
+                phase_key=phase_key,
+                phase_label=phase_label,
+                status=status,
+            )
+        except Exception as live_exc:
+            logger.debug("calendar_only live publish skipped: %s", live_exc, extra={"emoji_type": "debug"})
+
     try:
+        try:
+            from services.task_live_progress import CALENDAR_ONLY_PHASES, seed_sync_live_phases
+
+            seed_sync_live_phases(
+                int(task_run_id),
+                kind="calendar_only",
+                label="Calendar",
+                phase_defs=CALENDAR_ONLY_PHASES,
+            )
+        except Exception as live_exc:
+            logger.debug("calendar_only live seed skipped: %s", live_exc, extra={"emoji_type": "debug"})
+        _cal_live("calendar_dates", "working", phase_label="Calendar dates")
         result["calendar_date_refresh"] = run_calendar_date_refresh()
+        _cal_live("calendar_dates", "done", phase_label="Calendar dates")
+        _cal_live("calendar", "working", phase_label="Calendar status")
         result["calendar"] = run_calendar_phase()
         result["orphan_placeholders"] = run_orphan_placeholder_cleanup()
+        _cal_live("calendar", "done", phase_label="Calendar status")
         finish_task_run(task_run_id, status="done", summary=result)
         return result
     except Exception as exc:
+        _cal_live("calendar_dates", "failed", phase_label="Calendar dates")
         finish_task_run(task_run_id, status="failed", summary=result, error_message=str(exc))
         raise
     finally:
