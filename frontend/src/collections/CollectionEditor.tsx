@@ -21,6 +21,7 @@ import {
   useCollectionTheme,
 } from "./collectionTheme";
 import { AndOrToggle, ToggleSwitch } from "./ToggleSwitch";
+import { VisibleOnAtCreationHelp } from "./VisibleOnAtCreationHelp";
 import type {
   CollectionActiveWindow,
   CollectionBuilderMeta,
@@ -3013,14 +3014,11 @@ export function CollectionEditor(props: {
             </div>
 
             <div className={`border-t pt-4 ${theme.divider}`}>
-              <div className={`mb-1 ${theme.blockTitle}`}>
-                Visible on
-              </div>
-              <p className={`mb-3 text-[13px] leading-relaxed ${theme.muted}`}>
-                Promote this collection as a row in Plex (same as Visible On in Plex).{" "}
-                <span className={isLight ? "text-amber-800" : "text-amber-200"}>Plex Pass required.</span> The
-                collection still syncs into the library&apos;s Collections list when all are off.
-              </p>
+              <VisibleOnAtCreationHelp
+                titleClassName={theme.blockTitle}
+                mutedClassName={theme.muted}
+                plexPassClassName={isLight ? "text-amber-800" : "text-amber-200"}
+              />
               <div className="flex flex-col gap-2">
                 {(
                   [

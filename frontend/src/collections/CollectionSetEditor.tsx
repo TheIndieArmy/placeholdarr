@@ -20,6 +20,7 @@ import type {
 } from "../types/api";
 import { ToggleSwitch } from "../ToggleSwitch";
 import { getCollectionTheme } from "./collectionTheme";
+import { VisibleOnAtCreationHelp } from "./VisibleOnAtCreationHelp";
 
 type SetCategory = CollectionSetConfig["category"];
 
@@ -848,18 +849,15 @@ export function CollectionSetEditor(props: {
           </span>
           <div className="min-w-0 flex-1 space-y-1">
             <div className={theme.blockTitle}>Display</div>
-            <div className={theme.blockSubtitle}>Where each set collection appears in Plex</div>
+            <div className={theme.blockSubtitle}>Visible On defaults when each set collection is created</div>
           </div>
         </div>
         <div>
-          <div className={`mb-1 ${theme.blockTitle}`}>
-            Visible on
-          </div>
-          <p className={`mb-3 text-[13px] leading-relaxed ${theme.muted}`}>
-            Promote every collection in this set as a row in Plex (same as Visible On in Plex).{" "}
-            <span className={isLight ? "text-amber-800" : "text-amber-200"}>Plex Pass required.</span> Collections
-            still sync into the library&apos;s Collections list when all are off.
-          </p>
+          <VisibleOnAtCreationHelp
+            titleClassName={theme.blockTitle}
+            mutedClassName={theme.muted}
+            plexPassClassName={isLight ? "text-amber-800" : "text-amber-200"}
+          />
           <div className="flex flex-col gap-2">
             {(
               [

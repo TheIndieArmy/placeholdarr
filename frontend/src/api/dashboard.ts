@@ -172,6 +172,7 @@ export function getSeriesDetail(seriesId: number): Promise<DetailResponse> {
 export type EntityReconcileStartResponse = {
   ok: boolean;
   job_id?: number;
+  followup_job_id?: number | null;
   step?: string;
   step_label?: string;
   display_title?: string;

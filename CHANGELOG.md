@@ -9,20 +9,11 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
-### Fixed
-
-- **Movie delete activity vs purge**: Movie-deleted result history is written before catalog tombstone purge so the activity row can keep its movie FK.
-- **Series delete after purge**: Series delete no longer fails (and retries) when materialization hard-purges the series before the webhook return; already-absent deletes complete as done.
-- **Title refresh sidebar pill**: Manual single-item refresh keeps the sidebar progress pill across page reloads (resumes polling the in-flight job).
-- **Delete then quick re-add**: Pending movie-deleted materialization is superseded when the same title is re-added; stale obsolete teardown skips live rows; series bulk cleanup skips when the series is no longer soft-deleted.
-- **Catalog purge vs re-add**: Tombstone purge locks catalog rows and only hard-deletes when still soft-deleted, so a re-add mid-purge cannot lose the revived row.
-- **Title refresh phase bars**: Manual single-item refresh publishes per-phase live bars (Arr, catalog, placeholders, artwork, players) with expandable sidebar progress like other tasks.
-
 ## Pre-release
 
 ## Released
 
-## [0.11.5] - 2026-10-21
+## [0.11.5] - 2026-10-22
 
 ### Summary
 
@@ -32,6 +23,9 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **ARR instance bars**: Full sync ARR catalog and lite Catalog discovery nest one bar per Radarr/Sonarr instance.
 - **Catalog tombstone purge**: Soft-deleted catalog rows are hard-removed after placeholders clear (scoped materialization plus full-sync Catalog cleanup).
 - **Stop sync tasks**: Working full and lite sync runs can be stopped from Tasks or the sidebar pill.
+- **Delete / re-add hardening**: Tombstone purge and obsolete teardown survive quick Arr delete-then-readd without losing revived titles.
+- **Title refresh pill**: Manual single-item refresh keeps live phase bars across reloads, retries poll blips, and continues into follow-up jobs.
+- **Collections Visible on**: Create-time stamp only; Collection sync no longer overwrites Plex Visible On.
 
 ### Added
 
@@ -44,6 +38,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Stop full sync**: Working full sync runs show Stop in Tasks and the sidebar pill (same abandon path as art refresh; stops at the next cancel checkpoint).
 - **Stop lite sync**: Working lite sync runs show Stop in Tasks and the sidebar pill.
 - **Art Updating count cards**: Art refresh seeds Updating count cards from run start (zeroed / —) like other live phases.
+- **Title refresh phase bars**: Manual single-item refresh publishes per-phase live bars (Arr, catalog, placeholders, artwork, players) with expandable sidebar progress like other tasks.
 
 ### Changed
 
@@ -55,10 +50,21 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Tasks history row contrast**: Main run rows use a raised surface; expanded phase detail sits on a darker inset so open rows stay easy to collapse.
 - **Compact ARR unit labels**: Sidebar instance bars show the instance name on the first line; Arr type and counts share the second line.
 - **Metric tile layout**: Count cards reserve two lines for labels and pin the value on the third line so wrapped and short labels align.
+- **Collections Visible on**: Visible On applies only when Placeholdarr creates a Plex collection (first create, new Set child, or seasonal delete recreate). Routine Collection sync no longer overwrites it; editor copy spells out those ground rules.
 
 ### Fixed
 
 - **Duplicate phase count footer**: Progress sections already shown on expandable live phases (for example Status determination) no longer repeat under the bars.
+- **Movie delete activity vs purge**: Movie-deleted result history is written before catalog tombstone purge so the activity row can keep its movie FK.
+- **Series delete after purge**: Series delete no longer fails (and retries) when materialization hard-purges the series before the webhook return; already-absent deletes complete as done.
+- **Title refresh sidebar pill**: Manual single-item refresh keeps the sidebar progress pill across page reloads (resumes polling the in-flight job).
+- **Delete then quick re-add**: Pending movie-deleted materialization is superseded when the same title is re-added; stale obsolete teardown skips live rows; series bulk cleanup skips when the series is no longer soft-deleted.
+- **Catalog purge vs re-add**: Tombstone purge locks catalog rows and only hard-deletes when still soft-deleted, so a re-add mid-purge cannot lose the revived row.
+- **Series bulk skip fallback**: When series bulk tombstone cleanup skips a revived series, episodes fall back to per-episode materialization instead of being left untouched.
+- **Title refresh poll blips**: Transient status poll failures retry before clearing the sidebar pill; follow-up reconcile jobs stay visible after the first job finishes (including across page reload).
+- **Obsolete teardown vs re-add**: Movie/episode obsolete cleanup locks the catalog row and re-checks soft-delete before removing placeholders; claimed delete mats can be superseded on re-add.
+- **Task live clobber**: Full-sync / placeholder-refresh summary merges no longer overwrite a newer ``summary.live`` from an unlocked stale read.
+- **Movie-removed history after re-add**: Delete activity finalize skips writing a removed row when the movie is no longer soft-deleted.
 
 ## [0.11.4] - 2026-10-20
 

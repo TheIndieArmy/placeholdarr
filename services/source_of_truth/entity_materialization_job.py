@@ -46,17 +46,18 @@ def _payload_targets_movie_deleted(payload: dict[str, Any], movie_row_id: int) -
 
 
 def supersede_pending_movie_deleted_materialization(session, movie_row_id: int) -> int:
-    """Mark pending movie_deleted materialization jobs for this row as done.
+    """Mark pending/claimed movie_deleted materialization jobs for this row as done.
 
     Used when a quick re-add revives the same catalog row so deferred delete
-    teardown / purge does not run after the title is live again.
+    teardown / purge does not run after the title is live again. Claimed jobs
+    are also revoked so an in-flight handler can abandon at the next checkpoint.
     """
     now = datetime.now(timezone.utc)
     rows = (
         session.query(Job)
         .filter(
             Job.job_type == ENTITY_MATERIALIZATION_JOB_TYPE,
-            Job.status == "PENDING",
+            Job.status.in_(("PENDING", "CLAIMED", "WORKING")),
         )
         .with_for_update(skip_locked=True)
         .all()
@@ -66,6 +67,13 @@ def supersede_pending_movie_deleted_materialization(session, movie_row_id: int) 
         payload = job.payload if isinstance(job.payload, dict) else {}
         if not _payload_targets_movie_deleted(payload, int(movie_row_id)):
             continue
+        if str(job.status or "").upper() in ("CLAIMED", "WORKING"):
+            try:
+                from services.worker import mark_claim_revoked
+
+                mark_claim_revoked(int(job.id))
+            except Exception:
+                pass
         job.status = "DONE"
         job.error_message = "superseded_by_movie_readd"
         job.updated_at = now
@@ -73,7 +81,7 @@ def supersede_pending_movie_deleted_materialization(session, movie_row_id: int) 
         superseded += 1
     if superseded:
         logger.info(
-            f"Superseded {superseded} pending movie_deleted materialization job(s) "
+            f"Superseded {superseded} movie_deleted materialization job(s) "
             f"for movie_row_id={int(movie_row_id)} after re-add",
             extra={"emoji_type": "info"},
         )
@@ -138,7 +146,20 @@ def _finalize_movie_deleted_activity(
     )
     sess = get_session()
     try:
-        movie_after = sess.query(Movie).filter(Movie.id == movie_row_id).first()
+        movie_after = (
+            sess.query(Movie)
+            .filter(Movie.id == movie_row_id)
+            .with_for_update()
+            .first()
+        )
+        # Concurrent re-add cleared the tombstone; do not write a "removed" history row.
+        if movie_after is not None and not bool(getattr(movie_after, "is_deleted", False)):
+            logger.info(
+                f"entity_materialization activity skipped movie_id={movie_row_id} "
+                f"(no longer soft-deleted; likely re-added)",
+                extra={"emoji_type": "info"},
+            )
+            return
         result_path = ""
         item_title = "Unknown Movie"
         instance_key = None

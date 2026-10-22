@@ -601,14 +601,15 @@ def placeholder_refresh_task_label(summary: dict[str, Any] | None) -> str:
 
 
 def _merge_placeholder_refresh_enqueue_flags(task_run_id: int, out: dict[str, Any]) -> None:
-    """Attach enqueue result flags without clobbering begin_* phase metrics / run ids."""
+    """Attach enqueue result flags without clobbering begin_* phase metrics / run ids / live."""
     from services.task_run_history import update_task_run_summary
     from services.task_run_phases import _load_summary
 
-    live = _load_summary(int(task_run_id)) or {}
-    skip = {"art_backfill", "nfo_backfill", "phases", "progress"}
+    summary = _load_summary(int(task_run_id)) or {}
+    skip = {"art_backfill", "nfo_backfill", "phases", "progress", "live"}
     safe = {k: v for k, v in out.items() if k not in skip}
-    update_task_run_summary(int(task_run_id), {**live, **safe, "enqueued": bool(out.get("enqueued"))})
+    base = {k: v for k, v in summary.items() if k != "live"}
+    update_task_run_summary(int(task_run_id), {**base, **safe, "enqueued": bool(out.get("enqueued"))})
 
 
 def _persist_placeholder_refresh_progress(

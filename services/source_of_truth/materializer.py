@@ -739,12 +739,17 @@ def apply_movie_materialization(movie_id: int, session=None, activity_reason: st
             }
 
         if determination == DETERMINATION_OBSOLETE:
-            # Quick delete-then-readd can leave a stale obsolete determination after
-            # upsert clears is_deleted. Do not tear down a live title's placeholder.
-            try:
-                session.refresh(movie)
-            except Exception:
-                pass
+            # Lock the row for the obsolete decision + teardown so a concurrent re-add
+            # cannot clear is_deleted mid-cleanup and still lose its placeholder.
+            locked = (
+                session.query(Movie)
+                .filter(Movie.id == int(movie.id))
+                .with_for_update()
+                .first()
+            )
+            if not locked:
+                return {"ok": False, "reason": "movie_not_found", "movie_id": movie_id}
+            movie = locked
             if not bool(getattr(movie, "has_file", False)) and not bool(
                 getattr(movie, "is_deleted", False)
             ):
@@ -763,6 +768,15 @@ def apply_movie_materialization(movie_id: int, session=None, activity_reason: st
                 candidate_paths.append(movie.placeholder_filepath)
             first_path = next((p for p in candidate_paths if p), None)
             disk_paths = filter_movie_disk_cleanup_paths(session, movie, candidate_paths)
+            # Re-check under the same lock before touching disk.
+            if not bool(getattr(movie, "has_file", False)) and not bool(
+                getattr(movie, "is_deleted", False)
+            ):
+                return {
+                    "ok": True,
+                    "action": "noop_stale_obsolete",
+                    "movie_id": movie.id,
+                }
             cleanup_result = cleanup_movie_placeholder_files(candidate_paths=disk_paths)
 
             movie.has_placeholder = False
@@ -880,12 +894,24 @@ def apply_episode_materialization(episode_id: int, session=None, activity_reason
             }
 
         if determination == DETERMINATION_OBSOLETE:
-            try:
-                session.refresh(episode)
-                if series is not None:
-                    session.refresh(series)
-            except Exception:
-                pass
+            locked = (
+                session.query(Episode)
+                .filter(Episode.id == int(episode.id))
+                .with_for_update()
+                .first()
+            )
+            if not locked:
+                return {"ok": False, "reason": "episode_not_found", "episode_id": episode_id}
+            episode = locked
+            if series is not None and getattr(series, "id", None) is not None:
+                locked_series = (
+                    session.query(Series)
+                    .filter(Series.id == int(series.id))
+                    .with_for_update()
+                    .first()
+                )
+                if locked_series is not None:
+                    series = locked_series
             series_deleted = bool(getattr(series, "is_deleted", False)) if series is not None else False
             if (
                 not bool(getattr(episode, "has_file", False))
@@ -906,6 +932,17 @@ def apply_episode_materialization(episode_id: int, session=None, activity_reason
             if getattr(episode, "placeholder_filepath", None):
                 candidate_paths.append(episode.placeholder_filepath)
             first_path = next((p for p in candidate_paths if p), None)
+            series_deleted = bool(getattr(series, "is_deleted", False)) if series is not None else False
+            if (
+                not bool(getattr(episode, "has_file", False))
+                and not bool(getattr(episode, "is_deleted", False))
+                and not series_deleted
+            ):
+                return {
+                    "ok": True,
+                    "action": "noop_stale_obsolete",
+                    "episode_id": episode.id,
+                }
             cleanup_result = cleanup_episode_placeholder_files(
                 session,
                 season=season,
@@ -1438,22 +1475,25 @@ def _run_materialization_for_ids(
         ids = [int(x) for x in (series_episode_ids or []) if x is not None]
         if not ids:
             return
-        series = session.query(Series).filter(Series.id == int(series_id)).first()
+        series = (
+            session.query(Series)
+            .filter(Series.id == int(series_id))
+            .with_for_update()
+            .first()
+        )
         if not series:
             for episode_id in ids:
                 _process_single_episode_materialization(episode_id)
             return
         # Quick delete-then-readd: another worker may have cleared is_deleted already.
-        try:
-            session.refresh(series)
-        except Exception:
-            pass
         if not bool(getattr(series, "is_deleted", False)):
             logger.info(
                 f"Series bulk tombstone cleanup skipped for series_id={int(series_id)} "
-                f"(no longer soft-deleted; likely re-added)",
+                f"(no longer soft-deleted; likely re-added); falling back to per-episode materialization",
                 extra={"emoji_type": "info"},
             )
+            for episode_id in ids:
+                _process_single_episode_materialization(episode_id)
             return
 
         candidate_paths = _mark_placeholder_rows_deleted_for_episodes(

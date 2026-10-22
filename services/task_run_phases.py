@@ -701,7 +701,11 @@ def refresh_full_sync_task_progress(
         phases=phase_list,
         overall_status=overall_status,
     )
-    update_task_run_summary(task_run_id, {**summary, "phases": phase_list, "progress": progress})
+    # Do not rewrite ``live`` from this unlocked read; concurrent art/NFO heartbeats
+    # may have a newer live payload under mutate_task_run_summary.
+    payload = {**summary, "phases": phase_list, "progress": progress}
+    payload.pop("live", None)
+    update_task_run_summary(task_run_id, payload)
 
 
 def try_complete_full_sync_task_run(
@@ -1190,4 +1194,6 @@ def _save_phases(task_run_id: int, phases: list[dict[str, Any]], *, extra: dict[
     payload: dict[str, Any] = {**summary, "phases": phases, "progress": progress}
     if art_backfill is not None:
         payload["art_backfill"] = art_backfill
+    # Preserve concurrent ``summary.live`` writers (do not clobber with a stale load).
+    payload.pop("live", None)
     update_task_run_summary(task_run_id, payload)

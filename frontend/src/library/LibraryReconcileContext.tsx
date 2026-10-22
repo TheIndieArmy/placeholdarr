@@ -5,6 +5,7 @@ import {
   useEffect,
   useId,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -44,24 +45,50 @@ const IDLE_STATUS: LibraryReconcileSidebarStatus = {
 /** Survives full page reloads so the sidebar pill can resume polling a working job. */
 const RECONCILE_JOB_SESSION_KEY = "placeholdarr.libraryReconcileJobId";
 
-function readStoredReconcileJobId(): number | null {
+type StoredReconcileJobs = {
+  jobId: number;
+  followupJobId: number | null;
+};
+
+function _positiveJobId(raw: unknown): number | null {
+  const id = typeof raw === "number" ? raw : Number(raw);
+  return Number.isFinite(id) && id > 0 ? Math.trunc(id) : null;
+}
+
+function readStoredReconcileJobs(): StoredReconcileJobs | null {
   try {
     const raw = sessionStorage.getItem(RECONCILE_JOB_SESSION_KEY);
     if (!raw) return null;
-    const id = Number(raw);
-    return Number.isFinite(id) && id > 0 ? Math.trunc(id) : null;
+    // Legacy: plain numeric job id string.
+    if (/^\d+$/.test(raw.trim())) {
+      const jobId = _positiveJobId(raw.trim());
+      return jobId != null ? { jobId, followupJobId: null } : null;
+    }
+    const parsed = JSON.parse(raw) as { jobId?: unknown; followupJobId?: unknown };
+    const jobId = _positiveJobId(parsed?.jobId);
+    if (jobId == null) return null;
+    const followupJobId = _positiveJobId(parsed?.followupJobId);
+    return {
+      jobId,
+      followupJobId: followupJobId != null && followupJobId !== jobId ? followupJobId : null,
+    };
   } catch {
     return null;
   }
 }
 
-function writeStoredReconcileJobId(jobId: number | null): void {
+function writeStoredReconcileJobs(jobId: number | null, followupJobId: number | null = null): void {
   try {
     if (jobId == null) {
       sessionStorage.removeItem(RECONCILE_JOB_SESSION_KEY);
-    } else {
-      sessionStorage.setItem(RECONCILE_JOB_SESSION_KEY, String(jobId));
+      return;
     }
+    const followup =
+      followupJobId != null && followupJobId > 0 && followupJobId !== jobId ? followupJobId : null;
+    sessionStorage.setItem(
+      RECONCILE_JOB_SESSION_KEY,
+      JSON.stringify({ jobId, followupJobId: followup }),
+    );
   } catch {
     // Ignore quota / private-mode failures; pill just will not survive reload.
   }
@@ -78,22 +105,29 @@ export function useLibraryReconcile(): LibraryReconcileContextValue {
 export function LibraryReconcileProvider(props: { children: ReactNode }) {
   const [status, setStatus] = useState<LibraryReconcileSidebarStatus>(IDLE_STATUS);
   const [pollingJobId, setPollingJobId] = useState<number | null>(null);
+  const [followupJobId, setFollowupJobId] = useState<number | null>(null);
   const [resumeChecked, setResumeChecked] = useState(false);
+  const pollFailuresRef = useRef(0);
 
   const clearPollingJob = useCallback(() => {
-    writeStoredReconcileJobId(null);
+    writeStoredReconcileJobs(null);
     setPollingJobId(null);
+    setFollowupJobId(null);
+    pollFailuresRef.current = 0;
   }, []);
 
-  const beginPollingJob = useCallback((jobId: number) => {
-    writeStoredReconcileJobId(jobId);
+  const beginPollingJob = useCallback((jobId: number, followupId: number | null = null) => {
+    const followup = followupId != null && followupId > 0 && followupId !== jobId ? followupId : null;
+    writeStoredReconcileJobs(jobId, followup);
     setPollingJobId(jobId);
+    setFollowupJobId(followup);
+    pollFailuresRef.current = 0;
   }, []);
 
   // Resume an in-flight title refresh after a full page reload.
   useEffect(() => {
-    const storedId = readStoredReconcileJobId();
-    if (storedId == null) {
+    const stored = readStoredReconcileJobs();
+    if (stored == null) {
       setResumeChecked(true);
       return;
     }
@@ -105,7 +139,7 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
       title: null,
       live: null,
     });
-    beginPollingJob(storedId);
+    beginPollingJob(stored.jobId, stored.followupJobId);
     setResumeChecked(true);
   }, [beginPollingJob]);
 
@@ -126,6 +160,7 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
       try {
         const jobStatus = await getEntityReconcileStatus(pollingJobId);
         if (stopped) return;
+        pollFailuresRef.current = 0;
 
         const title = String(jobStatus.display_title || "").trim() || null;
         const live = jobStatus.live ?? null;
@@ -144,6 +179,19 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
         }
 
         if (jobStatus.status === "done") {
+          if (followupJobId != null && followupJobId !== pollingJobId) {
+            const nextId = followupJobId;
+            setStatus({
+              busy: true,
+              kind: "info",
+              message: "Follow-up refresh queued…",
+              step: "queued",
+              title,
+              live: null,
+            });
+            beginPollingJob(nextId, null);
+            return;
+          }
           clearPollingJob();
           setStatus({
             busy: false,
@@ -166,22 +214,38 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
         });
       } catch (e) {
         if (!stopped) {
-          clearPollingJob();
           const msg = e instanceof Error ? e.message : "Could not load refresh status";
           const stale =
             /not found/i.test(msg) || /404/.test(msg) || /Reconcile job not found/i.test(msg);
-          if (stale && resumeChecked) {
-            setStatus(IDLE_STATUS);
+          if (stale) {
+            clearPollingJob();
+            if (resumeChecked) {
+              setStatus(IDLE_STATUS);
+              return;
+            }
+            setStatus({
+              busy: false,
+              kind: "error",
+              message: msg,
+              step: null,
+              title: null,
+              live: null,
+            });
             return;
           }
-          setStatus({
-            busy: false,
-            kind: "error",
-            message: msg,
-            step: null,
-            title: null,
-            live: null,
-          });
+          // Transient network/5xx: keep polling; only fail after several misses.
+          pollFailuresRef.current += 1;
+          if (pollFailuresRef.current >= 3) {
+            clearPollingJob();
+            setStatus({
+              busy: false,
+              kind: "error",
+              message: msg,
+              step: null,
+              title: null,
+              live: null,
+            });
+          }
         }
       }
     };
@@ -194,7 +258,7 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
       stopped = true;
       window.clearInterval(interval);
     };
-  }, [pollingJobId, clearPollingJob, resumeChecked]);
+  }, [pollingJobId, followupJobId, clearPollingJob, beginPollingJob, resumeChecked]);
 
   const runReconcile = useCallback(async (startReconcile: () => Promise<EntityReconcileStartResponse>) => {
     clearPollingJob();
@@ -211,6 +275,10 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
       if (!out.ok || out.job_id == null) {
         throw new Error(out.message || "Failed to start refresh");
       }
+      const followup =
+        out.followup_job_id != null && Number(out.followup_job_id) > 0
+          ? Math.trunc(Number(out.followup_job_id))
+          : null;
       setStatus({
         busy: true,
         kind: "info",
@@ -219,7 +287,7 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
         title: String(out.display_title || "").trim() || null,
         live: out.live ?? null,
       });
-      beginPollingJob(out.job_id);
+      beginPollingJob(out.job_id, followup);
     } catch (e) {
       clearPollingJob();
       setStatus({
