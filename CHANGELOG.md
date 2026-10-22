@@ -65,6 +65,9 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Obsolete teardown vs re-add**: Movie/episode obsolete cleanup locks the catalog row and re-checks soft-delete before removing placeholders; claimed delete mats can be superseded on re-add.
 - **Task live clobber**: Full-sync / placeholder-refresh summary merges no longer overwrite a newer ``summary.live`` from an unlocked stale read.
 - **Movie-removed history after re-add**: Delete activity finalize skips writing a removed row when the movie is no longer soft-deleted.
+- **Stop during ARR catalog sync**: Full sync honors cancel between Arr titles and committed batches so Stop does not leave a long catalog fetch running after the task is marked STOPPED.
+- **Overlapping full sync after Stop**: A new full sync cannot start while another full sync process is still active (even if the Tasks row already shows STOPPED).
+- **Stopped phase bars**: Interrupted live phases keep a partial bar from frozen done/total instead of filling to 100%.
 
 ## [0.11.4] - 2026-10-20
 

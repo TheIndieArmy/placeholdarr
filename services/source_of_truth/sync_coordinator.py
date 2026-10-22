@@ -14,7 +14,18 @@ def is_full_sync_active() -> bool:
         return _full_sync_active
 
 
+def try_begin_full_sync() -> bool:
+    """Mark full sync active. Returns False when another full sync is already running."""
+    global _full_sync_active
+    with _coordinator_lock:
+        if _full_sync_active:
+            return False
+        _full_sync_active = True
+        return True
+
+
 def begin_full_sync() -> None:
+    """Force-mark full sync active (prefer ``try_begin_full_sync`` for new entry points)."""
     global _full_sync_active
     with _coordinator_lock:
         _full_sync_active = True

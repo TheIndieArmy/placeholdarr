@@ -207,9 +207,14 @@ export function TaskLiveDetailSections(props: {
 
 function phaseBarPct(done: number, total: number, status: LivePhaseBar["status"]): number {
   if (status === "pending" || status === "skipped") return 0;
-  // Unknown total (e.g. FS walk): keep the bar empty while counting up in the label.
+  // Unknown total (e.g. FS walk): empty while working; full when the phase has ended.
   if (total <= 0) return status === "done" || status === "failed" ? 100 : 0;
-  if (status === "done" || status === "failed" || done >= total) return 100;
+  if (status === "done" || done >= total) return 100;
+  // Stopped/failed: keep the frozen done/total fraction (do not paint a full bar).
+  if (status === "failed") {
+    if (done <= 0) return 0;
+    return Math.min(100, Math.floor((100 * done) / total));
+  }
   // Working: never paint a full bar from rounding (e.g. 249/250 → 100%).
   return Math.min(99, Math.floor((100 * done) / total));
 }

@@ -26,11 +26,12 @@ from services.source_of_truth.startup import (
 )
 from services.source_of_truth.sync_coordinator import (
     acquire_pipeline_blocking,
-    begin_full_sync,
     end_full_sync,
+    is_full_sync_active,
     release_pipeline,
     should_skip_lite_or_calendar,
     try_acquire_pipeline,
+    try_begin_full_sync,
 )
 from services.source_of_truth.sync_runner import run_full_sync
 from services.task_run_history import (
@@ -213,6 +214,18 @@ def _run_self_healing_pipeline_inner(run_id: str, *, include_calendar_date_refre
 
 def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, Any]:
     """Full ARR sync for all instances, then blocking self-heal pipeline."""
+    if is_full_sync_active():
+        skip_id = record_skipped_task_run(
+            task_key="full_sync",
+            trigger=trigger,
+            skip_reason="full_sync_in_progress",
+        )
+        logger.info(
+            "Full sync skipped: another full sync is still running",
+            extra={"emoji_type": "info"},
+        )
+        return {"skipped": True, "reason": "full_sync_in_progress", "task_run_id": skip_id}
+
     run_id = f"full_sync:{trigger}:{uuid4()}"
     task_run_id = begin_task_run(task_key="full_sync", trigger=trigger)
     started_at = datetime.now(timezone.utc)
@@ -234,7 +247,18 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
     )
 
     phases = TaskRunPhaseTracker(task_run_id, started_at=started_at)
-    begin_full_sync()
+    if not try_begin_full_sync():
+        finish_task_run(
+            task_run_id,
+            status="skipped",
+            summary={"skipped": True, "reason": "full_sync_in_progress"},
+            skip_reason="full_sync_in_progress",
+        )
+        logger.info(
+            "Full sync skipped after task open: another full sync claimed the lock",
+            extra={"emoji_type": "info"},
+        )
+        return {"skipped": True, "reason": "full_sync_in_progress", "task_run_id": task_run_id}
     result: dict[str, Any] = {
         "task_run_id": task_run_id,
         "run_id": run_id,
