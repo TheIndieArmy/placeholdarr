@@ -4,7 +4,7 @@ import os
 import time
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 from core.config import settings
 from core.logger import logger
@@ -34,6 +34,20 @@ RECONCILE_VALIDATE_CHUNK_SIZE = 500
 DETERMINATION_PROGRESS_EVERY_ROWS = 500
 DETERMINATION_PROGRESS_MIN_INTERVAL_S = 20.0
 DETERMINATION_CHUNK_SIZE = 2000
+
+
+def _full_scan_include_clause(model):
+    """Full-pass work set: active rows, or deleted rows that still need placeholder teardown.
+
+    Cleaned tombstones (``is_deleted`` with no placeholder and not stuck on obsolete)
+    are skipped so full sync does not re-walk the entire soft-delete history.
+    Scoped ``run_determination_for_entities*`` still evaluates every explicit id.
+    """
+    return or_(
+        model.is_deleted == False,  # noqa: E712
+        model.has_placeholder == True,  # noqa: E712
+        model.determination == DETERMINATION_OBSOLETE,
+    )
 
 
 def _determination_log_progress(
@@ -1026,18 +1040,27 @@ def _classify_episode_not_needed_bucket(episode: Episode, *, now_date: date) -> 
     return None
 
 
-def run_determination_pass() -> dict:
+def run_determination_pass(*, on_progress=None) -> dict:
     """Compute and persist determinations for movies and episodes.
 
     This phase is intentionally pure DB-state evaluation and does not perform
     side effects like file creation/deletion yet.
+
+    Soft-deleted rows with no remaining placeholder work are skipped (see
+    ``_full_scan_include_clause``). Newly deleted titles still flow through
+    scoped determination on the delete path.
+
+    ``on_progress(done, total)`` is optional; called at start and on the same
+    throttle as log progress so live task bars can show DB row counts.
     """
     session = get_session()
     stats = {
         'movies_total': 0,
         'movies_changed': 0,
+        'movies_skipped_tombstone': 0,
         'episodes_total': 0,
         'episodes_changed': 0,
+        'episodes_skipped_tombstone': 0,
         'obsolete_placeholder': 0,
         'not_needed': 0,
         'placeholder_exists': 0,
@@ -1049,19 +1072,55 @@ def run_determination_pass() -> dict:
         'density_episode_short_circuit': 0,
     }
 
+    def _emit_progress(done: int, total: int, *, force: bool = False, last_emit: list[float] | None = None) -> None:
+        if not callable(on_progress):
+            return
+        now = time.monotonic()
+        if (
+            not force
+            and last_emit is not None
+            and done % DETERMINATION_PROGRESS_EVERY_ROWS != 0
+            and (now - last_emit[0]) < DETERMINATION_PROGRESS_MIN_INTERVAL_S
+        ):
+            return
+        if last_emit is not None:
+            last_emit[0] = now
+        try:
+            on_progress(int(done), int(total))
+        except Exception:
+            pass
+
     try:
         with PhaseTimer("determination"):
             started_mono = time.monotonic()
             last_log_movies: list[float] = [started_mono]
             last_log_episodes: list[float] = [started_mono]
+            last_live: list[float] = [0.0]
             placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
             lookahead_days = int(getattr(settings, 'CALENDAR_LOOKAHEAD_DAYS', 30) or 30)
             now_date = datetime.now(timezone.utc).date()
 
-            movies = session.query(Movie).all()
+            movies_all = int(session.query(func.count(Movie.id)).scalar() or 0)
+            movies = (
+                session.query(Movie)
+                .filter(_full_scan_include_clause(Movie))
+                .order_by(Movie.id)
+                .all()
+            )
             stats['movies_total'] = len(movies)
+            stats['movies_skipped_tombstone'] = max(0, movies_all - int(stats['movies_total']))
+            include_specials = bool(getattr(settings, 'INCLUDE_SPECIALS', False))
+            episodes_all = int(session.query(func.count(Episode.id)).scalar() or 0)
+            stats['episodes_total'] = int(
+                session.query(func.count(Episode.id)).filter(_full_scan_include_clause(Episode)).scalar()
+                or 0
+            )
+            stats['episodes_skipped_tombstone'] = max(0, episodes_all - int(stats['episodes_total']))
+            work_total = int(stats['movies_total']) + int(stats['episodes_total'])
+            _emit_progress(0, work_total, force=True)
             logger.info(
-                f"Determination · full_scan · movies: {len(movies)} rows to check",
+                f"Determination · full_scan · movies: {len(movies)} rows to check "
+                f"(skipped_tombstone={stats['movies_skipped_tombstone']})",
                 extra={'emoji_type': 'info'},
             )
             from services.task_run_cancel import maybe_check_active_cancel
@@ -1098,11 +1157,10 @@ def run_determination_pass() -> dict:
                     last_log_mono=last_log_movies,
                     movie_phase=True,
                 )
+                _emit_progress(idx, work_total, last_emit=last_live)
             session.commit()
             session.expunge_all()
-
-            include_specials = bool(getattr(settings, 'INCLUDE_SPECIALS', False))
-            stats['episodes_total'] = int(session.query(Episode).count() or 0)
+            _emit_progress(int(stats['movies_total']), work_total, force=True)
             from services.source_of_truth.tv_density import density_suppresses_episode_files
 
             if density_suppresses_episode_files():
@@ -1112,13 +1170,15 @@ def run_determination_pass() -> dict:
                     extra={'emoji_type': 'info'},
                 )
             logger.info(
-                f"Determination · full_scan · episodes: {stats['episodes_total']} rows to check",
+                f"Determination · full_scan · episodes: {stats['episodes_total']} rows to check "
+                f"(skipped_tombstone={stats['episodes_skipped_tombstone']})",
                 extra={'emoji_type': 'info'},
             )
 
             season_rows = (
                 session.query(Episode.id, Season.series_id, Season.season_number, Episode.episode_number)
                 .join(Season, Episode.season_id == Season.id)
+                .filter(_full_scan_include_clause(Episode))
                 .all()
             )
             episode_order_meta_by_id: dict[int, tuple[int, int, int]] = {}
@@ -1168,6 +1228,7 @@ def run_determination_pass() -> dict:
                 chunk = (
                     session.query(Episode)
                     .filter(Episode.id > last_id)
+                    .filter(_full_scan_include_clause(Episode))
                     .order_by(Episode.id)
                     .limit(DETERMINATION_CHUNK_SIZE)
                     .all()
@@ -1219,6 +1280,11 @@ def run_determination_pass() -> dict:
                                 last_log_mono=last_log_episodes,
                                 movie_phase=False,
                             )
+                            _emit_progress(
+                                int(stats["movies_total"]) + idx,
+                                work_total,
+                                last_emit=last_live,
+                            )
                             continue
                     value, path_drift = _resolve_episode_determination(
                         session,
@@ -1269,11 +1335,17 @@ def run_determination_pass() -> dict:
                         last_log_mono=last_log_episodes,
                         movie_phase=False,
                     )
+                    _emit_progress(
+                        int(stats["movies_total"]) + idx,
+                        work_total,
+                        last_emit=last_live,
+                    )
                 chunk_last_id = int(chunk[-1].id)
                 session.commit()
                 session.expunge_all()
                 last_id = chunk_last_id
 
+            _emit_progress(work_total, work_total, force=True)
             logger.info(f"Determination · full_scan · complete: {stats}", extra={'emoji_type': 'success'})
             return stats
     except Exception as e:

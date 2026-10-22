@@ -274,13 +274,19 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
     WhatsNewNotice(
         id="collections-visible-on-delete-plex-0-11-4",
         since_version="0.11.4",
-        title="Collections: Visible on and delete from Plex",
+        title="Collections: Visible On At Creation and delete from Plex",
         body=(
-            "Recipe and Collection Set editors include a Display section with Visible on "
-            "checkboxes for Library Recommended, Home, and Shared users' Home. Placeholdarr "
-            "applies your choices when it syncs the collection to Plex. Plex Pass is required "
-            "for hub promotion. The collection still appears in the library Collections list "
-            "when all are off.\n\n"
+            "Recipe and Collection Set editors include Visible On At Creation "
+            "(Library Recommended, Home, and Shared users' Home).\n\n"
+            "These choices apply only when Placeholdarr creates a collection in Plex:\n"
+            "- first-time creation\n"
+            "- when a Collection Set adds a new child\n"
+            "- when a seasonal delete brings it back next season (only if Delete is selected "
+            "for when the window is inactive)\n\n"
+            "Saving or syncing does not change Visible On for a collection that already "
+            "exists. Post-creation changes still belong in Plex.\n\n"
+            "Plex Pass required to use this feature. With all off, the collection still "
+            "appears under the library's Collections list.\n\n"
             "When you delete a recipe, the confirm dialog can also remove Placeholdarr-owned "
             "Plex collection(s). Unlabeled same-title shelves in Plex are left unchanged."
         ),

@@ -644,6 +644,11 @@ def _is_non_retriable_webhook_error(error: Exception) -> bool:
         return True
     if '_missing_' in message:
         return True
+    # Delete webhooks after catalog purge: row is already gone; retrying cannot help.
+    if 'moviedelete_movie_not_found:' in message:
+        return True
+    if 'seriesdelete_series_not_found:' in message:
+        return True
     return False
 
 

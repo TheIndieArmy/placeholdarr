@@ -145,28 +145,68 @@ class TaskRunPhaseTracker:
         self.started_at = started_at or _utc_now()
         self._phases: list[dict[str, Any]] = []
         self._open: dict[str, datetime] = {}
+        self._live_kind = _task_run_key(int(task_run_id))
+
+    def _publish_live(
+        self,
+        key: str,
+        name: str,
+        status: str,
+        metrics: list[dict[str, Any]] | None = None,
+        *,
+        done: int | None = None,
+        total: int | None = None,
+        unit_label: str | None = None,
+        units: list[dict[str, Any]] | None = None,
+    ) -> None:
+        kind = str(self._live_kind or "").strip().lower()
+        if kind not in {"full_sync", "lite_sync", "calendar_only"}:
+            return
+        try:
+            from services.task_live_progress import publish_sync_phase_live
+
+            publish_sync_phase_live(
+                self.task_run_id,
+                kind=kind,
+                phase_key=key,
+                phase_label=name,
+                status=status,
+                detail_metrics=metrics,
+                done=done,
+                total=total,
+                unit_label=unit_label,
+                phase_units=units,
+            )
+        except Exception as exc:
+            logger.debug("%s live phase publish skipped: %s", kind, exc, extra={"emoji_type": "debug"})
 
     def begin(self, key: str, name: str) -> None:
         key = str(key).strip().lower()
         now = _utc_now()
         self._open[key] = now
+        seed_metrics = empty_live_metrics_for_phase(key)
         existing = next((p for p in self._phases if p.get("key") == key), None)
         if existing:
             existing["status"] = "working"
             existing["started_at"] = _iso(now)
             existing.pop("ended_at", None)
             existing.pop("duration_seconds", None)
+            if not existing.get("metrics"):
+                existing["metrics"] = seed_metrics
+            metrics = list(existing.get("metrics") or seed_metrics)
         else:
+            metrics = seed_metrics
             self._phases.append(
                 {
                     "key": key,
                     "name": name,
                     "status": "working",
                     "started_at": _iso(now),
-                    "metrics": [],
+                    "metrics": list(metrics),
                 }
             )
         self._persist()
+        self._publish_live(key, name, "working", metrics)
 
     def end(
         self,
@@ -175,6 +215,10 @@ class TaskRunPhaseTracker:
         status: str = "done",
         metrics: list[dict[str, Any]] | None = None,
         failed: bool = False,
+        done: int | None = None,
+        total: int | None = None,
+        unit_label: str | None = None,
+        units: list[dict[str, Any]] | None = None,
     ) -> None:
         key = str(key).strip().lower()
         now = _utc_now()
@@ -191,7 +235,52 @@ class TaskRunPhaseTracker:
         phase["status"] = "failed" if failed else str(status).lower()
         if metrics is not None:
             phase["metrics"] = metrics
+        if units is not None:
+            phase["units"] = units
         self._persist()
+        live_status = "failed" if failed else str(status).lower()
+        self._publish_live(
+            key,
+            str(phase.get("name") or key),
+            live_status,
+            metrics,
+            done=done,
+            total=total,
+            unit_label=unit_label,
+            units=units,
+        )
+
+    def progress(
+        self,
+        key: str,
+        *,
+        done: int | None = None,
+        total: int | None = None,
+        unit_label: str | None = None,
+        metrics: list[dict[str, Any]] | None = None,
+        units: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Mid-phase live counts (does not end the phase)."""
+        key = str(key).strip().lower()
+        phase = next((p for p in self._phases if p.get("key") == key), None)
+        name = str((phase or {}).get("name") or key)
+        if phase is not None:
+            if metrics is not None:
+                phase["metrics"] = metrics
+            if units is not None:
+                phase["units"] = units
+            if metrics is not None or units is not None:
+                self._persist()
+        self._publish_live(
+            key,
+            name,
+            "working",
+            metrics,
+            done=None if done is None else int(done or 0),
+            total=None if total is None else int(total or 0),
+            unit_label=unit_label,
+            units=units,
+        )
 
     def update_metrics(self, key: str, metrics: list[dict[str, Any]]) -> None:
         phase = next((p for p in self._phases if p.get("key") == key), None)
@@ -203,11 +292,18 @@ class TaskRunPhaseTracker:
         return list(self._phases)
 
     def _persist(self, *, extra_summary: dict[str, Any] | None = None) -> None:
+        kind = str(self._live_kind or "").strip().lower()
+        if kind == "lite_sync":
+            progress_mode = "lite"
+        elif kind == "placeholder_refresh":
+            progress_mode = "placeholder_refresh"
+        else:
+            progress_mode = "full"
         payload: dict[str, Any] = {
             "phases": self._phases,
             "progress": build_progress_from_phases(
                 task_run_id=self.task_run_id,
-                mode="full",
+                mode=progress_mode,
                 started_at=self.started_at,
                 phases=self._phases,
                 overall_status="WORKING" if any(p.get("status") == "working" for p in self._phases) else "DONE",
@@ -303,6 +399,30 @@ def _fs_scan_metrics(scan: dict[str, Any], scan_info: dict[str, Any]) -> list[di
     return metrics
 
 
+def metrics_from_lite_discovery(stats: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Count cards for lite Catalog discovery (ARR catalog diff + targeted sync)."""
+    s = stats if isinstance(stats, dict) else {}
+    movies = int(s.get("movies_seen") or 0)
+    series = int(s.get("series_seen") or 0)
+    episodes = int(s.get("episodes_seen") or 0)
+    targeted = int(s.get("movies_targeted") or 0) + int(s.get("series_targeted") or 0)
+    return [
+        {"label": "Movies updated", "value": movies},
+        {"label": "Series updated", "value": series},
+        {"label": "Episodes updated", "value": episodes},
+        {"label": "Titles targeted", "value": targeted},
+    ]
+
+
+def metrics_from_calendar_dates(stats: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Count cards for calendar date refresh."""
+    s = stats if isinstance(stats, dict) else {}
+    return [
+        {"label": "Movie dates updated", "value": int(s.get("movie_rows_updated") or 0)},
+        {"label": "Episode dates updated", "value": int(s.get("episode_rows_updated") or 0)},
+    ]
+
+
 def metrics_from_pipeline(pipeline: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     """Return metrics lists keyed by phase key."""
     out: dict[str, list[dict[str, Any]]] = {}
@@ -310,11 +430,18 @@ def metrics_from_pipeline(pipeline: dict[str, Any]) -> dict[str, list[dict[str, 
     scan_info = scan.get("info") if isinstance(scan.get("info"), dict) else {}
     out["fs_scan"] = _fs_scan_metrics(scan, scan_info)
     det = pipeline.get("determination") if isinstance(pipeline.get("determination"), dict) else {}
+    # Same card set for full (library walk) and lite (scoped) determination.
     out["determination"] = [
         {"label": "Movies evaluated", "value": int(det.get("movies_total") or 0)},
         {"label": "Episodes evaluated", "value": int(det.get("episodes_total") or 0)},
         {"label": "Already has placeholder", "value": int(det.get("placeholder_exists") or 0)},
         {"label": "Not yet aired", "value": int(det.get("not_needed_not_yet_aired") or det.get("not_needed") or 0)},
+        {"label": "Air date unknown", "value": int(det.get("not_needed_air_date_unknown") or 0)},
+        {
+            "label": "Tombstones skipped",
+            "value": int(det.get("movies_skipped_tombstone") or 0)
+            + int(det.get("episodes_skipped_tombstone") or 0),
+        },
     ]
     mat = pipeline.get("materialization") if isinstance(pipeline.get("materialization"), dict) else {}
     out["materialization"] = [
@@ -323,11 +450,69 @@ def metrics_from_pipeline(pipeline: dict[str, Any]) -> dict[str, list[dict[str, 
         {"label": "Already up to date", "value": int(mat.get("noop") or 0)},
         {"label": "Errors", "value": int(mat.get("errors") or 0)},
     ]
+    gc = pipeline.get("catalog_gc") if isinstance(pipeline.get("catalog_gc"), dict) else {}
+    out["catalog_gc"] = [
+        {"label": "Movies purged", "value": int(gc.get("movies_purged") or 0)},
+        {"label": "Series purged", "value": int(gc.get("series_purged") or 0)},
+        {"label": "Seasons purged", "value": int(gc.get("seasons_purged") or 0)},
+        {"label": "Episodes purged", "value": int(gc.get("episodes_purged") or 0)},
+        {"label": "Skipped (not ready)", "value": int(gc.get("skipped_not_ready") or 0)},
+    ]
     cal = pipeline.get("calendar") if isinstance(pipeline.get("calendar"), dict) else {}
     out["calendar"] = [
-        {"label": "Calendar updates", "value": int(cal.get("updated") or cal.get("changed") or 0)},
+        {
+            "label": "Calendar updates",
+            "value": int(
+                cal.get("updated")
+                or cal.get("changed")
+                or cal.get("status_applied")
+                or 0
+            ),
+        },
     ]
+    out["discovery"] = metrics_from_lite_discovery(
+        pipeline.get("discovery") if isinstance(pipeline.get("discovery"), dict) else pipeline.get("startup_sync")
+    )
+    out["calendar_dates"] = metrics_from_calendar_dates(
+        pipeline.get("calendar_dates")
+        if isinstance(pipeline.get("calendar_dates"), dict)
+        else pipeline.get("calendar_date_refresh")
+    )
     return out
+
+
+def empty_live_metrics_for_phase(phase_key: str) -> list[dict[str, Any]]:
+    """Zeroed / placeholder count cards so any live phase is expandable from seed / begin."""
+    key = str(phase_key or "").strip().lower()
+    if key == "arr_sync":
+        return [{"label": "Total ARR sync time", "value": "0s"}]
+    if key == "fs_scan":
+        return [
+            {"label": "Files on disk (walked)", "value": 0},
+            {"label": "Placeholder media files", "value": 0},
+            {"label": "New paths indexed", "value": 0},
+            {"label": "Status", "value": "Pending"},
+        ]
+    if key == "determining":
+        return [
+            {"label": "Trigger", "value": "—"},
+            {"label": "Scanned", "value": "— / —"},
+            {"label": "Needs refresh", "value": "—"},
+        ]
+    if key == "updating":
+        return [
+            {"label": "Trigger", "value": "—"},
+            {"label": "Source", "value": "—"},
+            {"label": "Placeholders", "value": "— / —"},
+            {"label": "Batches", "value": "— / —"},
+            {"label": "Movie posters", "value": 0},
+            {"label": "Series posters", "value": 0},
+            {"label": "Season posters", "value": 0},
+            {"label": "Episode stills", "value": 0},
+            {"label": "Created total", "value": 0},
+        ]
+    shells = metrics_from_pipeline({})
+    return list(shells.get(key) or [])
 
 
 ART_COUNT_KEYS = ("movie", "series", "season", "episode")
@@ -467,6 +652,32 @@ def mark_follow_up_phase_skipped(task_run_id: int, phase_key: str, name: str, *,
         }
     )
     _save_phases(task_run_id, phases, extra=summary)
+    if _task_run_key(int(task_run_id)) == "full_sync":
+        try:
+            from services.task_live_progress import publish_sync_phase_live
+
+            # Art follow-up uses determining/updating bars on live; map legacy art_refresh skip.
+            live_key = "updating" if str(phase_key) == "art_refresh" else str(phase_key)
+            live_label = "Updating" if live_key == "updating" else name
+            if str(phase_key) == "art_refresh":
+                publish_sync_phase_live(
+                    int(task_run_id),
+                    kind="full_sync",
+                    phase_key="determining",
+                    phase_label="Determining",
+                    status="skipped",
+                    detail_metrics=[{"label": "Reason", "value": reason}],
+                )
+            publish_sync_phase_live(
+                int(task_run_id),
+                kind="full_sync",
+                phase_key=live_key,
+                phase_label=live_label,
+                status="skipped",
+                detail_metrics=[{"label": "Reason", "value": reason}],
+            )
+        except Exception as exc:
+            logger.debug("full_sync live follow-up skip publish skipped: %s", exc, extra={"emoji_type": "debug"})
 
 
 def refresh_full_sync_task_progress(
@@ -490,7 +701,11 @@ def refresh_full_sync_task_progress(
         phases=phase_list,
         overall_status=overall_status,
     )
-    update_task_run_summary(task_run_id, {**summary, "phases": phase_list, "progress": progress})
+    # Do not rewrite ``live`` from this unlocked read; concurrent art/NFO heartbeats
+    # may have a newer live payload under mutate_task_run_summary.
+    payload = {**summary, "phases": phase_list, "progress": progress}
+    payload.pop("live", None)
+    update_task_run_summary(task_run_id, payload)
 
 
 def try_complete_full_sync_task_run(
@@ -609,6 +824,24 @@ def begin_nfo_backfill_phase(
     }
     _save_phases(task_run_id, phases, extra=summary)
     refresh_full_sync_task_progress(task_run_id, phases=phases, overall_status="WORKING")
+    if _task_run_key(int(task_run_id)) == "full_sync":
+        try:
+            from services.task_live_progress import publish_sync_phase_live
+
+            publish_sync_phase_live(
+                int(task_run_id),
+                kind="full_sync",
+                phase_key="metadata_refresh",
+                phase_label="Metadata refresh",
+                status="working",
+                detail_metrics=[
+                    {"label": "Placeholders queued", "value": placeholder_count},
+                    {"label": "Batches", "value": batch_count},
+                    {"label": "Source", "value": source},
+                ],
+            )
+        except Exception as exc:
+            logger.debug("full_sync metadata live begin skipped: %s", exc, extra={"emoji_type": "debug"})
 
 
 def finalize_nfo_backfill_phase(task_run_id: int, nfo_run_id: str, *, failed: bool = False) -> None:
@@ -639,6 +872,19 @@ def finalize_nfo_backfill_phase(task_run_id: int, nfo_run_id: str, *, failed: bo
     nfo["status"] = "failed" if failed else "done"
     summary["nfo_backfill"] = nfo
     _save_phases(task_run_id, phases, extra=summary)
+    if _task_run_key(int(task_run_id)) == "full_sync":
+        try:
+            from services.task_live_progress import publish_sync_phase_live
+
+            publish_sync_phase_live(
+                int(task_run_id),
+                kind="full_sync",
+                phase_key="metadata_refresh",
+                phase_label="Metadata refresh",
+                status="failed" if failed else "done",
+            )
+        except Exception as exc:
+            logger.debug("full_sync metadata live finalize skipped: %s", exc, extra={"emoji_type": "debug"})
 
 
 def accumulate_art_backfill_counts(
@@ -948,4 +1194,6 @@ def _save_phases(task_run_id: int, phases: list[dict[str, Any]], *, extra: dict[
     payload: dict[str, Any] = {**summary, "phases": phases, "progress": progress}
     if art_backfill is not None:
         payload["art_backfill"] = art_backfill
+    # Preserve concurrent ``summary.live`` writers (do not clobber with a stale load).
+    payload.pop("live", None)
     update_task_run_summary(task_run_id, payload)

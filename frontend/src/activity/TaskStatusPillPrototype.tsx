@@ -103,7 +103,9 @@ export function TaskStatusPillPrototype(props: {
   }, [props.taskRuns]);
 
   const canStop = Boolean(
-    workingRun && TASK_KEYS_WITH_STOP_SUPPORT.has(String(workingRun.task_key || "").trim().toLowerCase()),
+    workingRun &&
+      String(workingRun.trigger || "").trim().toLowerCase() !== "startup" &&
+      TASK_KEYS_WITH_STOP_SUPPORT.has(String(workingRun.task_key || "").trim().toLowerCase()),
   );
 
   const liveModel = useMemo(() => taskLiveFromApi(workingRun?.live), [workingRun]);
@@ -144,7 +146,7 @@ export function TaskStatusPillPrototype(props: {
       ) : (
         <div
           id={panelId}
-          className={`overflow-hidden rounded-xl border p-3 transition-all duration-300 ease-out ${panelShell}`}
+          className={`min-w-0 overflow-hidden rounded-xl border p-3 transition-all duration-300 ease-out ${panelShell}`}
         >
           <div className="mb-2.5 flex items-start justify-between gap-2">
             <p className="text-[10px] font-headline uppercase tracking-widest opacity-50">
@@ -161,7 +163,7 @@ export function TaskStatusPillPrototype(props: {
               </span>
             </button>
           </div>
-          <TaskLiveProgress model={liveModel} density="compact" isStudioGlass={glass} />
+          <TaskLiveProgress model={liveModel} density="compact" isStudioGlass={glass} showFullDetails />
           <div className="mt-3 flex flex-col gap-2">
             {canStop ? (
               <button

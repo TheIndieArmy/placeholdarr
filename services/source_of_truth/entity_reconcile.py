@@ -98,7 +98,7 @@ def _resolve_display_title(session, entity_type: str, entity_id: int) -> str:
             et = str(getattr(episode, "title", "") or "").strip()
             base = f"{st} S{sn:02d}E{en:02d}"
             if et:
-                return f'{base} — "{et}"'
+                return f'{base}: "{et}"'
             return base
         return f"Episode #{eid}"
 
@@ -168,10 +168,155 @@ def _step_label_for(step: str, *, arr_label: str = "Radarr") -> str:
     return labels.get(step, step.replace("_", " ").capitalize())
 
 
-def _set_job_step(session, job: Job, step: str, *, arr_label: str = "Radarr") -> None:
+# Durable sidebar phase bars (queued/done are stage only, not bars).
+RECONCILE_LIVE_PHASES: tuple[tuple[str, str], ...] = (
+    ("arr_refresh", "Arr refresh"),
+    ("arr_wait_refresh", "Wait for Arr"),
+    ("sync_catalog", "Catalog sync"),
+    ("filesystem", "Filesystem"),
+    ("determination", "Status"),
+    ("materialization", "Placeholders"),
+    ("sidecars", "Artwork & metadata"),
+    ("player", "Players"),
+)
+
+
+def _seed_reconcile_live(*, display_title: str, arr_label: str = "Radarr") -> dict[str, Any]:
+    phases = [
+        {"key": key, "label": label, "done": 0, "total": 1, "status": "pending"}
+        for key, label in RECONCILE_LIVE_PHASES
+    ]
+    return {
+        "kind": "entity_reconcile",
+        "label": str(display_title or "Title refresh").strip() or "Title refresh",
+        "stage": STEP_QUEUED,
+        "stage_label": _step_label_for(STEP_QUEUED, arr_label=arr_label),
+        "overall_pct": 0,
+        "units_done": 0,
+        "units_total": len(phases),
+        "unit_label": "phases",
+        "phases": phases,
+        "active_units": [],
+    }
+
+
+def _live_overall_from_phases(phases: list[dict[str, Any]]) -> tuple[int, int, int]:
+    """Return (overall_pct, units_done, units_total) from phase bars."""
+    total_phases = len(phases) or 1
+    done_phases = 0
+    weighted_done = 0.0
+    for phase in phases:
+        status = str(phase.get("status") or "").lower()
+        p_done = float(phase.get("done") or 0)
+        p_total = float(phase.get("total") or 0)
+        if status == "done" or status == "skipped":
+            done_phases += 1
+            weighted_done += 1.0
+        elif status == "working" and p_total > 0:
+            weighted_done += max(0.0, min(1.0, p_done / p_total))
+        elif status == "working":
+            weighted_done += 0.0
+    pct = int(round((weighted_done / float(total_phases)) * 100.0))
+    return max(0, min(100, pct)), done_phases, total_phases
+
+
+def _apply_live_step(
+    live: dict[str, Any],
+    step: str,
+    *,
+    arr_label: str = "Radarr",
+    phase_done: int | None = None,
+    phase_total: int | None = None,
+) -> dict[str, Any]:
+    """Advance phase bars for ``step`` (or mark all done)."""
+    out = dict(live) if isinstance(live, dict) else {}
+    phases_in = out.get("phases") if isinstance(out.get("phases"), list) else []
+    by_key = {
+        str(p.get("key") or "").strip(): dict(p)
+        for p in phases_in
+        if isinstance(p, dict) and str(p.get("key") or "").strip()
+    }
+    order = [key for key, _label in RECONCILE_LIVE_PHASES]
+    for key, label in RECONCILE_LIVE_PHASES:
+        if key not in by_key:
+            by_key[key] = {"key": key, "label": label, "done": 0, "total": 1, "status": "pending"}
+
+    if step == STEP_DONE:
+        for key in order:
+            row = by_key[key]
+            total = max(1, int(row.get("total") or 1))
+            row["status"] = "done"
+            row["done"] = total
+            row["total"] = total
+        stage = STEP_DONE
+        stage_label = _step_label_for(STEP_DONE, arr_label=arr_label)
+    elif step == STEP_QUEUED:
+        stage = STEP_QUEUED
+        stage_label = _step_label_for(STEP_QUEUED, arr_label=arr_label)
+    else:
+        reached = False
+        for key in order:
+            row = by_key[key]
+            if key == step:
+                reached = True
+                total = int(phase_total) if phase_total is not None else max(1, int(row.get("total") or 1))
+                done = int(phase_done) if phase_done is not None else int(row.get("done") or 0)
+                row["total"] = max(1, total)
+                row["done"] = max(0, min(row["total"], done))
+                row["status"] = "working"
+                continue
+            if not reached:
+                total = max(1, int(row.get("total") or 1))
+                row["status"] = "done"
+                row["done"] = total
+                row["total"] = total
+            else:
+                if str(row.get("status") or "").lower() == "working":
+                    row["status"] = "pending"
+                    row["done"] = 0
+        stage = step
+        stage_label = _step_label_for(step, arr_label=arr_label)
+
+    phases = [by_key[key] for key in order if key in by_key]
+    pct, units_done, units_total = _live_overall_from_phases(phases)
+    out["stage"] = stage
+    out["stage_label"] = stage_label
+    out["overall_pct"] = pct
+    out["units_done"] = units_done
+    out["units_total"] = units_total
+    out["unit_label"] = "phases"
+    out["phases"] = phases
+    out["kind"] = "entity_reconcile"
+    if not out.get("label"):
+        out["label"] = "Title refresh"
+    return out
+
+
+def _set_job_step(
+    session,
+    job: Job,
+    step: str,
+    *,
+    arr_label: str = "Radarr",
+    phase_done: int | None = None,
+    phase_total: int | None = None,
+) -> None:
     payload = _payload_dict(job)
     payload["step"] = step
     payload["step_label"] = _step_label_for(step, arr_label=arr_label)
+    live = payload.get("live") if isinstance(payload.get("live"), dict) else None
+    if live is None:
+        live = _seed_reconcile_live(
+            display_title=str(payload.get("display_title") or "Title refresh"),
+            arr_label=arr_label,
+        )
+    payload["live"] = _apply_live_step(
+        live,
+        step,
+        arr_label=arr_label,
+        phase_done=phase_done,
+        phase_total=phase_total,
+    )
     job.payload = payload
     session.add(job)
     session.commit()
@@ -249,6 +394,7 @@ def _enqueue_followup_reconcile_if_needed(
         "display_title": display_title,
         "step": STEP_QUEUED,
         "step_label": _step_label_for(STEP_QUEUED),
+        "live": _seed_reconcile_live(display_title=display_title),
     }
     job = Job(
         job_type=ENTITY_RECONCILE_JOB_TYPE,
@@ -403,6 +549,7 @@ def _run_sidecars_and_collect_paths(
     entity_type: str,
     display_title: str,
     job_id: int | None = None,
+    on_progress: Any | None = None,
 ) -> _SidecarPassResult:
     refresh_paths: set[str] = set()
     rewritten_movies: list[Any] = []
@@ -410,6 +557,21 @@ def _run_sidecars_and_collect_paths(
     processed_movies: set[int] = set()
     processed_series: set[int] = set()
     player_push: list[Placeholder] = []
+    total = len(placeholders)
+    processed = 0
+
+    progress_every = max(5, total // 20) if total > 0 else 5
+
+    def _tick_sidecar_progress() -> None:
+        nonlocal processed
+        processed += 1
+        if callable(on_progress) and (
+            processed == 1 or processed == total or processed % progress_every == 0
+        ):
+            try:
+                on_progress(processed, total)
+            except Exception:
+                pass
 
     for placeholder in placeholders:
         movie = session.query(Movie).get(placeholder.movie_id) if placeholder.movie_id else None
@@ -420,6 +582,7 @@ def _run_sidecars_and_collect_paths(
         if episode and bool(getattr(episode, "has_placeholder", False)):
             effective = True
         if not effective:
+            _tick_sidecar_progress()
             continue
 
         if movie:
@@ -435,13 +598,16 @@ def _run_sidecars_and_collect_paths(
                     rewritten_movies.append(movie)
             if getattr(placeholder, "has_placeholder", False) or getattr(movie, "has_placeholder", False):
                 player_push.append(placeholder)
+            _tick_sidecar_progress()
             continue
 
         if not episode:
+            _tick_sidecar_progress()
             continue
         season = session.query(Season).get(episode.season_id) if episode.season_id else None
         series = session.query(Series).get(season.series_id) if season and season.series_id else None
         if not season or not series:
+            _tick_sidecar_progress()
             continue
 
         _refresh_episode_nfo(session, placeholder, episode)
@@ -449,6 +615,7 @@ def _run_sidecars_and_collect_paths(
             getattr(placeholder, "path", "") or getattr(episode, "placeholder_filepath", "") or ""
         ).strip()
         if not path:
+            _tick_sidecar_progress()
             continue
 
         sid = int(series.id)
@@ -469,6 +636,8 @@ def _run_sidecars_and_collect_paths(
 
         if getattr(placeholder, "has_placeholder", False) or getattr(episode, "has_placeholder", False):
             player_push.append(placeholder)
+
+        _tick_sidecar_progress()
 
     if player_push:
         seen: set[tuple[str, int]] = set()
@@ -499,6 +668,12 @@ def _run_sidecars_and_collect_paths(
                 f"Media server status update failed: {exc}",
                 job_id=job_id,
             )
+
+    if callable(on_progress) and total > 0:
+        try:
+            on_progress(total, total)
+        except Exception:
+            pass
 
     return _SidecarPassResult(
         refresh_paths=refresh_paths,
@@ -543,6 +718,7 @@ def enqueue_entity_reconcile(
                 "step": payload.get("step") or STEP_QUEUED,
                 "step_label": payload.get("step_label") or _step_label_for(STEP_QUEUED),
                 "display_title": str(payload.get("display_title") or display_title),
+                "live": payload.get("live") if isinstance(payload.get("live"), dict) else None,
             }
 
         body: dict[str, Any] = {
@@ -552,6 +728,7 @@ def enqueue_entity_reconcile(
             "display_title": display_title,
             "step": STEP_QUEUED,
             "step_label": _step_label_for(STEP_QUEUED),
+            "live": _seed_reconcile_live(display_title=display_title),
         }
         job = Job(
             job_type=ENTITY_RECONCILE_JOB_TYPE,
@@ -571,6 +748,7 @@ def enqueue_entity_reconcile(
             "step": STEP_QUEUED,
             "step_label": body["step_label"],
             "display_title": display_title,
+            "live": body["live"],
         }
     finally:
         session.close()
@@ -587,6 +765,15 @@ def reconcile_job_status_view(job: Job) -> dict[str, Any]:
     else:
         status = "working"
 
+    live = payload.get("live") if isinstance(payload.get("live"), dict) else None
+    if live is None and status == "working":
+        live = _seed_reconcile_live(
+            display_title=str(payload.get("display_title") or "Title refresh"),
+        )
+        step = str(payload.get("step") or STEP_QUEUED)
+        if step and step != STEP_QUEUED:
+            live = _apply_live_step(live, step)
+
     return {
         "ok": status != "failed",
         "status": status,
@@ -596,6 +783,7 @@ def reconcile_job_status_view(job: Job) -> dict[str, Any]:
         "error_message": getattr(job, "error_message", None),
         "entity_type": payload.get("entity_type"),
         "entity_id": payload.get("entity_id"),
+        "live": live,
     }
 
 
@@ -717,33 +905,102 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
             episode_row_ids=targets.episode_row_ids,
         )
 
-        _step("determination")
+        scope_total = max(1, len(targets.movie_row_ids or []) + len(targets.episode_row_ids or []))
+        _set_job_step(
+            session,
+            job,
+            "determination",
+            arr_label=targets.arr_label,
+            phase_done=0,
+            phase_total=scope_total,
+        )
+        _log_reconcile_info(
+            entity_type,
+            title,
+            _step_log_detail("determination", arr_label=targets.arr_label),
+            job_id=int(job.id),
+        )
         run_determination_for_entities_with_siblings(
             movie_ids=targets.movie_row_ids or None,
             episode_ids=targets.episode_row_ids or None,
             log_subject=title,
         )
+        _set_job_step(
+            session,
+            job,
+            "determination",
+            arr_label=targets.arr_label,
+            phase_done=scope_total,
+            phase_total=scope_total,
+        )
 
-        _step("materialization")
+        _set_job_step(
+            session,
+            job,
+            "materialization",
+            arr_label=targets.arr_label,
+            phase_done=0,
+            phase_total=scope_total,
+        )
+        _log_reconcile_info(
+            entity_type,
+            title,
+            _step_log_detail("materialization", arr_label=targets.arr_label),
+            job_id=int(job.id),
+        )
         run_materialization_for_entities(
             movie_ids=targets.movie_row_ids or None,
             episode_ids=targets.episode_row_ids or None,
             observation_source="entity_reconcile",
             log_subject=title,
         )
+        _set_job_step(
+            session,
+            job,
+            "materialization",
+            arr_label=targets.arr_label,
+            phase_done=scope_total,
+            phase_total=scope_total,
+        )
 
-        _step("sidecars")
         placeholders = _placeholders_for_scope(
             session,
             movie_row_ids=targets.movie_row_ids,
             episode_row_ids=targets.episode_row_ids,
         )
+        sidecar_total = max(1, len(placeholders))
+        _set_job_step(
+            session,
+            job,
+            "sidecars",
+            arr_label=targets.arr_label,
+            phase_done=0,
+            phase_total=sidecar_total,
+        )
+        _log_reconcile_info(
+            entity_type,
+            title,
+            _step_log_detail("sidecars", arr_label=targets.arr_label),
+            job_id=int(job.id),
+        )
+
+        def _on_sidecar_progress(done: int, total: int) -> None:
+            _set_job_step(
+                session,
+                job,
+                "sidecars",
+                arr_label=targets.arr_label,
+                phase_done=int(done),
+                phase_total=max(1, int(total)),
+            )
+
         sidecar = _run_sidecars_and_collect_paths(
             session,
             placeholders,
             entity_type=entity_type,
             display_title=title,
             job_id=int(job.id),
+            on_progress=_on_sidecar_progress,
         )
         refresh_paths = sidecar.refresh_paths
 

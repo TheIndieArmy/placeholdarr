@@ -649,6 +649,7 @@ def _run_startup_lite_snapshot_for_instances(
     seed_movie_row_ids: set[int] | None = None,
     seed_episode_row_ids: set[int] | None = None,
     lite_reconciliation_pre: dict | None = None,
+    on_instance_progress=None,
 ) -> dict:
     stats = {
         'instances': 0,
@@ -678,10 +679,22 @@ def _run_startup_lite_snapshot_for_instances(
     touched_movie_row_ids: set[int] = set(seed_movie_row_ids or ())
     touched_series_row_ids: set[int] = set()
     touched_episode_row_ids: set[int] = set(seed_episode_row_ids or ())
+
+    def _emit_instance(index: int, status: str, *, done: int = 0, total: int = 0) -> None:
+        if not callable(on_instance_progress):
+            return
+        try:
+            on_instance_progress(index, status, int(done or 0), int(total or 0))
+        except Exception:
+            pass
+
     try:
-        for instance in instances:
+        for inst_idx, instance in enumerate(instances):
             stats['instances'] += 1
             instance_key = instance['instance_key']
+            _emit_instance(inst_idx, "working", done=0, total=0)
+            instance_done = 0
+            instance_total = 0
             try:
                 row = _get_or_create_arr_state(session, instance_key, instance['arr_type'])
                 t0 = time.monotonic()
@@ -698,8 +711,11 @@ def _run_startup_lite_snapshot_for_instances(
                             f"skipping catalog diff (will not treat titles as removed)",
                             extra={'emoji_type': 'warning'},
                         )
+                        _emit_instance(inst_idx, "failed", done=0, total=0)
                         continue
                     stats['snapshot_rows_seen'] += len(api_movies)
+                    instance_total = len(api_movies)
+                    _emit_instance(inst_idx, "working", done=0, total=instance_total)
                     drift_ids = _radarr_path_drift_movie_ids(session, instance_key=instance_key, api_movies=api_movies)
                     removed_ids = _radarr_movie_ids_removed_from_catalog(session, instance_key=instance_key, api_movies=api_movies)
                     api_by_id: dict[int, dict] = {}
@@ -804,6 +820,13 @@ def _run_startup_lite_snapshot_for_instances(
                                 .all()
                             ]
                             touched_movie_row_ids.update(row_ids)
+                        seen = int(sync_stats.get("movies_seen", 0) or 0)
+                        instance_done = seen if seen else len(target_ids)
+                        instance_total = max(instance_total, instance_done)
+                        _emit_instance(inst_idx, "working", done=instance_done, total=instance_total)
+                    else:
+                        instance_done = instance_total
+                        _emit_instance(inst_idx, "working", done=instance_done, total=instance_total)
                 else:
                     api_series = fetch_sonarr_series(instance['base_url'], instance['api_key'], bypass_cache=True)
                     if api_series is None:
@@ -812,8 +835,11 @@ def _run_startup_lite_snapshot_for_instances(
                             f"skipping catalog diff (will not treat series as removed)",
                             extra={'emoji_type': 'warning'},
                         )
+                        _emit_instance(inst_idx, "failed", done=0, total=0)
                         continue
                     stats['snapshot_rows_seen'] += len(api_series)
+                    instance_total = len(api_series)
+                    _emit_instance(inst_idx, "working", done=0, total=instance_total)
                     drift_ids = _sonarr_path_drift_series_ids(session, instance_key=instance_key, api_series=api_series)
                     removed_ids = _sonarr_series_ids_removed_from_catalog(session, instance_key=instance_key, api_series=api_series)
                     api_by_id: dict[int, dict] = {}
@@ -1035,11 +1061,23 @@ def _run_startup_lite_snapshot_for_instances(
                                 .all()
                             ]
                             touched_episode_row_ids.update(episode_row_ids)
+                        seen = int(sync_stats.get("series_seen", 0) or 0) + int(
+                            sync_stats.get("episodes_seen", 0) or 0
+                        )
+                        instance_done = seen if seen else len(target_ids)
+                        instance_total = max(instance_total, instance_done)
+                        _emit_instance(inst_idx, "working", done=instance_done, total=instance_total)
+                    else:
+                        instance_done = instance_total
+                        _emit_instance(inst_idx, "working", done=instance_done, total=instance_total)
 
                 row.last_history_checked_at = datetime.now(timezone.utc)
                 row.updated_at = datetime.now(timezone.utc)
                 session.add(row)
                 session.commit()
+                final_done = max(instance_done, instance_total)
+                final_total = max(final_done, instance_total)
+                _emit_instance(inst_idx, "done", done=final_total, total=final_total)
             except Exception as e:
                 session.rollback()
                 stats['instances_failed'] += 1
@@ -1047,6 +1085,7 @@ def _run_startup_lite_snapshot_for_instances(
                     f"Startup lite snapshot sync failed for {instance_key}: {e}",
                     extra={'emoji_type': 'warning'},
                 )
+                _emit_instance(inst_idx, "failed", done=instance_done, total=instance_total)
 
         stats["movie_row_ids"] = sorted(touched_movie_row_ids)
         stats["series_row_ids"] = sorted(touched_series_row_ids)
@@ -1105,6 +1144,45 @@ def _resolve_startup_sync_mode(
     return mode
 
 
+def _enqueue_startup_request_nfo_backfill() -> dict[str, object]:
+    """One-time REQUEST status NFO backfill after boot sync (non-fatal)."""
+    try:
+        from services.source_of_truth.status_reconciler import enqueue_request_status_nfo_backfill
+
+        request_nfo_backfill_stats = enqueue_request_status_nfo_backfill()
+        if request_nfo_backfill_stats.get("skipped"):
+            logger.debug(
+                f"REQUEST NFO backfill skipped: {request_nfo_backfill_stats.get('reason', '')}",
+                extra={"emoji_type": "debug"},
+            )
+        elif request_nfo_backfill_stats.get("ok") and int(request_nfo_backfill_stats.get("placeholder_count") or 0) > 0:
+            logger.info(
+                "Startup · REQUEST status NFO backfill queued · "
+                f"placeholders={request_nfo_backfill_stats.get('placeholder_count')} · "
+                f"jobs_created={request_nfo_backfill_stats.get('jobs_created', 0)} · "
+                f"jobs_updated={request_nfo_backfill_stats.get('jobs_updated', 0)}",
+                extra={"emoji_type": "info"},
+            )
+        elif request_nfo_backfill_stats.get("ok"):
+            logger.debug(
+                "Startup · REQUEST status NFO backfill: no matching placeholders",
+                extra={"emoji_type": "debug"},
+            )
+        else:
+            logger.warning(
+                f"Startup · REQUEST status NFO backfill enqueue issue: {request_nfo_backfill_stats}",
+                extra={"emoji_type": "warning"},
+            )
+        return request_nfo_backfill_stats
+    except Exception as exc:
+        logger.warning(
+            f"Startup · REQUEST status NFO backfill failed (non-fatal): {exc}",
+            extra={"emoji_type": "warning"},
+            exc_info=True,
+        )
+        return {"ok": False, "error": str(exc)}
+
+
 def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
     """Execute configured startup fullsyncs, filesystem scan, determine, and materialize."""
     settings.REFRESH_TRIGGER_SUPPRESSED = True
@@ -1142,6 +1220,7 @@ def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
         determination_stats: dict = {}
         materialization_stats: dict = {}
         startup_task_run_id: int | None = None
+        phases = None
 
         if selected_mode == "off":
             return {
@@ -1152,19 +1231,73 @@ def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
                 "reason": "boot_chose_off",
             }
 
-        if selected_mode in ("full", "lite"):
-            from services.task_run_history import begin_task_run
-
-            startup_task_run_id = begin_task_run(
-                task_key="full_sync" if selected_mode == "full" else "lite_sync",
-                trigger="startup",
-            )
-
         logger.info(
             f"Startup sync mode selected: {selected_mode} (configured_instances={len(instances)})",
             extra={'emoji_type': 'info'},
         )
         started_at = datetime.now(timezone.utc)
+
+        # Lite boot reuses the scheduled lite pipeline so Tasks/sidebar get the same live phase bars.
+        if selected_mode == "lite":
+            from services.source_of_truth.scheduled_sync import run_lite_sync
+            from services.source_of_truth.scheduler import reschedule_task_after_completion
+
+            lite_out = run_lite_sync(trigger="startup")
+            request_nfo_backfill_stats = _enqueue_startup_request_nfo_backfill()
+            determination_stats = (
+                lite_out.get("determination") if isinstance(lite_out.get("determination"), dict) else {}
+            )
+            materialization_stats = (
+                lite_out.get("materialization") if isinstance(lite_out.get("materialization"), dict) else {}
+            )
+            try:
+                from services.activity_markers import record_startup_source_of_truth_activity
+
+                record_startup_source_of_truth_activity(
+                    mode="lite",
+                    started_at=started_at,
+                    completed_at=datetime.now(timezone.utc),
+                    determination=determination_stats or None,
+                    materialization=materialization_stats or None,
+                )
+            except Exception:
+                logger.debug(
+                    "Startup activity marker persistence skipped",
+                    extra={"emoji_type": "debug"},
+                    exc_info=True,
+                )
+            lite_skipped = bool(lite_out.get("skipped") or lite_out.get("cancelled"))
+            if not lite_skipped:
+                reschedule_task_after_completion("lite_sync")
+            return {
+                "ran": not lite_skipped,
+                "startup_sync_mode": "lite",
+                "boot_decision": boot_decision,
+                "fullsync_ran": False,
+                "request_nfo_backfill": request_nfo_backfill_stats,
+                "primer": {"skipped": True, "reason": "deprecated"},
+                "status_reconcile": {"skipped": True, "reason": "deprecated"},
+                **lite_out,
+            }
+
+        from services.task_run_history import begin_task_run
+        from services.task_run_phases import (
+            TaskRunPhaseTracker,
+            metrics_from_pipeline,
+        )
+        from services.task_live_progress import STARTUP_FULL_SYNC_CORE_PHASES, seed_sync_live_phases
+
+        startup_task_run_id = begin_task_run(task_key="full_sync", trigger="startup")
+        try:
+            seed_sync_live_phases(
+                int(startup_task_run_id),
+                kind="full_sync",
+                label="Full sync",
+                phase_defs=STARTUP_FULL_SYNC_CORE_PHASES,
+            )
+        except Exception as live_exc:
+            logger.debug("startup full live seed skipped: %s", live_exc, extra={"emoji_type": "debug"})
+        phases = TaskRunPhaseTracker(int(startup_task_run_id), started_at=started_at)
 
         def _emit_startup_progress(**kwargs) -> None:
             if startup_task_run_id is not None:
@@ -1179,97 +1312,63 @@ def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
             else:
                 record_startup_sync_progress(mode=selected_mode, started_at=started_at, **kwargs)
 
-        if selected_mode == 'full':
-            startup_sync_stats = _run_startup_full_for_instances(instances, run_ids)
-        elif selected_mode == 'lite':
-            # Activity UI + operators otherwise see nothing until this phase finishes (can be many minutes:
-            # full /movie or /series catalogs per instance, then per-item targeted sync).
-            _emit_startup_progress(
-                current_phase="discovery",
-                startup_sync_stats=None,
-                determination_stats=None,
-                materialization_stats=None,
-            )
-            from services.source_of_truth.lite_reconcile import (
-                run_lite_startup_reconciliation_pre_discovery,
-                run_specials_backfill_if_pending,
-            )
+        phases.begin("arr_sync", "ARR catalog sync")
+        startup_sync_stats = _run_startup_full_for_instances(instances, run_ids)
+        arr_done = (
+            int(startup_sync_stats.get("movies_seen") or 0)
+            + int(startup_sync_stats.get("series_seen") or 0)
+            + int(startup_sync_stats.get("episodes_seen") or 0)
+        )
+        phases.end(
+            "arr_sync",
+            metrics=[
+                {"label": "Movies seen", "value": int(startup_sync_stats.get("movies_seen") or 0)},
+                {"label": "Series seen", "value": int(startup_sync_stats.get("series_seen") or 0)},
+                {"label": "Episodes seen", "value": int(startup_sync_stats.get("episodes_seen") or 0)},
+                {
+                    "label": "Instances",
+                    "value": (
+                        f"{int(startup_sync_stats.get('succeeded') or 0)}/"
+                        f"{int(startup_sync_stats.get('instances') or 0)} ok"
+                    ),
+                },
+            ],
+            done=arr_done,
+            total=arr_done,
+            unit_label="titles",
+        )
 
-            specials_backfill_stats = run_specials_backfill_if_pending(instances=instances)
-            pre_movie_ids, pre_episode_ids, recon_stats = run_lite_startup_reconciliation_pre_discovery()
-            startup_sync_stats = _run_startup_lite_snapshot_for_instances(
-                instances,
-                seed_movie_row_ids=set(pre_movie_ids),
-                seed_episode_row_ids=set(pre_episode_ids),
-                lite_reconciliation_pre=recon_stats,
-            )
-            specials_determination_ids = {
-                int(x)
-                for x in (specials_backfill_stats.get("determination_episode_row_ids") or [])
-                if x is not None
-            }
-            if specials_determination_ids:
-                merged_episode_ids = {
-                    int(x) for x in (startup_sync_stats.get("episode_row_ids") or []) if x is not None
-                }
-                merged_episode_ids.update(specials_determination_ids)
-                startup_sync_stats["episode_row_ids"] = sorted(merged_episode_ids)
-            startup_sync_stats["specials_backfill"] = specials_backfill_stats
-            logger.info(
-                "Startup lite · catalog refresh finished · "
-                f"{int(startup_sync_stats.get('movies_targeted', 0) or 0)} movies and "
-                f"{int(startup_sync_stats.get('series_targeted', 0) or 0)} series were checked against Radarr/Sonarr "
-                f"({int(startup_sync_stats.get('movies_seen', 0) or 0)} movie rows updated, "
-                f"{int(startup_sync_stats.get('series_seen', 0) or 0)} series / "
-                f"{int(startup_sync_stats.get('episodes_seen', 0) or 0)} episode rows updated)",
-                extra={'emoji_type': 'success'},
-            )
-        elif selected_mode == 'off':
-            startup_sync_stats = {'instances': len(instances), 'skipped': True}
+        _emit_startup_progress(
+            # Not determination yet: next steps are full-tree FS scan + placeholder reconcile (+ calendar refresh).
+            current_phase="fs_scan",
+            startup_sync_stats=startup_sync_stats,
+            determination_stats=None,
+            materialization_stats=None,
+        )
+
+        phases.begin("fs_scan", "Filesystem scan")
+        scan_run_id = run_ids[0] if run_ids else f'fullsync:startup:{int(time.time())}'
+        scan_result = scan_once_if_needed(scan_run_id, prefer_incremental=True)
+        if isinstance(scan_result, tuple):
+            scan_count, scan_info = scan_result
         else:
-            # Defensive fallback. _resolve_startup_sync_mode should prevent this branch.
-            startup_sync_stats = {'instances': len(instances), 'skipped': True, 'reason': f'unknown_mode:{selected_mode}'}
+            scan_count, scan_info = scan_result, {'reason': 'ok'}
 
-        if selected_mode == "lite":
-            scan_count = 0
-            scan_info = {"skipped": True, "reason": "lite_snapshot_diff"}
-            reconcile_stats = {"skipped": True, "reason": "lite_snapshot_diff"}
-            movie_row_ids = [int(x) for x in (startup_sync_stats.get("movie_row_ids") or []) if x is not None]
-            episode_row_ids = [int(x) for x in (startup_sync_stats.get("episode_row_ids") or []) if x is not None]
-            placeholder_truth_stats = _refresh_placeholder_presence_for_entities(
-                movie_row_ids=movie_row_ids,
-                episode_row_ids=episode_row_ids,
-            )
-            logger.info(
-                "Startup lite placeholder truth refresh complete: "
-                f"movies_checked={placeholder_truth_stats.get('movies_checked', 0)} "
-                f"movies_updated={placeholder_truth_stats.get('movies_updated', 0)} "
-                f"episodes_checked={placeholder_truth_stats.get('episodes_checked', 0)} "
-                f"episodes_updated={placeholder_truth_stats.get('episodes_updated', 0)}",
-                extra={'emoji_type': 'info'},
-            )
-        else:
-            _emit_startup_progress(
-                # Not determination yet: next steps are full-tree FS scan + placeholder reconcile (+ calendar refresh).
-                current_phase="fs_scan",
-                startup_sync_stats=startup_sync_stats,
-                determination_stats=None,
-                materialization_stats=None,
-            )
-
-            scan_run_id = run_ids[0] if run_ids else f'fullsync:startup:{int(time.time())}'
-            scan_result = scan_once_if_needed(scan_run_id, prefer_incremental=True)
-            if isinstance(scan_result, tuple):
-                scan_count, scan_info = scan_result
-            else:
-                scan_count, scan_info = scan_result, {'reason': 'ok'}
-
-            phase_started = time.monotonic()
-            reconcile_stats = run_placeholder_link_reconcile()
-            logger.info(
-                f"Startup phase complete: placeholder_reconcile elapsed_s={time.monotonic() - phase_started:.1f}",
-                extra={'emoji_type': 'info'},
-            )
+        phase_started = time.monotonic()
+        reconcile_stats = run_placeholder_link_reconcile()
+        logger.info(
+            f"Startup phase complete: placeholder_reconcile elapsed_s={time.monotonic() - phase_started:.1f}",
+            extra={'emoji_type': 'info'},
+        )
+        phases.end(
+            "fs_scan",
+            metrics=metrics_from_pipeline(
+                {"scan": {"count": scan_count, "info": scan_info}, "reconcile": reconcile_stats}
+            ).get("fs_scan"),
+            done=int(scan_count or 0),
+            total=int(scan_count or 0),
+            unit_label="files",
+        )
 
         phase_started = time.monotonic()
         calendar_date_refresh_stats = run_calendar_date_refresh()
@@ -1284,38 +1383,21 @@ def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
             determination_stats=None,
             materialization_stats=None,
         )
-        if selected_mode == "lite":
-            movie_row_ids = [int(x) for x in (startup_sync_stats.get("movie_row_ids") or []) if x is not None]
-            episode_row_ids = [int(x) for x in (startup_sync_stats.get("episode_row_ids") or []) if x is not None]
-            if movie_row_ids or episode_row_ids:
-                determination_stats = run_determination_for_entities(
-                    movie_ids=movie_row_ids,
-                    episode_ids=episode_row_ids,
-                )
-            else:
-                determination_stats = {
-                    "movies_total": 0,
-                    "movies_changed": 0,
-                    "episodes_total": 0,
-                    "episodes_changed": 0,
-                    "obsolete_placeholder": 0,
-                    "not_needed": 0,
-                    "placeholder_exists": 0,
-                    "needs_placeholder": 0,
-                    "path_drift_movies": 0,
-                    "path_drift_episodes": 0,
-                    "skipped": True,
-                    "reason": "no_lite_changes_detected",
-                }
-                logger.info(
-                    "Startup lite determination skipped: no changed entities detected",
-                    extra={"emoji_type": "info"},
-                )
-        else:
-            determination_stats = run_determination_pass()
+        phases.begin("determination", "Status determination")
+        determination_stats = run_determination_pass()
         logger.info(
             f"Startup phase complete: determination elapsed_s={time.monotonic() - phase_started:.1f}",
             extra={'emoji_type': 'info'},
+        )
+        det_done = int(determination_stats.get("movies_total") or 0) + int(
+            determination_stats.get("episodes_total") or 0
+        )
+        phases.end(
+            "determination",
+            metrics=metrics_from_pipeline({"determination": determination_stats}).get("determination"),
+            done=det_done,
+            total=det_done,
+            unit_label="rows",
         )
         _emit_startup_progress(
             current_phase='materialization',
@@ -1326,55 +1408,27 @@ def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
         # Primer phase removed to accelerate startup and simplify sync pipeline.
         primer_stats = {"skipped": True, "reason": "deprecated"}
         phase_started = time.monotonic()
-        if selected_mode == "lite":
-            movie_row_ids = [int(x) for x in (startup_sync_stats.get("movie_row_ids") or []) if x is not None]
-            episode_row_ids = [int(x) for x in (startup_sync_stats.get("episode_row_ids") or []) if x is not None]
-            materialization_stats = run_materialization_for_entities(
-                movie_ids=movie_row_ids,
-                episode_ids=episode_row_ids,
-                observation_source="startup_lite_materialization",
-            ) if (movie_row_ids or episode_row_ids) else {
-                "movies_considered": 0,
-                "episodes_considered": 0,
-                "created": 0,
-                "deleted": 0,
-                "noop": 0,
-                "errors": 0,
-                "files_created": 0,
-                "files_deleted": 0,
-                "directories_deleted": 0,
-                "nfo_written": 0,
-                "nfo_deleted": 0,
-                "series_nfo_deleted": 0,
-                "skipped": True,
-                "reason": "no_lite_changes_detected",
-            }
-            if not (movie_row_ids or episode_row_ids):
+        phases.begin("materialization", "Placeholder materialization")
+        materialization_stats = run_materialization_pass()
+        try:
+            from services.source_of_truth.tv_density_rematerialize import (
+                clear_tv_density_rematerialize_pending,
+                is_tv_density_rematerialize_pending,
+            )
+
+            if is_tv_density_rematerialize_pending():
+                clear_tv_density_rematerialize_pending()
+                materialization_stats = dict(materialization_stats or {})
+                materialization_stats["tv_density_rematerialize_pending_cleared"] = True
                 logger.info(
-                    "Startup lite materialization skipped: no changed entities detected",
+                    "Cleared TV density rematerialize pending after startup full materialization",
                     extra={"emoji_type": "info"},
                 )
-        else:
-            materialization_stats = run_materialization_pass()
-            try:
-                from services.source_of_truth.tv_density_rematerialize import (
-                    clear_tv_density_rematerialize_pending,
-                    is_tv_density_rematerialize_pending,
-                )
-
-                if is_tv_density_rematerialize_pending():
-                    clear_tv_density_rematerialize_pending()
-                    materialization_stats = dict(materialization_stats or {})
-                    materialization_stats["tv_density_rematerialize_pending_cleared"] = True
-                    logger.info(
-                        "Cleared TV density rematerialize pending after startup full materialization",
-                        extra={"emoji_type": "info"},
-                    )
-            except Exception as dens_exc:
-                logger.warning(
-                    f"Could not clear TV density rematerialize pending after startup: {dens_exc}",
-                    extra={"emoji_type": "warning"},
-                )
+        except Exception as dens_exc:
+            logger.warning(
+                f"Could not clear TV density rematerialize pending after startup: {dens_exc}",
+                extra={"emoji_type": "warning"},
+            )
         from services.source_of_truth.tag_placeholder_policy import merge_tag_policy_materialization_into
 
         materialization_stats = merge_tag_policy_materialization_into(
@@ -1385,42 +1439,21 @@ def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
             f"Startup phase complete: materialization elapsed_s={time.monotonic() - phase_started:.1f}",
             extra={'emoji_type': 'info'},
         )
+        mat_done = (
+            int(materialization_stats.get("created") or 0)
+            + int(materialization_stats.get("deleted") or 0)
+            + int(materialization_stats.get("noop") or 0)
+            + int(materialization_stats.get("errors") or 0)
+        )
+        phases.end(
+            "materialization",
+            metrics=metrics_from_pipeline({"materialization": materialization_stats}).get("materialization"),
+            done=mat_done,
+            total=mat_done,
+            unit_label="placeholders",
+        )
 
-        request_nfo_backfill_stats: dict[str, object] = {"skipped": True, "reason": "not_run"}
-        try:
-            from services.source_of_truth.status_reconciler import enqueue_request_status_nfo_backfill
-
-            request_nfo_backfill_stats = enqueue_request_status_nfo_backfill()
-            if request_nfo_backfill_stats.get("skipped"):
-                logger.debug(
-                    f"REQUEST NFO backfill skipped: {request_nfo_backfill_stats.get('reason', '')}",
-                    extra={"emoji_type": "debug"},
-                )
-            elif request_nfo_backfill_stats.get("ok") and int(request_nfo_backfill_stats.get("placeholder_count") or 0) > 0:
-                logger.info(
-                    "Startup · REQUEST status NFO backfill queued · "
-                    f"placeholders={request_nfo_backfill_stats.get('placeholder_count')} · "
-                    f"jobs_created={request_nfo_backfill_stats.get('jobs_created', 0)} · "
-                    f"jobs_updated={request_nfo_backfill_stats.get('jobs_updated', 0)}",
-                    extra={"emoji_type": "info"},
-                )
-            elif request_nfo_backfill_stats.get("ok"):
-                logger.debug(
-                    "Startup · REQUEST status NFO backfill: no matching placeholders",
-                    extra={"emoji_type": "debug"},
-                )
-            else:
-                logger.warning(
-                    f"Startup · REQUEST status NFO backfill enqueue issue: {request_nfo_backfill_stats}",
-                    extra={"emoji_type": "warning"},
-                )
-        except Exception as exc:
-            logger.warning(
-                f"Startup · REQUEST status NFO backfill failed (non-fatal): {exc}",
-                extra={"emoji_type": "warning"},
-                exc_info=True,
-            )
-            request_nfo_backfill_stats = {"ok": False, "error": str(exc)}
+        request_nfo_backfill_stats = _enqueue_startup_request_nfo_backfill()
 
         _emit_startup_progress(
             current_phase='complete',
@@ -1429,6 +1462,7 @@ def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
             materialization_stats=materialization_stats,
             completed_at=datetime.now(timezone.utc),
         )
+        phases.begin("calendar", "Calendar status")
         phase_started = time.monotonic()
         calendar_stats = run_calendar_phase()
         logger.info(
@@ -1440,6 +1474,21 @@ def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
         logger.info(
             f"Startup phase complete: orphan_placeholder_cleanup elapsed_s={time.monotonic() - phase_started:.1f}",
             extra={'emoji_type': 'info'},
+        )
+        cal_done = 0
+        if isinstance(calendar_stats, dict):
+            cal_done = int(
+                calendar_stats.get("updated")
+                or calendar_stats.get("changed")
+                or calendar_stats.get("status_applied")
+                or 0
+            )
+        phases.end(
+            "calendar",
+            metrics=metrics_from_pipeline({"calendar": calendar_stats or {}}).get("calendar"),
+            done=cal_done,
+            total=cal_done,
+            unit_label="updates",
         )
         status_reconcile_stats = {"skipped": True, "reason": "deprecated"}
 
@@ -1485,17 +1534,18 @@ def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
 
             finish_task_run(startup_task_run_id, status="done", summary=result)
         # Advance schedules so boot catch-up does not re-fire after a successful startup.
-        # Startup full subsumes lite; startup lite only bumps lite (leave overdue full).
-        if selected_mode == "full":
-            from services.source_of_truth.scheduler import reschedule_after_full_sync_success
+        # Startup full subsumes lite.
+        from services.source_of_truth.scheduler import reschedule_after_full_sync_success
 
-            reschedule_after_full_sync_success()
-        elif selected_mode == "lite":
-            from services.source_of_truth.scheduler import reschedule_task_after_completion
-
-            reschedule_task_after_completion("lite_sync")
+        reschedule_after_full_sync_success()
         return result
     except Exception as exc:
+        try:
+            if phases is not None:
+                for key in list(phases._open.keys()):
+                    phases.end(key, failed=True, status="failed")
+        except Exception:
+            pass
         try:
             from services.startup_sync_activity import record_startup_sync_progress
 

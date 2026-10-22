@@ -3,7 +3,9 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useId,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -11,20 +13,9 @@ import {
   getEntityReconcileStatus,
   type EntityReconcileStartResponse,
 } from "../api/dashboard";
-
-/** Ordered pipeline steps for the sidebar progress bar (matches entity_reconcile). */
-const RECONCILE_STEPS = [
-  "queued",
-  "arr_refresh",
-  "arr_wait_refresh",
-  "sync_catalog",
-  "filesystem",
-  "determination",
-  "materialization",
-  "sidecars",
-  "player",
-  "done",
-] as const;
+import { TaskLiveProgress } from "../activity/TaskLiveProgress";
+import { taskLiveFromApi } from "../activity/taskLiveProgress";
+import type { TaskRunLiveProgress } from "../types/api";
 
 type LibraryReconcileSidebarStatus = {
   message: string | null;
@@ -32,6 +23,7 @@ type LibraryReconcileSidebarStatus = {
   busy: boolean;
   step: string | null;
   title: string | null;
+  live: TaskRunLiveProgress | null;
 };
 
 type LibraryReconcileContextValue = {
@@ -47,7 +39,60 @@ const IDLE_STATUS: LibraryReconcileSidebarStatus = {
   busy: false,
   step: null,
   title: null,
+  live: null,
 };
+
+/** Survives full page reloads so the sidebar pill can resume polling a working job. */
+const RECONCILE_JOB_SESSION_KEY = "placeholdarr.libraryReconcileJobId";
+
+type StoredReconcileJobs = {
+  jobId: number;
+  followupJobId: number | null;
+};
+
+function _positiveJobId(raw: unknown): number | null {
+  const id = typeof raw === "number" ? raw : Number(raw);
+  return Number.isFinite(id) && id > 0 ? Math.trunc(id) : null;
+}
+
+function readStoredReconcileJobs(): StoredReconcileJobs | null {
+  try {
+    const raw = sessionStorage.getItem(RECONCILE_JOB_SESSION_KEY);
+    if (!raw) return null;
+    // Legacy: plain numeric job id string.
+    if (/^\d+$/.test(raw.trim())) {
+      const jobId = _positiveJobId(raw.trim());
+      return jobId != null ? { jobId, followupJobId: null } : null;
+    }
+    const parsed = JSON.parse(raw) as { jobId?: unknown; followupJobId?: unknown };
+    const jobId = _positiveJobId(parsed?.jobId);
+    if (jobId == null) return null;
+    const followupJobId = _positiveJobId(parsed?.followupJobId);
+    return {
+      jobId,
+      followupJobId: followupJobId != null && followupJobId !== jobId ? followupJobId : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredReconcileJobs(jobId: number | null, followupJobId: number | null = null): void {
+  try {
+    if (jobId == null) {
+      sessionStorage.removeItem(RECONCILE_JOB_SESSION_KEY);
+      return;
+    }
+    const followup =
+      followupJobId != null && followupJobId > 0 && followupJobId !== jobId ? followupJobId : null;
+    sessionStorage.setItem(
+      RECONCILE_JOB_SESSION_KEY,
+      JSON.stringify({ jobId, followupJobId: followup }),
+    );
+  } catch {
+    // Ignore quota / private-mode failures; pill just will not survive reload.
+  }
+}
 
 export function useLibraryReconcile(): LibraryReconcileContextValue {
   const ctx = useContext(LibraryReconcileContext);
@@ -57,19 +102,46 @@ export function useLibraryReconcile(): LibraryReconcileContextValue {
   return ctx;
 }
 
-function stepProgressPct(step: string | null, kind: LibraryReconcileSidebarStatus["kind"]): number {
-  if (kind === "success") return 100;
-  if (kind === "error") return 0;
-  const key = String(step || "queued").trim().toLowerCase();
-  const idx = RECONCILE_STEPS.indexOf(key as (typeof RECONCILE_STEPS)[number]);
-  if (idx < 0) return 0;
-  // Leave room under 100% until done so the bar does not look finished mid-run.
-  return Math.round((idx / Math.max(1, RECONCILE_STEPS.length - 1)) * 100);
-}
-
 export function LibraryReconcileProvider(props: { children: ReactNode }) {
   const [status, setStatus] = useState<LibraryReconcileSidebarStatus>(IDLE_STATUS);
   const [pollingJobId, setPollingJobId] = useState<number | null>(null);
+  const [followupJobId, setFollowupJobId] = useState<number | null>(null);
+  const [resumeChecked, setResumeChecked] = useState(false);
+  const pollFailuresRef = useRef(0);
+
+  const clearPollingJob = useCallback(() => {
+    writeStoredReconcileJobs(null);
+    setPollingJobId(null);
+    setFollowupJobId(null);
+    pollFailuresRef.current = 0;
+  }, []);
+
+  const beginPollingJob = useCallback((jobId: number, followupId: number | null = null) => {
+    const followup = followupId != null && followupId > 0 && followupId !== jobId ? followupId : null;
+    writeStoredReconcileJobs(jobId, followup);
+    setPollingJobId(jobId);
+    setFollowupJobId(followup);
+    pollFailuresRef.current = 0;
+  }, []);
+
+  // Resume an in-flight title refresh after a full page reload.
+  useEffect(() => {
+    const stored = readStoredReconcileJobs();
+    if (stored == null) {
+      setResumeChecked(true);
+      return;
+    }
+    setStatus({
+      busy: true,
+      kind: "info",
+      message: "Refreshing…",
+      step: "queued",
+      title: null,
+      live: null,
+    });
+    beginPollingJob(stored.jobId, stored.followupJobId);
+    setResumeChecked(true);
+  }, [beginPollingJob]);
 
   useEffect(() => {
     if (status.kind !== "success" || !status.message) return;
@@ -88,29 +160,46 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
       try {
         const jobStatus = await getEntityReconcileStatus(pollingJobId);
         if (stopped) return;
+        pollFailuresRef.current = 0;
 
         const title = String(jobStatus.display_title || "").trim() || null;
+        const live = jobStatus.live ?? null;
 
         if (jobStatus.status === "failed") {
-          setPollingJobId(null);
+          clearPollingJob();
           setStatus({
             busy: false,
             kind: "error",
             message: jobStatus.error_message || "Refresh failed",
             step: jobStatus.step || null,
             title,
+            live,
           });
           return;
         }
 
         if (jobStatus.status === "done") {
-          setPollingJobId(null);
+          if (followupJobId != null && followupJobId !== pollingJobId) {
+            const nextId = followupJobId;
+            setStatus({
+              busy: true,
+              kind: "info",
+              message: "Follow-up refresh queued…",
+              step: "queued",
+              title,
+              live: null,
+            });
+            beginPollingJob(nextId, null);
+            return;
+          }
+          clearPollingJob();
           setStatus({
             busy: false,
             kind: "success",
             message: "Refresh complete",
             step: "done",
             title,
+            live,
           });
           return;
         }
@@ -121,17 +210,42 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
           message: jobStatus.step_label || "Working…",
           step: jobStatus.step || null,
           title,
+          live,
         });
       } catch (e) {
         if (!stopped) {
-          setPollingJobId(null);
-          setStatus({
-            busy: false,
-            kind: "error",
-            message: e instanceof Error ? e.message : "Could not load refresh status",
-            step: null,
-            title: null,
-          });
+          const msg = e instanceof Error ? e.message : "Could not load refresh status";
+          const stale =
+            /not found/i.test(msg) || /404/.test(msg) || /Reconcile job not found/i.test(msg);
+          if (stale) {
+            clearPollingJob();
+            if (resumeChecked) {
+              setStatus(IDLE_STATUS);
+              return;
+            }
+            setStatus({
+              busy: false,
+              kind: "error",
+              message: msg,
+              step: null,
+              title: null,
+              live: null,
+            });
+            return;
+          }
+          // Transient network/5xx: keep polling; only fail after several misses.
+          pollFailuresRef.current += 1;
+          if (pollFailuresRef.current >= 3) {
+            clearPollingJob();
+            setStatus({
+              busy: false,
+              kind: "error",
+              message: msg,
+              step: null,
+              title: null,
+              live: null,
+            });
+          }
         }
       }
     };
@@ -144,40 +258,48 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
       stopped = true;
       window.clearInterval(interval);
     };
-  }, [pollingJobId]);
+  }, [pollingJobId, followupJobId, clearPollingJob, beginPollingJob, resumeChecked]);
 
   const runReconcile = useCallback(async (startReconcile: () => Promise<EntityReconcileStartResponse>) => {
-    setPollingJobId(null);
+    clearPollingJob();
     setStatus({
       busy: true,
       kind: "info",
       message: "Refresh queued…",
       step: "queued",
       title: null,
+      live: null,
     });
     try {
       const out = await startReconcile();
       if (!out.ok || out.job_id == null) {
         throw new Error(out.message || "Failed to start refresh");
       }
+      const followup =
+        out.followup_job_id != null && Number(out.followup_job_id) > 0
+          ? Math.trunc(Number(out.followup_job_id))
+          : null;
       setStatus({
         busy: true,
         kind: "info",
         message: out.step_label || "Refresh queued…",
         step: out.step || "queued",
         title: String(out.display_title || "").trim() || null,
+        live: out.live ?? null,
       });
-      setPollingJobId(out.job_id);
+      beginPollingJob(out.job_id, followup);
     } catch (e) {
+      clearPollingJob();
       setStatus({
         busy: false,
         kind: "error",
         message: e instanceof Error ? e.message : "Failed to start refresh",
         step: null,
         title: null,
+        live: null,
       });
     }
-  }, []);
+  }, [beginPollingJob, clearPollingJob]);
 
   const value = useMemo(() => ({ status, runReconcile }), [status, runReconcile]);
 
@@ -188,20 +310,17 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
   );
 }
 
-export function LibraryReconcileSidebarFooter(props: {
+function MinimizedReconcilePill(props: {
   isStudioGlass: boolean;
-  /** When a task live-progress pill is active, hide reconcile chrome so they do not stack. */
-  yieldToTaskLive?: boolean;
+  label: string;
+  stageText: string;
+  countsText: string;
+  pct: number;
+  queued: boolean;
+  kind: LibraryReconcileSidebarStatus["kind"];
+  onExpand?: () => void;
 }) {
-  const ctx = useContext(LibraryReconcileContext);
-  const status = ctx?.status ?? IDLE_STATUS;
-  const { message, kind, busy, step, title } = status;
-  if (props.yieldToTaskLive) return null;
-  if (!message && !busy) return null;
-
   const glass = props.isStudioGlass;
-  const queued = busy && String(step || "").toLowerCase() === "queued";
-  const pct = stepProgressPct(step, kind);
   const track = glass ? "bg-[#2a3340]" : "bg-slate-200";
   const fill = glass ? "bg-sky-400" : "bg-sky-600";
   const fillDone = glass ? "bg-emerald-400" : "bg-emerald-600";
@@ -209,10 +328,139 @@ export function LibraryReconcileSidebarFooter(props: {
   const muted = glass ? "text-slate-400" : "text-slate-600";
   const fg = glass ? "text-slate-100" : "text-slate-900";
   const barFill =
-    kind === "error" ? fillError : kind === "success" || pct >= 100 ? fillDone : queued ? track : fill;
-  const label = title || "Title refresh";
+    props.kind === "error"
+      ? fillError
+      : props.kind === "success" || props.pct >= 100
+        ? fillDone
+        : props.queued
+          ? track
+          : fill;
+  const shell = `w-full rounded-lg border px-3 py-2.5 text-left ${
+    glass
+      ? "border-[#424753]/55 bg-[#1e2430]/90 text-slate-200"
+      : "border-[#c5d0de] bg-white/90 text-slate-700"
+  }${
+    props.onExpand
+      ? glass
+        ? " transition-colors hover:border-sky-500/40 hover:bg-[#252e3a]"
+        : " transition-colors hover:border-sky-500/50 hover:bg-white"
+      : ""
+  }`;
+
+  const body = (
+    <div className="flex items-start gap-2">
+      <span
+        className={`material-symbols-outlined mt-0.5 shrink-0 ${
+          props.kind === "success"
+            ? glass
+              ? "text-emerald-400"
+              : "text-emerald-600"
+            : props.kind === "error"
+              ? glass
+                ? "text-rose-400"
+                : "text-rose-600"
+              : props.queued
+                ? glass
+                  ? "text-slate-400"
+                  : "text-slate-500"
+                : `animate-spin ${glass ? "text-sky-400" : "text-sky-600"}`
+        }`}
+        style={{ fontSize: 16 }}
+      >
+        {props.kind === "success"
+          ? "check_circle"
+          : props.kind === "error"
+            ? "error"
+            : props.queued
+              ? "schedule"
+              : "progress_activity"}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className={`block font-headline text-[12px] uppercase tracking-wider ${fg}`}>
+          {props.label}
+        </span>
+        <span className={`mt-0.5 block font-headline text-[11px] uppercase tracking-wider ${muted} line-clamp-2`}>
+          {props.stageText}
+        </span>
+        <span className={`mt-0.5 block tabular-nums text-[11px] ${muted} line-clamp-2`}>
+          {props.countsText}
+        </span>
+        <div className={`mt-2 h-1.5 w-full overflow-hidden rounded-full ${track}`}>
+          <div
+            className={`h-full rounded-full transition-[width] duration-500 ease-out ${barFill}`}
+            style={{ width: props.queued ? "0%" : `${Math.max(0, Math.min(100, props.pct))}%` }}
+          />
+        </div>
+      </span>
+    </div>
+  );
+
+  if (props.onExpand) {
+    return (
+      <button type="button" onClick={props.onExpand} aria-expanded={false} className={shell}>
+        {body}
+      </button>
+    );
+  }
+  return <div className={shell}>{body}</div>;
+}
+
+export function LibraryReconcileSidebarFooter(props: {
+  isStudioGlass: boolean;
+  /** When a task live-progress pill is active, hide reconcile chrome so they do not stack. */
+  yieldToTaskLive?: boolean;
+}) {
+  const ctx = useContext(LibraryReconcileContext);
+  const status = ctx?.status ?? IDLE_STATUS;
+  const { message, kind, busy, step, title, live } = status;
+  const [expanded, setExpanded] = useState(false);
+  const panelId = useId();
+
+  const liveModel = useMemo(() => {
+    if (!live) return null;
+    const model = taskLiveFromApi(live);
+    if (!model) return null;
+    // Prefer display title from status when live label is generic.
+    if (title && (!model.label || model.label === "Title refresh")) {
+      return { ...model, label: title };
+    }
+    return model;
+  }, [live, title]);
+
+  useEffect(() => {
+    if (!busy && kind !== "success") setExpanded(false);
+  }, [busy, kind]);
+
+  useEffect(() => {
+    if (!expanded) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setExpanded(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [expanded]);
+
+  if (props.yieldToTaskLive) return null;
+  if (!message && !busy) return null;
+
+  const glass = props.isStudioGlass;
+  const queued = busy && String(step || "").toLowerCase() === "queued";
+  const pct = liveModel
+    ? liveModel.overallPct
+    : kind === "success"
+      ? 100
+      : kind === "error"
+        ? 0
+        : 0;
+  const label = title || liveModel?.label || "Title refresh";
   const stageText =
-    kind === "success" ? "Done" : kind === "error" ? "Failed" : queued ? "Queued" : message || "Working…";
+    kind === "success"
+      ? "Done"
+      : kind === "error"
+        ? "Failed"
+        : queued
+          ? "Queued"
+          : liveModel?.stageLabel || message || "Working…";
   const countsText =
     kind === "success"
       ? "100%"
@@ -220,63 +468,56 @@ export function LibraryReconcileSidebarFooter(props: {
         ? message || "Failed"
         : queued
           ? "Waiting for a worker"
-          : `${pct}%`;
+          : liveModel
+            ? `${liveModel.overallPct}% · ${liveModel.unitsDone}/${liveModel.unitsTotal}`
+            : message || "Working…";
+
+  const canExpand = Boolean(liveModel?.phases?.length) && (busy || kind === "success");
 
   return (
     <div className="relative w-full shrink-0 px-4 pb-2" aria-live="polite">
-      <div
-        className={`w-full rounded-lg border px-3 py-2.5 text-left ${
-          glass
-            ? "border-[#424753]/55 bg-[#1e2430]/90 text-slate-200"
-            : "border-[#c5d0de] bg-white/90 text-slate-700"
-        }`}
-      >
-        <div className="flex items-start gap-2">
-          <span
-            className={`material-symbols-outlined mt-0.5 shrink-0 ${
-              kind === "success"
-                ? glass
-                  ? "text-emerald-400"
-                  : "text-emerald-600"
-                : kind === "error"
-                  ? glass
-                    ? "text-rose-400"
-                    : "text-rose-600"
-                  : queued
-                    ? glass
-                      ? "text-slate-400"
-                      : "text-slate-500"
-                    : `animate-spin ${glass ? "text-sky-400" : "text-sky-600"}`
-            }`}
-            style={{ fontSize: 16 }}
-          >
-            {kind === "success"
-              ? "check_circle"
-              : kind === "error"
-                ? "error"
-                : queued
-                  ? "schedule"
-                  : "progress_activity"}
-          </span>
-          <span className="min-w-0 flex-1">
-            <span className={`block font-headline text-[12px] uppercase tracking-wider ${fg}`}>
-              {label}
-            </span>
-            <span className={`mt-0.5 block font-headline text-[11px] uppercase tracking-wider ${muted} line-clamp-2`}>
-              {stageText}
-            </span>
-            <span className={`mt-0.5 block tabular-nums text-[11px] ${muted} line-clamp-2`}>
-              {countsText}
-            </span>
-            <div className={`mt-2 h-1.5 w-full overflow-hidden rounded-full ${track}`}>
-              <div
-                className={`h-full rounded-full transition-[width] duration-500 ease-out ${barFill}`}
-                style={{ width: queued ? "0%" : `${Math.max(0, Math.min(100, pct))}%` }}
-              />
-            </div>
-          </span>
+      {!expanded || !canExpand || !liveModel ? (
+        <MinimizedReconcilePill
+          isStudioGlass={glass}
+          label={label}
+          stageText={stageText}
+          countsText={countsText}
+          pct={pct}
+          queued={queued}
+          kind={kind}
+          onExpand={canExpand ? () => setExpanded(true) : undefined}
+        />
+      ) : (
+        <div
+          id={panelId}
+          className={`min-w-0 overflow-hidden rounded-xl border p-3 transition-all duration-300 ease-out ${
+            glass
+              ? "border-[#424753]/50 bg-[#141a24] text-slate-100"
+              : "border-[#c5d0de] bg-[#eef3f8] text-slate-900"
+          }`}
+        >
+          <div className="mb-2.5 flex items-start justify-between gap-2">
+            <p className="text-[10px] font-headline uppercase tracking-widest opacity-50">
+              {queued ? "Queued" : kind === "success" ? "Complete" : "In progress"}
+            </p>
+            <button
+              type="button"
+              onClick={() => setExpanded(false)}
+              className={`rounded-md p-1 ${
+                glass
+                  ? "text-slate-400 hover:bg-white/10 hover:text-white"
+                  : "text-slate-500 hover:bg-black/5 hover:text-slate-800"
+              }`}
+              aria-label="Collapse title refresh progress"
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
+                close
+              </span>
+            </button>
+          </div>
+          <TaskLiveProgress model={liveModel} density="compact" isStudioGlass={glass} showFullDetails />
         </div>
-      </div>
+      )}
     </div>
   );
 }

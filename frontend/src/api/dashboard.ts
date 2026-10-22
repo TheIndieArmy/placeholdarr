@@ -20,6 +20,7 @@ import type {
   StatsResponse,
   DeterminationExplainResponse,
   PlaceholderPolicySetResponse,
+  TaskRunLiveProgress,
 } from "../types/api";
 
 export function getStats(): Promise<StatsResponse> {
@@ -171,11 +172,13 @@ export function getSeriesDetail(seriesId: number): Promise<DetailResponse> {
 export type EntityReconcileStartResponse = {
   ok: boolean;
   job_id?: number;
+  followup_job_id?: number | null;
   step?: string;
   step_label?: string;
   display_title?: string;
   reused?: boolean;
   message?: string;
+  live?: TaskRunLiveProgress | null;
 };
 
 export type EntityReconcileStatusResponse = {
@@ -187,6 +190,7 @@ export type EntityReconcileStatusResponse = {
   error_message?: string | null;
   entity_type?: string;
   entity_id?: number;
+  live?: TaskRunLiveProgress | null;
 };
 
 export function refreshMoviePlaceholder(movieId: number): Promise<EntityReconcileStartResponse> {

@@ -492,6 +492,12 @@ def process_movie_add_event(payload: dict[str, Any], instance: str | None = None
         session.add(movie_row)
         session.flush()
         movie_row_id = int(movie_row.id)
+        # Drop any deferred movie_deleted materialization still waiting for this row.
+        from services.source_of_truth.entity_materialization_job import (
+            supersede_pending_movie_deleted_materialization,
+        )
+
+        supersede_pending_movie_deleted_materialization(session, movie_row_id)
         session.commit()
 
         determination_stats = run_determination_for_entities(movie_ids=[movie_row_id])
@@ -1104,7 +1110,19 @@ def process_movie_deleted_event(payload: dict[str, Any], instance: str | None = 
                 ).first()
 
         if not movie_row:
-            raise ValueError(f"moviedelete_movie_not_found:radarrid={movie_id}:instance_key={resolved_instance_key}")
+            # Already purged (or never cataloged). Desired end state is gone; do not retry.
+            logger.info(
+                f"movie_deleted webhook: movie already absent radarr_id={movie_id} "
+                f"instance={resolved_instance_key}; treating as done",
+                extra={"emoji_type": "info"},
+            )
+            return {
+                "ok": True,
+                "event": "movie_deleted",
+                "already_gone": True,
+                "movie_id": None,
+                "radarr_id": movie_id,
+            }
 
         movie_row.is_deleted = True
         movie_row.has_file = False
@@ -1116,7 +1134,7 @@ def process_movie_deleted_event(payload: dict[str, Any], instance: str | None = 
         ev_mono = time.monotonic()
         logger.info(
             f"movie_deleted webhook: tombstone committed movie_row_id={movie_row_id} "
-            f"radarr_id={movie_id} instance={instance or '?'} — running scoped determination, "
+            f"radarr_id={movie_id} instance={instance or '?'}; running scoped determination, "
             f"then enqueueing materialization (avoids long commit on webhook thread)",
             extra={"emoji_type": "info"},
         )
@@ -1413,17 +1431,32 @@ def process_series_deleted_event(payload: dict[str, Any], instance: str | None =
                 ).first()
 
         if not series_row:
-            raise ValueError(f"seriesdelete_series_not_found:sonarrid={sonarr_series_id}:instance_key={resolved_instance_key}")
+            # Already purged (or never cataloged). Desired end state is gone; do not retry.
+            logger.info(
+                f"series_deleted webhook: series already absent sonarr_id={sonarr_series_id} "
+                f"instance={resolved_instance_key}; treating as done",
+                extra={"emoji_type": "info"},
+            )
+            return {
+                "ok": True,
+                "event": "series_deleted",
+                "already_gone": True,
+                "series_id": None,
+                "episode_ids": [],
+                "sonarr_id": sonarr_series_id,
+            }
 
         series_row.is_deleted = True
         series_row.has_files = False
         series_row.seriesfile_count = 0
         session.add(series_row)
         session.flush()
+        # Capture before materialization/purge; hard-purge invalidates this ORM instance.
+        series_row_id = int(series_row.id)
 
         season_ids = [
             int(row[0])
-            for row in session.query(Season.id).filter(Season.series_id == series_row.id).all()
+            for row in session.query(Season.id).filter(Season.series_id == series_row_id).all()
         ]
         episode_ids: list[int] = []
         if season_ids:
@@ -1451,6 +1484,11 @@ def process_series_deleted_event(payload: dict[str, Any], instance: str | None =
             )
 
         session.commit()
+        # Detach so post-purge attribute access cannot raise ObjectDeletedError.
+        try:
+            session.expunge(series_row)
+        except Exception:
+            pass
 
         determination_stats = run_determination_for_entities(episode_ids=episode_ids)
         materialization_stats = run_materialization_for_entities(
@@ -1461,7 +1499,7 @@ def process_series_deleted_event(payload: dict[str, Any], instance: str | None =
         return {
             "ok": True,
             "event": "series_deleted",
-            "series_id": int(series_row.id),
+            "series_id": series_row_id,
             "episode_ids": episode_ids,
             "determination": determination_stats,
             "materialization": materialization_stats,

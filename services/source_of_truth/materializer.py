@@ -739,6 +739,25 @@ def apply_movie_materialization(movie_id: int, session=None, activity_reason: st
             }
 
         if determination == DETERMINATION_OBSOLETE:
+            # Lock the row for the obsolete decision + teardown so a concurrent re-add
+            # cannot clear is_deleted mid-cleanup and still lose its placeholder.
+            locked = (
+                session.query(Movie)
+                .filter(Movie.id == int(movie.id))
+                .with_for_update()
+                .first()
+            )
+            if not locked:
+                return {"ok": False, "reason": "movie_not_found", "movie_id": movie_id}
+            movie = locked
+            if not bool(getattr(movie, "has_file", False)) and not bool(
+                getattr(movie, "is_deleted", False)
+            ):
+                return {
+                    "ok": True,
+                    "action": "noop_stale_obsolete",
+                    "movie_id": movie.id,
+                }
             candidate_paths = _mark_placeholder_rows_deleted(
                 session,
                 movie_id=movie.id,
@@ -749,6 +768,15 @@ def apply_movie_materialization(movie_id: int, session=None, activity_reason: st
                 candidate_paths.append(movie.placeholder_filepath)
             first_path = next((p for p in candidate_paths if p), None)
             disk_paths = filter_movie_disk_cleanup_paths(session, movie, candidate_paths)
+            # Re-check under the same lock before touching disk.
+            if not bool(getattr(movie, "has_file", False)) and not bool(
+                getattr(movie, "is_deleted", False)
+            ):
+                return {
+                    "ok": True,
+                    "action": "noop_stale_obsolete",
+                    "movie_id": movie.id,
+                }
             cleanup_result = cleanup_movie_placeholder_files(candidate_paths=disk_paths)
 
             movie.has_placeholder = False
@@ -866,6 +894,35 @@ def apply_episode_materialization(episode_id: int, session=None, activity_reason
             }
 
         if determination == DETERMINATION_OBSOLETE:
+            locked = (
+                session.query(Episode)
+                .filter(Episode.id == int(episode.id))
+                .with_for_update()
+                .first()
+            )
+            if not locked:
+                return {"ok": False, "reason": "episode_not_found", "episode_id": episode_id}
+            episode = locked
+            if series is not None and getattr(series, "id", None) is not None:
+                locked_series = (
+                    session.query(Series)
+                    .filter(Series.id == int(series.id))
+                    .with_for_update()
+                    .first()
+                )
+                if locked_series is not None:
+                    series = locked_series
+            series_deleted = bool(getattr(series, "is_deleted", False)) if series is not None else False
+            if (
+                not bool(getattr(episode, "has_file", False))
+                and not bool(getattr(episode, "is_deleted", False))
+                and not series_deleted
+            ):
+                return {
+                    "ok": True,
+                    "action": "noop_stale_obsolete",
+                    "episode_id": episode.id,
+                }
             candidate_paths = _mark_placeholder_rows_deleted(
                 session,
                 movie_id=None,
@@ -875,6 +932,17 @@ def apply_episode_materialization(episode_id: int, session=None, activity_reason
             if getattr(episode, "placeholder_filepath", None):
                 candidate_paths.append(episode.placeholder_filepath)
             first_path = next((p for p in candidate_paths if p), None)
+            series_deleted = bool(getattr(series, "is_deleted", False)) if series is not None else False
+            if (
+                not bool(getattr(episode, "has_file", False))
+                and not bool(getattr(episode, "is_deleted", False))
+                and not series_deleted
+            ):
+                return {
+                    "ok": True,
+                    "action": "noop_stale_obsolete",
+                    "episode_id": episode.id,
+                }
             cleanup_result = cleanup_episode_placeholder_files(
                 session,
                 season=season,
@@ -1407,8 +1475,23 @@ def _run_materialization_for_ids(
         ids = [int(x) for x in (series_episode_ids or []) if x is not None]
         if not ids:
             return
-        series = session.query(Series).filter(Series.id == int(series_id)).first()
+        series = (
+            session.query(Series)
+            .filter(Series.id == int(series_id))
+            .with_for_update()
+            .first()
+        )
         if not series:
+            for episode_id in ids:
+                _process_single_episode_materialization(episode_id)
+            return
+        # Quick delete-then-readd: another worker may have cleared is_deleted already.
+        if not bool(getattr(series, "is_deleted", False)):
+            logger.info(
+                f"Series bulk tombstone cleanup skipped for series_id={int(series_id)} "
+                f"(no longer soft-deleted; likely re-added); falling back to per-episode materialization",
+                extra={"emoji_type": "info"},
+            )
             for episode_id in ids:
                 _process_single_episode_materialization(episode_id)
             return
@@ -1749,11 +1832,17 @@ def run_materialization_for_entities(
     episode_ids: list[int] | None = None,
     observation_source: str = "event_materialization",
     log_subject: str | None = None,
+    *,
+    purge_catalog_tombstones: bool = True,
 ) -> dict[str, Any]:
     """Run materialization only for targeted entities.
 
     This is used by webhook/event workflows so only affected content is
     materialized, refreshed, and observed.
+
+    When ``purge_catalog_tombstones`` is False, soft-deleted catalog rows are
+    left in place after placeholder teardown so callers can still write
+    activity history (or other FK-bound rows) before hard-purge.
     """
     movie_ids = [int(mid) for mid in (movie_ids or []) if mid is not None]
     episode_ids = [int(eid) for eid in (episode_ids or []) if eid is not None]
@@ -1814,6 +1903,22 @@ def run_materialization_for_entities(
             f"Scoped materialization complete{subject_part}: {stats}",
             extra={"emoji_type": "success"},
         )
+        # After placeholder teardown, hard-purge cleaned soft-deleted catalog rows for this scope.
+        if purge_catalog_tombstones:
+            try:
+                from services.source_of_truth.catalog_tombstone_purge import purge_cleaned_deleted_catalog
+
+                purge_stats = purge_cleaned_deleted_catalog(
+                    movie_ids=movie_ids,
+                    episode_ids=episode_ids,
+                )
+                if isinstance(stats, dict) and isinstance(purge_stats, dict):
+                    stats["catalog_tombstone_purge"] = purge_stats
+            except Exception as purge_exc:
+                logger.debug(
+                    f"Scoped catalog tombstone purge skipped{subject_part}: {purge_exc}",
+                    extra={"emoji_type": "debug"},
+                )
         return stats
     except Exception as e:
         session.rollback()

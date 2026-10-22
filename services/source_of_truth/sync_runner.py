@@ -763,10 +763,14 @@ def run_full_sync(
     instance_key: str | None = None,
     *,
     run_template_backfill: bool = False,
+    on_progress=None,
 ):
     """Source-of-truth full sync for ARR -> DB materialization.
 
     When ``instance_key`` is omitted, sync every configured instance for ``types``.
+
+    ``on_progress(done, total)`` is optional. Totals are catalog rows for this call
+    (movies + series titles). Episode upserts are folded under each series step.
     """
     started_at = datetime.now(timezone.utc)
     stats = {
@@ -794,6 +798,28 @@ def run_full_sync(
     touched_movie_row_ids: list[int] = []
     touched_series_row_ids: list[int] = []
     allow_episode_detail = _episode_detail_fetches_enabled()
+    progress_done = 0
+    progress_total = 0
+    last_live_mono = [0.0]
+
+    def _emit_arr_progress(*, force: bool = False) -> None:
+        if not callable(on_progress):
+            return
+        now = time.monotonic()
+        if not force and (now - last_live_mono[0]) < 1.5 and progress_done % max(1, int(batch_size or 50)) != 0:
+            return
+        last_live_mono[0] = now
+        try:
+            on_progress(int(progress_done), int(progress_total))
+        except Exception:
+            pass
+
+    def _check_cancel() -> None:
+        """Honor Stop between Arr titles / committed batches when a task cancel scope is active."""
+        from services.task_run_cancel import ensure_active_task_run_not_cancelled
+
+        ensure_active_task_run_not_cancelled()
+
     try:
         requested_key = str(instance_key or '').strip().lower() or None
         for content_type, base_url, api_key, sync_instance_key in _iter_arr_endpoints(
@@ -801,6 +827,7 @@ def run_full_sync(
             instance_key=requested_key,
             all_instances=requested_key is None,
         ):
+            _check_cancel()
             if content_type == 'movie':
                 movies = fetch_radarr_movies(base_url, api_key, bypass_cache=True)
                 if movies is None:
@@ -810,11 +837,16 @@ def run_full_sync(
                         extra={'emoji_type': 'warning'},
                     )
                     continue
+                progress_total += len(movies)
+                _emit_arr_progress(force=True)
                 seen_tmdbids = set()
                 for movie in movies:
+                    _check_cancel()
                     fields = _movie_fields(movie, sync_instance_key)
                     fields = _fill_missing_movie_art(fields, movie, base_url, api_key)
                     if not fields['tmdbid']:
+                        progress_done += 1
+                        _emit_arr_progress()
                         continue
                     seen_tmdbids.add(fields['tmdbid'])
                     stats['movies_seen'] += 1
@@ -827,6 +859,9 @@ def run_full_sync(
                         stats['movies_updated'] += 1
                     if not dry_run and batch_size > 0 and stats['movies_seen'] % batch_size == 0:
                         session.commit()
+                        _check_cancel()
+                    progress_done += 1
+                    _emit_arr_progress()
 
                 if not dry_run and seen_tmdbids:
                     marked_movies = (
@@ -848,15 +883,20 @@ def run_full_sync(
                     continue
                 seen_tvdbids = set()
                 total_series = len(series_items)
+                progress_total += total_series
+                _emit_arr_progress(force=True)
                 logger.info(
                     f"Series fullsync: fetched {total_series} series from Sonarr ({sync_instance_key}), syncing episodes...",
                     extra={'emoji_type': 'info'},
                 )
 
                 for series_idx, series_entry in enumerate(series_items, start=1):
+                    _check_cancel()
                     s_fields = _series_fields(series_entry, sync_instance_key)
                     s_fields = _fill_missing_series_art(s_fields, series_entry, base_url, api_key)
                     if not s_fields['tvdbid']:
+                        progress_done += 1
+                        _emit_arr_progress()
                         continue
 
                     sonarr_series_id = series_entry.get('id')
@@ -960,8 +1000,12 @@ def run_full_sync(
 
                     if not dry_run:
                         session.commit()
+                        _check_cancel()
+                    progress_done += 1
+                    _emit_arr_progress()
 
                 if not dry_run and seen_tvdbids:
+                    _check_cancel()
                     deleted_series_rows = (
                         session.query(Series.id)
                         .filter(and_(Series.instance_key == sync_instance_key, ~Series.tvdbid.in_(seen_tvdbids)))
@@ -1091,9 +1135,18 @@ def run_full_sync(
                 )
         else:
             stats['template_backfill'] = {"ok": True, "ran": False, "reason": "deferred_to_scheduled_sync"}
+        _emit_arr_progress(force=True)
         return stats
     except Exception as e:
         session.rollback()
+        from services.task_run_cancel import TaskRunCancelled
+
+        if isinstance(e, TaskRunCancelled):
+            logger.info(
+                f"Source-of-truth fullsync stopped by user: {e}",
+                extra={"emoji_type": "info"},
+            )
+            raise
         logger.error(f"Source-of-truth fullsync failed: {e}", extra={'emoji_type': 'error'})
         raise
     finally:

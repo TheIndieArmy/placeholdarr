@@ -11,6 +11,7 @@ worker turn so the webhook_event job can finish immediately after enqueue.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from core.logger import logger, start_verbose_stall_heartbeat
@@ -25,6 +26,79 @@ from services.postgres.models import Job, Movie
 from services.source_of_truth.materializer import run_materialization_for_entities
 
 ENTITY_MATERIALIZATION_JOB_TYPE = "entity_materialization"
+
+
+def _payload_targets_movie_deleted(payload: dict[str, Any], movie_row_id: int) -> bool:
+    """True when this materialization job is the movie_deleted follow-up for ``movie_row_id``."""
+    if not isinstance(payload, dict):
+        return False
+    obs = str(payload.get("observation_source") or "").strip()
+    finalize = bool(payload.get("finalize_movie_deleted_activity"))
+    if not finalize and obs != "event_movie_deleted":
+        return False
+    ids = [int(x) for x in (payload.get("movie_ids") or []) if x is not None]
+    mid = payload.get("movie_row_id")
+    try:
+        mid_int = int(mid) if mid is not None else None
+    except (TypeError, ValueError):
+        mid_int = None
+    return int(movie_row_id) in ids or mid_int == int(movie_row_id)
+
+
+def supersede_pending_movie_deleted_materialization(session, movie_row_id: int) -> int:
+    """Mark pending/claimed movie_deleted materialization jobs for this row as done.
+
+    Used when a quick re-add revives the same catalog row so deferred delete
+    teardown / purge does not run after the title is live again. Claimed jobs
+    are also revoked so an in-flight handler can abandon at the next checkpoint.
+    """
+    now = datetime.now(timezone.utc)
+    rows = (
+        session.query(Job)
+        .filter(
+            Job.job_type == ENTITY_MATERIALIZATION_JOB_TYPE,
+            Job.status.in_(("PENDING", "CLAIMED", "WORKING")),
+        )
+        .with_for_update(skip_locked=True)
+        .all()
+    )
+    superseded = 0
+    for job in rows:
+        payload = job.payload if isinstance(job.payload, dict) else {}
+        if not _payload_targets_movie_deleted(payload, int(movie_row_id)):
+            continue
+        if str(job.status or "").upper() in ("CLAIMED", "WORKING"):
+            try:
+                from services.worker import mark_claim_revoked
+
+                mark_claim_revoked(int(job.id))
+            except Exception:
+                pass
+        job.status = "DONE"
+        job.error_message = "superseded_by_movie_readd"
+        job.updated_at = now
+        session.add(job)
+        superseded += 1
+    if superseded:
+        logger.info(
+            f"Superseded {superseded} movie_deleted materialization job(s) "
+            f"for movie_row_id={int(movie_row_id)} after re-add",
+            extra={"emoji_type": "info"},
+        )
+    return superseded
+
+
+def movie_still_soft_deleted(movie_row_id: int) -> bool:
+    """Fresh read: True only when the catalog row exists and ``is_deleted`` is set."""
+    sess = get_session()
+    try:
+        row = sess.query(Movie.id, Movie.is_deleted).filter(Movie.id == int(movie_row_id)).first()
+        if not row:
+            return False
+        return bool(row[1])
+    finally:
+        sess.close()
+
 
 
 def enqueue_entity_materialization_job(
@@ -58,18 +132,111 @@ def enqueue_entity_materialization_job(
     return job
 
 
+def _finalize_movie_deleted_activity(
+    *,
+    movie_row_id: int,
+    stats_mat: dict[str, Any] | None,
+    determination_stats: Any,
+) -> None:
+    """Write movie-deleted result history while the Movie row still exists."""
+    det_stats = determination_stats if isinstance(determination_stats, dict) else {}
+    mat = materialization_stats_dict(stats_mat)
+    result_reason, status_label = outcome_reason_and_status_from_materialization(
+        "Movie removed from Radarr", mat
+    )
+    sess = get_session()
+    try:
+        movie_after = (
+            sess.query(Movie)
+            .filter(Movie.id == movie_row_id)
+            .with_for_update()
+            .first()
+        )
+        # Concurrent re-add cleared the tombstone; do not write a "removed" history row.
+        if movie_after is not None and not bool(getattr(movie_after, "is_deleted", False)):
+            logger.info(
+                f"entity_materialization activity skipped movie_id={movie_row_id} "
+                f"(no longer soft-deleted; likely re-added)",
+                extra={"emoji_type": "info"},
+            )
+            return
+        result_path = ""
+        item_title = "Unknown Movie"
+        instance_key = None
+        instance_id = None
+        if movie_after:
+            result_path = str(getattr(movie_after, "placeholder_filepath", "") or "").strip()
+            result_path = result_path or str(movie_placeholder_path(movie_after) or "")
+            item_title = str(getattr(movie_after, "title", None) or "Unknown Movie")
+            instance_key = getattr(movie_after, "instance_key", None)
+            instance_id = getattr(movie_after, "instance_id", None)
+        # Prefer a live FK while the row exists; fall back to null + snapshot if already gone.
+        history_movie_id = int(movie_row_id) if movie_after else None
+        append_placeholder_activity_status(
+            sess,
+            item_type="movie",
+            movie_id=history_movie_id,
+            episode_id=None,
+            series_id=None,
+            season_id=None,
+            season_number=None,
+            instance_key=instance_key,
+            instance_id=instance_id,
+            event_type="placeholder_event_movie_deleted_result",
+            path=str(result_path or ""),
+            item_title=item_title,
+            series_title=None,
+            reason=result_reason,
+            status_label=status_label,
+            source="event_movie_deleted",
+            extra_snapshot={
+                "determination": det_stats,
+                "materialization": mat,
+                "movie_id": int(movie_row_id),
+            },
+        )
+        c_hb = start_verbose_stall_heartbeat(
+            f"entity_materialization.activity_commit movie_id={movie_row_id}",
+        )
+        try:
+            sess.commit()
+        finally:
+            c_hb.set()
+    finally:
+        sess.close()
+
+
 def process_entity_materialization_job(session, job: Job) -> dict[str, Any]:
-    """Run scoped materialization and optional movie_deleted activity follow-up."""
+    """Run scoped materialization and optional movie_deleted activity follow-up.
+
+    For movie deletes, activity history is committed before catalog tombstone
+    purge so ``placeholder_activity_history.movie_id`` still resolves.
+
+    If the title was re-added before this job runs (``is_deleted`` cleared),
+    skip delete teardown / purge / "removed" activity so a quick undo does not
+    fight the new add.
+    """
     payload = job.payload if isinstance(job.payload, dict) else {}
     movie_ids = [int(x) for x in (payload.get("movie_ids") or []) if x is not None]
     episode_ids = [int(x) for x in (payload.get("episode_ids") or []) if x is not None]
     observation_source = str(payload.get("observation_source") or "event_materialization")
     run_determination_first = bool(payload.get("run_determination_first"))
+    finalize = bool(payload.get("finalize_movie_deleted_activity"))
 
     stop_v = start_verbose_stall_heartbeat(
         f"entity_materialization job_id={job.id} obs={observation_source}",
     )
     try:
+        if finalize and movie_ids:
+            movie_row_id = int(payload.get("movie_row_id") or movie_ids[0])
+            if not movie_still_soft_deleted(movie_row_id):
+                logger.info(
+                    f"entity_materialization job_id={job.id} movie_row_id={movie_row_id} "
+                    f"no longer soft-deleted (re-added or already purged); skipping delete follow-up",
+                    extra={"emoji_type": "info"},
+                )
+                return {"ok": True, "superseded": True, "movie_id": movie_row_id}
+
         determination_stats: dict[str, Any] | None = None
         if run_determination_first and (movie_ids or episode_ids):
             from services.source_of_truth.determiner import run_determination_for_entities
@@ -84,59 +251,45 @@ def process_entity_materialization_job(session, job: Job) -> dict[str, Any]:
                 extra={"emoji_type": "processing"},
             )
 
+        # Defer hard-purge when we still need to write movie-deleted activity.
         stats_mat = run_materialization_for_entities(
             movie_ids=movie_ids or None,
             episode_ids=episode_ids or None,
             observation_source=observation_source,
+            purge_catalog_tombstones=not finalize,
         )
 
-        finalize = bool(payload.get("finalize_movie_deleted_activity"))
         if finalize and movie_ids:
             movie_row_id = int(payload.get("movie_row_id") or movie_ids[0])
-            det_stats = payload.get("determination_stats") or {}
-            sess = get_session()
+            # Re-check after mat: a concurrent re-add may have revived the row.
+            if not movie_still_soft_deleted(movie_row_id):
+                logger.info(
+                    f"entity_materialization job_id={job.id} movie_row_id={movie_row_id} "
+                    f"revived during materialization; skipping delete activity + purge",
+                    extra={"emoji_type": "info"},
+                )
+                return {"ok": True, "superseded": True, "movie_id": movie_row_id}
+
+            det_stats = payload.get("determination_stats") or determination_stats or {}
+            _finalize_movie_deleted_activity(
+                movie_row_id=movie_row_id,
+                stats_mat=stats_mat if isinstance(stats_mat, dict) else {},
+                determination_stats=det_stats,
+            )
             try:
-                movie_after = sess.query(Movie).filter(Movie.id == movie_row_id).first()
-                mat = materialization_stats_dict(stats_mat)
-                result_reason, status_label = outcome_reason_and_status_from_materialization(
-                    "Movie removed from Radarr", mat
+                from services.source_of_truth.catalog_tombstone_purge import purge_cleaned_deleted_catalog
+
+                purge_stats = purge_cleaned_deleted_catalog(
+                    movie_ids=movie_ids,
+                    episode_ids=episode_ids,
                 )
-                result_path = ""
-                if movie_after:
-                    result_path = str(getattr(movie_after, "placeholder_filepath", "") or "").strip()
-                    result_path = result_path or str(movie_placeholder_path(movie_after) or "")
-                append_placeholder_activity_status(
-                    sess,
-                    item_type="movie",
-                    movie_id=movie_row_id,
-                    episode_id=None,
-                    series_id=None,
-                    season_id=None,
-                    season_number=None,
-                    instance_key=getattr(movie_after, "instance_key", None) if movie_after else None,
-                    instance_id=getattr(movie_after, "instance_id", None) if movie_after else None,
-                    event_type="placeholder_event_movie_deleted_result",
-                    path=str(result_path or ""),
-                    item_title=str(getattr(movie_after, "title", None) or "Unknown Movie"),
-                    series_title=None,
-                    reason=result_reason,
-                    status_label=status_label,
-                    source="event_movie_deleted",
-                    extra_snapshot={
-                        "determination": det_stats if isinstance(det_stats, dict) else {},
-                        "materialization": mat,
-                        "movie_id": int(movie_row_id),
-                    },
+                if isinstance(stats_mat, dict) and isinstance(purge_stats, dict):
+                    stats_mat["catalog_tombstone_purge"] = purge_stats
+            except Exception as purge_exc:
+                logger.debug(
+                    f"entity_materialization job_id={job.id} deferred catalog purge skipped: {purge_exc}",
+                    extra={"emoji_type": "debug"},
                 )
-                c_hb = start_verbose_stall_heartbeat(
-                    f"entity_materialization.activity_commit movie_id={movie_row_id}",
-                )
-                try:
-                    sess.commit()
-                finally:
-                    c_hb.set()
-            finally:
-                sess.close()
     finally:
         stop_v.set()
 
@@ -152,4 +305,6 @@ __all__ = [
     "ENTITY_MATERIALIZATION_JOB_TYPE",
     "enqueue_entity_materialization_job",
     "process_entity_materialization_job",
+    "supersede_pending_movie_deleted_materialization",
+    "movie_still_soft_deleted",
 ]

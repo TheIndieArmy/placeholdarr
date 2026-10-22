@@ -513,7 +513,17 @@ def _incremental_placeholder_scan(session, roots: list[str]) -> tuple[int, dict[
     return upserted, meta
 
 
-def scan_placeholder_roots(roots: list[str], *, full_scan: bool = True) -> tuple[int, dict[str, Any]]:
+def scan_placeholder_roots(
+    roots: list[str],
+    *,
+    full_scan: bool = True,
+    on_progress=None,
+) -> tuple[int, dict[str, Any]]:
+    """Walk placeholder roots.
+
+    ``on_progress(files_seen, media_candidates)`` is optional; called periodically
+    during a full walk (total file count is unknown until the walk finishes).
+    """
     session = get_session()
     upserted = 0
     stale_marked = 0
@@ -523,6 +533,24 @@ def scan_placeholder_roots(roots: list[str], *, full_scan: bool = True) -> tuple
     scanned_roots = [os.path.abspath(root) for root in roots if root]
     observed_paths: set[str] = set()
     started_mono = time.monotonic()
+    last_live_mono = [0.0]
+
+    def _emit_fs_progress(*, force: bool = False) -> None:
+        if not callable(on_progress):
+            return
+        now = time.monotonic()
+        if (
+            not force
+            and scanned_media_candidates % FS_SCAN_PROGRESS_EVERY_FILES != 0
+            and (now - last_live_mono[0]) < 2.0
+        ):
+            return
+        last_live_mono[0] = now
+        try:
+            on_progress(int(scanned_files), int(scanned_media_candidates))
+        except Exception:
+            pass
+
     try:
         if not full_scan:
             upserted, meta = _incremental_placeholder_scan(session, roots)
@@ -590,6 +618,7 @@ def scan_placeholder_roots(roots: list[str], *, full_scan: bool = True) -> tuple
                             f"elapsed_s={elapsed:.1f}",
                             extra={'emoji_type': 'info'},
                         )
+                    _emit_fs_progress()
 
         # Mark stale placeholder rows as missing whenever they were previously active
         # but were not observed in this scan. This intentionally includes rows whose
@@ -625,6 +654,7 @@ def scan_placeholder_roots(roots: list[str], *, full_scan: bool = True) -> tuple
                 )
 
         session.commit()
+        _emit_fs_progress(force=True)
         elapsed = time.monotonic() - started_mono
         meta = {
             "full_scan": True,
@@ -655,7 +685,12 @@ def scan_placeholder_roots(roots: list[str], *, full_scan: bool = True) -> tuple
         session.close()
 
 
-def scan_once_if_needed(run_id: Optional[str] = None, *, prefer_incremental: bool = False):
+def scan_once_if_needed(
+    run_id: Optional[str] = None,
+    *,
+    prefer_incremental: bool = False,
+    on_progress=None,
+):
     session = get_session()
     try:
         if run_id:
@@ -678,7 +713,11 @@ def scan_once_if_needed(run_id: Optional[str] = None, *, prefer_incremental: boo
             return 0, {'reason': 'no_roots'}
         interval_h = int(getattr(settings, "FULL_SYNC_INTERVAL_HOURS", 0) or 0)
         use_incremental = bool(prefer_incremental and interval_h > 0)
-        created, scan_meta = scan_placeholder_roots(roots, full_scan=not use_incremental)
+        created, scan_meta = scan_placeholder_roots(
+            roots,
+            full_scan=not use_incremental,
+            on_progress=on_progress,
+        )
         logger.debug(
             f'FS scan completed; placeholders created={created} incremental={use_incremental}',
             extra={'emoji_type': 'placeholder'},

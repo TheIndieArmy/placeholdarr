@@ -10,7 +10,7 @@ import {
   type LiveDetailSection,
   type TaskLiveProgressModel,
 } from "./TaskLiveProgress";
-import { taskLiveFromApi } from "./taskLiveProgress";
+import { detailSectionPhaseKey, hydratePhaseMetrics, taskLiveFromApi } from "./taskLiveProgress";
 import { formatTaskDuration, formatTaskTrigger, timeAgo, timeUntil } from "./formatActivityTime";
 import { TASK_KEYS_WITH_STOP_SUPPORT, TASK_STOP_CONFIRM_MESSAGE } from "./taskStopConfirm";
 
@@ -26,17 +26,38 @@ function taskRunProgressSections(progress: ActivityRow["progress"] | undefined):
   return sections.filter((section) => !isUnrequestedFollowUpSection(section));
 }
 
-/** Drop phase cards already represented by ``summary.live`` (avoids duplicate Art refresh blocks). */
+/** Drop phase cards already represented by expandable live phase metrics. */
 function sectionsNotCoveredByLive(sections: Array<any>, live: TaskLiveProgressModel | null): Array<any> {
   if (!live) return sections;
   const kind = String(live.kind || "").toLowerCase();
+  const coveredKeys = new Set<string>();
+  for (const phase of live.phases || []) {
+    const key = String(phase.key || "").trim().toLowerCase();
+    if (!key) continue;
+    // Only hide the legacy card when the live phase already carries the counts.
+    if ((phase.metrics?.length ?? 0) > 0) coveredKeys.add(key);
+  }
+  // Art determining/updating bars on a full_sync run cover the legacy art_refresh card.
+  if (coveredKeys.has("determining") || coveredKeys.has("updating")) {
+    coveredKeys.add("art_refresh");
+  }
   return sections.filter((section) => {
-    const key = String(section?.key || section?.name || "")
+    const rawKey = String(section?.key || "")
       .trim()
       .toLowerCase()
       .replace(/\s+/g, "_");
-    if (kind === "art_refresh" && (key === "art_refresh" || key === "art refresh")) return false;
-    if (kind === "metadata_refresh" && (key === "metadata_refresh" || key === "metadata refresh")) return false;
+    const rawName = String(section?.name || "");
+    // Prefer the stored phase key first. detailSectionPhaseKey("determination") maps to
+    // art's "determining", which would wrongly keep a full/lite sync determination footer.
+    const mappedFromName = detailSectionPhaseKey(rawName);
+    const mappedFromKey = rawKey ? detailSectionPhaseKey(rawKey) : null;
+    if (rawKey && coveredKeys.has(rawKey)) return false;
+    if (mappedFromName && coveredKeys.has(mappedFromName)) return false;
+    if (mappedFromKey && coveredKeys.has(mappedFromKey)) return false;
+    if (kind === "art_refresh" && (rawKey === "art_refresh" || mappedFromName === "art_refresh")) return false;
+    if (kind === "metadata_refresh" && (rawKey === "metadata_refresh" || mappedFromName === "metadata_refresh")) {
+      return false;
+    }
     return true;
   });
 }
@@ -82,8 +103,13 @@ function statusClass(status: string | null | undefined, semantic: { success: str
 function showRunErrorMessage(run: { status?: string | null; error_message?: string | null }): string | null {
   const msg = String(run.error_message || "").trim();
   if (!msg) return null;
-  // Status badge already says STOPPED; do not repeat stopped_by_user in red.
-  if (String(run.status || "").toLowerCase() === "stopped") return null;
+  const status = String(run.status || "").toLowerCase();
+  const reason = msg.toLowerCase();
+  // Status badge already says STOPPED; do not repeat a plain user-stop reason.
+  if (status === "stopped" && (reason === "stopped_by_user" || reason === "abandoned_manually")) {
+    return null;
+  }
+  // Keep interrupted_by_restart (and other stop reasons) visible under STOPPED.
   return msg;
 }
 
@@ -356,18 +382,35 @@ export function TasksPanel(props: {
                 {props.history.map((run) => {
                   const rowKey = `task-run-${run.id}`;
                   const sections = taskRunProgressSections(run.progress);
-                  const liveModel = taskLiveFromApi(run.live);
+                  const rawLive = taskLiveFromApi(run.live);
+                  const liveModel =
+                    rawLive && rawLive.phases?.length
+                      ? {
+                          ...rawLive,
+                          phases: hydratePhaseMetrics(rawLive.phases, sections),
+                        }
+                      : rawLive;
                   const leftoverSections = sectionsNotCoveredByLive(sections, liveModel);
                   const leftoverDetails = leftoverSections.map(legacySectionToLiveDetail);
                   const hasProgress = leftoverDetails.length > 0 || Boolean(liveModel);
                   const isExpanded = !!historyExpanded[rowKey];
                   const isWorking = String(run.status || "").toUpperCase() === "WORKING";
                   const canStop =
-                    isWorking && TASK_KEYS_WITH_STOP_SUPPORT.has(String(run.task_key || "").trim().toLowerCase());
+                    isWorking &&
+                    String(run.trigger || "").trim().toLowerCase() !== "startup" &&
+                    TASK_KEYS_WITH_STOP_SUPPORT.has(String(run.task_key || "").trim().toLowerCase());
                   const errorLine = showRunErrorMessage(run);
+                  const mainRowBg = isLight ? semantic.surfacePanel : "#1e2430";
+                  const expandRowBg = isLight ? semantic.surfaceMuted : "#12161c";
                   return (
                     <Fragment key={run.id}>
-                      <tr className="border-b" style={{ borderColor: isLight ? semantic.border : "rgba(66,71,83,0.15)" }}>
+                      <tr
+                        className="border-b"
+                        style={{
+                          borderColor: isLight ? semantic.border : "rgba(66,71,83,0.15)",
+                          backgroundColor: mainRowBg,
+                        }}
+                      >
                         <td className="px-3 py-2 text-[14px]" style={{ color: semantic.fg }}>
                           <div className="flex items-start gap-2">
                             {hasProgress ? (
@@ -426,7 +469,7 @@ export function TasksPanel(props: {
                       </tr>
                       {hasProgress && isExpanded ? (
                         <tr>
-                          <td colSpan={7} className="px-4 py-3" style={{ backgroundColor: isLight ? semantic.surfaceMuted : "#1a2028" }}>
+                          <td colSpan={7} className="px-4 py-3" style={{ backgroundColor: expandRowBg }}>
                             <div className="space-y-3">
                               {liveModel ? (
                                 <TaskLiveProgress

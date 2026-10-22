@@ -479,15 +479,20 @@ def resolve_owned_collection(
 def apply_collection_visibility(collection, visible_on: dict[str, Any] | None) -> None:
     """Apply Plex Visible On hub promotion (Library Recommended / Home / Shared Home).
 
+    Intended for **first create only**. Routine membership sync must not call this,
+    or Plex-side hub edits will be overwritten (and missing recipe flags would clear hubs).
+
     Requires admin Plex Pass. Failures are logged and do not raise so membership
     sync still succeeds when Pass or the hubs API is unavailable.
     """
     if collection is None:
         return
-    flags = visible_on if isinstance(visible_on, dict) else {}
-    recommended = bool(flags.get("library"))
-    home = bool(flags.get("home"))
-    shared = bool(flags.get("shared"))
+    if not isinstance(visible_on, dict):
+        return
+    recommended = bool(visible_on.get("library"))
+    home = bool(visible_on.get("home"))
+    shared = bool(visible_on.get("shared"))
+    # All-off is still a valid create-time stamp (stay off hubs; collection list only).
     try:
         hub = collection.visibility()
         hub.updateVisibility(recommended=recommended, home=home, shared=shared)
@@ -623,6 +628,7 @@ def sync_collection(
             ) from exc
         ensure_ownership_markers(created, recipe_id, set_value)
         _apply_custom_item_order(created, items)
+        # Create-time only: never re-apply on later membership syncs.
         apply_collection_visibility(created, visible_on)
         rating_key = str(getattr(created, "ratingKey", "") or "") or None
         logger.info(
@@ -666,7 +672,7 @@ def sync_collection(
             f"Failed to update collection {collection_title!r} membership: {exc}"
         ) from exc
 
-    apply_collection_visibility(existing, visible_on)
+    # Do not apply visible_on on update/adopt: Plex hubs stay under user control after create.
     rating_key = str(getattr(existing, "ratingKey", "") or "") or None
     logger.info(
         f"Collections: {'adopted' if adopted else 'synced'} Plex collection {collection_title!r} "

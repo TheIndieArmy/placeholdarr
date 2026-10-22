@@ -18,6 +18,7 @@ from services.source_of_truth.scheduled_sync import (
     run_lite_sync,
     run_scheduled_full_sync,
 )
+from services.source_of_truth.sync_coordinator import is_full_sync_active
 from services.source_of_truth.placeholder_refresh import (
     placeholder_refresh_task_label,
     reconcile_stuck_placeholder_refresh_tasks,
@@ -221,16 +222,20 @@ async def tasks_run(body: TaskRunRequest):
         raise HTTPException(status_code=400, detail=f"Unknown task_key: {key}")
 
     if key == "full_sync":
-        if get_working_run("full_sync") or get_working_run("lite_sync"):
+        if get_working_run("full_sync") or get_working_run("lite_sync") or is_full_sync_active():
             raise HTTPException(
                 status_code=409,
                 detail="Task already running: lite or full sync in progress",
             )
     elif key == "lite_sync":
-        if get_working_run("lite_sync") or get_working_run("full_sync"):
+        if (
+            get_working_run("lite_sync")
+            or get_working_run("full_sync")
+            or is_full_sync_active()
+        ):
             raise HTTPException(status_code=409, detail="Task already running: lite or full sync in progress")
     elif key == "placeholder_refresh":
-        if get_working_run("placeholder_refresh") or get_working_run("full_sync"):
+        if get_working_run("placeholder_refresh") or get_working_run("full_sync") or is_full_sync_active():
             raise HTTPException(
                 status_code=409,
                 detail="Task already running: placeholder refresh or full sync in progress",

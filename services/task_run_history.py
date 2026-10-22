@@ -285,7 +285,11 @@ def _mark_phases_interrupted(summary: dict[str, Any], *, ended_at: datetime, rea
 
 
 def abandon_task_run(run_id: int, *, reason: str = "interrupted") -> bool:
-    """Mark a stuck in-progress task run stopped so new manual/scheduled runs can start.
+    """Close a working task run after Stop or process restart (status ``stopped``).
+
+    Reasons such as ``interrupted_by_restart`` are stored on ``error_message`` so
+    the Tasks UI can show them under STOPPED. Plain user Stop uses
+    ``stopped_by_user`` and the UI omits that redundant line.
 
     Also requests cooperative cancel so long sync pipelines can stop between
     phases, and fails queued art/NFO follow-up jobs for this run.
@@ -299,12 +303,13 @@ def abandon_task_run(run_id: int, *, reason: str = "interrupted") -> bool:
         if not row or str(row.status or "").lower() != "working":
             return False
         now = _utc_now()
+        reason_text = str(reason or "interrupted").strip() or "interrupted"
         summary = row.summary if isinstance(row.summary, dict) else {}
-        summary = _mark_phases_interrupted(summary, ended_at=now, reason=reason)
+        summary = _mark_phases_interrupted(summary, ended_at=now, reason=reason_text)
         jobs_cancelled = _cancel_follow_up_jobs_for_task_run(session, int(run_id))
         row.status = "stopped"
         row.ended_at = now
-        row.error_message = str(reason)[:4000]
+        row.error_message = reason_text[:4000]
         row.summary = summary
         session.add(row)
         session.commit()
@@ -312,7 +317,7 @@ def abandon_task_run(run_id: int, *, reason: str = "interrupted") -> bool:
             "Abandoned task run id=%s task_key=%s reason=%s follow_up_jobs_failed=%s",
             run_id,
             row.task_key,
-            reason,
+            reason_text,
             jobs_cancelled,
             extra={"emoji_type": "warning"},
         )

@@ -26,11 +26,12 @@ from services.source_of_truth.startup import (
 )
 from services.source_of_truth.sync_coordinator import (
     acquire_pipeline_blocking,
-    begin_full_sync,
     end_full_sync,
+    is_full_sync_active,
     release_pipeline,
     should_skip_lite_or_calendar,
     try_acquire_pipeline,
+    try_begin_full_sync,
 )
 from services.source_of_truth.sync_runner import run_full_sync
 from services.task_run_history import (
@@ -71,6 +72,15 @@ def _run_full_sync_with_deadlock_retry(**kwargs: Any) -> Any:
 
 
 TaskTrigger = Literal["scheduled", "manual", "startup"]
+
+
+def _arr_instance_label(inst: dict[str, Any]) -> str:
+    arr_type = str(inst.get("arr_type") or "").strip().lower()
+    instance_key = str(inst.get("instance_key") or "").strip().lower()
+    kind = "Radarr" if arr_type == "radarr" else "Sonarr" if arr_type == "sonarr" else "ARR"
+    if not instance_key or instance_key == arr_type:
+        return kind
+    return f"{kind} · {instance_key}"
 
 
 def _placeholder_ids_for_entity_rows(
@@ -204,6 +214,18 @@ def _run_self_healing_pipeline_inner(run_id: str, *, include_calendar_date_refre
 
 def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, Any]:
     """Full ARR sync for all instances, then blocking self-heal pipeline."""
+    if is_full_sync_active():
+        skip_id = record_skipped_task_run(
+            task_key="full_sync",
+            trigger=trigger,
+            skip_reason="full_sync_in_progress",
+        )
+        logger.info(
+            "Full sync skipped: another full sync is still running",
+            extra={"emoji_type": "info"},
+        )
+        return {"skipped": True, "reason": "full_sync_in_progress", "task_run_id": skip_id}
+
     run_id = f"full_sync:{trigger}:{uuid4()}"
     task_run_id = begin_task_run(task_key="full_sync", trigger=trigger)
     started_at = datetime.now(timezone.utc)
@@ -225,7 +247,18 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
     )
 
     phases = TaskRunPhaseTracker(task_run_id, started_at=started_at)
-    begin_full_sync()
+    if not try_begin_full_sync():
+        finish_task_run(
+            task_run_id,
+            status="skipped",
+            summary={"skipped": True, "reason": "full_sync_in_progress"},
+            skip_reason="full_sync_in_progress",
+        )
+        logger.info(
+            "Full sync skipped after task open: another full sync claimed the lock",
+            extra={"emoji_type": "info"},
+        )
+        return {"skipped": True, "reason": "full_sync_in_progress", "task_run_id": task_run_id}
     result: dict[str, Any] = {
         "task_run_id": task_run_id,
         "run_id": run_id,
@@ -234,25 +267,96 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
         "task_run_started_at": started_at.isoformat(),
     }
     try:
+        from services.task_live_progress import FULL_SYNC_CORE_PHASES, seed_sync_live_phases
+
+        seed_sync_live_phases(
+            task_run_id,
+            kind="full_sync",
+            label="Full sync",
+            phase_defs=FULL_SYNC_CORE_PHASES,
+        )
+    except Exception as live_exc:
+        logger.debug("full_sync live seed skipped: %s", live_exc, extra={"emoji_type": "debug"})
+    try:
       with task_run_cancel_scope(task_run_id):
         phases.begin("arr_sync", "ARR catalog sync")
         sync_stats: dict[str, Any] = {}
-        for instance in _configured_arr_instances():
+
+        arr_instances = [
+            inst
+            for inst in _configured_arr_instances()
+            if str(inst.get("arr_type") or "").strip().lower() in {"radarr", "sonarr"}
+        ]
+        arr_units: list[dict[str, Any]] = [
+            {
+                "key": str(inst.get("instance_key") or inst.get("arr_type") or f"arr_{idx}").strip().lower(),
+                "label": _arr_instance_label(inst),
+                "done": 0,
+                "total": 0,
+                "status": "pending",
+            }
+            for idx, inst in enumerate(arr_instances)
+        ]
+        if arr_units:
+            phases.progress("arr_sync", units=list(arr_units), unit_label="titles")
+
+        for inst_idx, instance in enumerate(arr_instances):
             ensure_task_run_not_cancelled(task_run_id)
             arr_type = str(instance.get("arr_type") or "").strip().lower()
-            if arr_type not in {"radarr", "sonarr"}:
-                continue
+            arr_units[inst_idx] = {
+                **arr_units[inst_idx],
+                "status": "working",
+                "done": 0,
+                "total": int(arr_units[inst_idx].get("total") or 0),
+            }
+            phases.progress("arr_sync", units=list(arr_units), unit_label="titles")
+
+            def _on_arr_progress(done: int, total: int, *, _idx: int = inst_idx) -> None:
+                arr_units[_idx] = {
+                    **arr_units[_idx],
+                    "status": "working",
+                    "done": max(0, int(done or 0)),
+                    "total": max(0, int(total or 0)),
+                }
+                phases.progress("arr_sync", units=list(arr_units), unit_label="titles")
+
             key = _run_full_sync_with_deadlock_retry(
                 dry_run=False,
                 batch_size=50,
                 types=("movie",) if arr_type == "radarr" else ("series",),
                 instance_key=str(instance.get("instance_key") or "").strip().lower() or None,
                 run_template_backfill=False,
+                on_progress=_on_arr_progress,
             )
             sync_stats[str(instance.get("instance_key") or arr_type)] = key
+            try:
+                final_done = int(
+                    (key or {}).get("movies_seen")
+                    or (key or {}).get("movies_updated")
+                    or 0
+                ) + int(
+                    (key or {}).get("series_seen")
+                    or (key or {}).get("series_updated")
+                    or 0
+                )
+            except Exception:
+                final_done = int(arr_units[inst_idx].get("done") or 0)
+            final_total = max(final_done, int(arr_units[inst_idx].get("total") or 0))
+            arr_units[inst_idx] = {
+                **arr_units[inst_idx],
+                "status": "done",
+                "done": final_total if final_total > 0 else final_done,
+                "total": final_total if final_total > 0 else final_done,
+            }
+            phases.progress("arr_sync", units=list(arr_units), unit_label="titles")
 
         result["arr_sync"] = sync_stats
-        phases.end("arr_sync", metrics=metrics_from_arr_sync(sync_stats))
+        phases.end(
+            "arr_sync",
+            metrics=metrics_from_arr_sync(sync_stats),
+            units=list(arr_units) if arr_units else None,
+            unit_label="titles",
+        )
         ensure_task_run_not_cancelled(task_run_id)
 
         pipeline_stats: dict[str, Any] = {"run_id": run_id}
@@ -263,7 +367,20 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
 
             ensure_task_run_not_cancelled(task_run_id)
             phases.begin("fs_scan", "Filesystem scan")
-            scan_result = scan_once_if_needed(run_id, prefer_incremental=False)
+
+            def _on_fs_progress(files_seen: int, _media_candidates: int) -> None:
+                phases.progress(
+                    "fs_scan",
+                    done=int(files_seen or 0),
+                    total=0,
+                    unit_label="files",
+                )
+
+            scan_result = scan_once_if_needed(
+                run_id,
+                prefer_incremental=False,
+                on_progress=_on_fs_progress,
+            )
             if isinstance(scan_result, tuple):
                 scan_count, scan_info = scan_result
             else:
@@ -274,7 +391,16 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
 
             ensure_task_run_not_cancelled(task_run_id)
             phases.begin("determination", "Status determination")
-            pipeline_stats["determination"] = run_determination_pass()
+
+            def _on_det_progress(done: int, total: int) -> None:
+                phases.progress(
+                    "determination",
+                    done=int(done or 0),
+                    total=int(total or 0),
+                    unit_label="rows",
+                )
+
+            pipeline_stats["determination"] = run_determination_pass(on_progress=_on_det_progress)
             phases.end("determination", metrics=metrics_from_pipeline(pipeline_stats).get("determination"))
 
             ensure_task_run_not_cancelled(task_run_id)
@@ -311,7 +437,43 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
                 )
 
             ensure_task_run_not_cancelled(task_run_id)
+            phases.begin("catalog_gc", "Catalog cleanup")
+            # Seed count cards immediately so the phase is expandable while working.
+            phases.progress(
+                "catalog_gc",
+                done=0,
+                total=0,
+                unit_label="rows",
+                metrics=metrics_from_pipeline({"catalog_gc": {}}).get("catalog_gc"),
+            )
+
+            def _on_catalog_gc_progress(done: int, total: int, stats: dict | None = None) -> None:
+                phases.progress(
+                    "catalog_gc",
+                    done=int(done or 0),
+                    total=int(total or 0),
+                    unit_label="rows",
+                    metrics=metrics_from_pipeline({"catalog_gc": stats or {}}).get("catalog_gc"),
+                )
+
+            from services.source_of_truth.catalog_tombstone_purge import (
+                purge_cleaned_deleted_catalog_batch,
+            )
+
+            pipeline_stats["catalog_gc"] = purge_cleaned_deleted_catalog_batch(
+                on_progress=_on_catalog_gc_progress,
+            )
+            phases.end(
+                "catalog_gc",
+                metrics=metrics_from_pipeline(pipeline_stats).get("catalog_gc"),
+            )
+
+            ensure_task_run_not_cancelled(task_run_id)
             phases.begin("calendar", "Calendar status")
+            phases.progress(
+                "calendar",
+                metrics=metrics_from_pipeline({"calendar": {}}).get("calendar"),
+            )
             pipeline_stats["calendar"] = run_calendar_phase()
             pipeline_stats["orphan_placeholders"] = run_orphan_placeholder_cleanup()
             phases.end("calendar", metrics=metrics_from_pipeline(pipeline_stats).get("calendar"))
@@ -439,6 +601,12 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
         ensure_task_run_not_cancelled,
         task_run_cancel_scope,
     )
+    from services.task_run_phases import (
+        TaskRunPhaseTracker,
+        metrics_from_calendar_dates,
+        metrics_from_lite_discovery,
+        metrics_from_pipeline,
+    )
 
     own_run = task_run_id is None
     if own_run:
@@ -446,18 +614,52 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
 
     started_at = datetime.now(timezone.utc)
     result: dict[str, Any] = {"task_run_id": task_run_id}
+    phases = TaskRunPhaseTracker(int(task_run_id), started_at=started_at)
+
+    try:
+        from services.task_live_progress import LITE_SYNC_CORE_PHASES, seed_sync_live_phases
+
+        seed_sync_live_phases(
+            int(task_run_id),
+            kind="lite_sync",
+            label="Lite sync",
+            phase_defs=LITE_SYNC_CORE_PHASES,
+        )
+    except Exception as live_exc:
+        logger.debug("lite_sync live seed skipped: %s", live_exc, extra={"emoji_type": "debug"})
+
     try:
       with task_run_cancel_scope(task_run_id):
-        instances = _configured_arr_instances()
-        _record_progress(
-            task_run_id=task_run_id,
-            mode="lite",
-            started_at=started_at,
-            current_phase="discovery",
-            startup_sync_stats=None,
-            determination_stats=None,
-            materialization_stats=None,
-        )
+        instances = [
+            inst
+            for inst in _configured_arr_instances()
+            if str(inst.get("arr_type") or "").strip().lower() in {"radarr", "sonarr"}
+        ]
+
+        phases.begin("discovery", "Catalog discovery")
+        arr_units: list[dict[str, Any]] = [
+            {
+                "key": str(inst.get("instance_key") or inst.get("arr_type") or f"arr_{idx}").strip().lower(),
+                "label": _arr_instance_label(inst),
+                "done": 0,
+                "total": 0,
+                "status": "pending",
+            }
+            for idx, inst in enumerate(instances)
+        ]
+        if arr_units:
+            phases.progress("discovery", units=list(arr_units), unit_label="titles")
+
+        def _on_instance_progress(index: int, status: str, done: int, total: int) -> None:
+            if index < 0 or index >= len(arr_units):
+                return
+            arr_units[index] = {
+                **arr_units[index],
+                "status": status,
+                "done": max(0, int(done or 0)),
+                "total": max(0, int(total or 0)),
+            }
+            phases.progress("discovery", units=list(arr_units), unit_label="titles")
 
         from services.source_of_truth.lite_reconcile import (
             run_lite_startup_reconciliation_pre_discovery,
@@ -474,6 +676,7 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
             seed_movie_row_ids=set(pre_movie_ids),
             seed_episode_row_ids=set(pre_episode_ids),
             lite_reconciliation_pre=recon_stats,
+            on_instance_progress=_on_instance_progress,
         )
         specials_determination_ids = {
             int(x)
@@ -497,49 +700,80 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
             episode_row_ids=episode_row_ids,
         )
 
+        discovery_metrics = metrics_from_lite_discovery(startup_sync_stats)
+        discovery_done = (
+            int(startup_sync_stats.get("movies_seen") or 0)
+            + int(startup_sync_stats.get("series_seen") or 0)
+            + int(startup_sync_stats.get("episodes_seen") or 0)
+        )
+        phases.end(
+            "discovery",
+            metrics=discovery_metrics,
+            units=list(arr_units) if arr_units else None,
+            unit_label="titles",
+            done=discovery_done,
+            total=discovery_done,
+        )
+
         ensure_task_run_not_cancelled(task_run_id)
+        phases.begin("calendar_dates", "Calendar dates")
         phase_started = time.monotonic()
-        result["calendar_date_refresh"] = run_calendar_date_refresh()
+        calendar_dates = run_calendar_date_refresh()
+        result["calendar_date_refresh"] = calendar_dates
         logger.info(
             "Lite sync calendar_date_refresh elapsed_s=%.1f",
             time.monotonic() - phase_started,
             extra={"emoji_type": "info"},
         )
-
-        ensure_task_run_not_cancelled(task_run_id)
-        _record_progress(
-            task_run_id=task_run_id,
-            mode="lite",
-            started_at=started_at,
-            current_phase="determination",
-            startup_sync_stats=startup_sync_stats,
-            determination_stats=None,
-            materialization_stats=None,
+        date_metrics = metrics_from_calendar_dates(
+            calendar_dates if isinstance(calendar_dates, dict) else {}
+        )
+        date_done = int(
+            (calendar_dates or {}).get("movie_rows_updated") or 0
+        ) + int((calendar_dates or {}).get("episode_rows_updated") or 0) if isinstance(calendar_dates, dict) else 0
+        phases.end(
+            "calendar_dates",
+            metrics=date_metrics,
+            done=date_done,
+            total=date_done,
+            unit_label="rows",
         )
 
+        ensure_task_run_not_cancelled(task_run_id)
+        phases.begin("determination", "Status determination")
         if movie_row_ids or episode_row_ids:
             determination_stats = run_determination_for_entities(
                 movie_ids=movie_row_ids,
                 episode_ids=episode_row_ids,
+            )
+            det_metrics = metrics_from_pipeline({"determination": determination_stats}).get("determination")
+            det_done = int(determination_stats.get("movies_total") or 0) + int(
+                determination_stats.get("episodes_total") or 0
+            )
+            phases.end(
+                "determination",
+                metrics=det_metrics,
+                done=det_done,
+                total=det_done,
+                unit_label="rows",
             )
         else:
             determination_stats = {
                 "skipped": True,
                 "reason": "no_lite_changes_detected",
             }
+            phases.end(
+                "determination",
+                status="skipped",
+                metrics=metrics_from_pipeline({"determination": {}}).get("determination"),
+                done=0,
+                total=0,
+                unit_label="rows",
+            )
         result["determination"] = determination_stats
 
         ensure_task_run_not_cancelled(task_run_id)
-        _record_progress(
-            task_run_id=task_run_id,
-            mode="lite",
-            started_at=started_at,
-            current_phase="materialization",
-            startup_sync_stats=startup_sync_stats,
-            determination_stats=determination_stats,
-            materialization_stats=None,
-        )
-
+        phases.begin("materialization", "Placeholder materialization")
         if movie_row_ids or episode_row_ids:
             materialization_stats = run_materialization_for_entities(
                 movie_ids=movie_row_ids,
@@ -555,21 +789,47 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
             startup_sync_stats.get("tag_policies") if isinstance(startup_sync_stats, dict) else None,
         )
         result["materialization"] = materialization_stats
+        mat_metrics = metrics_from_pipeline({"materialization": materialization_stats}).get("materialization")
+        if materialization_stats.get("skipped"):
+            phases.end(
+                "materialization",
+                status="skipped",
+                metrics=mat_metrics,
+                done=0,
+                total=0,
+                unit_label="placeholders",
+            )
+        else:
+            mat_done = (
+                int(materialization_stats.get("created") or 0)
+                + int(materialization_stats.get("deleted") or 0)
+                + int(materialization_stats.get("noop") or 0)
+                + int(materialization_stats.get("errors") or 0)
+            )
+            phases.end(
+                "materialization",
+                metrics=mat_metrics,
+                done=mat_done,
+                total=mat_done,
+                unit_label="placeholders",
+            )
 
         ensure_task_run_not_cancelled(task_run_id)
-        _record_progress(
-            task_run_id=task_run_id,
-            mode="lite",
-            started_at=started_at,
-            current_phase="complete",
-            startup_sync_stats=startup_sync_stats,
-            determination_stats=determination_stats,
-            materialization_stats=materialization_stats,
-            completed_at=datetime.now(timezone.utc),
-        )
-
+        phases.begin("calendar", "Calendar status")
         result["calendar"] = run_calendar_phase()
         result["orphan_placeholders"] = run_orphan_placeholder_cleanup()
+        cal_metrics = metrics_from_pipeline({"calendar": result.get("calendar") or {}}).get("calendar")
+        cal_done = 0
+        if isinstance(result.get("calendar"), dict):
+            cal = result["calendar"]
+            cal_done = int(cal.get("updated") or cal.get("changed") or cal.get("status_applied") or 0)
+        phases.end(
+            "calendar",
+            metrics=cal_metrics,
+            done=cal_done,
+            total=cal_done,
+            unit_label="updates",
+        )
 
         try:
             from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_refresh
@@ -579,6 +839,7 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
                 episode_row_ids=episode_row_ids,
             )
             if ph_ids:
+                # Lite art enqueue has no task_run_id; leave art off this run's live (plan v1).
                 result["placeholder_art_refresh"] = enqueue_placeholder_art_refresh(ph_ids)
         except Exception as art_exc:
             logger.warning(f"Lite sync art refresh enqueue failed: {art_exc}", extra={"emoji_type": "warning"})
@@ -605,23 +866,18 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
         )
         result["cancelled"] = True
         if own_run:
-            # Abandon already marked failed; keep that outcome.
+            # Abandon already marked stopped; keep that outcome.
             update_task_run_summary(int(task_run_id), result)
         return result
     except Exception as exc:
         logger.exception("Lite sync failed")
-        _record_progress(
-            task_run_id=task_run_id,
-            mode="lite",
-            started_at=started_at,
-            current_phase="failed",
-            startup_sync_stats=result.get("startup_sync"),
-            determination_stats=result.get("determination"),
-            materialization_stats=result.get("materialization"),
-            completed_at=datetime.now(timezone.utc),
-            failed=True,
-            error_message=str(exc),
-        )
+        try:
+            for phase in phases.phases():
+                if str(phase.get("status") or "").lower() == "working":
+                    phases.end(str(phase.get("key") or "discovery"), failed=True, status="failed")
+                    break
+        except Exception:
+            pass
         if own_run:
             finish_task_run(task_run_id, status="failed", summary=result, error_message=str(exc))
         raise
@@ -647,15 +903,70 @@ def run_calendar_only_maintenance(*, trigger: TaskTrigger = "manual") -> dict[st
         )
         return {"skipped": True, "reason": "pipeline_busy", "task_run_id": skip_id}
 
+    from services.task_run_phases import (
+        TaskRunPhaseTracker,
+        metrics_from_calendar_dates,
+        metrics_from_pipeline,
+    )
+
     task_run_id = begin_task_run(task_key="calendar_only", trigger=trigger)
+    started_at = datetime.now(timezone.utc)
     result: dict[str, Any] = {"task_run_id": task_run_id}
+    phases = TaskRunPhaseTracker(int(task_run_id), started_at=started_at)
+
     try:
+        try:
+            from services.task_live_progress import CALENDAR_ONLY_PHASES, seed_sync_live_phases
+
+            seed_sync_live_phases(
+                int(task_run_id),
+                kind="calendar_only",
+                label="Calendar",
+                phase_defs=CALENDAR_ONLY_PHASES,
+            )
+        except Exception as live_exc:
+            logger.debug("calendar_only live seed skipped: %s", live_exc, extra={"emoji_type": "debug"})
+
+        phases.begin("calendar_dates", "Calendar dates")
         result["calendar_date_refresh"] = run_calendar_date_refresh()
+        calendar_dates = result["calendar_date_refresh"] if isinstance(result["calendar_date_refresh"], dict) else {}
+        date_metrics = metrics_from_calendar_dates(calendar_dates)
+        date_done = int(calendar_dates.get("movie_rows_updated") or 0) + int(
+            calendar_dates.get("episode_rows_updated") or 0
+        )
+        phases.end(
+            "calendar_dates",
+            metrics=date_metrics,
+            done=date_done,
+            total=date_done,
+            unit_label="rows",
+        )
+
+        phases.begin("calendar", "Calendar status")
         result["calendar"] = run_calendar_phase()
         result["orphan_placeholders"] = run_orphan_placeholder_cleanup()
+        cal_metrics = metrics_from_pipeline({"calendar": result.get("calendar") or {}}).get("calendar")
+        cal_done = 0
+        if isinstance(result.get("calendar"), dict):
+            cal = result["calendar"]
+            cal_done = int(cal.get("updated") or cal.get("changed") or cal.get("status_applied") or 0)
+        phases.end(
+            "calendar",
+            metrics=cal_metrics,
+            done=cal_done,
+            total=cal_done,
+            unit_label="updates",
+        )
         finish_task_run(task_run_id, status="done", summary=result)
         return result
     except Exception as exc:
+        try:
+            for phase in phases.phases():
+                if str(phase.get("status") or "").lower() == "working":
+                    phases.end(str(phase.get("key") or "calendar_dates"), failed=True, status="failed")
+                    break
+        except Exception:
+            pass
         finish_task_run(task_run_id, status="failed", summary=result, error_message=str(exc))
         raise
     finally:

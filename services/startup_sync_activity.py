@@ -116,60 +116,43 @@ def _build_startup_sync_row(
     if error_message:
         details = f"{details} • Error {error_message}"
 
+    # Same card labels as live phase metrics (discovery / determination / materialization).
+    from services.task_run_phases import metrics_from_lite_discovery, metrics_from_pipeline
+
+    discovery_metrics = metrics_from_lite_discovery(startup_sync_stats if bool(startup_sync_stats) else None)
+    if not bool(startup_sync_stats):
+        discovery_metrics = [{**m, "value": "--"} for m in discovery_metrics]
+    pipeline_metrics = metrics_from_pipeline(
+        {
+            "determination": determination_stats if bool(determination_stats) else {},
+            "materialization": materialization_stats if bool(materialization_stats) else {},
+        }
+    )
+    determination_metrics = list(pipeline_metrics.get("determination") or [])
+    materialization_metrics = list(pipeline_metrics.get("materialization") or [])
+    if not bool(determination_stats):
+        determination_metrics = [{**m, "value": "--"} for m in determination_metrics]
+    if not bool(materialization_stats):
+        materialization_metrics = [{**m, "value": "--"} for m in materialization_metrics]
+
     sections: list[dict[str, Any]] = [
         {
-            "name": "Scope Checked",
+            "key": "discovery",
+            "name": "Catalog discovery",
             "status": discovery_status,
-            "metrics": [
-                {"label": "Movies checked", "value": movies_discovered if bool(startup_sync_stats) else "--"},
-                {"label": "Series checked", "value": series_discovered if bool(startup_sync_stats) else "--"},
-                {"label": "Episodes checked", "value": episodes_discovered if bool(startup_sync_stats) else "--"},
-            ],
+            "metrics": discovery_metrics,
         },
         {
-            "name": "What Changed",
-            "status": materialization_status,
-            "metrics": [
-                {
-                    "label": "Placeholders created",
-                    "value": _to_int(materialization_stats.get("created"), 0) if bool(materialization_stats) else "--",
-                },
-                {
-                    "label": "Placeholders removed",
-                    "value": _to_int(materialization_stats.get("deleted"), 0) if bool(materialization_stats) else "--",
-                },
-                {
-                    "label": "Already up to date",
-                    "value": _to_int(materialization_stats.get("noop"), 0) if bool(materialization_stats) else "--",
-                },
-            ],
-        },
-        {
-            "name": "Why Items Were Skipped",
+            "key": "determination",
+            "name": "Status determination",
             "status": determination_status,
-            "metrics": [
-                {
-                    "label": "Already has placeholder",
-                    "value": _to_int(determination_stats.get("placeholder_exists"), 0) if bool(determination_stats) else "--",
-                },
-                {
-                    "label": "Not yet aired",
-                    "value": _to_int(
-                        determination_stats.get("not_needed_not_yet_aired"),
-                        _to_int(determination_stats.get("not_needed"), 0) if bool(determination_stats) else 0,
-                    )
-                    if bool(determination_stats)
-                    else "--",
-                },
-                {
-                    "label": "Air date unknown",
-                    "value": _to_int(determination_stats.get("not_needed_air_date_unknown"), 0) if bool(determination_stats) else "--",
-                    "tooltip": (
-                        "If Sonarr has no date for an episode, Placeholdarr checks later episodes. "
-                        "If all later dated episodes are still in the future, this episode is treated as not yet aired."
-                    ),
-                },
-            ],
+            "metrics": determination_metrics,
+        },
+        {
+            "key": "materialization",
+            "name": "Placeholder materialization",
+            "status": materialization_status,
+            "metrics": materialization_metrics,
         },
     ]
 
