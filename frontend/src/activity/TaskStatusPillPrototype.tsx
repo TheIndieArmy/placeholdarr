@@ -103,7 +103,9 @@ export function TaskStatusPillPrototype(props: {
   }, [props.taskRuns]);
 
   const canStop = Boolean(
-    workingRun && TASK_KEYS_WITH_STOP_SUPPORT.has(String(workingRun.task_key || "").trim().toLowerCase()),
+    workingRun &&
+      String(workingRun.trigger || "").trim().toLowerCase() !== "startup" &&
+      TASK_KEYS_WITH_STOP_SUPPORT.has(String(workingRun.task_key || "").trim().toLowerCase()),
   );
 
   const liveModel = useMemo(() => taskLiveFromApi(workingRun?.live), [workingRun]);

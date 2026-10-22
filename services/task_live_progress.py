@@ -672,6 +672,15 @@ FULL_SYNC_CORE_PHASES: list[tuple[str, str]] = [
     ("calendar", "Calendar status"),
 ]
 
+# Boot full path (no catalog_gc batch; calendar dates fold into the pipeline before determination).
+STARTUP_FULL_SYNC_CORE_PHASES: list[tuple[str, str]] = [
+    ("arr_sync", "ARR catalog sync"),
+    ("fs_scan", "Filesystem scan"),
+    ("determination", "Status determination"),
+    ("materialization", "Placeholder materialization"),
+    ("calendar", "Calendar status"),
+]
+
 LITE_SYNC_CORE_PHASES: list[tuple[str, str]] = [
     ("discovery", "Catalog discovery"),
     ("calendar_dates", "Calendar dates"),

@@ -17,7 +17,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ### Summary
 
-- **Live sync progress**: Full, lite, and calendar-only runs show phase bars in Tasks and the sidebar pill (same live model as art refresh).
+- **Live sync progress**: Full, lite, calendar-only, and startup runs show phase bars in Tasks and the sidebar pill (same live model as art refresh).
 - **Expandable phase counts**: Each phase expands to its own count cards from run start (seeded zeros / —); no separate last-phase-only strip.
 - **Real phase totals**: ARR, filesystem, and determination publish real done/total instead of coarse 1/1.
 - **ARR instance bars**: Full sync ARR catalog and lite Catalog discovery nest one bar per Radarr/Sonarr instance.
@@ -29,7 +29,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ### Added
 
-- **Live task progress (full/lite/calendar)**: Full sync, lite sync, and calendar-only publish phase bars on `summary.live` (sidebar pill + Tasks). Art follow-up on a full sync keeps sync bars and merges Determining/Updating instead of replacing live. Collections sync stays off live.
+- **Live task progress (full/lite/calendar/startup)**: Full sync, lite sync, calendar-only, and startup publish phase bars on `summary.live` (sidebar pill + Tasks). Startup lite reuses the lite live pipeline; startup full seeds the same bar chrome. Art follow-up on a full sync keeps sync bars and merges Determining/Updating instead of replacing live. Collections sync stays off live.
 - **Expandable phase counts**: Each live phase bar expands to show that phase’s count cards.
 - **Live phase count cards**: Full/lite/calendar sync phases seed zeroed expandable count cards at run start so every phase can be opened before the first progress tick. Phases stay collapsed until expanded.
 - **ARR sync instance bars**: Full sync ARR catalog progress shows one nested bar per Radarr/Sonarr instance.

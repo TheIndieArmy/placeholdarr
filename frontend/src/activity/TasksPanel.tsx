@@ -396,7 +396,9 @@ export function TasksPanel(props: {
                   const isExpanded = !!historyExpanded[rowKey];
                   const isWorking = String(run.status || "").toUpperCase() === "WORKING";
                   const canStop =
-                    isWorking && TASK_KEYS_WITH_STOP_SUPPORT.has(String(run.task_key || "").trim().toLowerCase());
+                    isWorking &&
+                    String(run.trigger || "").trim().toLowerCase() !== "startup" &&
+                    TASK_KEYS_WITH_STOP_SUPPORT.has(String(run.task_key || "").trim().toLowerCase());
                   const errorLine = showRunErrorMessage(run);
                   const mainRowBg = isLight ? semantic.surfacePanel : "#1e2430";
                   const expandRowBg = isLight ? semantic.surfaceMuted : "#12161c";
