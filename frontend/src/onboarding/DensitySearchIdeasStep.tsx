@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { DENSITY_CHOICE_META, type TvDensityChoice } from "./steps";
 import { UI_SECTION_FRAME_CLASS } from "../uiSectionFrame";
+import { BrandSelect } from "../BrandSelect";
 import {
   TV_PLAY_PROFILES,
   densityStarFor,
@@ -368,18 +369,15 @@ export function DensitySearchIdeasStep(props: {
           </p>
           <label className="block text-[14px] font-semibold text-slate-200">
             Retire when
-            <select
+            <BrandSelect
+              fullWidth
+              className="mt-2 max-w-xl"
               disabled={retireWhenLocked}
-              className="mt-2 block w-full max-w-xl rounded-lg border border-[#424753]/40 bg-[#0b111b] px-3 py-2 text-[15px] text-slate-200 outline-none disabled:cursor-not-allowed"
+              ariaLabel="Retire when"
               value={retireWhen}
-              onChange={(e) => props.onRetireWhenChange(e.target.value as TvDensityRetireWhen)}
-            >
-              {RETIRE_WHEN_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
+              options={RETIRE_WHEN_OPTIONS}
+              onChange={(v) => props.onRetireWhenChange(v as TvDensityRetireWhen)}
+            />
           </label>
           {retireWhenLocked ? (
             <p className="text-[13px] leading-relaxed text-slate-400">

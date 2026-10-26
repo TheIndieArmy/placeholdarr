@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ThemeMode } from "../brandTypes";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
+import { BrandCheckbox } from "../BrandCheckbox";
+import { BrandSelect } from "../BrandSelect";
 import { ExplainStatusIcon } from "../components/explain/ExplainStatusIcon";
 import {
   checkCollectionTitleConflicts,
@@ -22,6 +24,12 @@ import {
 } from "./collectionTheme";
 import { AndOrToggle, ToggleSwitch } from "./ToggleSwitch";
 import { VisibleOnAtCreationHelp } from "./VisibleOnAtCreationHelp";
+import {
+  parseTaskSchedule,
+  scheduleFromLegacyHours,
+  TaskScheduleEditor,
+  type TaskScheduleValue,
+} from "../settings/TaskScheduleEditor";
 import type {
   CollectionActiveWindow,
   CollectionBuilderMeta,
@@ -275,7 +283,7 @@ function collectionEditorSnapshot(parts: {
   enabled: boolean;
   sectionIds: number[];
   collectionTitle: string;
-  runIntervalHours: number | null;
+  runSchedule: TaskScheduleValue | null;
   activeWindow: CollectionActiveWindow | null;
   definition: CollectionDefinition;
 }): string {
@@ -607,15 +615,6 @@ function updateTreeAt(
 
 const MAX_FILTER_DEPTH = 3;
 
-const SCHEDULE_PRESETS: { value: string; label: string }[] = [
-  { value: "", label: "App default" },
-  { value: "1", label: "Every hour" },
-  { value: "6", label: "Every 6 hours" },
-  { value: "12", label: "Every 12 hours" },
-  { value: "24", label: "Daily" },
-  { value: "168", label: "Weekly" },
-];
-
 const MONTH_NAMES = [
   "Jan", "Feb", "Mar", "Apr", "May", "Jun",
   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -639,21 +638,17 @@ function joinMonthDay(month: number, day: number): string {
 }
 
 function MonthDayPicker(props: { value: string; onChange: (value: string) => void }) {
-  const theme = useCollectionTheme();
   const { month, day } = splitMonthDay(props.value);
   return (
     <span className="inline-flex items-center gap-1.5">
-      <select
-        className={`${theme.selectField} !min-w-[4.5rem]`}
-        value={month}
-        onChange={(e) => props.onChange(joinMonthDay(Number(e.target.value), day))}
-      >
-        {MONTH_NAMES.map((name, i) => (
-          <option key={name} value={i + 1}>
-            {name}
-          </option>
-        ))}
-      </select>
+      <BrandSelect
+        size="sm"
+        triggerClassName="!min-w-[4.5rem]"
+        value={String(month)}
+        options={MONTH_NAMES.map((name, i) => ({ value: String(i + 1), label: name }))}
+        onChange={(v) => props.onChange(joinMonthDay(Number(v), day))}
+        ariaLabel="Month"
+      />
       <NumberInput
         value={day}
         min={1}
@@ -1029,6 +1024,7 @@ export function CollectionEditor(props: {
   onSave: (payload: RecipeWritePayload) => void;
   onCancel: () => void;
   onDirtyChange?: (dirty: boolean) => void;
+  clockFormat?: string | null;
 }) {
   const accentHex = props.accent.hex;
   const isLight = props.themeMode === "light";
@@ -1042,7 +1038,18 @@ export function CollectionEditor(props: {
     return props.recipe?.plex_section_id ? [props.recipe.plex_section_id] : [];
   });
   const [collectionTitle, setCollectionTitle] = useState(props.recipe?.collection_title ?? "");
-  const [runIntervalHours, setRunIntervalHours] = useState<number | null>(props.recipe?.run_interval_hours ?? null);
+  const [followGlobalSchedule, setFollowGlobalSchedule] = useState(
+    () => props.recipe?.run_schedule == null && props.recipe?.run_interval_hours == null,
+  );
+  const [runSchedule, setRunSchedule] = useState<TaskScheduleValue>(() => {
+    if (props.recipe?.run_schedule && typeof props.recipe.run_schedule === "object") {
+      return parseTaskSchedule(props.recipe.run_schedule, 24);
+    }
+    if (props.recipe?.run_interval_hours != null) {
+      return scheduleFromLegacyHours(props.recipe.run_interval_hours);
+    }
+    return parseTaskSchedule({ enabled: true, mode: "daily", time: "03:00" }, 24);
+  });
   const [activeWindow, setActiveWindow] = useState<CollectionActiveWindow | null>(props.recipe?.active_window ?? null);
   const [definition, setDefinition] = useState<CollectionDefinition>(
     props.recipe?.definition && Array.isArray(props.recipe.definition.sources)
@@ -1063,11 +1070,11 @@ export function CollectionEditor(props: {
         enabled,
         sectionIds,
         collectionTitle,
-        runIntervalHours,
+        runSchedule: followGlobalSchedule ? null : runSchedule,
         activeWindow,
         definition,
       }),
-    [name, enabled, sectionIds, collectionTitle, runIntervalHours, activeWindow, definition],
+    [name, enabled, sectionIds, collectionTitle, followGlobalSchedule, runSchedule, activeWindow, definition],
   );
   const initialSnapshotRef = useRef(editorSnapshot);
   const dirty = editorSnapshot !== initialSnapshotRef.current;
@@ -1489,38 +1496,42 @@ export function CollectionEditor(props: {
         {block.type === "tmdb" ? (
           <label className={`flex items-center gap-2 ${theme.label}`}>
             Type
-            <select
-              className={theme.selectField}
+            <BrandSelect
+              triggerClassName="min-w-[8rem] shrink-0"
               value={tmdbSubtype ?? "trending"}
-              onChange={(e) => {
-                const next = applyTmdbSubtype(block, e.target.value);
+              options={[
+                { value: "trending", label: "Trending" },
+                { value: "popular", label: "Popular" },
+                { value: "upcoming", label: "Upcoming / On Air" },
+                { value: "discover", label: "Discover" },
+                { value: "page", label: "Page URL" },
+              ]}
+              onChange={(value) => {
+                const next = applyTmdbSubtype(block, value);
                 setDefinition((prev) => {
                   const sources = [...prev.sources];
                   sources[index] = next;
                   return { ...prev, sources };
                 });
               }}
-            >
-              <option value="trending">Trending</option>
-              <option value="popular">Popular</option>
-              <option value="upcoming">Upcoming / On Air</option>
-              <option value="discover">Discover</option>
-              <option value="page">Page URL</option>
-            </select>
+              ariaLabel="TMDB type"
+            />
           </label>
         ) : null}
 
         {isTmdbTrending ? (
           <label className={`flex items-center gap-2 ${theme.label}`}>
             Window
-            <select
-              className={theme.selectField}
+            <BrandSelect
+              triggerClassName="min-w-[8rem] shrink-0"
               value={block.window ?? "week"}
-              onChange={(e) => updateSource(index, { window: e.target.value as "day" | "week" })}
-            >
-              <option value="day">Today</option>
-              <option value="week">This week</option>
-            </select>
+              options={[
+                { value: "day", label: "Today" },
+                { value: "week", label: "This week" },
+              ]}
+              onChange={(value) => updateSource(index, { window: value as "day" | "week" })}
+              ariaLabel="Trending window"
+            />
           </label>
         ) : null}
 
@@ -1619,8 +1630,8 @@ export function CollectionEditor(props: {
           <>
             <label className={`flex items-center gap-2 ${theme.label}`}>
               Type
-              <select
-                className={theme.selectField}
+              <BrandSelect
+                triggerClassName="min-w-[8rem] shrink-0"
                 value={
                   block.subtype === "list" ||
                   block.subtype === "trending" ||
@@ -1633,8 +1644,11 @@ export function CollectionEditor(props: {
                       : "chart"
                     : "chart"
                 }
-                onChange={(e) => {
-                  const mode = e.target.value;
+                options={[
+                  { value: "chart", label: "Chart (Trakt rankings)" },
+                  { value: "list", label: "User list" },
+                ]}
+                onChange={(mode) => {
                   const nextSubtype = mode === "list" ? "list" : "trending";
                   const next = applyTraktSubtype(block, nextSubtype);
                   setDefinition((prev) => {
@@ -1643,10 +1657,8 @@ export function CollectionEditor(props: {
                     return { ...prev, sources };
                   });
                 }}
-              >
-                <option value="chart">Chart (Trakt rankings)</option>
-                <option value="list">User list</option>
-              </select>
+                ariaLabel="Trakt type"
+              />
             </label>
             {block.subtype === "list" ? (
               <>
@@ -1666,8 +1678,8 @@ export function CollectionEditor(props: {
               <>
                 <label className={`flex items-center gap-2 ${theme.label}`}>
                   Chart
-                  <select
-                    className={theme.selectField}
+                  <BrandSelect
+                    triggerClassName="min-w-[8rem] shrink-0"
                     value={
                       block.subtype === "trending" ||
                       block.subtype === "popular" ||
@@ -1677,38 +1689,42 @@ export function CollectionEditor(props: {
                         ? block.subtype
                         : "trending"
                     }
-                    onChange={(e) => {
-                      const next = applyTraktSubtype(block, e.target.value);
+                    options={[
+                      { value: "trending", label: "Trending" },
+                      { value: "popular", label: "Popular" },
+                      { value: "watched", label: "Most watched" },
+                      { value: "played", label: "Most played" },
+                      { value: "collected", label: "Most collected" },
+                    ]}
+                    onChange={(value) => {
+                      const next = applyTraktSubtype(block, value);
                       setDefinition((prev) => {
                         const sources = [...prev.sources];
                         sources[index] = next;
                         return { ...prev, sources };
                       });
                     }}
-                  >
-                    <option value="trending">Trending</option>
-                    <option value="popular">Popular</option>
-                    <option value="watched">Most watched</option>
-                    <option value="played">Most played</option>
-                    <option value="collected">Most collected</option>
-                  </select>
+                    ariaLabel="Trakt chart"
+                  />
                 </label>
                 {block.subtype === "watched" ||
                 block.subtype === "played" ||
                 block.subtype === "collected" ? (
                   <label className={`flex items-center gap-2 ${theme.label}`}>
                     Period
-                    <select
-                      className={theme.selectField}
+                    <BrandSelect
+                      triggerClassName="min-w-[8rem] shrink-0"
                       value={block.period ?? "weekly"}
-                      onChange={(e) => updateSource(index, { period: e.target.value })}
-                    >
-                      <option value="daily">Daily</option>
-                      <option value="weekly">Weekly</option>
-                      <option value="monthly">Monthly</option>
-                      <option value="yearly">Yearly</option>
-                      <option value="all">All time</option>
-                    </select>
+                      options={[
+                        { value: "daily", label: "Daily" },
+                        { value: "weekly", label: "Weekly" },
+                        { value: "monthly", label: "Monthly" },
+                        { value: "yearly", label: "Yearly" },
+                        { value: "all", label: "All time" },
+                      ]}
+                      onChange={(value) => updateSource(index, { period: value })}
+                      ariaLabel="Trakt period"
+                    />
                   </label>
                 ) : null}
               </>
@@ -1724,32 +1740,36 @@ export function CollectionEditor(props: {
           <>
             <label className={`flex items-center gap-2 ${theme.label}`}>
               Chart
-              <select
-                className={theme.selectField}
+              <BrandSelect
+                triggerClassName="min-w-[8rem] shrink-0"
                 value={block.subtype ?? "trending"}
-                onChange={(e) => updateSource(index, { subtype: e.target.value })}
-              >
-                <option value="trending">Trending</option>
-                <option value="popular">Popular</option>
-                <option value="watched">Most watched</option>
-                <option value="played">Most played</option>
-                <option value="collected">Most collected</option>
-              </select>
+                options={[
+                  { value: "trending", label: "Trending" },
+                  { value: "popular", label: "Popular" },
+                  { value: "watched", label: "Most watched" },
+                  { value: "played", label: "Most played" },
+                  { value: "collected", label: "Most collected" },
+                ]}
+                onChange={(value) => updateSource(index, { subtype: value })}
+                ariaLabel="Trakt chart"
+              />
             </label>
             {block.subtype === "watched" || block.subtype === "played" || block.subtype === "collected" ? (
               <label className={`flex items-center gap-2 ${theme.label}`}>
                 Period
-                <select
-                  className={theme.selectField}
+                <BrandSelect
+                  triggerClassName="min-w-[8rem] shrink-0"
                   value={block.period ?? "weekly"}
-                  onChange={(e) => updateSource(index, { period: e.target.value })}
-                >
-                  <option value="daily">Daily</option>
-                  <option value="weekly">Weekly</option>
-                  <option value="monthly">Monthly</option>
-                  <option value="yearly">Yearly</option>
-                  <option value="all">All time</option>
-                </select>
+                  options={[
+                    { value: "daily", label: "Daily" },
+                    { value: "weekly", label: "Weekly" },
+                    { value: "monthly", label: "Monthly" },
+                    { value: "yearly", label: "Yearly" },
+                    { value: "all", label: "All time" },
+                  ]}
+                  onChange={(value) => updateSource(index, { period: value })}
+                  ariaLabel="Trakt period"
+                />
               </label>
             ) : null}
           </>
@@ -1759,14 +1779,16 @@ export function CollectionEditor(props: {
           <>
             <label className={`flex items-center gap-2 ${theme.label}`}>
               Stat
-              <select
-                className={theme.selectField}
+              <BrandSelect
+                triggerClassName="min-w-[8rem] shrink-0"
                 value={block.subtype ?? "most_popular"}
-                onChange={(e) => updateSource(index, { subtype: e.target.value })}
-              >
-                <option value="most_popular">Most popular (unique users)</option>
-                <option value="most_watched">Most watched (play count)</option>
-              </select>
+                options={[
+                  { value: "most_popular", label: "Most popular (unique users)" },
+                  { value: "most_watched", label: "Most watched (play count)" },
+                ]}
+                onChange={(value) => updateSource(index, { subtype: value })}
+                ariaLabel="Tautulli stat"
+              />
             </label>
             <label className={`flex items-center gap-2 ${theme.label}`}>
               Days
@@ -1798,42 +1820,41 @@ export function CollectionEditor(props: {
           <>
             <label className={`flex items-center gap-2 ${theme.label}`}>
               Instance
-              <select
-                className={theme.selectField}
+              <BrandSelect
+                triggerClassName="min-w-[8rem] shrink-0"
                 value={block.instance_key ?? ""}
-                onChange={(e) => {
-                  const instance_key = e.target.value;
+                options={[
+                  { value: "", label: "Select instance…" },
+                  ...(builderMeta?.instances || []).map((inst) => ({
+                    value: inst.instance_key,
+                    label: inst.label,
+                  })),
+                ]}
+                onChange={(instance_key) => {
                   const firstTag = (builderMeta?.arr_tags || []).find((t) => t.instance_key === instance_key);
                   updateSource(index, { instance_key, tag_id: firstTag?.tag_id ?? null });
                 }}
-              >
-                <option value="">Select instance…</option>
-                {(builderMeta?.instances || []).map((inst) => (
-                  <option key={inst.instance_key} value={inst.instance_key}>
-                    {inst.label}
-                  </option>
-                ))}
-              </select>
+                ariaLabel="Arr instance"
+              />
             </label>
             <label className={`flex items-center gap-2 ${theme.label}`}>
               Tag
-              <select
-                className={theme.selectField}
-                value={block.tag_id ?? ""}
+              <BrandSelect
+                triggerClassName="min-w-[8rem] shrink-0"
+                value={block.tag_id != null ? String(block.tag_id) : ""}
                 disabled={!block.instance_key}
-                onChange={(e) =>
-                  updateSource(index, { tag_id: e.target.value ? Number(e.target.value) : null })
-                }
-              >
-                <option value="">Select tag…</option>
-                {(builderMeta?.arr_tags || [])
-                  .filter((t) => t.instance_key === (block.instance_key || ""))
-                  .map((t) => (
-                    <option key={`${t.instance_key}:${t.tag_id}`} value={t.tag_id}>
-                      {t.label}
-                    </option>
-                  ))}
-              </select>
+                options={[
+                  { value: "", label: "Select tag…" },
+                  ...(builderMeta?.arr_tags || [])
+                    .filter((t) => t.instance_key === (block.instance_key || ""))
+                    .map((t) => ({
+                      value: String(t.tag_id),
+                      label: t.label,
+                    })),
+                ]}
+                onChange={(value) => updateSource(index, { tag_id: value ? Number(value) : null })}
+                ariaLabel="Arr tag"
+              />
             </label>
             {(builderMeta?.instances || []).length === 0 ? (
               <p className="text-[12px] text-slate-500">Configure a Radarr/Sonarr instance in Settings first.</p>
@@ -1861,17 +1882,20 @@ export function CollectionEditor(props: {
           <>
             <label className={`flex items-center gap-2 ${theme.label}`}>
               Sort from TMDB
-              <select
-                className={theme.selectField}
+              <BrandSelect
+                triggerClassName="min-w-[8rem] shrink-0"
                 value={block.sort_by ?? "popularity.desc"}
-                onChange={(e) => updateSource(index, { sort_by: e.target.value })}
-              >
-                {TMDB_SOURCE_SORT_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
+                options={TMDB_SOURCE_SORT_OPTIONS.map((option) => ({
+                  value: option.value,
+                  label: option.label,
+                }))}
+                onChange={(value) =>
+                  updateSource(index, {
+                    sort_by: value as NonNullable<CollectionSourceBlock["sort_by"]>,
+                  })
+                }
+                ariaLabel="Sort from TMDB"
+              />
             </label>
             <div>
               <div className={`${theme.blockTitle} mb-1.5`}>Genres</div>
@@ -1925,22 +1949,19 @@ export function CollectionEditor(props: {
                 <span className={theme.blockTitle}>
                   Streaming services
                 </span>
-                <select
-                  className={theme.selectField}
+                <BrandSelect
+                  triggerClassName="min-w-[8rem] shrink-0"
                   value={region}
-                  onChange={(e) => {
-                    updateSource(index, { watch_region: e.target.value });
-                    ensureMeta(mediaType, e.target.value);
+                  options={(regionMeta?.regions?.length
+                    ? regionMeta.regions
+                    : [{ code: "US", name: "United States" }]
+                  ).map((r) => ({ value: r.code, label: r.name }))}
+                  onChange={(value) => {
+                    updateSource(index, { watch_region: value });
+                    ensureMeta(mediaType, value);
                   }}
-                >
-                  {(regionMeta?.regions?.length ? regionMeta.regions : [{ code: "US", name: "United States" }]).map(
-                    (r) => (
-                      <option key={r.code} value={r.code}>
-                        {r.name}
-                      </option>
-                    ),
-                  )}
-                </select>
+                  ariaLabel="Watch region"
+                />
               </div>
               <MultiChipPicker
                 options={(regionMeta?.providers ?? []).slice(0, 60).map((p) => ({ key: String(p.id), label: p.name }))}
@@ -1962,17 +1983,20 @@ export function CollectionEditor(props: {
         {isTmdbPage && tmdbUrlSupportsSourceSort ? (
           <label className={`flex items-center gap-2 ${theme.label}`}>
             Sort from TMDB
-            <select
-              className={theme.selectField}
+            <BrandSelect
+              triggerClassName="min-w-[8rem] shrink-0"
               value={block.sort_by ?? "popularity.desc"}
-              onChange={(e) => updateSource(index, { sort_by: e.target.value })}
-            >
-              {TMDB_SOURCE_SORT_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
+              options={TMDB_SOURCE_SORT_OPTIONS.map((option) => ({
+                value: option.value,
+                label: option.label,
+              }))}
+              onChange={(value) =>
+                updateSource(index, {
+                  sort_by: value as NonNullable<CollectionSourceBlock["sort_by"]>,
+                })
+              }
+              ariaLabel="Sort from TMDB"
+            />
           </label>
         ) : null}
 
@@ -1998,17 +2022,13 @@ export function CollectionEditor(props: {
 
   function renderFilterConfig(block: CollectionFilterBlock, update: (patch: Partial<CollectionFilterBlock>) => void) {
     const opSelect = (options: { value: string; label: string }[]) => (
-      <select
-        className={theme.selectOp}
+      <BrandSelect
+        triggerClassName="min-w-[12.5rem] shrink-0"
         value={block.op ?? options[0].value}
-        onChange={(e) => update({ op: e.target.value })}
-      >
-        {options.map((o) => (
-          <option key={o.value} value={o.value}>
-            {o.label}
-          </option>
-        ))}
-      </select>
+        options={options}
+        onChange={(value) => update({ op: value })}
+        ariaLabel="Filter operator"
+      />
     );
 
     switch (block.field) {
@@ -2061,16 +2081,16 @@ export function CollectionEditor(props: {
             {sectionType === "show" ? (
               <label className={`flex items-center gap-2 ${theme.label}`}>
                 based on
-                <select
-                  className={theme.selectField}
+                <BrandSelect
+                  triggerClassName="min-w-[8rem] shrink-0"
                   value={block.basis === "aired_during" ? "aired_during" : "premiered"}
-                  onChange={(e) =>
-                    update({ basis: e.target.value as CollectionFilterBlock["basis"] })
-                  }
-                >
-                  <option value="premiered">Premiere year</option>
-                  <option value="aired_during">Was airing during</option>
-                </select>
+                  options={[
+                    { value: "premiered", label: "Premiere year" },
+                    { value: "aired_during", label: "Was airing during" },
+                  ]}
+                  onChange={(value) => update({ basis: value as CollectionFilterBlock["basis"] })}
+                  ariaLabel="Year basis"
+                />
               </label>
             ) : (
               <span className="text-[13px] text-slate-500">premiere year</span>
@@ -2133,14 +2153,16 @@ export function CollectionEditor(props: {
         );
       case "monitored":
         return (
-          <select
-            className={theme.selectField}
+          <BrandSelect
+            triggerClassName="min-w-[8rem] shrink-0"
             value={block.value === false ? "no" : "yes"}
-            onChange={(e) => update({ value: e.target.value === "yes" })}
-          >
-            <option value="yes">is monitored</option>
-            <option value="no">is not monitored</option>
-          </select>
+            options={[
+              { value: "yes", label: "is monitored" },
+              { value: "no", label: "is not monitored" },
+            ]}
+            onChange={(value) => update({ value: value === "yes" })}
+            ariaLabel="Monitored"
+          />
         );
       case "quality_profile":
         return (
@@ -2189,19 +2211,19 @@ export function CollectionEditor(props: {
         );
       case "instance":
         return (
-          <select
-            className={theme.selectField}
-            style={{ width: 260 }}
+          <BrandSelect
+            triggerClassName="min-w-[260px] shrink-0"
             value={typeof block.value === "string" ? block.value : ""}
-            onChange={(e) => update({ value: e.target.value })}
-          >
-            <option value="">{builderMeta ? "Select an instance…" : "Loading instances…"}</option>
-            {(builderMeta?.instances ?? []).map((inst) => (
-              <option key={inst.instance_key} value={inst.instance_key}>
-                {inst.label} ({inst.instance_key})
-              </option>
-            ))}
-          </select>
+            options={[
+              { value: "", label: builderMeta ? "Select an instance…" : "Loading instances…" },
+              ...(builderMeta?.instances ?? []).map((inst) => ({
+                value: inst.instance_key,
+                label: `${inst.label} (${inst.instance_key})`,
+              })),
+            ]}
+            onChange={(value) => update({ value })}
+            ariaLabel="Instance"
+          />
         );
       case "release_window": {
         const statusOp = block.op === "has_released" || block.op === "not_yet_released";
@@ -2226,27 +2248,25 @@ export function CollectionEditor(props: {
             ) : null}
             <label className={`flex items-center gap-2 ${theme.label}`}>
               based on
-              <select
-                className={theme.selectField}
+              <BrandSelect
+                triggerClassName="min-w-[8rem] shrink-0"
                 value={block.basis ?? (sectionType === "movie" ? "theater" : "premiered")}
-                onChange={(e) =>
-                  update({ basis: e.target.value as CollectionFilterBlock["basis"] })
+                options={
+                  sectionType === "movie"
+                    ? [
+                        { value: "theater", label: "Theatrical release" },
+                        { value: "digital", label: "Digital release" },
+                        { value: "physical", label: "Physical release" },
+                      ]
+                    : [
+                        { value: "premiered", label: "Series premiere" },
+                        { value: "latest_episode", label: "Latest aired episode" },
+                        { value: "latest_season", label: "Latest season premiere" },
+                      ]
                 }
-              >
-                {sectionType === "movie" ? (
-                  <>
-                    <option value="theater">Theatrical release</option>
-                    <option value="digital">Digital release</option>
-                    <option value="physical">Physical release</option>
-                  </>
-                ) : (
-                  <>
-                    <option value="premiered">Series premiere</option>
-                    <option value="latest_episode">Latest aired episode</option>
-                    <option value="latest_season">Latest season premiere</option>
-                  </>
-                )}
-              </select>
+                onChange={(value) => update({ basis: value as CollectionFilterBlock["basis"] })}
+                ariaLabel="Release basis"
+              />
             </label>
           </div>
         );
@@ -2268,11 +2288,15 @@ export function CollectionEditor(props: {
           <div className="flex flex-col gap-2">
             <div className="flex flex-wrap items-center gap-2">
               {sectionType === "movie" ? (
-                <select
-                  className={theme.selectField}
+                <BrandSelect
+                  triggerClassName="min-w-[8rem] shrink-0"
                   value={provider ?? "imdb"}
-                  onChange={(e) => {
-                    const next = e.target.value as CollectionRatingProvider;
+                  options={MOVIE_RATING_PROVIDERS.map((p) => ({
+                    value: p.value,
+                    label: p.label,
+                  }))}
+                  onChange={(value) => {
+                    const next = value as CollectionRatingProvider;
                     const prevMax = ratingProviderMax(provider);
                     const nextMax = ratingProviderMax(next);
                     let nextValue = typeof block.value === "number" ? block.value : null;
@@ -2281,13 +2305,8 @@ export function CollectionEditor(props: {
                     }
                     updateRating({ provider: next, value: nextValue });
                   }}
-                >
-                  {MOVIE_RATING_PROVIDERS.map((p) => (
-                    <option key={p.value} value={p.value}>
-                      {p.label}
-                    </option>
-                  ))}
-                </select>
+                  ariaLabel="Rating provider"
+                />
               ) : (
                 <span
                   className="text-[13px] text-slate-500"
@@ -2296,14 +2315,16 @@ export function CollectionEditor(props: {
                   Sonarr rating
                 </span>
               )}
-              <select
-                className={theme.selectOp}
+              <BrandSelect
+                triggerClassName="min-w-[12.5rem] shrink-0"
                 value={block.op ?? "gte"}
-                onChange={(e) => updateRating({ op: e.target.value })}
-              >
-                <option value="gte">is at least</option>
-                <option value="lte">is at most</option>
-              </select>
+                options={[
+                  { value: "gte", label: "is at least" },
+                  { value: "lte", label: "is at most" },
+                ]}
+                onChange={(value) => updateRating({ op: value })}
+                ariaLabel="Rating operator"
+              />
               <NumberInput
                 value={typeof block.value === "number" ? block.value : null}
                 min={0}
@@ -2465,13 +2486,16 @@ export function CollectionEditor(props: {
                       key={s.id}
                       className={`flex items-center gap-2 text-[13px] ${typeLocked ? "opacity-40 pointer-events-none" : "cursor-pointer"} ${theme.label}`}
                     >
-                      <input
-                        type="checkbox"
+                      <BrandCheckbox
                         checked={selected}
                         disabled={typeLocked}
-                        onChange={() => {
+                        size="sm"
+                        accentHex={accentHex}
+                        ariaLabel={`${s.title} library`}
+                        onChange={(next) => {
                           setSectionIds((prev) => {
-                            if (prev.includes(s.id)) return prev.filter((id) => id !== s.id);
+                            if (!next) return prev.filter((id) => id !== s.id);
+                            if (prev.includes(s.id)) return prev;
                             if (prev.length && s.type !== sectionType) return prev;
                             return [...prev, s.id];
                           });
@@ -2594,21 +2618,20 @@ export function CollectionEditor(props: {
               />
             </label>
           </div>
+          <div className="space-y-3">
+            <div className={`text-[12px] font-headline uppercase tracking-wider ${theme.muted}`}>Schedule</div>
+            <TaskScheduleEditor
+              value={runSchedule}
+              allowFollowGlobal
+              followGlobal={followGlobalSchedule}
+              onFollowGlobalChange={setFollowGlobalSchedule}
+              accentHex={accentHex}
+              fallbackHours={24}
+              clockFormat={props.clockFormat}
+              onChange={setRunSchedule}
+            />
+          </div>
           <div className="flex flex-wrap items-center gap-4">
-            <label className={`flex items-center gap-2 ${theme.label}`}>
-              Schedule
-              <select
-                className={theme.selectField}
-                value={runIntervalHours == null ? "" : String(runIntervalHours)}
-                onChange={(e) => setRunIntervalHours(e.target.value === "" ? null : Number(e.target.value))}
-              >
-                {SCHEDULE_PRESETS.map((preset) => (
-                  <option key={preset.value} value={preset.value}>
-                    {preset.label}
-                  </option>
-                ))}
-              </select>
-            </label>
             <label className={`flex items-center gap-2 ${theme.label} cursor-pointer select-none`}>
               <span>Seasonal window</span>
               <ToggleSwitch
@@ -2638,29 +2661,27 @@ export function CollectionEditor(props: {
                 </label>
                 <label className={`flex items-center gap-2 ${theme.label}`}>
                   When dormant
-                  <select
-                    className={theme.selectField}
+                  <BrandSelect
+                    triggerClassName="min-w-[8rem] shrink-0"
                     value={activeWindow.when_inactive}
-                    onChange={(e) =>
+                    options={[
+                      { value: "keep", label: "Keep collection as-is" },
+                      { value: "clear", label: "Empty the collection" },
+                      { value: "delete", label: "Delete the collection" },
+                    ]}
+                    onChange={(value) =>
                       setActiveWindow((prev) =>
                         prev
                           ? {
                               ...prev,
                               when_inactive:
-                                e.target.value === "delete"
-                                  ? "delete"
-                                  : e.target.value === "clear"
-                                    ? "clear"
-                                    : "keep",
+                                value === "delete" ? "delete" : value === "clear" ? "clear" : "keep",
                             }
                           : prev,
                       )
                     }
-                  >
-                    <option value="keep">Keep collection as-is</option>
-                    <option value="clear">Empty the collection</option>
-                    <option value="delete">Delete the collection</option>
-                  </select>
+                    ariaLabel="When dormant"
+                  />
                 </label>
                 {activeWindow.when_inactive === "delete" ? (
                   <span className={`text-[12px] font-normal normal-case tracking-normal ${theme.muted}`}>
@@ -2944,11 +2965,21 @@ export function CollectionEditor(props: {
               <div className="flex flex-wrap items-center gap-4">
                 <label className={`flex items-center gap-2 ${theme.label}`}>
                   Sort by
-                  <select
-                    className={theme.selectField}
+                  <BrandSelect
+                    triggerClassName="min-w-[8rem] shrink-0"
                     value={definition.sort ?? "popularity"}
-                    onChange={(e) => {
-                      const next = e.target.value as CollectionDefinition["sort"];
+                    options={[
+                      { value: "popularity", label: "Popularity / list rank" },
+                      { value: "release_date", label: "Release date (newest)" },
+                      {
+                        value: "latest_aired",
+                        label: `Newest content first${sectionType === "show" ? " (latest aired episode)" : ""}`,
+                      },
+                      { value: "rating", label: "Rating (highest first)" },
+                      { value: "title", label: "Title (A–Z, ignoring a/an/the)" },
+                    ]}
+                    onChange={(value) => {
+                      const next = value as CollectionDefinition["sort"];
                       setDefinition((prev) => ({
                         ...prev,
                         sort: next,
@@ -2960,36 +2991,28 @@ export function CollectionEditor(props: {
                             : null,
                       }));
                     }}
-                  >
-                    <option value="popularity">Popularity / list rank</option>
-                    <option value="release_date">Release date (newest)</option>
-                    <option value="latest_aired">
-                      Newest content first{sectionType === "show" ? " (latest aired episode)" : ""}
-                    </option>
-                    <option value="rating">Rating (highest first)</option>
-                    <option value="title">Title (A–Z, ignoring a/an/the)</option>
-                  </select>
+                    ariaLabel="Sort by"
+                  />
                 </label>
                 {definition.sort === "rating" ? (
                   sectionType === "movie" ? (
                     <label className={`flex items-center gap-2 ${theme.label}`}>
                       Source
-                      <select
-                        className={theme.selectField}
+                      <BrandSelect
+                        triggerClassName="min-w-[8rem] shrink-0"
                         value={definition.sort_provider ?? "imdb"}
-                        onChange={(e) =>
+                        options={MOVIE_RATING_PROVIDERS.map((p) => ({
+                          value: p.value,
+                          label: p.label,
+                        }))}
+                        onChange={(value) =>
                           setDefinition((prev) => ({
                             ...prev,
-                            sort_provider: e.target.value as CollectionRatingProvider,
+                            sort_provider: value as CollectionRatingProvider,
                           }))
                         }
-                      >
-                        {MOVIE_RATING_PROVIDERS.map((p) => (
-                          <option key={p.value} value={p.value}>
-                            {p.label}
-                          </option>
-                        ))}
-                      </select>
+                        ariaLabel="Rating source"
+                      />
                     </label>
                   ) : (
                     <span
@@ -3033,17 +3056,19 @@ export function CollectionEditor(props: {
                       key={opt.key}
                       className={`flex items-center gap-2 text-[13px] cursor-pointer ${theme.label}`}
                     >
-                      <input
-                        type="checkbox"
+                      <BrandCheckbox
                         checked={checked}
-                        onChange={() =>
+                        size="sm"
+                        accentHex={accentHex}
+                        ariaLabel={opt.label}
+                        onChange={(next) =>
                           setDefinition((prev) => ({
                             ...prev,
                             visible_on: {
                               library: Boolean(prev.visible_on?.library),
                               home: Boolean(prev.visible_on?.home),
                               shared: Boolean(prev.visible_on?.shared),
-                              [opt.key]: !checked,
+                              [opt.key]: next,
                             },
                           }))
                         }
@@ -3077,7 +3102,12 @@ export function CollectionEditor(props: {
                 plex_section_type: sectionType,
                 collection_title: collectionTitle.trim(),
                 definition,
-                run_interval_hours: runIntervalHours,
+                run_interval_hours: followGlobalSchedule
+                  ? null
+                  : runSchedule.mode === "interval"
+                    ? runSchedule.interval_hours
+                    : null,
+                run_schedule: followGlobalSchedule ? null : runSchedule,
                 active_window: activeWindow
                   ? {
                       start: joinMonthDay(

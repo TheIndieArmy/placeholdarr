@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ThemeMode } from "../brandTypes";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
+import { BrandCheckbox } from "../BrandCheckbox";
 import {
   checkCollectionTitleConflicts,
   createCollectionRecipe,
@@ -17,6 +18,8 @@ import {
 } from "../api/collections";
 import type { CollectionRecipe, LibraryItem, PlexSectionOption } from "../types/api";
 import { ConfirmModal } from "../ConfirmModal";
+import { formatHhmmDisplay, parseClockFormat, type ClockFormat } from "../clockFormat";
+import { parseTaskSchedule } from "../settings/TaskScheduleEditor";
 import { ToggleSwitch } from "../ToggleSwitch";
 import { CollectionEditor } from "./CollectionEditor";
 import { CollectionSetEditor, isCollectionSetRecipe } from "./CollectionSetEditor";
@@ -25,21 +28,50 @@ import { getCollectionTheme } from "./collectionTheme";
 /** Scale with main until this floor, then horizontal scroll on main (header, card, footnote move together). */
 const COLLECTIONS_LIST_LAYOUT_CLASS = "w-full min-w-[max(100%,52rem)]";
 
-function formatSchedule(recipe: CollectionRecipe): string {
+function describeRecipeSchedule(sched: ReturnType<typeof parseTaskSchedule>, clock: ClockFormat): string {
+  if (!sched.enabled) return "Disabled";
+  if (sched.mode === "interval") {
+    const hours = Math.max(1, sched.interval_hours || 12);
+    if (hours === 1) return "Every hour";
+    return `Every ${hours} hours`;
+  }
+  const time = formatHhmmDisplay(sched.time || "03:00", clock);
+  if (sched.mode === "daily") return `Daily at ${time}`;
+  if (sched.mode === "weekly") {
+    const days = (sched.weekdays || [])
+      .map((d) => ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][d] || "")
+      .filter(Boolean);
+    return `Weekly ${days.join(", ") || "days"} at ${time}`;
+  }
+  if (sched.mode === "monthly") return `Monthly day ${sched.monthday ?? 1} at ${time}`;
+  if (sched.mode === "cron") return `Cron: ${sched.cron || "unset"}`;
+  return "Custom";
+}
+
+function formatSchedule(recipe: CollectionRecipe, clock: ClockFormat = "12h"): string {
+  if (recipe.run_schedule && typeof recipe.run_schedule === "object") {
+    return describeRecipeSchedule(parseTaskSchedule(recipe.run_schedule, 24), clock);
+  }
   const hours = recipe.run_interval_hours;
   if (hours == null) return "App default";
-  if (hours === 1) return "Hourly";
+  if (hours === 1) return "Every hour";
   if (hours === 24) return "Daily";
   if (hours === 168) return "Weekly";
   if (hours % 24 === 0) return `Every ${hours / 24}d`;
   return `Every ${hours}h`;
 }
 
-function formatLastRun(recipe: CollectionRecipe): string {
+function formatLastRun(recipe: CollectionRecipe, clock: ClockFormat = "12h"): string {
   if (!recipe.last_run_at) return "Never run";
   try {
     const date = new Date(recipe.last_run_at);
-    return date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    return date.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: clock !== "24h",
+    });
   } catch {
     return recipe.last_run_at;
   }
@@ -57,10 +89,13 @@ export function CollectionsPanel(props: {
   onOpenOptionalApis?: () => void;
   /** True while the recipe editor has unsaved edits (for sidebar leave prompts). */
   onDraftDirty?: (dirty: boolean) => void;
+  /** Dashboard clock format (12h / 24h). */
+  clockFormat?: ClockFormat | string | null;
 }) {
   const accentHex = props.accent.hex;
   const isLight = props.themeMode === "light";
   const theme = getCollectionTheme(isLight);
+  const clockFormat = parseClockFormat(props.clockFormat);
 
   const [recipes, setRecipes] = useState<CollectionRecipe[]>([]);
   const [tmdbConfigured, setTmdbConfigured] = useState(true);
@@ -502,6 +537,7 @@ export function CollectionsPanel(props: {
             onSave={(payload) => void handleSave(payload)}
             onCancel={leaveEditor}
             onDirtyChange={handleEditorDirty}
+            clockFormat={clockFormat}
           />
         ) : (
           <CollectionEditor
@@ -520,6 +556,7 @@ export function CollectionsPanel(props: {
             onSave={(payload) => void handleSave(payload)}
             onCancel={leaveEditor}
             onDirtyChange={handleEditorDirty}
+            clockFormat={clockFormat}
           />
         )}
       </div>
@@ -600,12 +637,18 @@ export function CollectionsPanel(props: {
               isLight ? "text-slate-700" : "text-slate-300"
             }`}
           >
-            <input
-              type="checkbox"
-              className="mt-0.5"
+            <BrandCheckbox
               checked={deletePlexToo}
               disabled={deleting}
-              onChange={(e) => setDeletePlexToo(e.target.checked)}
+              size="sm"
+              accentHex={accentHex}
+              align="start"
+              ariaLabel={
+                isCollectionSetRecipe(deleteConfirm)
+                  ? "Also delete the Plex collections this set manages"
+                  : "Also delete the collection from Plex"
+              }
+              onChange={setDeletePlexToo}
             />
             <span>
               {isCollectionSetRecipe(deleteConfirm)
@@ -786,11 +829,12 @@ export function CollectionsPanel(props: {
                     }`}
                   >
                     {h === "" ? (
-                      <input
-                        type="checkbox"
+                      <BrandCheckbox
                         checked={allSelected}
-                        onChange={toggleSelectAll}
-                        aria-label="Select all collections"
+                        size="sm"
+                        accentHex={accentHex}
+                        ariaLabel="Select all collections"
+                        onChange={() => toggleSelectAll()}
                       />
                     ) : (
                       h
@@ -810,11 +854,12 @@ export function CollectionsPanel(props: {
                     className={isLight ? "hover:bg-[#f2f7ff] transition-colors" : "hover:bg-[#1e2430]/40 transition-colors"}
                   >
                     <td className="px-5 py-4">
-                      <input
-                        type="checkbox"
+                      <BrandCheckbox
                         checked={selected}
+                        size="sm"
+                        accentHex={accentHex}
+                        ariaLabel={`Select ${recipe.name}`}
                         onChange={() => toggleSelected(recipe.id)}
-                        aria-label={`Select ${recipe.name}`}
                       />
                     </td>
                     <td className="px-5 py-4">
@@ -874,7 +919,7 @@ export function CollectionsPanel(props: {
                           : "—"}
                     </td>
                     <td className={`px-5 py-4 text-[14px] ${isLight ? "text-slate-600" : "text-slate-400"}`}>
-                      {formatSchedule(recipe)}
+                      {formatSchedule(recipe, clockFormat)}
                       {recipe.active_window ? (
                         <span className={`block text-[12px] ${theme.muted}`}>
                           {recipe.active_window.start} → {recipe.active_window.end}
@@ -883,7 +928,7 @@ export function CollectionsPanel(props: {
                     </td>
                     <td className="px-5 py-4">
                       <span className={`block text-[14px] ${isLight ? "text-slate-600" : "text-slate-400"}`}>
-                        {formatLastRun(recipe)}
+                        {formatLastRun(recipe, clockFormat)}
                       </span>
                       {summary ? (
                         summary.status === "ok" ? (

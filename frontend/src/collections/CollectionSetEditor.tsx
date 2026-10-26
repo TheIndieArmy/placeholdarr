@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ThemeMode } from "../brandTypes";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
+import { BrandCheckbox } from "../BrandCheckbox";
+import { BrandSelect } from "../BrandSelect";
 import {
   checkCollectionTitleConflicts,
   getCollectionBuilderMeta,
@@ -18,6 +20,12 @@ import type {
   CollectionVisibleOn,
   PlexSectionOption,
 } from "../types/api";
+import {
+  parseTaskSchedule,
+  scheduleFromLegacyHours,
+  TaskScheduleEditor,
+  type TaskScheduleValue,
+} from "../settings/TaskScheduleEditor";
 import { ToggleSwitch } from "../ToggleSwitch";
 import { getCollectionTheme } from "./collectionTheme";
 import { VisibleOnAtCreationHelp } from "./VisibleOnAtCreationHelp";
@@ -61,15 +69,6 @@ const CATEGORY_OPTIONS: {
     description: "Upcoming and recently released shelves. Pick which release date to base them on.",
     defaultPattern: "{value}",
   },
-];
-
-const SCHEDULE_PRESETS: { value: string; label: string }[] = [
-  { value: "", label: "App default" },
-  { value: "1", label: "Hourly" },
-  { value: "6", label: "Every 6 hours" },
-  { value: "12", label: "Every 12 hours" },
-  { value: "24", label: "Daily" },
-  { value: "168", label: "Weekly" },
 ];
 
 const RELEASE_TIMING_PRESETS = [
@@ -153,6 +152,7 @@ export function CollectionSetEditor(props: {
   onSave: (payload: RecipeWritePayload) => void;
   onCancel: () => void;
   onDirtyChange?: (dirty: boolean) => void;
+  clockFormat?: string | null;
 }) {
   const accentHex = props.accent.hex;
   const isLight = props.themeMode === "light";
@@ -166,7 +166,18 @@ export function CollectionSetEditor(props: {
     if (extras.length) return extras;
     return props.recipe?.plex_section_id ? [props.recipe.plex_section_id] : [];
   });
-  const [runIntervalHours, setRunIntervalHours] = useState<number | null>(props.recipe?.run_interval_hours ?? null);
+  const [followGlobalSchedule, setFollowGlobalSchedule] = useState(
+    () => props.recipe?.run_schedule == null && props.recipe?.run_interval_hours == null,
+  );
+  const [runSchedule, setRunSchedule] = useState<TaskScheduleValue>(() => {
+    if (props.recipe?.run_schedule && typeof props.recipe.run_schedule === "object") {
+      return parseTaskSchedule(props.recipe.run_schedule, 24);
+    }
+    if (props.recipe?.run_interval_hours != null) {
+      return scheduleFromLegacyHours(props.recipe.run_interval_hours);
+    }
+    return parseTaskSchedule({ enabled: true, mode: "daily", time: "03:00" }, 24);
+  });
   const [activeWindow, setActiveWindow] = useState<CollectionActiveWindow | null>(
     props.recipe?.active_window ?? null,
   );
@@ -196,7 +207,7 @@ export function CollectionSetEditor(props: {
         name,
         enabled,
         sectionIds,
-        runIntervalHours,
+        runSchedule: followGlobalSchedule ? null : runSchedule,
         activeWindow,
         adoptExisting,
         visibleOn,
@@ -212,7 +223,17 @@ export function CollectionSetEditor(props: {
           release_basis: setConfig.release_basis,
         },
       }),
-    [name, enabled, sectionIds, runIntervalHours, activeWindow, adoptExisting, visibleOn, setConfig],
+    [
+      name,
+      enabled,
+      sectionIds,
+      followGlobalSchedule,
+      runSchedule,
+      activeWindow,
+      adoptExisting,
+      visibleOn,
+      setConfig,
+    ],
   );
   const initialRef = useRef(snapshot);
   const dirty = snapshot !== initialRef.current;
@@ -440,7 +461,12 @@ export function CollectionSetEditor(props: {
       plex_section_type: sectionType,
       collection_title: pattern,
       definition: setDefinition(config, adoptExisting, visibleOn),
-      run_interval_hours: runIntervalHours,
+      run_interval_hours: followGlobalSchedule
+        ? null
+        : runSchedule.mode === "interval"
+          ? runSchedule.interval_hours
+          : null,
+      run_schedule: followGlobalSchedule ? null : runSchedule,
       active_window: activeWindow,
     });
   };
@@ -494,13 +520,16 @@ export function CollectionSetEditor(props: {
                     key={s.id}
                     className={`flex items-center gap-2 text-[13px] ${typeLocked ? "opacity-40 pointer-events-none" : "cursor-pointer"} ${theme.label}`}
                   >
-                    <input
-                      type="checkbox"
+                    <BrandCheckbox
                       checked={selected}
                       disabled={typeLocked}
-                      onChange={() => {
+                      size="sm"
+                      accentHex={accentHex}
+                      ariaLabel={`${s.title} library`}
+                      onChange={(next) => {
                         setSectionIds((prev) => {
-                          if (prev.includes(s.id)) return prev.filter((id) => id !== s.id);
+                          if (!next) return prev.filter((id) => id !== s.id);
+                          if (prev.includes(s.id)) return prev;
                           if (prev.length && s.type !== sectionType) return prev;
                           return [...prev, s.id];
                         });
@@ -537,21 +566,20 @@ export function CollectionSetEditor(props: {
             />
           </label>
         </div>
+        <div className="space-y-3">
+          <div className={`text-[12px] font-headline uppercase tracking-wider ${theme.muted}`}>Schedule</div>
+          <TaskScheduleEditor
+            value={runSchedule}
+            allowFollowGlobal
+            followGlobal={followGlobalSchedule}
+            onFollowGlobalChange={setFollowGlobalSchedule}
+            accentHex={accentHex}
+            fallbackHours={24}
+            clockFormat={props.clockFormat}
+            onChange={setRunSchedule}
+          />
+        </div>
         <div className="flex flex-wrap items-center gap-4">
-          <label className={`flex items-center gap-2 ${theme.label}`}>
-            Schedule
-            <select
-              className={theme.selectField}
-              value={runIntervalHours == null ? "" : String(runIntervalHours)}
-              onChange={(e) => setRunIntervalHours(e.target.value === "" ? null : Number(e.target.value))}
-            >
-              {SCHEDULE_PRESETS.map((preset) => (
-                <option key={preset.value || "default"} value={preset.value}>
-                  {preset.label}
-                </option>
-              ))}
-            </select>
-          </label>
           <label className={`flex items-center gap-2 ${theme.label} cursor-pointer select-none`}>
             <span>Seasonal window</span>
             <ToggleSwitch
@@ -587,25 +615,23 @@ export function CollectionSetEditor(props: {
               </label>
               <label className={`flex items-center gap-2 ${theme.label}`}>
                 When inactive
-                <select
-                  className={theme.selectField}
+                <BrandSelect
+                  triggerClassName="min-w-[8rem] shrink-0"
                   value={activeWindow.when_inactive}
-                  onChange={(e) =>
+                  options={[
+                    { value: "keep", label: "Keep collection as-is" },
+                    { value: "clear", label: "Empty the collection" },
+                    { value: "delete", label: "Delete the collection" },
+                  ]}
+                  onChange={(value) =>
                     setActiveWindow({
                       ...activeWindow,
                       when_inactive:
-                        e.target.value === "delete"
-                          ? "delete"
-                          : e.target.value === "clear"
-                            ? "clear"
-                            : "keep",
+                        value === "delete" ? "delete" : value === "clear" ? "clear" : "keep",
                     })
                   }
-                >
-                  <option value="keep">Keep collection as-is</option>
-                  <option value="clear">Empty the collection</option>
-                  <option value="delete">Delete the collection</option>
-                </select>
+                  ariaLabel="When inactive"
+                />
               </label>
               {activeWindow.when_inactive === "delete" ? (
                 <span className={`text-[12px] font-normal normal-case tracking-normal ${theme.muted}`}>
@@ -665,20 +691,21 @@ export function CollectionSetEditor(props: {
             hasLibrary ? (
               <label className={`flex items-center gap-2 ${theme.label}`}>
                 *arr instance
-                <select
-                  className={theme.selectField}
+                <BrandSelect
+                  triggerClassName="min-w-[8rem] shrink-0"
                   value={setConfig.instance_key ?? ""}
-                  onChange={(e) =>
-                    setSetConfig((prev) => ({ ...prev, instance_key: e.target.value || null, values: [] }))
+                  options={[
+                    { value: "", label: "Select instance…" },
+                    ...arrInstances.map((inst) => ({
+                      value: inst.instance_key,
+                      label: inst.label || inst.instance_key,
+                    })),
+                  ]}
+                  onChange={(value) =>
+                    setSetConfig((prev) => ({ ...prev, instance_key: value || null, values: [] }))
                   }
-                >
-                  <option value="">Select instance…</option>
-                  {arrInstances.map((inst) => (
-                    <option key={inst.instance_key} value={inst.instance_key}>
-                      {inst.label || inst.instance_key}
-                    </option>
-                  ))}
-                </select>
+                  ariaLabel="Arr instance"
+                />
               </label>
             ) : (
               <p className={`text-[13px] ${theme.muted}`}>
@@ -690,17 +717,16 @@ export function CollectionSetEditor(props: {
           {setConfig.category === "release_timing" ? (
             <label className={`flex items-center gap-2 ${theme.label}`}>
               Based on
-              <select
-                className={theme.selectField}
+              <BrandSelect
+                triggerClassName="min-w-[8rem] shrink-0"
                 value={setConfig.release_basis ?? (sectionType === "show" ? "premiered" : "theater")}
-                onChange={(e) => setSetConfig((prev) => ({ ...prev, release_basis: e.target.value }))}
-              >
-                {releaseBasisOptions.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
+                options={releaseBasisOptions.map((opt) => ({
+                  value: opt.value,
+                  label: opt.label,
+                }))}
+                onChange={(value) => setSetConfig((prev) => ({ ...prev, release_basis: value }))}
+                ariaLabel="Based on"
+              />
             </label>
           ) : null}
 
@@ -792,20 +818,22 @@ export function CollectionSetEditor(props: {
           </p>
           <label className={`flex items-center gap-2 ${theme.label}`}>
             Values
-            <select
-              className={theme.selectField}
+            <BrandSelect
+              triggerClassName="min-w-[8rem] shrink-0"
               value={setConfig.selection_mode}
-              onChange={(e) =>
+              options={[
+                { value: "all", label: "All values" },
+                { value: "include", label: "Only selected values" },
+                { value: "exclude", label: "All except selected values" },
+              ]}
+              onChange={(value) =>
                 setSetConfig((prev) => ({
                   ...prev,
-                  selection_mode: e.target.value as CollectionSetConfig["selection_mode"],
+                  selection_mode: value as CollectionSetConfig["selection_mode"],
                 }))
               }
-            >
-              <option value="all">All values</option>
-              <option value="include">Only selected values</option>
-              <option value="exclude">All except selected values</option>
-            </select>
+              ariaLabel="Values"
+            />
           </label>
           {setConfig.selection_mode !== "all" ? (
             <div className="flex flex-wrap gap-1.5">
@@ -872,13 +900,15 @@ export function CollectionSetEditor(props: {
                   key={opt.key}
                   className={`flex items-center gap-2 text-[13px] cursor-pointer ${theme.label}`}
                 >
-                  <input
-                    type="checkbox"
+                  <BrandCheckbox
                     checked={checked}
-                    onChange={() =>
+                    size="sm"
+                    accentHex={accentHex}
+                    ariaLabel={opt.label}
+                    onChange={(next) =>
                       setVisibleOn((prev) => ({
                         ...prev,
-                        [opt.key]: !checked,
+                        [opt.key]: next,
                       }))
                     }
                   />

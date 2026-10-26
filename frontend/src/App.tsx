@@ -54,6 +54,8 @@ import placeholdarrLogoBlue from "./assets/Placeholdarr_blue.svg";
 import placeholdarrLogoYellow from "./assets/Placeholdarr_yellow.svg";
 import type { Brand, ThemeMode } from "./brandTypes";
 import { ToggleSwitch } from "./ToggleSwitch";
+import { BrandSelect } from "./BrandSelect";
+import { BrandCheckbox } from "./BrandCheckbox";
 import { SettingsStringListChips } from "./SettingsStringListChips";
 import {
   PlaybackDestFilterControls,
@@ -61,6 +63,7 @@ import {
   isPlaybackDestFilterKey,
   playbackDestOptionsFromValues,
 } from "./settings/PlaybackDestFilterControls";
+import { ScheduleTimezoneNote, TaskScheduleEditor } from "./settings/TaskScheduleEditor";
 import { UI_SECTION_FRAME_CLASS, UI_SECTION_LEGEND_CLASS } from "./uiSectionFrame";
 
 import { TmdbAttribution } from "./TmdbAttribution";
@@ -1997,6 +2000,9 @@ export function App() {
           onOpenPlexSettings={() => tryNavigate("/settings/media-integrations")}
           onOpenOptionalApis={() => tryNavigate("/settings/optional-apis")}
           onDraftDirty={setCollectionsDraftDirty}
+          clockFormat={fieldValues.UI_CLOCK_FORMAT ?? settingsPayload?.sections
+            ?.flatMap((s) => s.fields)
+            .find((f) => f.key === "UI_CLOCK_FORMAT")?.value}
         />
       );
     }
@@ -2203,9 +2209,6 @@ export function App() {
                   return;
                 }
                 setBaselineValues(fieldValues);
-                const backfillQueuedNow =
-                  applyScope === "now" &&
-                  Boolean(result.nfo_backfill?.enqueued || result.art_backfill?.enqueued);
                 const saveMsg = formatSettingsSaveSuccessMessage(result.restart_required_keys);
                 if (result.restart_required_keys && result.restart_required_keys.length > 0) {
                   setRestartAvailable(true);
@@ -2219,9 +2222,8 @@ export function App() {
                 setSettingsFeedbackKind("success");
                 // Leave-without-saving is clear once baseline matches. Refresh payload/tasks in the
                 // background so a slow library reload does not keep the user stuck on Settings.
-                if (backfillQueuedNow || applyScope === "now") {
-                  void refreshTasks();
-                }
+                // Always refresh tasks so schedule next-run times update after Library sync saves.
+                void refreshTasks();
                 invalidateLibraryAfterCatalogChange();
                 void getSettingsCurrent()
                   .then((payload) => {
@@ -3470,11 +3472,11 @@ function CalendarPanel(props: {
                     key={`rel-menu-${item.key}`}
                     className="flex items-center gap-2 px-2 py-2 rounded-md text-[14px] text-slate-300 hover:bg-[#1b2433] cursor-pointer"
                   >
-                    <input
-                      type="checkbox"
+                    <BrandCheckbox
                       checked={active}
                       onChange={() => props.onToggleFilter("releaseTypes", item.key)}
-                      className="h-3.5 w-3.5 rounded border-[#424753]/60 bg-[#0f141c] text-teal-400 focus:ring-0"
+                      size="sm"
+                      ariaLabel={item.label}
                     />
                     <span className="font-headline uppercase tracking-wider">{item.label}</span>
                   </label>
@@ -3867,18 +3869,21 @@ function LogsPanel(props: {
             className={`w-full bg-[#1e2430] border border-[#424753]/40 rounded-lg pl-9 pr-3 py-2 text-[16px] text-slate-300 placeholder-slate-500 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
             placeholder="Search log output..." />
         </div>
-        <div className="relative flex items-center gap-2">
+        <div className="flex items-center gap-2">
           <span className="text-[12px] font-headline uppercase tracking-widest text-slate-500 whitespace-nowrap">Display filter</span>
-          <select value={props.logLevel} onChange={e => props.onLevelChange(e.target.value as "all" | "debug" | "info" | "warn" | "error" | "critical")}
-            className="appearance-none bg-[#1e2430] border border-[#424753]/40 rounded-lg px-3 py-2 pr-8 text-[16px] text-slate-300 outline-none">
-            <option value="all">All captured levels</option>
-            <option value="debug">Debug + Above</option>
-            <option value="info">Info + Above</option>
-            <option value="warn">Warnings + Above</option>
-            <option value="error">Errors + Above</option>
-            <option value="critical">Critical Only</option>
-          </select>
-          <span className="material-symbols-outlined absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" style={{ fontSize: 16 }}>expand_more</span>
+          <BrandSelect
+            value={props.logLevel}
+            onChange={(v) => props.onLevelChange(v as "all" | "debug" | "info" | "warn" | "error" | "critical")}
+            ariaLabel="Display filter"
+            options={[
+              { value: "all", label: "All captured levels" },
+              { value: "debug", label: "Debug + Above" },
+              { value: "info", label: "Info + Above" },
+              { value: "warn", label: "Warnings + Above" },
+              { value: "error", label: "Errors + Above" },
+              { value: "critical", label: "Critical Only" },
+            ]}
+          />
         </div>
       </div>
 
@@ -4499,8 +4504,6 @@ function PlayActionsInstanceMatrix(props: {
   onRealKeysChange: (keys: string[]) => void;
   realColumnNote?: string;
 }) {
-  const focus = getBrandFocusClass(props.brand, props.themeMode);
-
   if (!props.enabled || props.instances.length < 2) {
     return (
       <div className="min-w-0 flex h-full flex-col gap-2">
@@ -4567,34 +4570,26 @@ function PlayActionsInstanceMatrix(props: {
                     {label}
                   </td>
                   <td className="w-[8.25rem] px-1 py-2 text-center">
-                    <select
+                    <BrandSelect
                       id={`${idPrefix}-ph-mode-${key}`}
-                      aria-label={`Placeholder play for ${label}`}
-                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-1.5 py-1.5 text-[12px] text-slate-200 outline-none transition-colors ${focus}`}
+                      ariaLabel={`Placeholder play for ${label}`}
+                      fullWidth
+                      size="sm"
                       value={phMode}
-                      onChange={(e) => setMode(key, e.target.value as PlaceholderPlayMode)}
-                    >
-                      {PLACEHOLDER_PLAY_MODE_OPTIONS.map((opt) => (
-                        <option key={opt.value} value={opt.value}>
-                          {opt.label}
-                        </option>
-                      ))}
-                    </select>
+                      onChange={(v) => setMode(key, v as PlaceholderPlayMode)}
+                      options={PLACEHOLDER_PLAY_MODE_OPTIONS}
+                    />
                   </td>
                   <td className="w-[8.25rem] px-1 py-2 text-center">
-                    <select
+                    <BrandSelect
                       id={`${idPrefix}-real-mode-${key}`}
-                      aria-label={`Real file play for ${label}`}
-                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-1.5 py-1.5 text-[12px] text-slate-200 outline-none transition-colors ${focus}`}
+                      ariaLabel={`Real file play for ${label}`}
+                      fullWidth
+                      size="sm"
                       value={realMode}
-                      onChange={(e) => setRealMode(key, e.target.value as RealFilePlayMode)}
-                    >
-                      {REAL_FILE_PLAY_MODE_OPTIONS.map((opt) => (
-                        <option key={opt.value} value={opt.value}>
-                          {opt.label}
-                        </option>
-                      ))}
-                    </select>
+                      onChange={(v) => setRealMode(key, v as RealFilePlayMode)}
+                      options={REAL_FILE_PLAY_MODE_OPTIONS}
+                    />
                   </td>
                 </tr>
               );
@@ -4621,31 +4616,25 @@ function PlayActionsInstanceMatrix(props: {
               <div className="text-[14px] font-semibold text-slate-200">{label}</div>
               <label className="block text-[13px] text-slate-300">
                 <span className="mb-1 block font-semibold text-slate-400">Placeholder play</span>
-                <select
-                  className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-2 py-2 text-[14px] text-slate-200 outline-none transition-colors ${focus}`}
+                <BrandSelect
+                  fullWidth
+                  size="sm"
+                  ariaLabel={`Placeholder play for ${label}`}
                   value={phMode}
-                  onChange={(e) => setMode(key, e.target.value as PlaceholderPlayMode)}
-                >
-                  {PLACEHOLDER_PLAY_MODE_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(v) => setMode(key, v as PlaceholderPlayMode)}
+                  options={PLACEHOLDER_PLAY_MODE_OPTIONS}
+                />
               </label>
               <label className="block text-[13px] text-slate-300">
                 <span className="mb-1 block font-semibold text-slate-400">Real file</span>
-                <select
-                  className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-2 py-2 text-[14px] text-slate-200 outline-none transition-colors ${focus}`}
+                <BrandSelect
+                  fullWidth
+                  size="sm"
+                  ariaLabel={`Real file play for ${label}`}
                   value={realMode}
-                  onChange={(e) => setRealMode(key, e.target.value as RealFilePlayMode)}
-                >
-                  {REAL_FILE_PLAY_MODE_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(v) => setRealMode(key, v as RealFilePlayMode)}
+                  options={REAL_FILE_PLAY_MODE_OPTIONS}
+                />
               </label>
             </li>
           );
@@ -4750,25 +4739,24 @@ function SharedPlaceholderCleanupColumn(props: {
   disabledHint: string;
 }) {
   const mode = sharedPlaceholderCleanupMode(props.values, props.settingKey);
-  const focus = getBrandFocusClass(props.brand, props.themeMode);
   return (
     <div className="min-w-0">
       <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">{props.label}</label>
-      <select
-        className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${focus} ${props.enabled ? "" : "opacity-60 cursor-not-allowed"}`}
+      <BrandSelect
+        fullWidth
+        className={props.enabled ? "" : "opacity-60"}
         value={props.enabled ? mode : "na"}
-        onChange={(e) => props.onChange(props.settingKey, e.target.value)}
+        onChange={(v) => props.onChange(props.settingKey, v)}
         disabled={!props.enabled}
-      >
-        {props.enabled ? (
-          <>
-            <option value="protect_siblings">Remove when all instances have a real file</option>
-            <option value="any_instance_has_file">Remove when any instance has a real file</option>
-          </>
-        ) : (
-          <option value="na">Not applicable</option>
-        )}
-      </select>
+        options={
+          props.enabled
+            ? [
+                { value: "protect_siblings", label: "Remove when all instances have a real file" },
+                { value: "any_instance_has_file", label: "Remove when any instance has a real file" },
+              ]
+            : [{ value: "na", label: "Not applicable" }]
+        }
+      />
       <p className="ui-field-description-compact mt-1.5">
         {props.enabled ? (props.helpByMode[mode] ?? props.helpByMode.protect_siblings) : props.disabledHint}
       </p>
@@ -6570,17 +6558,15 @@ function LibraryPathsForm(props: {
   }
 
   function renderChoice(field: SettingsField, opts?: { compact?: boolean; muted?: boolean }) {
-    const border = opts?.muted ? "border-[#424753]/25" : "border-[#424753]/40";
     return (
-      <select
-        className={`w-full bg-[#0f1419] border ${border} rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${focus} ${opts?.compact ? "text-[14px] py-1.5" : ""}`}
+      <BrandSelect
+        fullWidth
+        size={opts?.compact ? "sm" : "md"}
+        className={opts?.muted ? "opacity-90" : undefined}
         value={String(props.values[field.key] ?? field.options?.[0]?.value ?? "")}
-        onChange={(e) => props.onValueChange(field.key, e.target.value)}
-      >
-        {(field.options || []).map((opt) => (
-          <option key={opt.value} value={opt.value}>{opt.label}</option>
-        ))}
-      </select>
+        onChange={(v) => props.onValueChange(field.key, v)}
+        options={(field.options || []).map((opt) => ({ value: opt.value, label: opt.label }))}
+      />
     );
   }
 
@@ -6617,19 +6603,17 @@ function LibraryPathsForm(props: {
       );
     }
     return (
-      <select
-        className={`w-full bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${focus}`}
+      <BrandSelect
+        fullWidth
         value={raw}
-        onChange={(e) => props.onValueChange(field.key, e.target.value)}
-      >
-        <option value="">Select a library…</option>
-        {!currentInList && raw ? <option value={raw}>Current ID #{raw}</option> : null}
-        {options.map((s) => (
-          <option key={s.id} value={String(s.id)}>
-            {s.title} (#{s.id})
-          </option>
-        ))}
-      </select>
+        onChange={(v) => props.onValueChange(field.key, v)}
+        ariaLabel={field.label}
+        options={[
+          { value: "", label: "Select a library…" },
+          ...(!currentInList && raw ? [{ value: raw, label: `Current ID #${raw}` }] : []),
+          ...options.map((s) => ({ value: String(s.id), label: `${s.title} (#${s.id})` })),
+        ]}
+      />
     );
   }
 
@@ -6655,15 +6639,13 @@ function LibraryPathsForm(props: {
         {field.type === "bool" ? (
           renderBool(field)
         ) : field.type === "choice" && field.options?.length ? (
-          <select
-            className={`w-full max-w-xl bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${focus}`}
+          <BrandSelect
+            fullWidth
+            className="max-w-xl"
             value={String(value ?? field.options[0]?.value ?? "")}
-            onChange={(e) => props.onValueChange(field.key, e.target.value)}
-          >
-            {field.options.map((opt) => (
-              <option key={opt.value} value={opt.value}>{opt.label}</option>
-            ))}
-          </select>
+            onChange={(v) => props.onValueChange(field.key, v)}
+            options={field.options.map((opt) => ({ value: opt.value, label: opt.label }))}
+          />
         ) : (
           <div className="flex gap-2">
             <input
@@ -7410,6 +7392,66 @@ function PosterOverlayLivePreview(props: {
   );
 }
 
+const LIBRARY_SYNC_SCHEDULE_KEYS = [
+  "STARTUP_SYNC_MODE",
+  "UI_CLOCK_FORMAT",
+  "FULL_SYNC_SCHEDULE",
+  "LITE_SYNC_SCHEDULE",
+  "COLLECTIONS_SYNC_SCHEDULE",
+] as const;
+
+const LIBRARY_SYNC_PLACEHOLDER_RULE_KEYS = [
+  "INCLUDE_SPECIALS",
+  "SKIP_PLACEHOLDERS_WHEN_MONITORED",
+  "SKIP_PLACEHOLDERS_WHEN_SERIES_MONITORED",
+] as const;
+
+const LIBRARY_SYNC_TAG_POLICY_KEYS = [
+  "PLACEHOLDER_POLICY_NEVER_TAGS",
+  "PLACEHOLDER_POLICY_PINNED_TAGS",
+] as const;
+
+const LIBRARY_SYNC_PLACEHOLDER_RULES_INTRO =
+  "Rules for which titles get placeholders on sync, aside from Arr tags. Matching Never or Pinned tags still override these.";
+
+const LIBRARY_SYNC_TAG_POLICIES_INTRO =
+  "Use Radarr movie tags or Sonarr series tags to control placeholders on sync: never create them for a title, or always keep them. Matching tags override every other create or delete rule for that title. Defaults are included below; you can add any tags you already use in Arr.";
+
+function partitionLibrarySyncFields(fields: SettingsField[]) {
+  const byKey = new Map(fields.map((f) => [f.key, f]));
+  const pick = (keys: readonly string[]) =>
+    keys.map((key) => byKey.get(key)).filter(Boolean) as SettingsField[];
+  const known = new Set<string>([
+    ...LIBRARY_SYNC_SCHEDULE_KEYS,
+    ...LIBRARY_SYNC_PLACEHOLDER_RULE_KEYS,
+    ...LIBRARY_SYNC_TAG_POLICY_KEYS,
+  ]);
+  return {
+    schedule: [
+      ...pick(LIBRARY_SYNC_SCHEDULE_KEYS),
+      ...fields.filter((f) => !known.has(f.key)),
+    ],
+    placeholderRules: pick(LIBRARY_SYNC_PLACEHOLDER_RULE_KEYS),
+    tagPolicies: pick(LIBRARY_SYNC_TAG_POLICY_KEYS),
+  };
+}
+
+/** Shared intro for placeholder create rules (Settings + onboarding). */
+function PlaceholderRulesIntro(props: { spacing: "settings" | "wizard" }) {
+  const wrap =
+    props.spacing === "settings"
+      ? "space-y-2 px-6 py-5"
+      : "space-y-2 border-t border-[#424753]/25 pt-4 first:border-t-0 first:pt-0";
+  return (
+    <div className={wrap}>
+      <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider">
+        Placeholder rules
+      </h3>
+      <p className="ui-field-description leading-relaxed">{LIBRARY_SYNC_PLACEHOLDER_RULES_INTRO}</p>
+    </div>
+  );
+}
+
 /** Shared intro for Arr tag policy settings (Settings + onboarding). */
 function TagPoliciesIntro(props: { spacing: "settings" | "wizard" }) {
   const wrap =
@@ -7419,11 +7461,7 @@ function TagPoliciesIntro(props: { spacing: "settings" | "wizard" }) {
   return (
     <div className={wrap}>
       <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider">Tag policies</h3>
-      <p className="ui-field-description leading-relaxed">
-        Use Radarr movie tags or Sonarr series tags to control placeholders on sync: never create them for a title, or
-        always keep them. Matching tags override every other create or delete rule for that title. Defaults are included
-        below; you can add any tags you already use in Arr.
-      </p>
+      <p className="ui-field-description leading-relaxed">{LIBRARY_SYNC_TAG_POLICIES_INTRO}</p>
     </div>
   );
 }
@@ -8047,7 +8085,7 @@ function SettingsPanel(props: {
               ) : field.description && !isPlexSectionIdField(field.key) && !isPosterLanguageFieldKey(field.key) ? (
                 <p className="ui-field-description mt-1">{field.description}</p>
               ) : null)}
-            {field.key === "FULL_SYNC_INTERVAL_HOURS" ? (
+            {field.key === "FULL_SYNC_SCHEDULE" ? (
               <p className="ui-field-description ui-field-description-accent3 mt-2 leading-relaxed">
                 If you have Startup ARR sync mode set to OFF, then a scheduled sync is recommended.
               </p>
@@ -8055,7 +8093,18 @@ function SettingsPanel(props: {
           </div>
         </div>
 
-        {field.type === "bool" ? (
+        {field.type === "task_schedule" ? (
+          <TaskScheduleEditor
+            value={value}
+            disabled={interactionLocked}
+            accentHex={accent.hex}
+            clockFormat={props.values.UI_CLOCK_FORMAT}
+            fallbackHours={
+              field.key === "FULL_SYNC_SCHEDULE" ? 168 : field.key === "LITE_SYNC_SCHEDULE" ? 12 : 24
+            }
+            onChange={(next) => handleSettingsValueChange(field.key, next)}
+          />
+        ) : field.type === "bool" ? (
           <div className="flex flex-wrap items-center gap-3">
           <label className={`flex items-center gap-3 select-none w-fit ${interactionLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
             <ToggleSwitch
@@ -8072,9 +8121,10 @@ function SettingsPanel(props: {
               </span>
           </label>
             {field.key === "PLACEHOLDER_POSTER_BADGE" ? (
-              <select
-                className={`min-w-[9.5rem] bg-[#0f1419] border border-[#424753]/40 rounded-lg pl-2.5 pr-8 py-1.5 text-[13px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${interactionLocked || !settingsBoolUiChecked(field, value) ? "cursor-not-allowed opacity-50" : ""}`}
-                aria-label="Badge position"
+              <BrandSelect
+                className="min-w-[9.5rem]"
+                size="sm"
+                ariaLabel="Badge position"
                 disabled={interactionLocked || !settingsBoolUiChecked(field, value)}
                 value={(() => {
                   const raw = String(props.values.PLACEHOLDER_POSTER_BADGE_POSITION ?? "bottom_right")
@@ -8083,31 +8133,24 @@ function SettingsPanel(props: {
                     .replace(/-/g, "_");
                   return POSTER_BADGE_POSITION_OPTIONS.some((o) => o.value === raw) ? raw : "bottom_right";
                 })()}
-                onChange={(e) => handleSettingsValueChange("PLACEHOLDER_POSTER_BADGE_POSITION", e.target.value)}
-              >
-                {POSTER_BADGE_POSITION_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
+                onChange={(v) => handleSettingsValueChange("PLACEHOLDER_POSTER_BADGE_POSITION", v)}
+                options={POSTER_BADGE_POSITION_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+              />
             ) : null}
           </div>
         ) : field.type === "choice" && field.options?.length ? (
-          <select
-            className={`w-full max-w-xl bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${interactionLocked ? "cursor-not-allowed" : ""}`}
+          <BrandSelect
+            fullWidth
+            className="max-w-xl"
             disabled={interactionLocked}
             value={(() => {
               const raw = String(value ?? field.options[0]?.value ?? "");
               if (field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && raw.toLowerCase() === "off") return "summary";
               return raw;
             })()}
-            onChange={(e) => handleSettingsValueChange(field.key, e.target.value)}
-          >
-            {field.options.map((opt) => (
-              <option key={opt.value} value={opt.value}>{opt.label}</option>
-            ))}
-          </select>
+            onChange={(v) => handleSettingsValueChange(field.key, v)}
+            options={field.options.map((opt) => ({ value: opt.value, label: opt.label }))}
+          />
         ) : field.type === "string_list" ? (
           <SettingsStringListChips
             value={value}
@@ -8143,19 +8186,15 @@ function SettingsPanel(props: {
             return (
               <div className={`mt-4 ${bannerPositionActive ? "" : "opacity-50"}`}>
                 <div className="mb-2 text-[16px] font-semibold text-white font-headline">Position</div>
-                <select
-                  className={`min-w-[6.5rem] bg-[#0f1419] border border-[#424753]/40 rounded-lg pl-2.5 pr-8 py-1.5 text-[13px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${bannerPositionActive ? "" : "cursor-not-allowed"}`}
-                  aria-label="Banner position"
+                <BrandSelect
+                  className="min-w-[6.5rem]"
+                  size="sm"
+                  ariaLabel="Banner position"
                   disabled={!bannerPositionActive}
                   value={String(props.values.PLACEHOLDER_POSTER_BANNER_POSITION ?? "top") === "bottom" ? "bottom" : "top"}
-                  onChange={(e) => handleSettingsValueChange("PLACEHOLDER_POSTER_BANNER_POSITION", e.target.value)}
-                >
-                  {POSTER_BANNER_POSITION_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(v) => handleSettingsValueChange("PLACEHOLDER_POSTER_BANNER_POSITION", v)}
+                  options={POSTER_BANNER_POSITION_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+                />
               </div>
             );
           })()
@@ -8193,34 +8232,41 @@ function SettingsPanel(props: {
     fields: SettingsField[],
     opts?: { intro?: ReactNode; legend?: string },
   ) {
-    const hasTagPolicies = fields.some((field) => field.key === "PLACEHOLDER_POLICY_NEVER_TAGS");
-    const beforeTags: SettingsField[] = [];
-    const tagFields: SettingsField[] = [];
-    let seenTags = false;
-    for (const field of fields) {
-      if (hasTagPolicies && field.key === "PLACEHOLDER_POLICY_NEVER_TAGS") seenTags = true;
-      if (seenTags) tagFields.push(field);
-      else beforeTags.push(field);
-    }
     return (
       <div className="px-6 py-5 space-y-6">
         <SettingsDensityFrame legend={opts?.legend ?? "Settings"} intro={opts?.intro}>
-          {(hasTagPolicies ? beforeTags : fields).map((field) => (
+          {fields.map((field) => (
             <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
           ))}
         </SettingsDensityFrame>
-        {hasTagPolicies && tagFields.length ? (
+      </div>
+    );
+  }
+
+  function renderLibrarySyncSection(fields: SettingsField[], timezoneName?: string | null) {
+    const { schedule, placeholderRules, tagPolicies } = partitionLibrarySyncFields(fields);
+    return (
+      <div className="px-6 py-5 space-y-6">
+        {schedule.length ? (
           <SettingsDensityFrame
-            legend="Tag policies"
-            intro={
-              <p>
-                Use Radarr movie tags or Sonarr series tags to control placeholders on sync: never create them for a
-                title, or always keep them. Matching tags override every other create or delete rule for that title.
-                Defaults are included below; you can add any tags you already use in Arr.
-              </p>
-            }
+            legend="Schedule"
+            intro={<ScheduleTimezoneNote name={timezoneName} />}
           >
-            {tagFields.map((field) => (
+            {schedule.map((field) => (
+              <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
+            ))}
+          </SettingsDensityFrame>
+        ) : null}
+        {placeholderRules.length ? (
+          <SettingsDensityFrame legend="Placeholder rules" intro={<p>{LIBRARY_SYNC_PLACEHOLDER_RULES_INTRO}</p>}>
+            {placeholderRules.map((field) => (
+              <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
+            ))}
+          </SettingsDensityFrame>
+        ) : null}
+        {tagPolicies.length ? (
+          <SettingsDensityFrame legend="Tag policies" intro={<p>{LIBRARY_SYNC_TAG_POLICIES_INTRO}</p>}>
+            {tagPolicies.map((field) => (
               <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
             ))}
           </SettingsDensityFrame>
@@ -8561,11 +8607,14 @@ function SettingsPanel(props: {
                   />
                   {(() => {
                     const remaining = active.fields.filter(
-                      (field) => !(DENSITY_SEARCH_STEP_KEYS as readonly string[]).includes(field.key),
+                      (field) =>
+                        !(DENSITY_SEARCH_STEP_KEYS as readonly string[]).includes(field.key) &&
+                        !SETTINGS_UI_HIDDEN_FIELD_KEYS.has(field.key) &&
+                        !HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key),
                     );
                     return remaining.length ? (
                       <div className="mt-6 border-t border-[#424753]/25 pt-4">
-                        {renderOnboardingStyleSectionRows(remaining)}
+                        {renderOnboardingStyleSectionRows(remaining, { legend: "More density settings" })}
                       </div>
                     ) : null;
                   })()}
@@ -8693,7 +8742,7 @@ function SettingsPanel(props: {
                   </SettingsDensityFrame>
                 </div>
               ) : active.name === "Library sync" ? (
-                renderOnboardingStyleSectionRows(active.fields, { legend: "Library sync" })
+                renderLibrarySyncSection(active.fields, props.payload?.timezone)
               ) : active.name === "Calendar" ? (
                 renderOnboardingStyleSectionRows(active.fields, {
                   legend: "Calendar",
@@ -9493,20 +9542,19 @@ function StatusMessagesPanel(props: {
             <div className="flex flex-col gap-1">
               <label className="text-[12px] font-headline uppercase tracking-wider text-slate-400">Separator</label>
               <div className="flex items-center gap-2">
-                <select
-                  className={`min-w-0 max-w-[13rem] shrink-0 rounded-lg border border-[#424753]/40 bg-[#0f1419] py-2 pl-3 pr-9 text-[15px] text-slate-200 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
-                  title="Separator preset"
+                <BrandSelect
+                  className="min-w-0 max-w-[13rem] shrink-0"
+                  ariaLabel="Separator preset"
                   value={payload.separator_presets.some((p) => p.value === separator) ? separator : "__custom__"}
-                  onChange={(e) => {
-                    if (e.target.value === "__custom__") return;
-                    setSeparator(e.target.value);
+                  onChange={(v) => {
+                    if (v === "__custom__") return;
+                    setSeparator(v);
                   }}
-                >
-                  {payload.separator_presets.map((p) => (
-                    <option key={p.value} value={p.value}>{p.label}</option>
-                  ))}
-                  <option value="__custom__">Custom…</option>
-                </select>
+                  options={[
+                    ...payload.separator_presets.map((p) => ({ value: p.value, label: p.label })),
+                    { value: "__custom__", label: "Custom…" },
+                  ]}
+                />
                 <input
                   className={`w-24 shrink-0 rounded-lg border border-[#424753]/40 bg-[#0f1419] px-3 py-2 font-mono text-[15px] text-slate-200 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
                   value={separator}
@@ -9518,30 +9566,24 @@ function StatusMessagesPanel(props: {
             </div>
             <div className="flex flex-col gap-1">
               <label className="text-[12px] font-headline uppercase tracking-wider text-slate-400">Default Case</label>
-              <select
-                className={`min-w-0 max-w-[13rem] shrink-0 rounded-lg border border-[#424753]/40 bg-[#0f1419] py-2 pl-3 pr-9 text-[15px] text-slate-200 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
-                title="Default case for rendered messages"
+              <BrandSelect
+                className="min-w-0 max-w-[13rem] shrink-0"
+                ariaLabel="Default case for rendered messages"
                 value={caseMode}
-                onChange={(e) => setCaseMode(e.target.value)}
-              >
-                {payload.case_options.map((opt) => (
-                  <option key={opt.value} value={opt.value}>{opt.label}</option>
-                ))}
-              </select>
+                onChange={setCaseMode}
+                options={payload.case_options.map((opt) => ({ value: opt.value, label: opt.label }))}
+              />
             </div>
             <div className="flex flex-col gap-1">
               <label className="text-[12px] font-headline uppercase tracking-wider text-slate-400">Wrapper</label>
               <div className="flex flex-wrap items-center gap-2">
-                <select
-                  className={`min-w-0 max-w-[13rem] shrink-0 rounded-lg border border-[#424753]/40 bg-[#0f1419] py-2 pl-3 pr-9 text-[15px] text-slate-200 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
-                  title="Status bracket wrapper preset"
+                <BrandSelect
+                  className="min-w-0 max-w-[13rem] shrink-0"
+                  ariaLabel="Status bracket wrapper preset"
                   value={wrapperPreset}
-                  onChange={(e) => setWrapperPreset(e.target.value)}
-                >
-                  {(payload.wrapper_presets ?? []).map((p) => (
-                    <option key={p.value} value={p.value}>{p.label}</option>
-                  ))}
-                </select>
+                  onChange={setWrapperPreset}
+                  options={(payload.wrapper_presets ?? []).map((p) => ({ value: p.value, label: p.label }))}
+                />
                 {wrapperPreset === "custom" && (
                   <>
                     <input
@@ -10019,15 +10061,13 @@ function StatusMessagesTokenModal(props: {
           </div>
           <div>
             <label className="block text-[12px] font-headline uppercase tracking-wider text-slate-400 mb-1">Default Case</label>
-            <select
-              className={`bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
+            <BrandSelect
+              size="sm"
+              ariaLabel="Default Case"
               value={props.caseMode}
-              onChange={(e) => props.onChangeCase(e.target.value)}
-            >
-              {props.payload.case_options.map((opt) => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
-              ))}
-            </select>
+              onChange={props.onChangeCase}
+              options={props.payload.case_options.map((opt) => ({ value: opt.value, label: opt.label }))}
+            />
           </div>
         </div>
 
@@ -11550,12 +11590,23 @@ function OnboardingWizard(props: {
           ) : field.description && !isPosterLanguageFieldKey(field.key) ? (
             <p className="ui-field-description mb-2 leading-relaxed">{field.description}</p>
           ) : null)}
-        {field.key === "FULL_SYNC_INTERVAL_HOURS" ? (
+        {field.key === "FULL_SYNC_SCHEDULE" ? (
           <p className="ui-field-description ui-field-description-accent3 mb-2 mt-1 leading-relaxed">
             If you have Startup ARR sync mode set to OFF, then a scheduled sync is recommended.
           </p>
         ) : null}
-        {field.type === "bool" ? (
+        {field.type === "task_schedule" ? (
+          <TaskScheduleEditor
+            value={displayValue}
+            disabled={interactionLocked}
+            accentHex={accent.hex}
+            clockFormat={props.values?.UI_CLOCK_FORMAT}
+            fallbackHours={
+              field.key === "FULL_SYNC_SCHEDULE" ? 168 : field.key === "LITE_SYNC_SCHEDULE" ? 12 : 24
+            }
+            onChange={(next) => handleWizardValueChange(field.key, next)}
+          />
+        ) : field.type === "bool" ? (
           <div className="flex flex-wrap items-center gap-3">
           <label className={`flex items-center gap-3 select-none w-fit ${interactionLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
             <ToggleSwitch
@@ -11572,9 +11623,10 @@ function OnboardingWizard(props: {
               </span>
           </label>
             {field.key === "PLACEHOLDER_POSTER_BADGE" ? (
-              <select
-                className={`min-w-[9.5rem] bg-[#0f1419] border border-[#424753]/40 rounded-lg pl-2.5 pr-8 py-1.5 text-[13px] text-slate-200 outline-none transition-colors ${focus} ${interactionLocked || !settingsBoolUiChecked(field, displayValue) ? "cursor-not-allowed opacity-50" : ""}`}
-                aria-label="Badge position"
+              <BrandSelect
+                className="min-w-[9.5rem]"
+                size="sm"
+                ariaLabel="Badge position"
                 disabled={interactionLocked || !settingsBoolUiChecked(field, displayValue)}
                 value={(() => {
                   const raw = String(props.values.PLACEHOLDER_POSTER_BADGE_POSITION ?? "bottom_right")
@@ -11583,31 +11635,23 @@ function OnboardingWizard(props: {
                     .replace(/-/g, "_");
                   return POSTER_BADGE_POSITION_OPTIONS.some((o) => o.value === raw) ? raw : "bottom_right";
                 })()}
-                onChange={(e) => handleWizardValueChange("PLACEHOLDER_POSTER_BADGE_POSITION", e.target.value)}
-              >
-                {POSTER_BADGE_POSITION_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
+                onChange={(v) => handleWizardValueChange("PLACEHOLDER_POSTER_BADGE_POSITION", v)}
+                options={POSTER_BADGE_POSITION_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+              />
             ) : null}
           </div>
         ) : field.type === "choice" && field.options?.length ? (
-          <select
-            className={`w-full bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${focus} ${interactionLocked ? "cursor-not-allowed" : ""}`}
+          <BrandSelect
+            fullWidth
             disabled={interactionLocked}
             value={(() => {
               const raw = String(displayValue ?? field.options[0]?.value ?? "");
               if (field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && raw.toLowerCase() === "off") return "summary";
               return raw;
             })()}
-            onChange={(e) => handleWizardValueChange(field.key, e.target.value)}
-          >
-            {field.options.map((opt) => (
-              <option key={opt.value} value={opt.value}>{opt.label}</option>
-            ))}
-          </select>
+            onChange={(v) => handleWizardValueChange(field.key, v)}
+            options={field.options.map((opt) => ({ value: opt.value, label: opt.label }))}
+          />
         ) : field.type === "string_list" ? (
           <SettingsStringListChips
             value={displayValue}
@@ -11642,19 +11686,15 @@ function OnboardingWizard(props: {
             return (
               <div className={`mt-3 ${bannerPositionActive ? "" : "opacity-50"}`}>
                 <div className="mb-1 text-[16px] font-semibold text-white font-headline">Position</div>
-                <select
-                  className={`min-w-[6.5rem] bg-[#0f1419] border border-[#424753]/40 rounded-lg pl-2.5 pr-8 py-1.5 text-[13px] text-slate-200 outline-none transition-colors ${focus} ${bannerPositionActive ? "" : "cursor-not-allowed"}`}
-                  aria-label="Banner position"
+                <BrandSelect
+                  className="min-w-[6.5rem]"
+                  size="sm"
+                  ariaLabel="Banner position"
                   disabled={!bannerPositionActive}
                   value={String(props.values.PLACEHOLDER_POSTER_BANNER_POSITION ?? "top") === "bottom" ? "bottom" : "top"}
-                  onChange={(e) => handleWizardValueChange("PLACEHOLDER_POSTER_BANNER_POSITION", e.target.value)}
-                >
-                  {POSTER_BANNER_POSITION_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(v) => handleWizardValueChange("PLACEHOLDER_POSTER_BANNER_POSITION", v)}
+                  options={POSTER_BANNER_POSITION_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+                />
               </div>
             );
           })()
@@ -12116,16 +12156,33 @@ function OnboardingWizard(props: {
                 const surfaceClass = WIZARD_ONBOARDING_SECTION_SURFACE_CLASS;
                 const fieldsBlock =
                   sectionName === "Library sync" ? (
-                    <div className="space-y-5">
-                      {secFields.map((field) => (
-                        <Fragment key={field.key}>
-                          {field.key === "PLACEHOLDER_POLICY_NEVER_TAGS" ? (
-                            <TagPoliciesIntro spacing="wizard" />
+                    (() => {
+                      const { schedule, placeholderRules, tagPolicies } = partitionLibrarySyncFields(secFields);
+                      return (
+                        <div className="space-y-5">
+                          <ScheduleTimezoneNote name={props.payload?.timezone} />
+                          {schedule.map((field) => (
+                            <Fragment key={field.key}>{wizardFieldRow(field)}</Fragment>
+                          ))}
+                          {placeholderRules.length ? (
+                            <>
+                              <PlaceholderRulesIntro spacing="wizard" />
+                              {placeholderRules.map((field) => (
+                                <Fragment key={field.key}>{wizardFieldRow(field)}</Fragment>
+                              ))}
+                            </>
                           ) : null}
-                          {wizardFieldRow(field)}
-                        </Fragment>
-                      ))}
-                    </div>
+                          {tagPolicies.length ? (
+                            <>
+                              <TagPoliciesIntro spacing="wizard" />
+                              {tagPolicies.map((field) => (
+                                <Fragment key={field.key}>{wizardFieldRow(field)}</Fragment>
+                              ))}
+                            </>
+                          ) : null}
+                        </div>
+                      );
+                    })()
                   ) : (
                     <div className="space-y-5">{secFields.map((field) => wizardFieldRow(field))}</div>
                   );
@@ -12454,8 +12511,24 @@ function deepEqualValues(a: FieldValueMap, b: FieldValueMap) {
 function normalizeComparable(value: unknown) {
   if (typeof value === "boolean") return value ? "true" : "false";
   if (value === null || value === undefined) return "";
-  if (Array.isArray(value)) return JSON.stringify(value);
+  // Objects (task schedules, etc.) must not use String(obj) → "[object Object]",
+  // or dirty detection never sees schedule edits.
+  if (typeof value === "object") return stableJsonStringify(value);
   return String(value).trim();
+}
+
+/** Deterministic JSON for dirty compares (sorted object keys). */
+function stableJsonStringify(value: unknown): string {
+  if (value === null || value === undefined) return "null";
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableJsonStringify(item)).join(",")}]`;
+  }
+  if (typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    const keys = Object.keys(obj).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableJsonStringify(obj[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function timeAgo(iso: string | null) {

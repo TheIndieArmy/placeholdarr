@@ -293,6 +293,28 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         cta_label="Open Collections",
         cta_path="/collections",
     ),
+    WhatsNewNotice(
+        id="task-schedules-timezone-0-11-6",
+        since_version="0.11.6",
+        title="Local timezone and calendar task schedules",
+        body=(
+            "Full, lite, and collections schedules are no longer hour-interval only. "
+            "In Settings → Library sync (and onboarding), each task can use Interval "
+            "(every N hours), Daily, Weekly (choose weekdays), Monthly (day of month; "
+            "short months clamp to the last day), or a 5-field Cron expression.\n\n"
+            "Wall-clock times use the container or process TZ environment variable "
+            "(IANA name such as America/New_York). Unset TZ defaults to UTC. "
+            "Docker Compose documents a commented TZ example; local/non-Docker runs "
+            "can set TZ in .env. Coming Soon “today”, seasonal collection windows, "
+            "and related date logic use the same local calendar day.\n\n"
+            "Saving schedule settings rebuilds the live scheduler without a restart. "
+            "Existing hour-interval values migrate automatically (for example 168h → "
+            "weekly Sunday 03:00, 12h → every 12 hours, 24h → daily 03:00)."
+        ),
+        cta_label="Open Library sync",
+        cta_path="/settings/library-sync",
+        requires_ack=True,
+    ),
 )
 
 

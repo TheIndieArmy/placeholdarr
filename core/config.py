@@ -220,9 +220,16 @@ class Settings(BaseSettings):
     # - config: verify configured URL/API-key pairs only
     # - live: make live ARR API calls to verify reachability/auth
     STARTUP_ARR_CHECK_MODE: Literal["off", "config", "live"] = "live"
+    # Legacy hour intervals (migrated into *_SCHEDULE on boot; kept for read fallback).
     FULL_SYNC_INTERVAL_HOURS: int = 168
     # Lite sync: ARR catalog diff + calendar date refresh + calendar phase (replaces separate calendar cron when > 0).
     LITE_SYNC_INTERVAL_HOURS: int = 12
+    # JSON schedules: Interval | Daily | Weekly | Monthly | Cron (see services.task_schedule).
+    FULL_SYNC_SCHEDULE: Optional[dict] = None
+    LITE_SYNC_SCHEDULE: Optional[dict] = None
+    COLLECTIONS_SYNC_SCHEDULE: Optional[dict] = None
+    # Dashboard clock display for schedules / next-run (values still stored as HH:MM).
+    UI_CLOCK_FORMAT: str = "12h"
     # Arr tag labels (JSON string arrays) that drive Never / Pinned placeholder policy on sync.
     PLACEHOLDER_POLICY_NEVER_TAGS: str = '["placeholdarr-never"]'
     PLACEHOLDER_POLICY_PINNED_TAGS: str = '["placeholdarr-pinned"]'
@@ -234,7 +241,7 @@ class Settings(BaseSettings):
     # Optional outbound Tautulli API for Collections "most played" sources.
     TAUTULLI_URL: Optional[str] = None
     TAUTULLI_API_KEY: Optional[str] = None
-    # How often to run enabled collection recipes. <= 0 disables the scheduled job.
+    # Legacy: how often to run enabled collection recipes. Prefer COLLECTIONS_SYNC_SCHEDULE.
     COLLECTIONS_SYNC_INTERVAL_HOURS: int = 24
 
     # Dashboard authentication (see services/auth.py). Env AUTH_MODE overrides DB when set.

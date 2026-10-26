@@ -11,7 +11,7 @@ import {
   type TaskLiveProgressModel,
 } from "./TaskLiveProgress";
 import { detailSectionPhaseKey, hydratePhaseMetrics, taskLiveFromApi } from "./taskLiveProgress";
-import { formatTaskDuration, formatTaskTrigger, timeAgo, timeUntil } from "./formatActivityTime";
+import { formatNextRunClock, formatTaskDuration, formatTaskTrigger, timeAgo, timeUntil } from "./formatActivityTime";
 import { TASK_KEYS_WITH_STOP_SUPPORT, TASK_STOP_CONFIRM_MESSAGE } from "./taskStopConfirm";
 
 type StripAccent = { hex: string; text: string; icon: string; hoverHex: string };
@@ -315,7 +315,16 @@ export function TasksPanel(props: {
                     {task.running ? (
                       <span style={{ color: semantic.accentIce }}>Running now</span>
                     ) : task.next_run ? (
-                      timeUntil(task.next_run)
+                      <span className="block">
+                        <span>{timeUntil(task.next_run)}</span>
+                        <span className="block text-[12px] mt-0.5" style={{ color: semantic.fgSubtle }}>
+                          {formatNextRunClock(task.next_run, {
+                            timeZone: task.timezone,
+                            clockFormat: task.clock_format,
+                          })}
+                          {task.timezone ? ` · ${task.timezone}` : ""}
+                        </span>
+                      </span>
                     ) : task.enabled ? (
                       "--"
                     ) : (

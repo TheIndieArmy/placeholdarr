@@ -8,6 +8,7 @@ from core.config import settings
 from core.logger import logger
 from services.postgres.db import get_session
 from services.postgres.models import ArrState
+from services.task_schedule import get_schedule_for_task
 from services.task_schedule_state import is_task_overdue
 
 
@@ -48,10 +49,8 @@ def resolve_boot_sync_mode(
         )
         setting = "auto"
 
-    full_hours = max(0, int(getattr(settings, "FULL_SYNC_INTERVAL_HOURS", 0) or 0))
-    lite_hours = max(0, int(getattr(settings, "LITE_SYNC_INTERVAL_HOURS", 0) or 0))
-    overdue_full = is_task_overdue("full_sync", full_hours)
-    overdue_lite = is_task_overdue("lite_sync", lite_hours)
+    overdue_full = is_task_overdue("full_sync", get_schedule_for_task("full_sync"))
+    overdue_lite = is_task_overdue("lite_sync", get_schedule_for_task("lite_sync"))
     first_full_needed = needs_first_full_sync(instances)
 
     want_full = bool(overdue_full)

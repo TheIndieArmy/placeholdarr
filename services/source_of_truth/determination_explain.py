@@ -8,6 +8,7 @@ from typing import Any
 from core.config import settings
 from services.placeholders import episode_placeholder_path, movie_placeholder_path
 from services.postgres.models import Episode, Movie, Season, Series
+from services.app_timezone import local_today
 from services.source_of_truth.arr_share_guard import (
     shared_placeholder_suppresses_creation,
     sibling_episode_has_file,
@@ -446,7 +447,7 @@ def _build_series_max_known_order_within_horizon(
 
 
 def explain_movie_determination(session, movie: Movie) -> dict[str, Any]:
-    now_date = datetime.now(timezone.utc).date()
+    now_date = local_today()
     placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
     lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
     has_placeholder = bool(getattr(movie, "has_placeholder", False))
@@ -653,7 +654,7 @@ def explain_movie_determination(session, movie: Movie) -> dict[str, Any]:
 
 
 def explain_episode_determination(session, episode: Episode) -> dict[str, Any]:
-    now_date = datetime.now(timezone.utc).date()
+    now_date = local_today()
     placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
     lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
     has_placeholder = bool(getattr(episode, "has_placeholder", False))

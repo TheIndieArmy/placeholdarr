@@ -1,3 +1,4 @@
+from services.app_timezone import local_today
 import os
 import re
 import time
@@ -265,7 +266,7 @@ def _derive_episode_arr_status(entry: Dict, episode_file: Dict) -> str | None:
     air_dt = _extract_date(entry.get('airDate') or entry.get('airDateUtc'))
     if air_dt is None:
         return None
-    if air_dt > date.today():
+    if air_dt > local_today():
         return 'unaired'
     return 'missing'
 

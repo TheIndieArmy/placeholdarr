@@ -9,6 +9,37 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Summary
+
+- **Task schedules**: Full, lite, and collections use Interval, Daily, Weekly, Monthly, or Cron in local TZ.
+- **Timezone**: Compose/env `TZ` (commented America/New_York example); Coming Soon and seasonal windows use local civil date.
+- **Settings save**: Changing schedules rebuilds APScheduler jobs immediately (no restart).
+- **Clock format**: Settings Library sync 12-hour / 24-hour choice drives schedule pickers and next-run clocks.
+
+### Added
+
+- **Task schedule modes**: Interval (every N hours), Daily at HH:MM, Weekly on weekdays, Monthly on day-of-month (clamped on short months), and 5-field Cron.
+- **Compose/env TZ**: Documented `TZ` for Docker (commented) and local `.env.example`; schedules and “today” use that zone (UTC if unset).
+- **Settings timezone note**: Library sync shows the active IANA timezone from `TZ`.
+- **Per-recipe run_schedule**: Collection recipes can override the global collections schedule with the same modes (or follow global).
+- **What's New (schedules)**: Ack notice for timezone + calendar schedules (`since_version` 0.11.6).
+- **Clock format setting**: `UI_CLOCK_FORMAT` (12h / 24h) in Library sync for schedule times and Tasks next-run display.
+
+### Changed
+
+- **Hour-interval migration**: Legacy `*_INTERVAL_HOURS` values migrate into JSON schedules (168 → weekly Sunday 03:00; 12 → interval 12h; 24 → daily 03:00).
+- **Tasks scheduled table**: Shows schedule label plus absolute next-run clock and timezone.
+- **Civil date helpers**: Determination, calendar, overlays, and seasonal windows use app-local today instead of UTC midnight.
+- **Branded time picker**: Schedule “At” control matches the chosen 12h or 24h clock format.
+- **Library sync settings layout**: Schedule, Placeholder rules, then Tag policies (Settings and onboarding).
+
+### Fixed
+
+- **Schedule save lag**: Saving Library sync schedules applies the new cadence without requiring a process restart.
+- **Next-run clock zone**: Tasks absolute next-run uses the app `TZ`, not the browser zone.
+- **Disabled recipe schedule**: Explicit Disabled overrides stay off the global collections tick (no longer treated as Follow global).
+- **Collections schedule column**: Shows Daily / Weekly / Monthly / Cron / Disabled from `run_schedule` instead of always “App default”.
+
 ## Pre-release
 
 ## Released

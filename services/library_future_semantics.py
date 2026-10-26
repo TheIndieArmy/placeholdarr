@@ -17,6 +17,7 @@ from sqlalchemy import Date, and_, cast, func, literal, or_
 from sqlalchemy.sql import ColumnElement
 
 from core.config import settings
+from services.app_timezone import app_timezone_name, local_today
 
 if TYPE_CHECKING:
     from services.postgres.models import Episode, Movie
@@ -24,8 +25,10 @@ if TYPE_CHECKING:
 DETERMINATION_NOT_NEEDED = "not_needed"
 
 
-def _utc_today_sql() -> ColumnElement:
-    return cast(func.timezone("UTC", func.now()), Date)
+def _local_today_sql() -> ColumnElement:
+    """Civil today in the app zone (compose ``TZ``), for SQL comparisons."""
+    zone = app_timezone_name() or "UTC"
+    return cast(func.timezone(zone, func.now()), Date)
 
 
 def _lookahead_int() -> int:
@@ -59,7 +62,7 @@ def sql_episode_future_outside_lookahead(Episode: Any, Season: Any) -> ColumnEle
     if not _placeholders_enabled():
         return literal(False)
 
-    eff = _utc_today_sql()
+    eff = _local_today_sql()
     lk = _lookahead_int()
     include_specials = _include_specials()
     policy_ok = or_(Season.season_number != 0, literal(include_specials))
@@ -90,7 +93,7 @@ def sql_movie_future_outside_lookahead(Movie: Any) -> ColumnElement:
     if not _placeholders_enabled():
         return literal(False)
 
-    eff = _utc_today_sql()
+    eff = _local_today_sql()
     lk = _lookahead_int()
     lk_lit = literal(lk)
     target = _preferred_movie_release_date_column(Movie)
@@ -116,7 +119,7 @@ def sql_movie_future_outside_lookahead(Movie: Any) -> ColumnElement:
 
 def movie_row_is_future_outside_lookahead(movie: Movie, *, now_date: date | None = None) -> bool:
     """Python mirror of :func:`sql_movie_future_outside_lookahead` for API row building."""
-    eff = now_date or datetime.now(timezone.utc).date()
+    eff = now_date or local_today()
     if not _placeholders_enabled():
         return False
     if str(getattr(movie, "determination", None) or "") != DETERMINATION_NOT_NEEDED:
@@ -150,7 +153,7 @@ def movie_row_is_future_outside_lookahead(movie: Movie, *, now_date: date | None
 
 def episode_row_is_future_outside_lookahead(episode: Episode, season_number: int, *, now_date: date | None = None) -> bool:
     """Python mirror for per-episode checks (detail views) if needed."""
-    eff = now_date or datetime.now(timezone.utc).date()
+    eff = now_date or local_today()
     if not _placeholders_enabled():
         return False
     if season_number == 0 and not _include_specials():
@@ -186,7 +189,7 @@ def build_series_max_known_order_within_horizon(
 
     Mirrors determination pass logic used for unknown-air-date middle-of-run episodes.
     """
-    eff = now_date or datetime.now(timezone.utc).date()
+    eff = now_date or local_today()
     lk = _lookahead_int()
     if not _placeholders_enabled() or lk < 0:
         return None
@@ -225,7 +228,7 @@ def episode_is_future_for_playback_search(
     Playback suppress treats "future" as not aired yet (air date after today), not the
     calendar lookahead window used for library-grid Future rows.
     """
-    eff = now_date or datetime.now(timezone.utc).date()
+    eff = now_date or local_today()
     air_date = getattr(episode, "air_date", None)
 
     if air_date is not None:
@@ -250,7 +253,7 @@ def movie_is_future_for_playback_search(movie: Movie, *, now_date: date | None =
     Uses the configured preferred release date (same preference as calendar Coming Soon).
     Unknown preferred date is treated as future unless Radarr release status is ``released``.
     """
-    eff = now_date or datetime.now(timezone.utc).date()
+    eff = now_date or local_today()
     preferred = str(getattr(settings, "PREFERRED_MOVIE_DATE_TYPE", "inCinemas") or "inCinemas").strip()
     mapping = {
         "inCinemas": "theater_release_date",

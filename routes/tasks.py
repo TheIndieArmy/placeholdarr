@@ -142,10 +142,22 @@ class TaskAbandonRequest(BaseModel):
 @router.get("/api/tasks/scheduled")
 async def tasks_scheduled():
     meta = get_scheduled_task_metadata()
+    tz_name = str(meta.get("timezone") or "UTC")
+    try:
+        from core.config import settings
+
+        clock_format = str(getattr(settings, "UI_CLOCK_FORMAT", "12h") or "12h").strip().lower()
+    except Exception:
+        clock_format = "12h"
+    if clock_format in {"24", "24h", "24-hour", "24hour"}:
+        clock_format = "24h"
+    else:
+        clock_format = "12h"
     rows = []
     for task_key in ("full_sync", "lite_sync", "collections_sync"):
         sched = meta.get(task_key) or {}
         interval = int(sched.get("interval_hours") or 0)
+        schedule_label = str(sched.get("schedule_label") or _interval_label(interval))
         working = get_working_run(task_key)
         last = latest_finished_run(task_key)
         if working:
@@ -158,7 +170,10 @@ async def tasks_scheduled():
                 "label": TASK_LABELS[task_key],
                 "enabled": bool(sched.get("enabled")),
                 "interval_hours": interval,
-                "interval_label": _interval_label(interval),
+                "interval_label": schedule_label,
+                "schedule_label": schedule_label,
+                "timezone": tz_name,
+                "clock_format": clock_format,
                 "next_run": sched.get("next_run"),
                 "running": working is not None,
                 "last_run": _iso(last.ended_at or last.started_at) if last else None,
@@ -166,7 +181,7 @@ async def tasks_scheduled():
                 "last_status": str(last.status or "").upper() if last else None,
             }
         )
-    return {"tasks": rows}
+    return {"tasks": rows, "timezone": tz_name, "clock_format": clock_format}
 
 
 def _interval_label(hours: int) -> str:

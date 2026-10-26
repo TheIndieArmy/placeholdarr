@@ -14,6 +14,7 @@ from services.messages import render as render_message
 from services.placeholders import ensure_placeholder_file, resolve_calendar_variant_dummy_path
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Movie, Placeholder
+from services.app_timezone import local_today
 from services.source_of_truth.status_intent import DisplayStatus, StatusIntent, StatusSource
 
 
@@ -287,7 +288,7 @@ def _dummy_variant_for_status(status: str | None) -> str:
 
 def _calendar_settings_snapshot(*, now_date: date | None = None) -> dict[str, Any]:
     """Shared calendar settings used by status, calendar phase, and materializer."""
-    resolved_now = now_date or datetime.now(timezone.utc).date()
+    resolved_now = now_date or local_today()
     return {
         "lookahead_days": int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30),
         "placeholders_enabled": bool(settings.coming_soon_placeholders_enabled),
@@ -638,7 +639,7 @@ def _run_calendar_phase_inner(stats: dict[str, Any]) -> dict[str, Any]:
     lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
     placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
     countdown_enabled = bool(getattr(settings, "ENABLE_COMING_SOON_COUNTDOWN", True))
-    now_date = datetime.now(timezone.utc).date()
+    now_date = local_today()
     settings_fingerprint = _calendar_variant_settings_fingerprint()
     win_start, win_end = _calendar_phase_window_bounds(now_date, lookahead_days)
     stats["window_start"] = win_start.isoformat()

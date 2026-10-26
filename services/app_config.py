@@ -134,6 +134,9 @@ REMOVED_SETTINGS_KEYS_IGNORED_ON_SAVE = frozenset(
         "TV_LIBRARY_4K_FOLDER",
         "PLEX_MOVIE_4K_SECTION_ID",
         "PLEX_TV_4K_SECTION_ID",
+        "FULL_SYNC_INTERVAL_HOURS",
+        "LITE_SYNC_INTERVAL_HOURS",
+        "COLLECTIONS_SYNC_INTERVAL_HOURS",
     }
 )
 
@@ -509,71 +512,64 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
-            "FULL_SYNC_INTERVAL_HOURS",
+            "UI_CLOCK_FORMAT",
             {
                 "section": "Library sync",
-                "label": "Scheduled full sync interval (hours)",
-                "description": "How often to schedule a full ARR/database reconciliation (default 168 = weekly). Set to 0 to disable recurring full sync jobs.",
-                "type": "int",
-                "min": 0,
-                "restart_required": True,
+                "label": "Clock format",
+                "description": (
+                    "How schedule times and next-run clocks appear in Settings, Tasks, and Collections. "
+                    "Stored schedule values stay 24-hour internally (HH:MM)."
+                ),
+                "type": "choice",
+                "restart_required": False,
+                "default": "12h",
+                "options": [
+                    {"value": "12h", "label": "12-hour (3:00 AM)"},
+                    {"value": "24h", "label": "24-hour (03:00)"},
+                ],
             },
         ),
         (
-            "LITE_SYNC_INTERVAL_HOURS",
+            "FULL_SYNC_SCHEDULE",
             {
                 "section": "Library sync",
-                "label": "Scheduled lite sync interval (hours)",
+                "label": "Full sync schedule",
                 "description": (
-                    "How often to run lite sync: ARR catalog diff, targeted sync for changes, calendar date refresh, "
-                    "Coming Soon status updates, and scoped placeholder work. Default 12 hours. Set to 0 to disable. "
+                    "When to run a full ARR/database reconciliation. Interval (every N hours), Daily, Weekly, "
+                    "Monthly, or Cron in the container TZ. Default: weekly Sunday 03:00 (migrated from 168h)."
+                ),
+                "type": "task_schedule",
+                "default_task": "full_sync",
+                "restart_required": False,
+            },
+        ),
+        (
+            "LITE_SYNC_SCHEDULE",
+            {
+                "section": "Library sync",
+                "label": "Lite sync schedule",
+                "description": (
+                    "When to run lite sync: ARR catalog diff, calendar date refresh, Coming Soon updates, and "
+                    "scoped placeholder work. Interval is useful for every-12h; Daily/Weekly/Monthly/Cron use local TZ. "
                     "Includes calendar maintenance; a separate calendar interval is only used when lite sync is off."
                 ),
-                "type": "int",
-                "min": 0,
-                "restart_required": True,
-            },
-        ),
-        (
-            "COLLECTIONS_SYNC_INTERVAL_HOURS",
-            {
-                "section": "Library sync",
-                "label": "Scheduled collections sync interval (hours)",
-                "description": (
-                    "How often to run enabled collection recipes and sync their results into Plex collections. "
-                    "Default 24 hours. Set to 0 to disable the scheduled job (recipes can still be run manually)."
-                ),
-                "type": "int",
-                "min": 0,
-                "restart_required": True,
-            },
-        ),
-        (
-            "PLACEHOLDER_POLICY_NEVER_TAGS",
-            {
-                "section": "Library sync",
-                "label": "Never create placeholders",
-                "description": (
-                    "Titles with any of these Arr tags will not get placeholders on sync. "
-                    "Default: placeholdarr-never. Add your own existing Arr tags if you prefer."
-                ),
-                "type": "string_list",
+                "type": "task_schedule",
+                "default_task": "lite_sync",
                 "restart_required": False,
-                "default": ["placeholdarr-never"],
             },
         ),
         (
-            "PLACEHOLDER_POLICY_PINNED_TAGS",
+            "COLLECTIONS_SYNC_SCHEDULE",
             {
                 "section": "Library sync",
-                "label": "Always keep placeholders",
+                "label": "Collections sync schedule",
                 "description": (
-                    "Titles with any of these Arr tags always keep placeholders on sync. "
-                    "Default: placeholdarr-pinned. If a Never-create tag also matches, Never wins."
+                    "When to run enabled collection recipes and sync results into Plex. "
+                    "Set Disabled to turn off the scheduled job (recipes can still be run manually)."
                 ),
-                "type": "string_list",
+                "type": "task_schedule",
+                "default_task": "collections_sync",
                 "restart_required": False,
-                "default": ["placeholdarr-pinned"],
             },
         ),
         (
@@ -614,6 +610,34 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "restart_required": False,
                 "depends_on": "SKIP_PLACEHOLDERS_WHEN_MONITORED",
                 "nested": True,
+            },
+        ),
+        (
+            "PLACEHOLDER_POLICY_NEVER_TAGS",
+            {
+                "section": "Library sync",
+                "label": "Never create placeholders",
+                "description": (
+                    "Titles with any of these Arr tags will not get placeholders on sync. "
+                    "Default: placeholdarr-never. Add your own existing Arr tags if you prefer."
+                ),
+                "type": "string_list",
+                "restart_required": False,
+                "default": ["placeholdarr-never"],
+            },
+        ),
+        (
+            "PLACEHOLDER_POLICY_PINNED_TAGS",
+            {
+                "section": "Library sync",
+                "label": "Always keep placeholders",
+                "description": (
+                    "Titles with any of these Arr tags always keep placeholders on sync. "
+                    "Default: placeholdarr-pinned. If a Never-create tag also matches, Never wins."
+                ),
+                "type": "string_list",
+                "restart_required": False,
+                "default": ["placeholdarr-pinned"],
             },
         ),
         (
@@ -1752,6 +1776,11 @@ def _validate_value(key: str, raw_value: Any) -> Any:
                 raise ValueError(f"must be one of: {', '.join(allowed)}")
     elif value_type == "string_list":
         value = _coerce_string_list(raw_value)
+    elif value_type == "task_schedule":
+        from services.task_schedule import normalize_schedule
+
+        default_task = str(meta.get("default_task") or "").strip() or None
+        value = normalize_schedule(raw_value, default_task=default_task)
     else:
         value = str(raw_value or "").strip()
     if bool(meta.get("required", False)) and _is_blank(value):
@@ -2619,6 +2648,15 @@ def apply_persisted_settings(session=None) -> dict[str, Any]:
         migrate_playback_filters_to_dest_lists()
         migrate_play_also_instances_from_legacy()
         migrate_poster_overlay_layers()
+        try:
+            from services.task_schedule import migrate_interval_hours_to_schedules
+
+            migrate_interval_hours_to_schedules(session)
+        except Exception as exc:
+            logger.warning(
+                f"Task schedule migration failed: {exc}",
+                extra={"emoji_type": "warning"},
+            )
         rows = session.query(AppConfig).filter(AppConfig.key.in_(tuple(SETTINGS_SCHEMA.keys()))).all()
         for row in rows:
             if row.key not in SETTINGS_SCHEMA:
@@ -2698,6 +2736,21 @@ def get_settings_payload(session=None) -> dict[str, Any]:
                     effective_value = defaults
                 else:
                     effective_value = _parse_string_list_value(effective_value, default=defaults)
+            if meta["type"] == "task_schedule":
+                from services.task_schedule import default_schedule_for_task, normalize_schedule
+
+                task = str(meta.get("default_task") or "").strip() or None
+                try:
+                    if isinstance(effective_value, dict) and effective_value:
+                        effective_value = normalize_schedule(effective_value, default_task=task)
+                    elif task:
+                        effective_value = default_schedule_for_task(task)
+                    else:
+                        effective_value = normalize_schedule({"enabled": False})
+                except ValueError:
+                    effective_value = (
+                        default_schedule_for_task(task) if task else normalize_schedule({"enabled": False})
+                    )
             if _is_blank(effective_value):
                 pass
             saved_value_out = None if bool(meta.get("secret", False)) else (row.value if row else None)
@@ -2741,11 +2794,13 @@ def get_settings_payload(session=None) -> dict[str, Any]:
                 entry["has_saved_value"] = any_saved or bool((row and row.value not in (None, "")))
             grouped[meta["section"]].append(entry)
 
+        from services.app_timezone import app_timezone_name
         from services.auth import ensure_webhook_api_key
         from services.library_destinations import selectable_playback_dests
 
         return {
             "status": get_onboarding_status(session=session),
+            "timezone": app_timezone_name(),
             "sections": [{"name": name, "fields": fields} for name, fields in grouped.items()],
             # Own session: do not commit the settings-read transaction.
             "webhook_api_key": ensure_webhook_api_key(),
@@ -3083,10 +3138,19 @@ def save_settings(
 
         restart_required_keys: list[str] = []
         saved_keys: list[str] = []
+        schedule_keys = {
+            "FULL_SYNC_SCHEDULE",
+            "LITE_SYNC_SCHEDULE",
+            "COLLECTIONS_SYNC_SCHEDULE",
+        }
+        schedule_keys_changed: set[str] = set()
         for key, value in validated.items():
             meta = SETTINGS_SCHEMA[key]
             row = _get_row(session, key)
             prev_value = row.value if row else None
+            value_changed = _normalized_stored_setting_value(
+                key, prev_value
+            ) != _normalized_stored_setting_value(key, value)
             if key == "INCLUDE_SPECIALS":
                 if row is not None:
                     specials_before = _coerce_bool(row.value)
@@ -3110,9 +3174,9 @@ def save_settings(
                 session.add(row)
             _set_runtime_value(key, value)
             saved_keys.append(key)
-            if bool(meta.get("restart_required", False)) and _normalized_stored_setting_value(
-                key, prev_value
-            ) != _normalized_stored_setting_value(key, value):
+            if key in schedule_keys and value_changed:
+                schedule_keys_changed.add(key)
+            if bool(meta.get("restart_required", False)) and value_changed:
                 restart_required_keys.append(key)
 
         # Only mark onboarding as completed when this is not a partial save.
@@ -3196,6 +3260,39 @@ def save_settings(
                     extra={"emoji_type": "error"},
                 )
         _set_runtime_value("PLACEHOLDER_CREATE_NFO", True)
+        if schedule_keys_changed:
+            try:
+                from services.source_of_truth.scheduler import refresh_all_schedules
+                from services.task_schedule_state import resolve_next_run_time
+                from services.task_schedule import get_schedule_for_task
+
+                task_by_key = {
+                    "FULL_SYNC_SCHEDULE": "full_sync",
+                    "LITE_SYNC_SCHEDULE": "lite_sync",
+                    "COLLECTIONS_SYNC_SCHEDULE": "collections_sync",
+                }
+                # Always refresh all three jobs so parent collections tick stays consistent;
+                # only ignore persisted next-run for schedules whose JSON actually changed.
+                for config_key, task_key in task_by_key.items():
+                    try:
+                        resolve_next_run_time(
+                            task_key,
+                            get_schedule_for_task(task_key),
+                            ignore_persisted=config_key in schedule_keys_changed,
+                        )
+                    except Exception:
+                        pass
+                refresh_all_schedules()
+                logger.info(
+                    "Refreshed APScheduler jobs after schedule settings save "
+                    f"(changed={sorted(schedule_keys_changed)})",
+                    extra={"emoji_type": "info"},
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"Failed to refresh schedules after settings save: {exc}",
+                    extra={"emoji_type": "warning"},
+                )
         backfill_summary: dict[str, Any] | None = None
         art_backfill_summary: dict[str, Any] | None = None
         language_poster_cleanup_needed = bool(

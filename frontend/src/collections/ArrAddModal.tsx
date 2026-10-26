@@ -1,5 +1,7 @@
 import { KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
+import { BrandCheckbox } from "../BrandCheckbox";
+import { BrandSelect } from "../BrandSelect";
 import {
   addCollectionTitlesToArr,
   arrAddItemKey,
@@ -324,9 +326,11 @@ export function ArrAddModal(props: {
                 <div className="flex flex-col gap-2">
                   {instances.map((row) => (
                     <label key={row.instance_key} className={`flex items-center gap-2 ${theme.label}`}>
-                      <input
-                        type="checkbox"
+                      <BrandCheckbox
                         checked={selectedKeys.includes(row.instance_key)}
+                        size="sm"
+                        accentHex={props.accentHex}
+                        ariaLabel={row.label}
                         onChange={() => toggleInstance(row.instance_key)}
                       />
                       {row.label}
@@ -346,35 +350,39 @@ export function ArrAddModal(props: {
                   <div className={theme.sectionLabel}>{row.label}</div>
                   <label className={`flex flex-col gap-1 ${theme.label}`}>
                     Quality profile
-                    <select
-                      className={theme.selectField}
-                      value={profiles[key] ?? ""}
-                      onChange={(event) =>
-                        setProfiles((prev) => ({ ...prev, [key]: Number(event.target.value) }))
+                    <BrandSelect
+                      fullWidth
+                      triggerClassName="min-w-[8rem] shrink-0"
+                      value={profiles[key] != null ? String(profiles[key]) : ""}
+                      options={[
+                        { value: "", label: "Select profile" },
+                        ...row.quality_profiles.map((profile) => ({
+                          value: String(profile.id),
+                          label: profile.name,
+                        })),
+                      ]}
+                      onChange={(value) =>
+                        setProfiles((prev) => ({ ...prev, [key]: Number(value) }))
                       }
-                    >
-                      <option value="">Select profile</option>
-                      {row.quality_profiles.map((profile) => (
-                        <option key={profile.id} value={profile.id}>
-                          {profile.name}
-                        </option>
-                      ))}
-                    </select>
+                      ariaLabel={`${row.label} quality profile`}
+                    />
                   </label>
                   <label className={`flex flex-col gap-1 ${theme.label}`}>
                     Root folder
-                    <select
-                      className={theme.selectField}
+                    <BrandSelect
+                      fullWidth
+                      triggerClassName="min-w-[8rem] shrink-0"
                       value={roots[key] ?? ""}
-                      onChange={(event) => setRoots((prev) => ({ ...prev, [key]: event.target.value }))}
-                    >
-                      <option value="">Select folder</option>
-                      {row.root_folders.map((folder) => (
-                        <option key={folder.path} value={folder.path}>
-                          {folder.path}
-                        </option>
-                      ))}
-                    </select>
+                      options={[
+                        { value: "", label: "Select folder" },
+                        ...row.root_folders.map((folder) => ({
+                          value: folder.path,
+                          label: folder.path,
+                        })),
+                      ]}
+                      onChange={(value) => setRoots((prev) => ({ ...prev, [key]: value }))}
+                      ariaLabel={`${row.label} root folder`}
+                    />
                   </label>
                 </div>
               );

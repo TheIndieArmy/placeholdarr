@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
+from services.app_timezone import local_today
+
 # Hardcoded English for v1 (same as today's hardcoded PLACEHOLDER banner).
 OVERLAY_BANNER_PLACEHOLDER = "PLACEHOLDER"
 OVERLAY_BANNER_COMING_SOON = "Coming Soon"
@@ -152,7 +154,7 @@ def next_unaired_episode_air_date(
     from services.postgres.db import session_scope
     from services.postgres.models import Episode, Season
 
-    today = now_date or datetime.now().astimezone().date()
+    today = now_date or local_today()
     try:
         with session_scope() as session:
             q = (

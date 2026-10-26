@@ -20,6 +20,7 @@ from services.source_of_truth.arr_share_guard import (
 from services.source_of_truth.filesystem import configured_roots
 from services.source_of_truth.phase_metrics import PhaseTimer, log_phase_boundary
 from services.source_of_truth.status_intent import DisplayStatus
+from services.app_timezone import local_today
 
 
 DETERMINATION_OBSOLETE = 'obsolete_placeholder'
@@ -996,7 +997,7 @@ def _compute_determination(
     # - lookahead == 0 => disabled/off for future placeholders
     # - lookahead > 0  => strict horizon in days
     if placeholders_enabled is True and lookahead_days is not None and not has_file and not is_deleted:
-        effective_now = now_date or datetime.now(timezone.utc).date()
+        effective_now = now_date or local_today()
         lookahead = int(lookahead_days)
 
         if lookahead < 0:
@@ -1098,7 +1099,7 @@ def run_determination_pass(*, on_progress=None) -> dict:
             last_live: list[float] = [0.0]
             placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
             lookahead_days = int(getattr(settings, 'CALENDAR_LOOKAHEAD_DAYS', 30) or 30)
-            now_date = datetime.now(timezone.utc).date()
+            now_date = local_today()
 
             movies_all = int(session.query(func.count(Movie.id)).scalar() or 0)
             movies = (
@@ -1474,7 +1475,7 @@ def run_determination_for_entities_in_session(
 
     placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
     lookahead_days = int(getattr(settings, 'CALENDAR_LOOKAHEAD_DAYS', 30) or 30)
-    now_date = datetime.now(timezone.utc).date()
+    now_date = local_today()
 
     movies_q = session.query(Movie)
     if movie_ids:

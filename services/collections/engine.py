@@ -11,6 +11,7 @@ collection so the builder UI can show live staged counts.
 from __future__ import annotations
 
 import re
+from services.app_timezone import local_today
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -1297,7 +1298,7 @@ def _load_air_date_lookup(series_row_ids: list[int]) -> dict[int, dict[str, Opti
     """
     if not series_row_ids:
         return {}
-    today = datetime.now(timezone.utc).date()
+    today = local_today()
     lookup: dict[int, dict[str, Optional[datetime]]] = {}
     with session_scope() as session:
         latest_episode_rows = (
@@ -2765,8 +2766,14 @@ def window_is_active(window: Optional[dict[str, Any]], when: Optional[datetime] 
     end = _parse_month_day(window.get("end"))
     if start is None or end is None:
         return True
-    now = (when or datetime.now(timezone.utc)).date()
-    today = (now.month, now.day)
+    if when is None:
+        today_date = local_today()
+    else:
+        from services.app_timezone import to_app_zone
+
+        aware = when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+        today_date = to_app_zone(aware).date()
+    today = (today_date.month, today_date.day)
     if start <= end:
         return start <= today <= end
     return today >= start or today <= end
@@ -2832,33 +2839,29 @@ def _apply_inactive_window(recipe_id: int) -> dict[str, Any]:
     )
 
 
-def smallest_enabled_recipe_interval_hours() -> Optional[int]:
-    """Smallest per-recipe schedule override among enabled recipes (None if no overrides)."""
+def enabled_recipe_schedules() -> list[dict[str, Any] | None]:
+    """Per-recipe schedule overrides for enabled recipes (None = follow global)."""
+    from services.task_schedule import normalize_schedule, recipe_schedule_from_legacy_hours
+
+    out: list[dict[str, Any] | None] = []
     try:
         with session_scope() as session:
-            value = (
-                session.query(func.min(CollectionRecipe.run_interval_hours))
-                .filter(
-                    CollectionRecipe.enabled.is_(True),
-                    CollectionRecipe.run_interval_hours.isnot(None),
-                )
-                .scalar()
+            rows = (
+                session.query(CollectionRecipe.run_schedule, CollectionRecipe.run_interval_hours)
+                .filter(CollectionRecipe.enabled.is_(True))
+                .all()
             )
     except Exception:
-        return None
-    return int(value) if value else None
-
-
-def _recipe_is_due(
-    last_run_at: Optional[datetime],
-    interval_hours: int,
-    now: datetime,
-) -> bool:
-    if last_run_at is None:
-        return True
-    last = last_run_at if last_run_at.tzinfo else last_run_at.replace(tzinfo=timezone.utc)
-    # Small grace so a job ticking at exactly the interval doesn't miss by seconds.
-    return now >= last + timedelta(hours=interval_hours) - timedelta(minutes=5)
+        return out
+    for run_schedule, hours in rows:
+        if isinstance(run_schedule, dict) and run_schedule:
+            try:
+                out.append(normalize_schedule(run_schedule))
+            except ValueError:
+                out.append(recipe_schedule_from_legacy_hours(hours))
+        else:
+            out.append(recipe_schedule_from_legacy_hours(hours))
+    return out
 
 
 def _clear_recipe_collection(recipe_id: int) -> dict[str, Any]:
@@ -3066,12 +3069,25 @@ def run_all_enabled_recipes(*, force: bool = False, default_interval_hours: int 
     `force=True` (manual task trigger) ignores due-ness but still respects
     seasonal windows; dormant recipes apply keep/clear/delete once per policy.
     """
+    from services.task_schedule import (
+        get_schedule_for_task,
+        recipe_is_due,
+        recipe_schedule_from_legacy_hours,
+        schedule_from_legacy_hours,
+    )
+
     now = datetime.now(timezone.utc)
+    try:
+        global_schedule = get_schedule_for_task("collections_sync")
+    except Exception:
+        global_schedule = schedule_from_legacy_hours(default_interval_hours)
+
     with session_scope() as session:
         recipe_rows = [
             {
                 "id": row.id,
                 "run_interval_hours": row.run_interval_hours,
+                "run_schedule": row.run_schedule,
                 "active_window": row.active_window,
                 "last_run_at": row.last_run_at,
                 "last_run_summary": row.last_run_summary,
@@ -3111,8 +3127,15 @@ def run_all_enabled_recipes(*, force: bool = False, default_interval_hours: int 
                     results["dormant"] += 1
             continue
 
-        interval = int(row["run_interval_hours"] or default_interval_hours or 24)
-        if not force and not _recipe_is_due(row["last_run_at"], interval, now):
+        recipe_sched = row["run_schedule"] if isinstance(row["run_schedule"], dict) else None
+        if not recipe_sched:
+            recipe_sched = recipe_schedule_from_legacy_hours(row["run_interval_hours"])
+        if not force and not recipe_is_due(
+            schedule=recipe_sched,
+            global_schedule=global_schedule,
+            last_run_at=row["last_run_at"],
+            now=now,
+        ):
             results["recipes"][str(recipe_id)] = {"status": "skipped", "reason": "not due"}
             results["skipped"] += 1
             continue

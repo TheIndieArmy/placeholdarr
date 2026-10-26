@@ -12,6 +12,7 @@ from services.library_future_semantics import sql_episode_future_outside_lookahe
 from services.postgres.models import Episode, Placeholder, Season, Series
 from services.source_of_truth.tv_density import PLACEHOLDER_KIND_SERIES_STUB, PLACEHOLDER_KIND_SEASON_STUB, tv_placeholder_density
 
+from services.app_timezone import local_today
 SERIES_STAT_KEYS = (
     "episode_total",
     "episode_files",
@@ -294,7 +295,7 @@ def series_last_aired_map(session: Session, series_ids: list[int]) -> dict[int, 
     ids = sorted({int(x) for x in series_ids if x is not None})
     if not ids:
         return {}
-    today = datetime.now(timezone.utc).date()
+    today = local_today()
     out: dict[int, date | None] = {}
     chunk_size = 500
     for i in range(0, len(ids), chunk_size):

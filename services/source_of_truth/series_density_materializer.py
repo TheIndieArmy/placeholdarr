@@ -13,6 +13,7 @@ from core.config import settings
 from core.logger import logger
 from services.messages.context import build_projection_context_from_session
 from services.placeholder_poster_art import ensure_series_art
+from services.app_timezone import local_today
 from services.placeholders import (
     ensure_episode_nfo,
     ensure_placeholder_file,
@@ -117,7 +118,7 @@ def series_stub_needed(session, series: Series, *, now_date: date | None = None)
     include_specials = _include_specials()
     placeholders_enabled = _placeholders_enabled()
     lookahead_days = _lookahead_days()
-    today = now_date or date.today()
+    today = now_date or local_today()
 
     episodes = (
         session.query(Episode)
