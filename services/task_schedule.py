@@ -104,13 +104,21 @@ def interval_schedule(hours: int) -> dict[str, Any]:
 def schedule_from_legacy_hours(hours: int | None) -> dict[str, Any]:
     """Migrate legacy hour intervals into mode schedules.
 
-    0 → off; 12 → interval 12h; 24 → daily 03:00; 168 → weekly Sunday 03:00;
-    other multiples of 168 → weekly Sunday; multiples of 24 → daily; else interval.
+    Preserves cadence as Interval every N hours (0 → off). Does not remap 24/168
+    into Daily/Weekly; users keep the same interval until they change the schedule.
     """
     try:
         n = int(hours or 0)
     except (TypeError, ValueError):
         n = 0
+    if n <= 0:
+        return _disabled_schedule()
+    return interval_schedule(n)
+
+
+def _remapped_legacy_schedule(hours: int) -> dict[str, Any]:
+    """Pre-fix shape that turned 24→Daily and 168→Weekly (for repair detection only)."""
+    n = int(hours or 0)
     if n <= 0:
         return _disabled_schedule()
     if n == 12:
@@ -125,6 +133,13 @@ def schedule_from_legacy_hours(hours: int | None) -> dict[str, Any]:
         out["time"] = DEFAULT_TIME
         return out
     return interval_schedule(n)
+
+
+def _schedule_dicts_equal(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    try:
+        return normalize_schedule(a) == normalize_schedule(b)
+    except ValueError:
+        return False
 
 
 def default_schedule_for_task(task_key: str) -> dict[str, Any]:
@@ -541,32 +556,26 @@ def get_schedule_for_task(task_key: str) -> dict[str, Any]:
     return default_schedule_for_task(key)
 
 
+_FAITHFUL_INTERVAL_REPAIR_KEY = "TASK_SCHEDULE_INTERVAL_FAITHFUL_REPAIR_V1"
+
+
 def migrate_interval_hours_to_schedules(session) -> list[str]:
-    """Write ``*_SCHEDULE`` AppConfig rows from legacy hour ints when missing."""
+    """Write ``*_SCHEDULE`` AppConfig rows from legacy hour ints when missing.
+
+    Legacy hours become Interval every N hours (not Daily/Weekly). Once, if an
+    earlier build already wrote the Daily/Weekly remapped shape and it still
+    matches that auto-remap for the stored hours, rewrite it back to Interval.
+    """
     from services.postgres.models import AppConfig
 
+    repair_row = (
+        session.query(AppConfig).filter(AppConfig.key == _FAITHFUL_INTERVAL_REPAIR_KEY).first()
+    )
+    allow_remap_repair = repair_row is None or not bool(repair_row.value)
+
     written: list[str] = []
+    remapped_repaired = False
     for task_key, schedule_key in TASK_SCHEDULE_KEYS.items():
-        existing = session.query(AppConfig).filter(AppConfig.key == schedule_key).first()
-        if existing is not None and isinstance(existing.value, dict) and existing.value:
-            val = existing.value
-            needs = False
-            if isinstance(val, dict):
-                mode = str(val.get("mode") or "")
-                # Only rewrite WIP every/unit or singular weekday without weekdays.
-                if "unit" in val and mode not in SCHEDULE_MODES:
-                    needs = True
-                elif val.get("weekday") is not None and not val.get("weekdays"):
-                    needs = True
-            if needs:
-                try:
-                    existing.value = normalize_schedule(val, default_task=task_key)
-                    existing.value_type = "task_schedule"
-                    session.add(existing)
-                    written.append(schedule_key)
-                except ValueError:
-                    pass
-            continue
         legacy_key = LEGACY_INTERVAL_KEYS[task_key]
         legacy_row = session.query(AppConfig).filter(AppConfig.key == legacy_key).first()
         if legacy_row is not None and legacy_row.value not in (None, ""):
@@ -576,26 +585,80 @@ def migrate_interval_hours_to_schedules(session) -> list[str]:
                 hours = int(DEFAULT_INTERVAL_HOURS[task_key])
         else:
             hours = int(DEFAULT_INTERVAL_HOURS[task_key])
-        # Legacy calendar 0 = piggyback on lite; seed an enabled daily schedule instead of Disabled.
+        # Legacy calendar 0 = piggyback on lite; seed the calendar default interval.
         if task_key == "calendar_sync" and hours <= 0:
             hours = int(DEFAULT_INTERVAL_HOURS[task_key])
-        payload = schedule_from_legacy_hours(hours)
+
+        faithful = schedule_from_legacy_hours(hours)
+        existing = session.query(AppConfig).filter(AppConfig.key == schedule_key).first()
+
+        if existing is not None and isinstance(existing.value, dict) and existing.value:
+            val = existing.value
+            mode = str(val.get("mode") or "")
+            payload: dict[str, Any] | None = None
+            if "unit" in val and mode not in SCHEDULE_MODES:
+                try:
+                    payload = normalize_schedule(val, default_task=task_key)
+                except ValueError:
+                    payload = None
+            elif val.get("weekday") is not None and not val.get("weekdays"):
+                try:
+                    payload = normalize_schedule(val, default_task=task_key)
+                except ValueError:
+                    payload = None
+            elif (
+                allow_remap_repair
+                and legacy_row is not None
+                and mode in {"daily", "weekly"}
+                and _schedule_dicts_equal(val, _remapped_legacy_schedule(hours))
+            ):
+                # Undo untouched 24→Daily / 168→Weekly auto-remap (one-shot).
+                payload = faithful
+                remapped_repaired = True
+            if payload is None:
+                continue
+            existing.value = payload
+            existing.value_type = "task_schedule"
+            session.add(existing)
+            written.append(schedule_key)
+            continue
+
         if existing is None:
             session.add(
                 AppConfig(
                     key=schedule_key,
-                    value=payload,
+                    value=faithful,
                     value_type="task_schedule",
                     restart_required=False,
                     description=f"Schedule for {task_key}",
                 )
             )
         else:
-            existing.value = payload
+            existing.value = faithful
             existing.value_type = "task_schedule"
             session.add(existing)
         written.append(schedule_key)
-    if written:
+
+    if allow_remap_repair:
+        # Stamp even when nothing needed repair so later intentional Daily/Weekly
+        # choices that match the old remapped shape are not overwritten.
+        if repair_row is None:
+            session.add(
+                AppConfig(
+                    key=_FAITHFUL_INTERVAL_REPAIR_KEY,
+                    value=True,
+                    value_type="bool",
+                    restart_required=False,
+                    description="One-shot repair of interval→Daily/Weekly schedule remap",
+                )
+            )
+        else:
+            repair_row.value = True
+            session.add(repair_row)
+        if remapped_repaired and _FAITHFUL_INTERVAL_REPAIR_KEY not in written:
+            written.append(_FAITHFUL_INTERVAL_REPAIR_KEY)
+
+    if written or allow_remap_repair:
         session.commit()
     return written
 

@@ -47,7 +47,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ### Changed
 
-- **Hour-interval migration**: Legacy `*_INTERVAL_HOURS` values migrate into JSON schedules (168 → weekly Sunday 03:00; 12 → interval 12h; 24 → daily 03:00).
+- **Hour-interval migration**: Legacy `*_INTERVAL_HOURS` values migrate into JSON Interval schedules with the same hour count (0 → off).
 - **Tasks scheduled table**: Shows schedule label plus absolute next-run clock (app TZ; no zone name suffix).
 - **Civil date helpers**: Determination, calendar, overlays, and seasonal windows use app-local today instead of UTC midnight.
 - **Branded time picker**: Schedule “At” control matches the chosen 12h or 24h clock format.
@@ -70,6 +70,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Title refresh Coming Soon**: Single-item refresh re-evaluates calendar status after Arr date sync so countdown text updates before NFO/player refresh.
 - **Calendar history alias**: Latest-run / working lookups treat legacy `calendar_only` rows as `calendar_sync` so overdue and catch-up stay honest after the rename.
 - **Calendar sync live phases**: Phase bars mark done after the `calendar_sync` rename (were stuck pending).
+- **Schedule migrate keeps Interval**: Legacy hour settings stay Interval every N hours (e.g. 168 stays every 168 hours). A one-shot repair undoes installs that were auto-remapped to Daily/Weekly.
 
 ## [0.11.5] - 2026-10-22
 
