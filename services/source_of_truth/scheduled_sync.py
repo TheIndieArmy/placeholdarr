@@ -574,7 +574,7 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
 
 
 def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None = None) -> dict[str, Any]:
-    """Catalog diff + targeted ARR sync, calendar refresh, scoped determine/materialize, calendar phase."""
+    """Catalog diff + targeted ARR sync, scoped determine/materialize (calendar is a separate task)."""
     if should_skip_lite_or_calendar():
         skip_id = record_skipped_task_run(
             task_key="lite_sync",
@@ -603,7 +603,6 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
     )
     from services.task_run_phases import (
         TaskRunPhaseTracker,
-        metrics_from_calendar_dates,
         metrics_from_lite_discovery,
         metrics_from_pipeline,
     )
@@ -716,30 +715,6 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
         )
 
         ensure_task_run_not_cancelled(task_run_id)
-        phases.begin("calendar_dates", "Calendar dates")
-        phase_started = time.monotonic()
-        calendar_dates = run_calendar_date_refresh()
-        result["calendar_date_refresh"] = calendar_dates
-        logger.info(
-            "Lite sync calendar_date_refresh elapsed_s=%.1f",
-            time.monotonic() - phase_started,
-            extra={"emoji_type": "info"},
-        )
-        date_metrics = metrics_from_calendar_dates(
-            calendar_dates if isinstance(calendar_dates, dict) else {}
-        )
-        date_done = int(
-            (calendar_dates or {}).get("movie_rows_updated") or 0
-        ) + int((calendar_dates or {}).get("episode_rows_updated") or 0) if isinstance(calendar_dates, dict) else 0
-        phases.end(
-            "calendar_dates",
-            metrics=date_metrics,
-            done=date_done,
-            total=date_done,
-            unit_label="rows",
-        )
-
-        ensure_task_run_not_cancelled(task_run_id)
         phases.begin("determination", "Status determination")
         if movie_row_ids or episode_row_ids:
             determination_stats = run_determination_for_entities(
@@ -814,22 +789,7 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
                 unit_label="placeholders",
             )
 
-        ensure_task_run_not_cancelled(task_run_id)
-        phases.begin("calendar", "Calendar status")
-        result["calendar"] = run_calendar_phase()
         result["orphan_placeholders"] = run_orphan_placeholder_cleanup()
-        cal_metrics = metrics_from_pipeline({"calendar": result.get("calendar") or {}}).get("calendar")
-        cal_done = 0
-        if isinstance(result.get("calendar"), dict):
-            cal = result["calendar"]
-            cal_done = int(cal.get("updated") or cal.get("changed") or cal.get("status_applied") or 0)
-        phases.end(
-            "calendar",
-            metrics=cal_metrics,
-            done=cal_done,
-            total=cal_done,
-            unit_label="updates",
-        )
 
         try:
             from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_refresh
@@ -886,10 +846,10 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
 
 
 def run_calendar_only_maintenance(*, trigger: TaskTrigger = "manual") -> dict[str, Any]:
-    """Date refresh + calendar phase only (manual from Tasks UI)."""
+    """Date refresh + calendar phase (scheduled calendar sync / manual Tasks run)."""
     if should_skip_lite_or_calendar():
         skip_id = record_skipped_task_run(
-            task_key="calendar_only",
+            task_key="calendar_sync",
             trigger=trigger,
             skip_reason="full_sync_in_progress",
         )
@@ -897,7 +857,7 @@ def run_calendar_only_maintenance(*, trigger: TaskTrigger = "manual") -> dict[st
 
     if not try_acquire_pipeline():
         skip_id = record_skipped_task_run(
-            task_key="calendar_only",
+            task_key="calendar_sync",
             trigger=trigger,
             skip_reason="pipeline_busy",
         )
@@ -909,7 +869,7 @@ def run_calendar_only_maintenance(*, trigger: TaskTrigger = "manual") -> dict[st
         metrics_from_pipeline,
     )
 
-    task_run_id = begin_task_run(task_key="calendar_only", trigger=trigger)
+    task_run_id = begin_task_run(task_key="calendar_sync", trigger=trigger)
     started_at = datetime.now(timezone.utc)
     result: dict[str, Any] = {"task_run_id": task_run_id}
     phases = TaskRunPhaseTracker(int(task_run_id), started_at=started_at)
@@ -920,25 +880,26 @@ def run_calendar_only_maintenance(*, trigger: TaskTrigger = "manual") -> dict[st
 
             seed_sync_live_phases(
                 int(task_run_id),
-                kind="calendar_only",
-                label="Calendar",
+                kind="calendar_sync",
+                label="Calendar sync",
                 phase_defs=CALENDAR_ONLY_PHASES,
             )
         except Exception as live_exc:
-            logger.debug("calendar_only live seed skipped: %s", live_exc, extra={"emoji_type": "debug"})
+            logger.debug("calendar_sync live seed skipped: %s", live_exc, extra={"emoji_type": "debug"})
 
         phases.begin("calendar_dates", "Calendar dates")
         result["calendar_date_refresh"] = run_calendar_date_refresh()
         calendar_dates = result["calendar_date_refresh"] if isinstance(result["calendar_date_refresh"], dict) else {}
         date_metrics = metrics_from_calendar_dates(calendar_dates)
-        date_done = int(calendar_dates.get("movie_rows_updated") or 0) + int(
-            calendar_dates.get("episode_rows_updated") or 0
+        # Progress is Arr calendar rows checked (not only rows whose dates changed).
+        date_total = int(calendar_dates.get("movie_rows_seen") or 0) + int(
+            calendar_dates.get("episode_rows_seen") or 0
         )
         phases.end(
             "calendar_dates",
             metrics=date_metrics,
-            done=date_done,
-            total=date_done,
+            done=date_total,
+            total=date_total,
             unit_label="rows",
         )
 
@@ -946,18 +907,21 @@ def run_calendar_only_maintenance(*, trigger: TaskTrigger = "manual") -> dict[st
         result["calendar"] = run_calendar_phase()
         result["orphan_placeholders"] = run_orphan_placeholder_cleanup()
         cal_metrics = metrics_from_pipeline({"calendar": result.get("calendar") or {}}).get("calendar")
-        cal_done = 0
+        cal_total = 0
         if isinstance(result.get("calendar"), dict):
             cal = result["calendar"]
-            cal_done = int(cal.get("updated") or cal.get("changed") or cal.get("status_applied") or 0)
+            cal_total = int(cal.get("scanned") or 0)
+            if cal_total <= 0:
+                cal_total = int(cal.get("updated") or cal.get("changed") or cal.get("status_applied") or 0)
         phases.end(
             "calendar",
             metrics=cal_metrics,
-            done=cal_done,
-            total=cal_done,
-            unit_label="updates",
+            done=cal_total,
+            total=cal_total,
+            unit_label="placeholders",
         )
         finish_task_run(task_run_id, status="done", summary=result)
+        _apply_schedule_after_success("calendar_sync", trigger)
         return result
     except Exception as exc:
         try:

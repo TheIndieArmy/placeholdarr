@@ -160,7 +160,8 @@ class TaskRunPhaseTracker:
         units: list[dict[str, Any]] | None = None,
     ) -> None:
         kind = str(self._live_kind or "").strip().lower()
-        if kind not in {"full_sync", "lite_sync", "calendar_only"}:
+        # calendar_sync is the task key; calendar_only remains accepted for older rows.
+        if kind not in {"full_sync", "lite_sync", "calendar_sync", "calendar_only"}:
             return
         try:
             from services.task_live_progress import publish_sync_phase_live
@@ -418,6 +419,8 @@ def metrics_from_calendar_dates(stats: dict[str, Any] | None) -> list[dict[str, 
     """Count cards for calendar date refresh."""
     s = stats if isinstance(stats, dict) else {}
     return [
+        {"label": "Movies checked", "value": int(s.get("movie_rows_seen") or 0)},
+        {"label": "Episodes checked", "value": int(s.get("episode_rows_seen") or 0)},
         {"label": "Movie dates updated", "value": int(s.get("movie_rows_updated") or 0)},
         {"label": "Episode dates updated", "value": int(s.get("episode_rows_updated") or 0)},
     ]
@@ -460,6 +463,7 @@ def metrics_from_pipeline(pipeline: dict[str, Any]) -> dict[str, list[dict[str, 
     ]
     cal = pipeline.get("calendar") if isinstance(pipeline.get("calendar"), dict) else {}
     out["calendar"] = [
+        {"label": "Placeholders scanned", "value": int(cal.get("scanned") or 0)},
         {
             "label": "Calendar updates",
             "value": int(

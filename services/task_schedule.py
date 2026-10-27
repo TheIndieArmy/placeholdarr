@@ -46,18 +46,22 @@ TASK_SCHEDULE_KEYS = {
     "full_sync": "FULL_SYNC_SCHEDULE",
     "lite_sync": "LITE_SYNC_SCHEDULE",
     "collections_sync": "COLLECTIONS_SYNC_SCHEDULE",
+    "calendar_sync": "CALENDAR_SYNC_SCHEDULE",
 }
 
 LEGACY_INTERVAL_KEYS = {
     "full_sync": "FULL_SYNC_INTERVAL_HOURS",
     "lite_sync": "LITE_SYNC_INTERVAL_HOURS",
     "collections_sync": "COLLECTIONS_SYNC_INTERVAL_HOURS",
+    "calendar_sync": "CALENDAR_SYNC_INTERVAL_HOURS",
 }
 
 DEFAULT_INTERVAL_HOURS = {
     "full_sync": 168,
     "lite_sync": 12,
     "collections_sync": 24,
+    # Twice daily (same cadence as lite); legacy calendar hours 0 still migrate via get_schedule.
+    "calendar_sync": 12,
 }
 
 DEFAULT_TIME = "03:00"
@@ -530,6 +534,9 @@ def get_schedule_for_task(task_key: str) -> dict[str, Any]:
             hours = int(getattr(settings, legacy_key, 0) or 0)
         except (TypeError, ValueError):
             hours = int(DEFAULT_INTERVAL_HOURS.get(key, 0))
+        # Calendar interval 0 used to mean "run with lite"; use the calendar default cadence.
+        if key == "calendar_sync" and hours <= 0:
+            hours = int(DEFAULT_INTERVAL_HOURS.get(key, 12))
         return schedule_from_legacy_hours(hours)
     return default_schedule_for_task(key)
 
@@ -568,6 +575,9 @@ def migrate_interval_hours_to_schedules(session) -> list[str]:
             except (TypeError, ValueError):
                 hours = int(DEFAULT_INTERVAL_HOURS[task_key])
         else:
+            hours = int(DEFAULT_INTERVAL_HOURS[task_key])
+        # Legacy calendar 0 = piggyback on lite; seed an enabled daily schedule instead of Disabled.
+        if task_key == "calendar_sync" and hours <= 0:
             hours = int(DEFAULT_INTERVAL_HOURS[task_key])
         payload = schedule_from_legacy_hours(hours)
         if existing is None:

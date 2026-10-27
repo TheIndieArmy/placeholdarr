@@ -2,7 +2,13 @@ export type DashboardTab = "activity" | "library" | "collections" | "calendar" |
 
 export type ActivitySubPage = "placeholders" | "tasks" | "operations";
 
-export type TaskKey = "full_sync" | "lite_sync" | "calendar_only" | "placeholder_refresh" | "collections_sync";
+export type TaskKey =
+  | "full_sync"
+  | "lite_sync"
+  | "calendar_sync"
+  | "calendar_only"
+  | "placeholder_refresh"
+  | "collections_sync";
 
 export interface ScheduledTaskRow {
   task_key: TaskKey;

@@ -137,6 +137,8 @@ REMOVED_SETTINGS_KEYS_IGNORED_ON_SAVE = frozenset(
         "FULL_SYNC_INTERVAL_HOURS",
         "LITE_SYNC_INTERVAL_HOURS",
         "COLLECTIONS_SYNC_INTERVAL_HOURS",
+        "CALENDAR_SYNC_INTERVAL_HOURS",
+        "STARTUP_SYNC_MODE",
     }
 )
 
@@ -477,49 +479,11 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
-            "STARTUP_SYNC_MODE",
-            {
-                "section": "Library sync",
-                "label": "Startup ARR sync mode",
-                # Intro copy is also structured in `frontend/src/App.tsx` (`StartupSyncModeDescription`); update both together.
-                "description": (
-                    "When Placeholdarr starts, it can run one Arr sync to catch up with your libraries. "
-                    "Your choice here is weighed with any overdue scheduled lite or full sync. "
-                    "If a full sync is already due, Placeholdarr runs full instead of lite. "
-                    "Off means do not request a sync only because the process started; overdue schedules can still promote a full or lite run. "
-                    "Full sync scans *arr catalogs and Placeholdarr roots, then add/delete placeholders as needed. "
-                    "Lite sync compares live Arr catalogs to Placeholdarr's database, syncs only titles that changed, then updates placeholders for those titles (no full filesystem scan). "
-                    "Media players still need to rescan before new or removed placeholders show up in your libraries. "
-                    "A full sync will automatically start in the background at the completion of this setup."
-                ),
-                "type": "choice",
-                "restart_required": True,
-                "options": [
-                    {
-                        "value": "auto",
-                        "label": "Auto: full when the scheduled full sync is overdue; otherwise lite",
-                    },
-                    {"value": "full", "label": "Full: always run full on every startup"},
-                    {
-                        "value": "lite",
-                        "label": "Lite: run lite on startup (full still runs if the scheduled full sync is overdue)",
-                    },
-                    {
-                        "value": "off",
-                        "label": "Off: no startup sync; overdue schedules can still run",
-                    },
-                ],
-            },
-        ),
-        (
             "UI_CLOCK_FORMAT",
             {
                 "section": "Library sync",
                 "label": "Clock format",
-                "description": (
-                    "How schedule times and next-run clocks appear in Settings, Tasks, and Collections. "
-                    "Stored schedule values stay 24-hour internally (HH:MM)."
-                ),
+                "description": "",
                 "type": "choice",
                 "restart_required": False,
                 "default": "12h",
@@ -534,10 +498,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Library sync",
                 "label": "Full sync schedule",
-                "description": (
-                    "When to run a full ARR/database reconciliation. Interval (every N hours), Daily, Weekly, "
-                    "Monthly, or Cron in the container TZ. Default: weekly Sunday 03:00 (migrated from 168h)."
-                ),
+                "description": "When to run a full ARR/database reconciliation.",
                 "type": "task_schedule",
                 "default_task": "full_sync",
                 "restart_required": False,
@@ -549,12 +510,24 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "section": "Library sync",
                 "label": "Lite sync schedule",
                 "description": (
-                    "When to run lite sync: ARR catalog diff, calendar date refresh, Coming Soon updates, and "
-                    "scoped placeholder work. Interval is useful for every-12h; Daily/Weekly/Monthly/Cron use local TZ. "
-                    "Includes calendar maintenance; a separate calendar interval is only used when lite sync is off."
+                    "When to run lite sync: ARR catalog diff and scoped placeholder updates for changed titles."
                 ),
                 "type": "task_schedule",
                 "default_task": "lite_sync",
+                "restart_required": False,
+            },
+        ),
+        (
+            "CALENDAR_SYNC_SCHEDULE",
+            {
+                "section": "Library sync",
+                "label": "Calendar sync schedule",
+                "description": (
+                    "When to refresh release dates and Coming Soon / countdown placeholder status. "
+                    "Full sync still includes calendar work."
+                ),
+                "type": "task_schedule",
+                "default_task": "calendar_sync",
                 "restart_required": False,
             },
         ),
@@ -564,8 +537,9 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "section": "Library sync",
                 "label": "Collections sync schedule",
                 "description": (
-                    "When to run enabled collection recipes and sync results into Plex. "
-                    "Set Disabled to turn off the scheduled job (recipes can still be run manually)."
+                    "Default schedule for collection recipes that follow the app setting. "
+                    "Recipes with their own schedule still run on that cadence when this is disabled. "
+                    "Follow-global recipes only run manually while this is off."
                 ),
                 "type": "task_schedule",
                 "default_task": "collections_sync",
@@ -652,20 +626,6 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "type": "int",
                 "min": -1,
                 "restart_required": False,
-            },
-        ),
-        (
-            "CALENDAR_SYNC_INTERVAL_HOURS",
-            {
-                "section": "Calendar",
-                "label": "Calendar sync interval (hours)",
-                "description": (
-                    "Only used when lite sync interval is 0. When lite sync is enabled, calendar date refresh and "
-                    "status updates run as part of lite sync instead. Set to 0 to disable."
-                ),
-                "type": "int",
-                "min": 0,
-                "restart_required": True,
             },
         ),
         (
@@ -3142,6 +3102,7 @@ def save_settings(
             "FULL_SYNC_SCHEDULE",
             "LITE_SYNC_SCHEDULE",
             "COLLECTIONS_SYNC_SCHEDULE",
+            "CALENDAR_SYNC_SCHEDULE",
         }
         schedule_keys_changed: set[str] = set()
         for key, value in validated.items():
@@ -3263,26 +3224,21 @@ def save_settings(
         if schedule_keys_changed:
             try:
                 from services.source_of_truth.scheduler import refresh_all_schedules
-                from services.task_schedule_state import resolve_next_run_time
-                from services.task_schedule import get_schedule_for_task
 
                 task_by_key = {
                     "FULL_SYNC_SCHEDULE": "full_sync",
                     "LITE_SYNC_SCHEDULE": "lite_sync",
                     "COLLECTIONS_SYNC_SCHEDULE": "collections_sync",
+                    "CALENDAR_SYNC_SCHEDULE": "calendar_sync",
                 }
-                # Always refresh all three jobs so parent collections tick stays consistent;
-                # only ignore persisted next-run for schedules whose JSON actually changed.
-                for config_key, task_key in task_by_key.items():
-                    try:
-                        resolve_next_run_time(
-                            task_key,
-                            get_schedule_for_task(task_key),
-                            ignore_persisted=config_key in schedule_keys_changed,
-                        )
-                    except Exception:
-                        pass
-                refresh_all_schedules()
+                # Rebuild all three jobs; clear persisted next-run only for schedules
+                # whose JSON actually changed so the new cadence applies immediately.
+                reset_keys = {
+                    task_by_key[config_key]
+                    for config_key in schedule_keys_changed
+                    if config_key in task_by_key
+                }
+                refresh_all_schedules(reset_next_run_for=reset_keys)
                 logger.info(
                     "Refreshed APScheduler jobs after schedule settings save "
                     f"(changed={sorted(schedule_keys_changed)})",

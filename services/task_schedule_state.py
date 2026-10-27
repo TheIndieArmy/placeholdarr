@@ -21,6 +21,9 @@ _TASK_KEYS = {
     "full_sync": "SCHEDULED_TASK_NEXT_RUN_FULL_SYNC",
     "lite_sync": "SCHEDULED_TASK_NEXT_RUN_LITE_SYNC",
     "collections_sync": "SCHEDULED_TASK_NEXT_RUN_COLLECTIONS_SYNC",
+    "calendar_sync": "SCHEDULED_TASK_NEXT_RUN_CALENDAR_SYNC",
+    # Legacy alias used by older calendar-only task runs.
+    "calendar_only": "SCHEDULED_TASK_NEXT_RUN_CALENDAR_SYNC",
 }
 
 CATCH_UP_MINUTES = 2

@@ -763,7 +763,7 @@ export function App() {
 
   const [logLevel, setLogLevel] = useState<"all" | "debug" | "info" | "warn" | "error" | "critical">("all");
   const [logFilter, setLogFilter] = useState("");
-  const [taskRunModal, setTaskRunModal] = useState<null | "full" | "lite">(null);
+  const [taskRunModal, setTaskRunModal] = useState<null | "full" | "lite" | "calendar">(null);
   const [whatsNewNotices, setWhatsNewNotices] = useState<WhatsNewNotice[]>([]);
   const [whatsNewBusy, setWhatsNewBusy] = useState(false);
   const [appVersionLabel, setAppVersionLabel] = useState("");
@@ -3059,11 +3059,11 @@ export function App() {
               setTaskRunPending(false);
             }
           }}
-          onConfirmCalendarOnly={async () => {
+          onConfirmCalendar={async () => {
             setTaskRunPending(true);
             setTaskRunError(null);
             try {
-              await postTaskRun("calendar_only");
+              await postTaskRun("calendar_sync");
               setTaskRunModal(null);
               invalidateLibraryAfterCatalogChange();
               void refreshTasks();
@@ -3147,7 +3147,7 @@ export function App() {
 }
 
 function TaskRunConfirmModals(props: {
-  modal: null | "full" | "lite";
+  modal: null | "full" | "lite" | "calendar";
   pending: boolean;
   error: string | null;
   brand: Brand;
@@ -3155,10 +3155,42 @@ function TaskRunConfirmModals(props: {
   onClose: () => void;
   onConfirmFull: () => void;
   onConfirmLite: () => void;
-  onConfirmCalendarOnly: () => void;
+  onConfirmCalendar: () => void;
 }) {
   if (!props.modal) return null;
   const accent = getBrandAccent(props.brand, props.themeMode);
+  const title =
+    props.modal === "full"
+      ? "Run full ARR sync now?"
+      : props.modal === "calendar"
+        ? "Run calendar sync now?"
+        : "Run lite sync now?";
+  const body =
+    props.modal === "full" ? (
+      <p className="ui-field-description mt-2 leading-relaxed">
+        Full sync pulls complete Radarr and Sonarr catalogs into Placeholdarr, then runs filesystem scan, placeholder
+        reconciliation, determination, materialization, and calendar status updates. Large libraries can take a long
+        time and use significant CPU, disk I/O, and ARR API quota.
+      </p>
+    ) : props.modal === "calendar" ? (
+      <p className="ui-field-description mt-2 leading-relaxed">
+        Calendar sync refreshes release dates from ARR and updates Coming Soon / countdown placeholder status. It does
+        not pull full Arr catalogs.
+      </p>
+    ) : (
+      <p className="ui-field-description mt-2 leading-relaxed">
+        Lite sync checks ARR for catalog changes (targeted sync only), then updates placeholders for changed titles. It
+        does not run calendar date refresh; use Calendar sync for Coming Soon status.
+      </p>
+    );
+  const confirmLabel =
+    props.modal === "full" ? "Run full sync" : props.modal === "calendar" ? "Run calendar sync" : "Run lite sync";
+  const onConfirm =
+    props.modal === "full"
+      ? props.onConfirmFull
+      : props.modal === "calendar"
+        ? props.onConfirmCalendar
+        : props.onConfirmLite;
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
@@ -3168,25 +3200,8 @@ function TaskRunConfirmModals(props: {
     >
       <div className={`w-full max-w-xl ${UI_SECTION_FRAME_CLASS} bg-[#171c22] flex flex-col overflow-hidden`}>
         <div className="px-5 py-4 border-b border-[#424753]/30">
-          <h3 className="text-[18px] font-bold text-white font-headline">
-            {props.modal === "full" ? "Run full ARR sync now?" : "Run maintenance sync"}
-          </h3>
-          {props.modal === "full" ? (
-            <p className="ui-field-description mt-2 leading-relaxed">
-              Full sync pulls complete Radarr and Sonarr catalogs into Placeholdarr, then runs filesystem scan,
-              placeholder reconciliation, determination, materialization, and calendar status updates. Large libraries
-              can take a long time and use significant CPU, disk I/O, and ARR API quota.
-            </p>
-          ) : (
-            <p className="ui-field-description mt-2 leading-relaxed">
-              <strong className="text-slate-200">Lite sync</strong> checks ARR for catalog changes (targeted sync only),
-              then runs calendar date refresh and Coming Soon status updates. Scheduled lite sync always includes both.
-              <br />
-              <br />
-              <strong className="text-slate-200">Calendar only</strong> refreshes release dates from ARR calendar APIs and
-              updates placeholder statuses; no full catalog pull.
-            </p>
-          )}
+          <h3 className="text-[18px] font-bold text-white font-headline">{title}</h3>
+          {body}
           {props.error ? <p className="text-[13px] text-red-400 mt-2">{props.error}</p> : null}
         </div>
         <div className="px-5 py-4 flex flex-wrap justify-end gap-3 border-t border-[#424753]/30">
@@ -3198,37 +3213,15 @@ function TaskRunConfirmModals(props: {
           >
             Cancel
           </button>
-          {props.modal === "full" ? (
-            <button
-              type="button"
-              disabled={props.pending}
-              onClick={props.onConfirmFull}
-              className={`px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
-              style={accentFilledStyle(accent.hex)}
-            >
-              {props.pending ? "Starting…" : "Run full sync"}
-            </button>
-          ) : (
-            <>
-              <button
-                type="button"
-                disabled={props.pending}
-                onClick={props.onConfirmCalendarOnly}
-                className="px-4 py-2 rounded-lg border border-[#424753]/50 text-[14px] font-headline uppercase tracking-wider text-slate-200 hover:bg-[#252e3a] disabled:opacity-50"
-              >
-                Calendar only
-              </button>
-              <button
-                type="button"
-                disabled={props.pending}
-                onClick={props.onConfirmLite}
-                className={`px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
-                style={accentFilledStyle(accent.hex)}
-              >
-                {props.pending ? "Starting…" : "Run lite sync"}
-              </button>
-            </>
-          )}
+          <button
+            type="button"
+            disabled={props.pending}
+            onClick={onConfirm}
+            className={`px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
+            style={accentFilledStyle(accent.hex)}
+          >
+            {props.pending ? "Starting…" : confirmLabel}
+          </button>
         </div>
       </div>
     </div>
@@ -7393,10 +7386,10 @@ function PosterOverlayLivePreview(props: {
 }
 
 const LIBRARY_SYNC_SCHEDULE_KEYS = [
-  "STARTUP_SYNC_MODE",
   "UI_CLOCK_FORMAT",
   "FULL_SYNC_SCHEDULE",
   "LITE_SYNC_SCHEDULE",
+  "CALENDAR_SYNC_SCHEDULE",
   "COLLECTIONS_SYNC_SCHEDULE",
 ] as const;
 
@@ -7763,44 +7756,6 @@ function SecurityAccountControls(props: {
   );
 }
 
-/** Keep sentences in sync with `STARTUP_SYNC_MODE` description in `services/app_config.py`. */
-function StartupSyncModeDescription(props: { spacing: "settings" | "wizard" }) {
-  const top = props.spacing === "settings" ? "mt-1" : "mb-2";
-  return (
-    <div className={`${top} space-y-3`}>
-      <p className="ui-field-description text-slate-300 leading-relaxed">
-        When Placeholdarr starts, it can run one Arr sync to catch up with your libraries. Your choice here is weighed
-        with any overdue scheduled lite or full sync. If a full sync is already due, Placeholdarr runs full instead of
-        lite.
-      </p>
-      <ul className="list-disc space-y-2 pl-5 text-[14px] text-slate-400 leading-relaxed">
-        <li>
-          <span className="font-medium text-slate-200">Full sync</span>
-          {" "}
-          scans *arr catalogs and Placeholdarr roots, then add/delete placeholders as needed.
-        </li>
-        <li>
-          <span className="font-medium text-slate-200">Lite sync</span>
-          {" "}
-          compares live Arr catalogs to Placeholdarr&apos;s database, syncs only titles that changed, then updates
-          placeholders for those titles (no full filesystem scan).
-        </li>
-        <li>
-          <span className="font-medium text-slate-200">Off</span>
-          {" "}
-          means do not request a sync only because the process started. Overdue schedules can still promote a full or lite run.
-        </li>
-      </ul>
-      <p className="ui-field-description text-slate-400 leading-relaxed">
-        Media players still need to rescan before new or removed placeholders show up in your libraries.
-      </p>
-      <p className="ui-field-description ui-field-description-accent3 leading-relaxed">
-        A full sync will automatically start in the background at the completion of this setup.
-      </p>
-    </div>
-  );
-}
-
 function SettingsPanel(props: {
   payload: SettingsPayload | null;
   activeSection: string;
@@ -8066,9 +8021,7 @@ function SettingsPanel(props: {
             </div>
             {isPlexSectionIdField(field.key) ? <PlexLibraryTipsDisclosure fieldKey={field.key} className="mt-1" /> : null}
             {!(lookaheadRangeLocked && field.key === "EPISODES_LOOKAHEAD") &&
-              (field.key === "STARTUP_SYNC_MODE" ? (
-                <StartupSyncModeDescription spacing="settings" />
-              ) : field.key === "PLACEHOLDER_STATUS_UPDATES" ? (
+              (field.key === "PLACEHOLDER_STATUS_UPDATES" ? (
                 <PlaceholderStatusUpdatesDescription spacing="settings" />
               ) : field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" ? (
                 <ProjectStatusIntoDescription spacing="settings" />
@@ -8085,11 +8038,6 @@ function SettingsPanel(props: {
               ) : field.description && !isPlexSectionIdField(field.key) && !isPosterLanguageFieldKey(field.key) ? (
                 <p className="ui-field-description mt-1">{field.description}</p>
               ) : null)}
-            {field.key === "FULL_SYNC_SCHEDULE" ? (
-              <p className="ui-field-description ui-field-description-accent3 mt-2 leading-relaxed">
-                If you have Startup ARR sync mode set to OFF, then a scheduled sync is recommended.
-              </p>
-            ) : null}
           </div>
         </div>
 
@@ -8100,7 +8048,13 @@ function SettingsPanel(props: {
             accentHex={accent.hex}
             clockFormat={props.values.UI_CLOCK_FORMAT}
             fallbackHours={
-              field.key === "FULL_SYNC_SCHEDULE" ? 168 : field.key === "LITE_SYNC_SCHEDULE" ? 12 : 24
+              field.key === "FULL_SYNC_SCHEDULE"
+                ? 168
+                : field.key === "LITE_SYNC_SCHEDULE"
+                  ? 12
+                  : field.key === "CALENDAR_SYNC_SCHEDULE"
+                    ? 12
+                    : 24
             }
             onChange={(next) => handleSettingsValueChange(field.key, next)}
           />
@@ -11571,9 +11525,7 @@ function OnboardingWizard(props: {
           {field.label}
         </label>
         {!(lookaheadRangeLocked && field.key === "EPISODES_LOOKAHEAD") &&
-          (field.key === "STARTUP_SYNC_MODE" ? (
-            <StartupSyncModeDescription spacing="wizard" />
-          ) : field.key === "PLACEHOLDER_STATUS_UPDATES" ? (
+          (field.key === "PLACEHOLDER_STATUS_UPDATES" ? (
             <PlaceholderStatusUpdatesDescription spacing="wizard" />
           ) : field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" ? (
             <ProjectStatusIntoDescription spacing="wizard" />
@@ -11590,11 +11542,6 @@ function OnboardingWizard(props: {
           ) : field.description && !isPosterLanguageFieldKey(field.key) ? (
             <p className="ui-field-description mb-2 leading-relaxed">{field.description}</p>
           ) : null)}
-        {field.key === "FULL_SYNC_SCHEDULE" ? (
-          <p className="ui-field-description ui-field-description-accent3 mb-2 mt-1 leading-relaxed">
-            If you have Startup ARR sync mode set to OFF, then a scheduled sync is recommended.
-          </p>
-        ) : null}
         {field.type === "task_schedule" ? (
           <TaskScheduleEditor
             value={displayValue}
@@ -11602,7 +11549,13 @@ function OnboardingWizard(props: {
             accentHex={accent.hex}
             clockFormat={props.values?.UI_CLOCK_FORMAT}
             fallbackHours={
-              field.key === "FULL_SYNC_SCHEDULE" ? 168 : field.key === "LITE_SYNC_SCHEDULE" ? 12 : 24
+              field.key === "FULL_SYNC_SCHEDULE"
+                ? 168
+                : field.key === "LITE_SYNC_SCHEDULE"
+                  ? 12
+                  : field.key === "CALENDAR_SYNC_SCHEDULE"
+                    ? 12
+                    : 24
             }
             onChange={(next) => handleWizardValueChange(field.key, next)}
           />
@@ -11731,11 +11684,8 @@ function OnboardingWizard(props: {
       >
         <div className="relative z-10 flex flex-1 min-h-0 w-full flex-col items-center pb-5 sm:pb-8">
           <OnboardingWizardHeroBanner footerBlendHex={wizardSemantic.chromePage} />
-          <div
-            className={`flex w-full flex-1 min-h-0 flex-col px-3 ${
-              step.key === "look_and_feel" ? "max-w-5xl" : "max-w-3xl"
-            }`}
-          >
+          {/* One shell width for every step (Appearance needs room for overlay previews). */}
+          <div className="flex w-full max-w-5xl flex-1 min-h-0 flex-col px-3">
           <div className="flex flex-1 min-h-0 flex-col rounded-2xl border border-white/10 bg-[#121722]/93 backdrop-blur-md shadow-2xl overflow-hidden max-h-[min(900px,calc(100vh-7rem))]">
         <div className="px-6 sm:px-8 py-4 sm:py-5 border-b border-[#424753]/30 shrink-0">
           {previewMode ? (

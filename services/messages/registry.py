@@ -153,8 +153,18 @@ _TOKEN_SPECS: tuple[TokenSpec, ...] = (
         name="DaysUntil",
         label="Days Until",
         group="Calendar",
-        description="Number of days until the upcoming release or air date.",
+        description="Number of days until the upcoming release or air date (app timezone civil today).",
         sample="5",
+    ),
+    TokenSpec(
+        name="DaysUntilPlusOne",
+        label="Days Until +1",
+        group="Calendar",
+        description=(
+            "DaysUntil plus one. Useful if you treat Arr dates as US release days and want "
+            "countdowns that feel a day later in timezones ahead of the US (for example Australia)."
+        ),
+        sample="6",
     ),
     TokenSpec(
         name="ReleaseLabel",
@@ -170,7 +180,7 @@ _TOKEN_SPECS: tuple[TokenSpec, ...] = (
         name="ReleaseDate",
         label="Release Date",
         group="Calendar",
-        description="Release or air date in YYYY-MM-DD form.",
+        description="Release or air date in YYYY-MM-DD form (the date Arr stored, not converted).",
         sample="2026-12-25",
     ),
     # Queue
@@ -399,8 +409,31 @@ def _build_registry() -> tuple[MessageKey, ...]:
 
 
     # --- Calendar ---
-    cal_movie_tokens = ("Sep", "DaysUntil", "ReleaseLabel", "ReleaseDate") + _MEDIA_TOKENS
-    cal_tv_tokens = ("Sep", "DaysUntil", "ReleaseDate") + _MEDIA_TOKENS + _EPISODE_TOKENS
+    cal_movie_tokens = (
+        "Sep",
+        "DaysUntil",
+        "DaysUntilPlusOne",
+        "ReleaseLabel",
+        "ReleaseDate",
+    ) + _MEDIA_TOKENS
+    cal_tv_tokens = ("Sep", "DaysUntil", "DaysUntilPlusOne", "ReleaseDate") + _MEDIA_TOKENS + _EPISODE_TOKENS
+    _cal_movie_sample = {
+        "ReleaseLabel": "Theatrical",
+        "DaysUntil": "5",
+        "DaysUntilPlusOne": "6",
+        "ReleaseDate": "2026-12-25",
+        "Title": "Inception",
+        "Year": "2010",
+    }
+    _cal_tv_sample = {
+        "DaysUntil": "5",
+        "DaysUntilPlusOne": "6",
+        "ReleaseDate": "2026-12-25",
+        "Title": "Breaking Bad",
+        "SeriesTitle": "Breaking Bad",
+        "EpisodeTitle": "Pilot",
+        "SXXEYY": "S01E01",
+    }
 
     keys.append(
         MessageKey(
@@ -411,10 +444,11 @@ def _build_registry() -> tuple[MessageKey, ...]:
             subgroup="Movie",
             tooltip=(
                 "Shown for movies the day before release. {ReleaseLabel} resolves to Theatrical / Digital / Physical "
-                "based on your preferred movie date type, or 'Coming Soon' when no release type is configured."
+                "based on your preferred movie date type, or 'Coming Soon' when no release type is configured. "
+                "Use {DaysUntilPlusOne} if you want a day-later countdown (common for timezones ahead of the US)."
             ),
             allowed_tokens=cal_movie_tokens,
-            sample_context={"ReleaseLabel": "Theatrical", "DaysUntil": "1"},
+            sample_context={**_cal_movie_sample, "DaysUntil": "1", "DaysUntilPlusOne": "2"},
             alt_defaults={"no_release_type": "Coming Soon (1 day)"},
         )
     )
@@ -430,7 +464,7 @@ def _build_registry() -> tuple[MessageKey, ...]:
                 "When no release type is configured Placeholdarr falls back to a parenthetical phrasing."
             ),
             allowed_tokens=cal_movie_tokens,
-            sample_context={"ReleaseLabel": "Theatrical", "DaysUntil": "5"},
+            sample_context=dict(_cal_movie_sample),
             alt_defaults={"no_release_type": "Coming Soon ({DaysUntil} days)"},
         )
     )
@@ -443,10 +477,11 @@ def _build_registry() -> tuple[MessageKey, ...]:
             subgroup="Movie",
             tooltip=(
                 "Shown for movies on their release day. {ReleaseLabel} resolves to Theatrical / Digital / Physical "
-                "or 'Coming Soon' when no release type is configured."
+                "or 'Coming Soon' when no release type is configured. "
+                "{DaysUntilPlusOne} is 1 on this day if you prefer wording like 'in 1 day' instead of today."
             ),
             allowed_tokens=cal_movie_tokens,
-            sample_context={"ReleaseLabel": "Theatrical", "DaysUntil": "0"},
+            sample_context={**_cal_movie_sample, "DaysUntil": "0", "DaysUntilPlusOne": "1"},
             alt_defaults={"no_release_type": "Coming Soon (Today)"},
         )
     )
@@ -462,7 +497,11 @@ def _build_registry() -> tuple[MessageKey, ...]:
                 "Falls back to 'Coming Soon' when no release type is configured."
             ),
             allowed_tokens=cal_movie_tokens,
-            sample_context={"ReleaseLabel": "Theatrical"},
+            sample_context={
+                **_cal_movie_sample,
+                "DaysUntil": "5",
+                "DaysUntilPlusOne": "6",
+            },
             alt_defaults={"no_release_type": "Coming Soon"},
         )
     )
@@ -474,9 +513,12 @@ def _build_registry() -> tuple[MessageKey, ...]:
             default="Airing in 1 day",
             group="Calendar Coming Soon",
             subgroup="TV",
-            tooltip="Shown for TV episodes airing the next day.",
+            tooltip=(
+                "Shown for TV episodes airing the next day. "
+                "Use {DaysUntilPlusOne} for a day-later countdown if you treat air dates as US release days."
+            ),
             allowed_tokens=cal_tv_tokens,
-            sample_context={"DaysUntil": "1"},
+            sample_context={**_cal_tv_sample, "DaysUntil": "1", "DaysUntilPlusOne": "2"},
         )
     )
     keys.append(
@@ -488,7 +530,7 @@ def _build_registry() -> tuple[MessageKey, ...]:
             subgroup="TV",
             tooltip="Shown for upcoming TV episodes when more than one day remains. Use {DaysUntil} for the day count.",
             allowed_tokens=cal_tv_tokens,
-            sample_context={"DaysUntil": "5"},
+            sample_context=dict(_cal_tv_sample),
         )
     )
     keys.append(
@@ -498,9 +540,12 @@ def _build_registry() -> tuple[MessageKey, ...]:
             default="Airing today",
             group="Calendar Coming Soon",
             subgroup="TV",
-            tooltip="Shown for TV episodes airing today.",
+            tooltip=(
+                "Shown for TV episodes airing today. "
+                "{DaysUntilPlusOne} is 1 on this day if you prefer wording like 'in 1 day' instead of today."
+            ),
             allowed_tokens=cal_tv_tokens,
-            sample_context={"DaysUntil": "0"},
+            sample_context={**_cal_tv_sample, "DaysUntil": "0", "DaysUntilPlusOne": "1"},
         )
     )
     keys.append(
@@ -512,7 +557,7 @@ def _build_registry() -> tuple[MessageKey, ...]:
             subgroup="TV",
             tooltip="Shown for upcoming TV episodes when 'Enable Coming Soon countdown text' is off.",
             allowed_tokens=cal_tv_tokens,
-            sample_context={},
+            sample_context=dict(_cal_tv_sample),
         )
     )
     keys.append(
@@ -527,7 +572,7 @@ def _build_registry() -> tuple[MessageKey, ...]:
                 "{ReleaseLabel} resolves to Theatrical / Digital / Physical from your movie date type setting."
             ),
             allowed_tokens=cal_movie_tokens,
-            sample_context={"ReleaseLabel": "Theatrical"},
+            sample_context={"ReleaseLabel": "Theatrical", "Title": "Inception", "Year": "2010"},
             alt_defaults={"no_release_type": "TBD"},
         )
     )
@@ -540,12 +585,19 @@ def _build_registry() -> tuple[MessageKey, ...]:
             subgroup="TV",
             tooltip="Shown for pinned episodes when Sonarr has no air date yet.",
             allowed_tokens=cal_tv_tokens,
-            sample_context={},
+            sample_context={
+                "Title": "Breaking Bad",
+                "SeriesTitle": "Breaking Bad",
+                "EpisodeTitle": "Pilot",
+                "SXXEYY": "S01E01",
+            },
         )
     )
 
     # --- Queue monitor ---
-    queue_tokens = ("Sep", "Progress") + _MEDIA_TOKENS + _EPISODE_TOKENS
+    # Only Progress is supplied at render time; media/episode tokens were previously
+    # listed but never populated (they collapsed to empty).
+    queue_tokens = ("Sep", "Progress")
 
     keys.append(
         MessageKey(

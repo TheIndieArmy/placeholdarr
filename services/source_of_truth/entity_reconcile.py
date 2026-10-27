@@ -136,6 +136,7 @@ _STEP_LOG_DETAIL: dict[str, str] = {
     "filesystem": "Checking placeholder files on disk",
     "determination": "Updating placeholder status",
     "materialization": "Creating or updating placeholder files",
+    "calendar": "Updating Coming Soon countdown from release dates",
     "sidecars": "Writing NFO sidecars and poster art",
     "player": "Refreshing Plex, Jellyfin, and Emby for this title",
     STEP_DONE: "Finished",
@@ -161,6 +162,7 @@ def _step_label_for(step: str, *, arr_label: str = "Radarr") -> str:
         "filesystem": "Checking placeholder files…",
         "determination": "Updating status…",
         "materialization": "Applying placeholders…",
+        "calendar": "Updating Coming Soon countdown…",
         "sidecars": "Writing artwork & metadata…",
         "player": "Updating Plex/Jellyfin/Emby…",
         STEP_DONE: "Done",
@@ -176,6 +178,7 @@ RECONCILE_LIVE_PHASES: tuple[tuple[str, str], ...] = (
     ("filesystem", "Filesystem"),
     ("determination", "Status"),
     ("materialization", "Placeholders"),
+    ("calendar", "Coming Soon"),
     ("sidecars", "Artwork & metadata"),
     ("player", "Players"),
 )
@@ -533,6 +536,38 @@ def _placeholders_for_scope(session, *, movie_row_ids: list[int], episode_row_id
     else:
         q = q.filter(Placeholder.episode_id.in_(eids))
     return q.all()
+
+
+def _refresh_calendar_status_for_placeholders(session, placeholders: list[Placeholder]) -> int:
+    """Recompute Coming Soon / countdown for on-disk placeholders after Arr dates sync.
+
+    Single-item library refresh updates release/air dates from Arr, then callers need
+    this pass so media-player countdown text matches without waiting for Calendar sync.
+    """
+    from services.source_of_truth.calendar_phase import refresh_placeholder_calendar_status
+
+    # Arr catalog sync commits in its own session; drop cached Movie/Episode rows so
+    # calendar decisions see the newly written release/air dates.
+    try:
+        session.expire_all()
+    except Exception:
+        pass
+
+    updated = 0
+    for placeholder in placeholders:
+        if not bool(getattr(placeholder, "has_placeholder", False)):
+            continue
+        try:
+            if refresh_placeholder_calendar_status(session, placeholder):
+                updated += 1
+        except Exception as exc:
+            logger.warning(
+                f"Calendar status refresh failed placeholder_id={getattr(placeholder, 'id', None)}: {exc}",
+                extra={"emoji_type": "warning"},
+            )
+    if updated:
+        session.commit()
+    return updated
 
 
 @dataclass
@@ -968,6 +1003,44 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
             movie_row_ids=targets.movie_row_ids,
             episode_row_ids=targets.episode_row_ids,
         )
+        calendar_total = max(1, len(placeholders))
+        _set_job_step(
+            session,
+            job,
+            "calendar",
+            arr_label=targets.arr_label,
+            phase_done=0,
+            phase_total=calendar_total,
+        )
+        _log_reconcile_info(
+            entity_type,
+            title,
+            _step_log_detail("calendar", arr_label=targets.arr_label),
+            job_id=int(job.id),
+        )
+        calendar_updated = _refresh_calendar_status_for_placeholders(session, placeholders)
+        _set_job_step(
+            session,
+            job,
+            "calendar",
+            arr_label=targets.arr_label,
+            phase_done=calendar_total,
+            phase_total=calendar_total,
+        )
+        if calendar_updated:
+            _log_reconcile_info(
+                entity_type,
+                title,
+                f"Coming Soon status updated on {calendar_updated} placeholder(s)",
+                job_id=int(job.id),
+            )
+            # Materialization / calendar may have mutated rows; reload for sidecars.
+            placeholders = _placeholders_for_scope(
+                session,
+                movie_row_ids=targets.movie_row_ids,
+                episode_row_ids=targets.episode_row_ids,
+            )
+
         sidecar_total = max(1, len(placeholders))
         _set_job_step(
             session,

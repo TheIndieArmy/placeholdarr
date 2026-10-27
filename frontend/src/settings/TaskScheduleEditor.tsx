@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { BrandCheckbox } from "../BrandCheckbox";
 import { BrandSelect } from "../BrandSelect";
 import { BrandTimeSelect } from "../BrandTimeSelect";
@@ -45,6 +45,72 @@ const INPUT_CLASS =
 
 const CRON_INPUT_CLASS =
   `bg-[#0f1419] border border-[#424753]/40 rounded-lg px-2.5 py-1.5 text-[14px] text-slate-200 w-full max-w-md font-mono ${FIELD_FOCUS}`;
+
+const CRON_HELP_EXAMPLES: { expr: string; meaning: string }[] = [
+  { expr: "0 3 * * *", meaning: "Every day at 03:00" },
+  { expr: "0 */6 * * *", meaning: "Every 6 hours" },
+  { expr: "0 3 * * 0", meaning: "Mondays at 03:00" },
+];
+
+function CronExpressionHelp() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div>
+      <button
+        type="button"
+        className="inline-flex items-center gap-1 text-[12px] font-headline uppercase tracking-wider text-slate-400 transition hover:text-slate-200"
+        aria-expanded={open}
+        aria-controls="cron-expression-help"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="material-symbols-outlined" style={{ fontSize: 16 }} aria-hidden>
+          {open ? "expand_less" : "expand_more"}
+        </span>
+        Cron help
+      </button>
+      {open ? (
+        <div
+          id="cron-expression-help"
+          className="mt-1.5 max-w-md space-y-2 rounded-lg border border-[#424753]/40 bg-[#0f1419]/80 px-3 py-2.5 text-[13px] leading-snug text-slate-400"
+        >
+          <p>
+            Five fields, in order: minute, hour, day-of-month, month, day-of-week (APScheduler;
+            Monday=0).
+          </p>
+          <ul className="list-disc space-y-1 pl-5">
+            <li>
+              <span className="font-mono text-slate-300">*</span> any value
+            </li>
+            <li>
+              <span className="font-mono text-slate-300">,</span> list (e.g.{" "}
+              <span className="font-mono text-slate-300">1,15</span>)
+            </li>
+            <li>
+              <span className="font-mono text-slate-300">-</span> range (e.g.{" "}
+              <span className="font-mono text-slate-300">1-5</span>)
+            </li>
+            <li>
+              <span className="font-mono text-slate-300">/</span> step (e.g.{" "}
+              <span className="font-mono text-slate-300">*/6</span>)
+            </li>
+          </ul>
+          <div className="space-y-1 pt-0.5">
+            <p className="text-[12px] font-headline uppercase tracking-wider text-slate-500">Examples</p>
+            <ul className="space-y-1">
+              {CRON_HELP_EXAMPLES.map((row) => (
+                <li key={row.expr}>
+                  <span className="font-mono text-slate-300">{row.expr}</span>
+                  <span className="text-slate-500"> · </span>
+                  {row.meaning}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 function disabledSchedule(): TaskScheduleValue {
   return {
@@ -236,8 +302,7 @@ export function ScheduleTimezoneNote(props: { name?: string | null; className?: 
   const name = String(props.name || "").trim() || "UTC";
   return (
     <p className={props.className || "text-[12px] text-slate-400"}>
-      Local timezone: <span className="text-slate-200">{name}</span>
-      {" "}(from <code className="text-[11px]">TZ</code> env; unset defaults to UTC)
+      Timezone: <span className="text-slate-200">{name}</span>
     </p>
   );
 }
@@ -293,16 +358,23 @@ export function TaskScheduleEditor(props: Props) {
   return (
     <div className={props.className || "space-y-3"}>
       {props.allowFollowGlobal ? (
-        <label className={`flex items-center gap-3 text-sm text-slate-200 select-none w-fit ${props.disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer"}`}>
-          <ToggleSwitch
-            checked={follow}
-            disabled={props.disabled}
-            accentHex={accentHex}
-            ariaLabel="Follow global collections schedule"
-            onChange={(checked) => props.onFollowGlobalChange?.(checked)}
-          />
-          Follow global collections schedule
-        </label>
+        <div className="space-y-1.5">
+          <label className={`flex items-center gap-3 text-sm text-slate-200 select-none w-fit ${props.disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer"}`}>
+            <ToggleSwitch
+              checked={follow}
+              disabled={props.disabled}
+              accentHex={accentHex}
+              ariaLabel="Follow Collections sync schedule"
+              onChange={(checked) => props.onFollowGlobalChange?.(checked)}
+            />
+            Follow Collections sync schedule
+          </label>
+          <p className="text-[12px] text-slate-500 leading-relaxed">
+            {follow
+              ? "Uses Settings → Library sync → Collections sync schedule. If that schedule is disabled, this recipe only runs manually."
+              : "Uses this recipe’s own schedule, even when the Collections sync schedule in Settings is disabled."}
+          </p>
+        </div>
       ) : null}
 
       {!follow ? (
@@ -463,9 +535,7 @@ export function TaskScheduleEditor(props: Props) {
                     }
                     aria-label="Cron expression"
                   />
-                  <p className="text-[12px] text-slate-500">
-                    Minute hour day-of-month month day-of-week (APScheduler; Monday=0).
-                  </p>
+                  <CronExpressionHelp />
                 </div>
               ) : null}
 
@@ -478,7 +548,7 @@ export function TaskScheduleEditor(props: Props) {
                       ? `Runs on selected days at ${timeLabel}.`
                       : mode === "monthly"
                         ? `Runs on day ${sched.monthday ?? 1} each month at ${timeLabel}.`
-                        : "Runs on the cron expression in the local timezone."}
+                        : "Runs on the cron expression."}
               </p>
             </div>
           ) : null}

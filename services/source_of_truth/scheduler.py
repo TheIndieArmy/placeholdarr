@@ -1,17 +1,23 @@
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Collection
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.base import BaseTrigger
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from services.app_timezone import get_app_zone, parse_hhmm
-from services.source_of_truth.scheduled_sync import run_lite_sync, run_scheduled_full_sync
+from services.source_of_truth.scheduled_sync import (
+    run_calendar_only_maintenance,
+    run_lite_sync,
+    run_scheduled_full_sync,
+)
 from services.task_schedule import (
     any_calendar_mode,
     describe_schedule,
     get_schedule_for_task,
+    next_occurrence_after,
     normalize_schedule,
     schedule_enabled,
     schedule_interval_hours,
@@ -25,12 +31,35 @@ from services.task_schedule_state import (
 )
 
 
+class _ClampedMonthlyTrigger(BaseTrigger):
+    """Monthly fires via ``next_occurrence_after`` so day 29–31 clamp on short months.
+
+    Plain ``CronTrigger(day=N)`` skips months that lack day N; our schedule math does not.
+    """
+
+    def __init__(self, sched: dict[str, Any]):
+        super().__init__()
+        self._sched = dict(sched)
+
+    def get_next_fire_time(self, previous_fire_time, now):
+        if now is None:
+            return None
+        after = previous_fire_time if previous_fire_time is not None else now
+        try:
+            nxt = next_occurrence_after(self._sched, after)
+        except ValueError:
+            return None
+        if nxt.tzinfo is None:
+            nxt = nxt.replace(tzinfo=timezone.utc)
+        return nxt
+
+
 logger = logging.getLogger("services.source_of_truth.scheduler")
 _scheduler: BackgroundScheduler | None = None
 
 JOB_ID_FULL = "source_of_truth:all_arrs"
 JOB_ID_LITE = "source_of_truth:lite_sync"
-JOB_ID_CALENDAR = "source_of_truth:calendar_date_refresh"
+JOB_ID_CALENDAR = "source_of_truth:calendar_sync"
 JOB_ID_COLLECTIONS = "collections:sync"
 
 
@@ -46,26 +75,49 @@ def _job_id_for(task_key: str) -> str | None:
         return JOB_ID_FULL
     if task_key == "lite_sync":
         return JOB_ID_LITE
+    if task_key in {"calendar_sync", "calendar_only"}:
+        return JOB_ID_CALENDAR
     if task_key == "collections_sync":
         return JOB_ID_COLLECTIONS
     return None
 
 
 def _collections_parent_schedule() -> dict[str, Any]:
-    """Effective schedule used to tick the collections APScheduler job."""
-    global_sched = get_schedule_for_task("collections_sync")
-    if not schedule_enabled(global_sched):
-        return global_sched
+    """Effective schedule used to tick the collections APScheduler job.
 
-    recipe_schedules: list[dict[str, Any] | None] = [global_sched]
+    Global Collections sync schedule is the default for recipes that follow it.
+    Recipes with their own enabled schedule still keep this job alive when the
+    global schedule is disabled (follow-global recipes stay manual-only then).
+    """
+    global_sched = get_schedule_for_task("collections_sync")
+
+    explicit_recipe_schedules: list[dict[str, Any]] = []
     try:
         from services.collections.engine import enabled_recipe_schedules
 
-        recipe_schedules.extend(enabled_recipe_schedules())
+        for raw in enabled_recipe_schedules():
+            if not isinstance(raw, dict):
+                continue
+            try:
+                sched = normalize_schedule(raw)
+            except ValueError:
+                continue
+            if schedule_enabled(sched):
+                explicit_recipe_schedules.append(sched)
     except Exception:
         pass
 
-    if any_calendar_mode(recipe_schedules):
+    candidates: list[dict[str, Any]] = []
+    if schedule_enabled(global_sched):
+        candidates.append(global_sched)
+        candidates.extend(explicit_recipe_schedules)
+    else:
+        candidates = list(explicit_recipe_schedules)
+
+    if not candidates:
+        return global_sched
+
+    if any_calendar_mode(candidates):
         # Hourly tick; per-recipe due gating decides who actually runs.
         return {
             "enabled": True,
@@ -78,7 +130,7 @@ def _collections_parent_schedule() -> dict[str, Any]:
             "cron": None,
         }
 
-    smallest = smallest_interval_hours_among(recipe_schedules)
+    smallest = smallest_interval_hours_among(candidates)
     if smallest and smallest > 0:
         hours = schedule_interval_hours(global_sched) or smallest
         return {
@@ -91,7 +143,7 @@ def _collections_parent_schedule() -> dict[str, Any]:
             "monthday": None,
             "cron": None,
         }
-    return global_sched
+    return candidates[0]
 
 
 def _trigger_for_schedule(sched: dict[str, Any]):
@@ -117,9 +169,7 @@ def _trigger_for_schedule(sched: dict[str, Any]):
         dow = ",".join(str(int(d)) for d in sorted({int(d) for d in days if 0 <= int(d) <= 6}))
         return CronTrigger(day_of_week=dow, hour=hour, minute=minute, timezone=zone)
     if mode == "monthly":
-        # Cron day=N skips short months; next_run resolution clamps via clamp_month_day.
-        md = max(1, min(31, int(sched.get("monthday") or 1)))
-        return CronTrigger(day=md, hour=hour, minute=minute, timezone=zone)
+        return _ClampedMonthlyTrigger(sched)
     return IntervalTrigger(hours=24, timezone=zone)
 
 
@@ -130,6 +180,7 @@ def _start_scheduled_job(
     label: str,
     *,
     job_id: str,
+    ignore_persisted: bool = False,
 ) -> None:
     if not schedule_enabled(sched):
         logger.info("%s scheduler disabled", label)
@@ -142,7 +193,7 @@ def _start_scheduled_job(
         return
 
     scheduler = _ensure_scheduler()
-    next_run_time = resolve_next_run_time(task_key, sched)
+    next_run_time = resolve_next_run_time(task_key, sched, ignore_persisted=ignore_persisted)
     trigger = _trigger_for_schedule(sched)
 
     try:
@@ -200,14 +251,15 @@ def _apply_next_run_to_job(
 
 def reschedule_task_after_completion(task_key: str, *, completed_at: datetime | None = None) -> None:
     """Persist and apply the next run time after manual or scheduled completion."""
-    if task_key == "collections_sync":
+    key = "calendar_sync" if task_key == "calendar_only" else str(task_key)
+    if key == "collections_sync":
         sched = _collections_parent_schedule()
     else:
-        sched = get_schedule_for_task(task_key)
+        sched = get_schedule_for_task(key)
     if not schedule_enabled(sched):
         return
-    nxt = bump_next_run_after_run(task_key, sched, completed_at=completed_at)
-    _apply_next_run_to_job(task_key, nxt, sched)
+    nxt = bump_next_run_after_run(key, sched, completed_at=completed_at)
+    _apply_next_run_to_job(key, nxt, sched)
 
 
 def reschedule_after_full_sync_success(*, completed_at: datetime | None = None) -> None:
@@ -231,25 +283,40 @@ def _run_collections_sync_scheduled():
     run_collections_sync(trigger="scheduled")
 
 
+def _run_calendar_sync_scheduled():
+    run_calendar_only_maintenance(trigger="scheduled")
+
+
 def refresh_collections_schedule() -> None:
-    """Re-apply the collections job after recipe schedule overrides change."""
+    """Re-apply the collections job after recipe schedule overrides change.
+
+    Always drops the persisted next-run so a far-future global tick cannot stick
+    after the parent cadence switches to hourly (calendar recipe overrides).
+    """
     _start_scheduled_job(
         "collections_sync",
         _collections_parent_schedule(),
         _run_collections_sync_scheduled,
         "Collections sync",
         job_id=JOB_ID_COLLECTIONS,
+        ignore_persisted=True,
     )
 
 
-def refresh_all_schedules() -> None:
-    """Rebuild full/lite/collections jobs from current settings (no process restart)."""
-    schedule_all_syncs()
+def refresh_all_schedules(*, reset_next_run_for: Collection[str] | None = None) -> None:
+    """Rebuild full/lite/collections jobs from current settings (no process restart).
+
+    ``reset_next_run_for``: task keys whose persisted next-run should be cleared so the
+    new cadence takes effect immediately (settings save). Startup rebuilds omit this
+    and keep persisted clocks.
+    """
+    schedule_all_syncs(reset_next_run_for=reset_next_run_for)
 
 
-def schedule_all_syncs():
+def schedule_all_syncs(*, reset_next_run_for: Collection[str] | None = None):
     """Schedule full, lite, and collections jobs from JSON schedules."""
     global _scheduler
+    reset = {str(k).strip().lower() for k in (reset_next_run_for or ())}
 
     _start_scheduled_job(
         "full_sync",
@@ -257,6 +324,7 @@ def schedule_all_syncs():
         _run_all_syncs_scheduled,
         "All ARRs (full sync)",
         job_id=JOB_ID_FULL,
+        ignore_persisted="full_sync" in reset,
     )
 
     lite_sched = get_schedule_for_task("lite_sync")
@@ -266,6 +334,7 @@ def schedule_all_syncs():
         _run_lite_sync_scheduled,
         "Lite sync",
         job_id=JOB_ID_LITE,
+        ignore_persisted="lite_sync" in reset,
     )
 
     _start_scheduled_job(
@@ -274,53 +343,17 @@ def schedule_all_syncs():
         _run_collections_sync_scheduled,
         "Collections sync",
         job_id=JOB_ID_COLLECTIONS,
+        ignore_persisted="collections_sync" in reset,
     )
 
-    from core.config import settings
-
-    calendar_hours = int(getattr(settings, "CALENDAR_SYNC_INTERVAL_HOURS", 0) or 0)
-    lite_on = schedule_enabled(lite_sched)
-    if not lite_on and calendar_hours > 0:
-        from services.source_of_truth.scheduled_sync import run_calendar_only_maintenance
-
-        def _legacy_calendar_scheduled():
-            run_calendar_only_maintenance(trigger="scheduled")
-
-        scheduler = _ensure_scheduler()
-        legacy = {
-            "enabled": True,
-            "mode": "interval",
-            "interval_hours": max(1, calendar_hours),
-            "time": None,
-            "weekday": None,
-            "monthday": None,
-        }
-        cal_next = resolve_next_run_time("lite_sync", legacy)
-        try:
-            scheduler.add_job(
-                _legacy_calendar_scheduled,
-                trigger=IntervalTrigger(hours=max(1, calendar_hours), timezone=get_app_zone()),
-                id=JOB_ID_CALENDAR,
-                replace_existing=True,
-                max_instances=1,
-                coalesce=True,
-                next_run_time=cal_next,
-            )
-        except Exception:
-            logger.exception("Failed to start legacy calendar scheduler")
-    else:
-        if _scheduler is not None:
-            try:
-                if _scheduler.get_job(JOB_ID_CALENDAR):
-                    _scheduler.remove_job(JOB_ID_CALENDAR)
-            except Exception:
-                pass
-        if calendar_hours > 0 and lite_on:
-            logger.info(
-                "CALENDAR_SYNC_INTERVAL_HOURS ignored while lite sync is enabled "
-                "(lite sync includes calendar date refresh and calendar phase)",
-                extra={"emoji_type": "info"},
-            )
+    _start_scheduled_job(
+        "calendar_sync",
+        get_schedule_for_task("calendar_sync"),
+        _run_calendar_sync_scheduled,
+        "Calendar sync",
+        job_id=JOB_ID_CALENDAR,
+        ignore_persisted="calendar_sync" in reset,
+    )
 
     if _scheduler and not _scheduler.running:
         _scheduler.start()
@@ -357,11 +390,25 @@ def get_scheduled_task_metadata() -> dict[str, Any]:
             "schedule_label": "Disabled",
             "timezone": tz_name,
         },
+        "calendar_sync": {
+            "enabled": False,
+            "interval_hours": 0,
+            "next_run": None,
+            "schedule": None,
+            "schedule_label": "Disabled",
+            "timezone": tz_name,
+        },
     }
-    for task_key in ("full_sync", "lite_sync", "collections_sync"):
-        sched = get_schedule_for_task(task_key)
+    for task_key in ("full_sync", "lite_sync", "collections_sync", "calendar_sync"):
+        # Collections job may run on a faster parent tick than the global setting
+        # (hourly when any enabled recipe uses a calendar cadence).
+        raw_sched = (
+            _collections_parent_schedule()
+            if task_key == "collections_sync"
+            else get_schedule_for_task(task_key)
+        )
         try:
-            sched = normalize_schedule(sched)
+            sched = normalize_schedule(raw_sched)
         except ValueError:
             sched = {
                 "enabled": False,

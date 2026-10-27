@@ -9,29 +9,54 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Added
+
+- **DaysUntilPlusOne token**: Calendar Coming Soon templates can use `{DaysUntilPlusOne}` (DaysUntil + 1) for day-later countdowns when Arr dates are treated as US release days.
+
+### Fixed
+
+- **Calendar message tokens**: `{ReleaseDate}` and media/episode tokens listed in Status Updates are now populated when Coming Soon messages render (they were allowed in the picker but empty at runtime).
+- **Queue Monitor token picker**: Allowed tokens trimmed to `{Sep}` and `{Progress}`; media/episode chips that never had render data are no longer offered.
+
+## Pre-release
+
+## Released
+
+## [0.11.6] - 2026-10-27
+
 ### Summary
 
-- **Task schedules**: Full, lite, and collections use Interval, Daily, Weekly, Monthly, or Cron in local TZ.
-- **Timezone**: Compose/env `TZ` (commented America/New_York example); Coming Soon and seasonal windows use local civil date.
+- **Task schedules**: Full, lite, calendar, and collections use Interval, Daily, Weekly, Monthly, or Cron.
+- **Calendar sync task**: Coming Soon date/status maintenance is scheduled separately from lite sync.
+- **Startup**: Dropped Startup ARR sync mode; boot runs overdue full, then lite, then calendar (plus first-full safety).
+- **Timezone**: Compose/env `TZ`; Coming Soon and seasonal windows use local civil date.
 - **Settings save**: Changing schedules rebuilds APScheduler jobs immediately (no restart).
 - **Clock format**: Settings Library sync 12-hour / 24-hour choice drives schedule pickers and next-run clocks.
+- **Title refresh countdown**: Single-item library refresh re-applies Coming Soon status after Arr dates sync.
 
 ### Added
 
 - **Task schedule modes**: Interval (every N hours), Daily at HH:MM, Weekly on weekdays, Monthly on day-of-month (clamped on short months), and 5-field Cron.
 - **Compose/env TZ**: Documented `TZ` for Docker (commented) and local `.env.example`; schedules and “today” use that zone (UTC if unset).
-- **Settings timezone note**: Library sync shows the active IANA timezone from `TZ`.
+- **Settings timezone note**: Library sync Schedule shows `Timezone: <IANA name>`.
 - **Per-recipe run_schedule**: Collection recipes can override the global collections schedule with the same modes (or follow global).
-- **What's New (schedules)**: Ack notice for timezone + calendar schedules (`since_version` 0.11.6).
+- **What's New (0.11.6)**: Ack notice for compose TZ, flexible schedules, Calendar sync as its own task, and startup overdue catch-up.
 - **Clock format setting**: `UI_CLOCK_FORMAT` (12h / 24h) in Library sync for schedule times and Tasks next-run display.
+- **Calendar sync schedule**: `CALENDAR_SYNC_SCHEDULE` in Library sync; Tasks row for Calendar sync (default every 12 hours).
+- **Cron help**: Click-to-open symbols and examples next to the cron expression field (APScheduler Monday=0).
 
 ### Changed
 
 - **Hour-interval migration**: Legacy `*_INTERVAL_HOURS` values migrate into JSON schedules (168 → weekly Sunday 03:00; 12 → interval 12h; 24 → daily 03:00).
-- **Tasks scheduled table**: Shows schedule label plus absolute next-run clock and timezone.
+- **Tasks scheduled table**: Shows schedule label plus absolute next-run clock (app TZ; no zone name suffix).
 - **Civil date helpers**: Determination, calendar, overlays, and seasonal windows use app-local today instead of UTC midnight.
 - **Branded time picker**: Schedule “At” control matches the chosen 12h or 24h clock format.
 - **Library sync settings layout**: Schedule, Placeholder rules, then Tag policies (Settings and onboarding).
+- **Tasks collections label**: Shows the effective parent tick (often hourly) when recipes use calendar cadences.
+- **Schedule field copy**: Shorter full/lite/collections/calendar descriptions.
+- **Lite sync scope**: No longer embeds calendar date refresh / calendar phase (use Calendar sync).
+- **Removed Startup ARR sync mode**: Boot catch-up is overdue schedules only (plus first full when needed).
+- **Removed Calendar sync interval (hours)**: Replaced by Calendar sync schedule under Library sync.
 
 ### Fixed
 
@@ -39,10 +64,12 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Next-run clock zone**: Tasks absolute next-run uses the app `TZ`, not the browser zone.
 - **Disabled recipe schedule**: Explicit Disabled overrides stay off the global collections tick (no longer treated as Follow global).
 - **Collections schedule column**: Shows Daily / Weekly / Monthly / Cron / Disabled from `run_schedule` instead of always “App default”.
-
-## Pre-release
-
-## Released
+- **Stale collections next-run**: Recipe or settings cadence changes clear the persisted next-run so the new parent tick applies immediately.
+- **Monthly short months**: Monthly APScheduler fires use clamped day-of-month (same as next-run math), not raw cron `day=N`.
+- **Recipe schedules without global**: Enabled per-recipe schedules still tick when Collections sync schedule is disabled; follow-global recipes stay manual-only then.
+- **Title refresh Coming Soon**: Single-item refresh re-evaluates calendar status after Arr date sync so countdown text updates before NFO/player refresh.
+- **Calendar history alias**: Latest-run / working lookups treat legacy `calendar_only` rows as `calendar_sync` so overdue and catch-up stay honest after the rename.
+- **Calendar sync live phases**: Phase bars mark done after the `calendar_sync` rename (were stuck pending).
 
 ## [0.11.5] - 2026-10-22
 

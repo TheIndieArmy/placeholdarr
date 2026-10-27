@@ -38,7 +38,8 @@ router = APIRouter()
 TASK_LABELS = {
     "full_sync": "Full ARR sync",
     "lite_sync": "Lite sync",
-    "calendar_only": "Calendar only",
+    "calendar_sync": "Calendar sync",
+    "calendar_only": "Calendar sync",  # legacy task_key alias
     "placeholder_refresh": "Metadata & art refresh",
     "collections_sync": "Collections sync",
 }
@@ -126,7 +127,10 @@ def _serialize_run(row: ScheduledTaskRun) -> dict[str, Any]:
 
 
 class TaskRunRequest(BaseModel):
-    task_key: str = Field(..., description="full_sync | lite_sync | calendar_only | placeholder_refresh | collections_sync")
+    task_key: str = Field(
+        ...,
+        description="full_sync | lite_sync | calendar_sync | calendar_only | placeholder_refresh | collections_sync",
+    )
     metadata: bool | None = Field(None, description="When task_key=placeholder_refresh, run metadata refresh phase")
     art: bool | None = Field(None, description="When task_key=placeholder_refresh, run art refresh phase")
 
@@ -154,7 +158,7 @@ async def tasks_scheduled():
     else:
         clock_format = "12h"
     rows = []
-    for task_key in ("full_sync", "lite_sync", "collections_sync"):
+    for task_key in ("full_sync", "lite_sync", "calendar_sync", "collections_sync"):
         sched = meta.get(task_key) or {}
         interval = int(sched.get("interval_hours") or 0)
         schedule_label = str(sched.get("schedule_label") or _interval_label(interval))
@@ -233,7 +237,9 @@ async def tasks_abandon(body: TaskAbandonRequest | None = None):
 @router.post("/api/tasks/run")
 async def tasks_run(body: TaskRunRequest):
     key = str(body.task_key or "").strip().lower()
-    if key not in {"full_sync", "lite_sync", "calendar_only", "placeholder_refresh", "collections_sync"}:
+    if key == "calendar_only":
+        key = "calendar_sync"
+    if key not in {"full_sync", "lite_sync", "calendar_sync", "placeholder_refresh", "collections_sync"}:
         raise HTTPException(status_code=400, detail=f"Unknown task_key: {key}")
 
     if key == "full_sync":
@@ -249,6 +255,14 @@ async def tasks_run(body: TaskRunRequest):
             or is_full_sync_active()
         ):
             raise HTTPException(status_code=409, detail="Task already running: lite or full sync in progress")
+    elif key == "calendar_sync":
+        if (
+            get_working_run("calendar_sync")
+            or get_working_run("calendar_only")
+            or get_working_run("full_sync")
+            or is_full_sync_active()
+        ):
+            raise HTTPException(status_code=409, detail="Task already running: calendar or full sync in progress")
     elif key == "placeholder_refresh":
         if get_working_run("placeholder_refresh") or get_working_run("full_sync") or is_full_sync_active():
             raise HTTPException(
@@ -268,6 +282,8 @@ async def tasks_run(body: TaskRunRequest):
                 run_scheduled_full_sync(trigger="manual")
             elif key == "lite_sync":
                 run_lite_sync(trigger="manual")
+            elif key == "calendar_sync":
+                run_calendar_only_maintenance(trigger="manual")
             elif key == "placeholder_refresh":
                 run_placeholder_refresh_task(
                     trigger="manual",
@@ -279,8 +295,6 @@ async def tasks_run(body: TaskRunRequest):
                 from services.collections.scheduled import run_collections_sync
 
                 run_collections_sync(trigger="manual")
-            else:
-                run_calendar_only_maintenance(trigger="manual")
         except Exception as exc:
             logger.error("Manual task run failed task_key=%s: %s", key, exc, extra={"emoji_type": "error"})
 

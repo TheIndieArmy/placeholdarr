@@ -294,22 +294,20 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         cta_path="/collections",
     ),
     WhatsNewNotice(
-        id="task-schedules-timezone-0-11-6",
+        id="schedules-calendar-startup-0-11-6",
         since_version="0.11.6",
-        title="Local timezone and calendar task schedules",
+        title="Timezone, schedules, and Calendar sync",
         body=(
-            "Full, lite, and collections schedules are no longer hour-interval only. "
-            "In Settings → Library sync (and onboarding), each task can use Interval "
-            "(every N hours), Daily, Weekly (choose weekdays), Monthly (day of month; "
-            "short months clamp to the last day), or a 5-field Cron expression.\n\n"
-            "Wall-clock times use the container or process TZ environment variable "
-            "(IANA name such as America/New_York). Unset TZ defaults to UTC. "
-            "Docker Compose documents a commented TZ example; local/non-Docker runs "
-            "can set TZ in .env. Coming Soon “today”, seasonal collection windows, "
-            "and related date logic use the same local calendar day.\n\n"
-            "Saving schedule settings rebuilds the live scheduler without a restart. "
-            "Existing hour-interval values migrate automatically (for example 168h → "
-            "weekly Sunday 03:00, 12h → every 12 hours, 24h → daily 03:00)."
+            "You can set a timezone with the TZ environment variable in Docker Compose, "
+            "and Placeholdarr will respect it throughout. If TZ is not set, Placeholdarr "
+            "continues to use UTC.\n\n"
+            "Task scheduling is more flexible. Tasks can now use Interval, Daily, Weekly, "
+            "Monthly, or Cron in Settings → Library sync.\n\n"
+            "Calendar sync is now its own task for Coming Soon dates and countdowns "
+            "(with a Tasks row). Lite stays focused on Arr catalog changes; full sync still "
+            "includes calendar work.\n\n"
+            "Startup ARR sync mode is gone. Tasks follow the schedules you set, and if the "
+            "app was offline past a scheduled time, that work runs automatically on startup."
         ),
         cta_label="Open Library sync",
         cta_path="/settings/library-sync",
