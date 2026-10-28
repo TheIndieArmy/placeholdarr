@@ -711,8 +711,8 @@ def scan_once_if_needed(
         if not roots:
             logger.warning('No library roots configured; skipping FS scan', extra={'emoji_type': 'warning'})
             return 0, {'reason': 'no_roots'}
-        interval_h = int(getattr(settings, "FULL_SYNC_INTERVAL_HOURS", 0) or 0)
-        use_incremental = bool(prefer_incremental and interval_h > 0)
+        from services.task_schedule import get_schedule_for_task, schedule_enabled
+        use_incremental = bool(prefer_incremental and schedule_enabled(get_schedule_for_task("full_sync")))
         created, scan_meta = scan_placeholder_roots(
             roots,
             full_scan=not use_incremental,

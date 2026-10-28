@@ -293,6 +293,26 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         cta_label="Open Collections",
         cta_path="/collections",
     ),
+    WhatsNewNotice(
+        id="schedules-calendar-startup-0-11-6",
+        since_version="0.11.6",
+        title="Timezone, schedules, and Calendar sync",
+        body=(
+            "You can set a timezone with the TZ environment variable in Docker Compose, "
+            "and Placeholdarr will respect it throughout. If TZ is not set, Placeholdarr "
+            "continues to use UTC.\n\n"
+            "Task scheduling is more flexible. Tasks can now use Interval, Daily, Weekly, "
+            "Monthly, or Cron in Settings → Library sync.\n\n"
+            "Calendar sync is now its own task for Coming Soon dates and countdowns "
+            "(with a Tasks row). Lite stays focused on Arr catalog changes; full sync still "
+            "includes calendar work.\n\n"
+            "Startup ARR sync mode is gone. Tasks follow the schedules you set, and if the "
+            "app was offline past a scheduled time, that work runs automatically on startup."
+        ),
+        cta_label="Open Library sync",
+        cta_path="/settings/library-sync",
+        requires_ack=True,
+    ),
 )
 
 

@@ -11,7 +11,7 @@ import {
   type TaskLiveProgressModel,
 } from "./TaskLiveProgress";
 import { detailSectionPhaseKey, hydratePhaseMetrics, taskLiveFromApi } from "./taskLiveProgress";
-import { formatTaskDuration, formatTaskTrigger, timeAgo, timeUntil } from "./formatActivityTime";
+import { formatNextRunClock, formatTaskDuration, formatTaskTrigger, timeAgo, timeUntil } from "./formatActivityTime";
 import { TASK_KEYS_WITH_STOP_SUPPORT, TASK_STOP_CONFIRM_MESSAGE } from "./taskStopConfirm";
 
 type StripAccent = { hex: string; text: string; icon: string; hoverHex: string };
@@ -195,7 +195,7 @@ export function TasksPanel(props: {
   themeMode: ThemeMode;
   accent: StripAccent;
   activeSearches: ActiveSearchesResponse;
-  onRequestRun: (kind: "full" | "lite") => void;
+  onRequestRun: (kind: "full" | "lite" | "calendar") => void;
   onRunCollections: () => Promise<void> | void;
   onRequestRefresh: (kind: "metadata" | "art" | "both") => Promise<void> | void;
   onStopRun: (runId: number) => Promise<void> | void;
@@ -293,7 +293,12 @@ export function TasksPanel(props: {
                     {task.label}
                     {task.task_key === "lite_sync" ? (
                       <p className="text-[12px] font-normal mt-0.5 max-w-md" style={{ color: semantic.fgSubtle }}>
-                        Catalog diff plus calendar date refresh and Coming Soon status updates.
+                        ARR catalog diff and scoped placeholder updates for changed titles.
+                      </p>
+                    ) : null}
+                    {task.task_key === "calendar_sync" ? (
+                      <p className="text-[12px] font-normal mt-0.5 max-w-md" style={{ color: semantic.fgSubtle }}>
+                        Release date refresh and Coming Soon / countdown status updates.
                       </p>
                     ) : null}
                   </td>
@@ -315,7 +320,15 @@ export function TasksPanel(props: {
                     {task.running ? (
                       <span style={{ color: semantic.accentIce }}>Running now</span>
                     ) : task.next_run ? (
-                      timeUntil(task.next_run)
+                      <span className="block">
+                        <span>{timeUntil(task.next_run)}</span>
+                        <span className="block text-[12px] mt-0.5" style={{ color: semantic.fgSubtle }}>
+                          {formatNextRunClock(task.next_run, {
+                            timeZone: task.timezone,
+                            clockFormat: task.clock_format,
+                          })}
+                        </span>
+                      </span>
                     ) : task.enabled ? (
                       "--"
                     ) : (
@@ -331,7 +344,15 @@ export function TasksPanel(props: {
                           void props.onRunCollections();
                           return;
                         }
-                        props.onRequestRun(task.task_key === "full_sync" ? "full" : "lite");
+                        if (task.task_key === "full_sync") {
+                          props.onRequestRun("full");
+                          return;
+                        }
+                        if (task.task_key === "calendar_sync") {
+                          props.onRequestRun("calendar");
+                          return;
+                        }
+                        props.onRequestRun("lite");
                       }}
                       className="inline-flex items-center justify-center w-9 h-9 rounded-lg border disabled:opacity-40"
                       style={{ borderColor: semantic.border, color: semantic.fgMuted }}

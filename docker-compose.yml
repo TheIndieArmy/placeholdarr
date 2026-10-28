@@ -18,6 +18,9 @@ services:
       DB_NAME: placeholdarr
       PUID: 1000
       PGID: 1000
+      # IANA timezone for schedules (Daily/Weekly/Monthly/Cron) and Coming Soon "today".
+      # Unset defaults to UTC. Example:
+      # TZ: America/New_York
       # Optional: change the container listen port (default 8000). The right side of
       # ports: below must match. Host-only remaps keep the right side at 8000.
       # PLACEHOLDARR_PORT: "8000"

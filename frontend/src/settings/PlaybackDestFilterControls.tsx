@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { BrandCheckbox } from "../BrandCheckbox";
 import { UI_SECTION_FRAME_CLASS } from "../uiSectionFrame";
 
 export type PlaybackDestOptions = {
@@ -117,14 +118,14 @@ function DestGroup(props: {
                   }`}
                   title={title}
                 >
-                  <input
-                    type="checkbox"
-                    className="mt-1"
+                  <BrandCheckbox
                     checked={checked}
                     disabled={rowDisabled}
-                    onChange={(e) => {
+                    align="start"
+                    ariaLabel={path}
+                    onChange={(next) => {
                       if (blocked) return;
-                      props.onChange(togglePath(props.selected, path, e.target.checked));
+                      props.onChange(togglePath(props.selected, path, next));
                     }}
                   />
                   <span

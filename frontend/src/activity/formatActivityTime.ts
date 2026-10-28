@@ -1,3 +1,5 @@
+import { formatDateTimeInZone, parseClockFormat, type ClockFormat } from "../clockFormat";
+
 export function timeAgo(iso: string | null | undefined): string {
   if (!iso) return "--";
   const d = new Date(iso);
@@ -16,12 +18,22 @@ export function timeUntil(iso: string | null | undefined): string {
   if (!Number.isFinite(t)) return "--";
   const diffMs = t - Date.now();
   if (diffMs <= 0) return "now";
-  const mins = Math.floor(diffMs / 60000);
+  // Round up sub-minute remainders so we never show "in 0 min".
+  const mins = Math.max(1, Math.floor(diffMs / 60000));
   if (mins < 60) return `in ${mins} min`;
   const hours = Math.floor(mins / 60);
   if (hours < 48) return `in ${hours} hr`;
   const days = Math.floor(hours / 24);
   return `in ${days} day${days === 1 ? "" : "s"}`;
+}
+
+/** Absolute next-run clock in the app timezone (not the browser zone). */
+export function formatNextRunClock(
+  iso: string | null | undefined,
+  opts?: { timeZone?: string | null; clockFormat?: ClockFormat | string | null },
+): string {
+  const format = parseClockFormat(opts?.clockFormat);
+  return formatDateTimeInZone(iso, opts?.timeZone, format);
 }
 
 export function formatTaskDuration(seconds: number | null | undefined): string {

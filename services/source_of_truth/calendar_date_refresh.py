@@ -10,6 +10,7 @@ from services.postgres.db import get_session
 from services.postgres.models import Episode, Movie, Season, Series
 from services.source_of_truth.arr_api import fetch_radarr_calendar, fetch_sonarr_calendar
 from services.source_of_truth.sync_runner import _extract_date
+from services.app_timezone import local_today
 
 _PAST_DAYS = 7
 _FUTURE_BUFFER_DAYS = 7
@@ -52,7 +53,7 @@ def run_calendar_date_refresh() -> dict:
     without running a full content sync.
     """
     lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
-    now_date = datetime.now(timezone.utc).date()
+    now_date = local_today()
     start_date, end_date = _window_bounds(now_date, lookahead_days)
 
     stats = {

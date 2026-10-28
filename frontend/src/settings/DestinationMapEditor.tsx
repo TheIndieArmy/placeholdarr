@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { ensureDestFolder, getArrRootFolders } from "../api/dashboard";
 import { getCollectionPlexSections } from "../api/collections";
+import { BrandCheckbox } from "../BrandCheckbox";
+import { BrandSelect } from "../BrandSelect";
 import type { PlexSectionOption } from "../types/api";
 
 export type DestinationMapRow = {
@@ -617,11 +619,12 @@ export function DestinationMapEditor(props: {
                           lockedOut ? "cursor-not-allowed opacity-45" : "cursor-pointer"
                         }`}
                       >
-                        <input
-                          type="checkbox"
-                          className="mt-1"
+                        <BrandCheckbox
                           checked={checked}
                           disabled={lockedOut}
+                          size="sm"
+                          align="start"
+                          ariaLabel={`${item.label} (${item.arr_type})`}
                           onChange={() => toggleInstance(item)}
                         />
                         <span className="min-w-0 text-[14px] text-slate-200">
@@ -674,11 +677,12 @@ export function DestinationMapEditor(props: {
                                 taken ? "cursor-not-allowed opacity-45" : "cursor-pointer"
                               }`}
                             >
-                              <input
-                                type="checkbox"
-                                className="mt-1"
+                              <BrandCheckbox
                                 checked={checked}
                                 disabled={taken}
+                                size="sm"
+                                align="start"
+                                ariaLabel={folder.path}
                                 onChange={() => toggleRoot(inst, folder.path)}
                               />
                               <span className="min-w-0">
@@ -734,22 +738,26 @@ export function DestinationMapEditor(props: {
                   use the default Movies/TV section under Library Root.
                 </p>
               ) : (
-                <select
-                  className={`w-full rounded-lg border border-[#424753]/40 bg-[#0f1419] px-3 py-2 text-[16px] text-slate-200 outline-none ${props.focusClass}`}
+                <BrandSelect
+                  fullWidth
                   value={draft.plex_section_id === "" ? "" : String(draft.plex_section_id)}
-                  onChange={(e) =>
+                  options={[
+                    {
+                      value: "",
+                      label: `Use default ${sectionType === "movie" ? "Movies" : "TV"} library`,
+                    },
+                    ...sectionOptions.map((s) => ({
+                      value: String(s.id),
+                      label: `${s.title} (#${s.id})`,
+                    })),
+                  ]}
+                  onChange={(value) =>
                     patchDraft({
-                      plex_section_id: e.target.value ? Number(e.target.value) : "",
+                      plex_section_id: value ? Number(value) : "",
                     })
                   }
-                >
-                  <option value="">Use default {sectionType === "movie" ? "Movies" : "TV"} library</option>
-                  {sectionOptions.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.title} (#{s.id})
-                    </option>
-                  ))}
-                </select>
+                  ariaLabel="Plex library override"
+                />
               )}
             </div>
           ) : (

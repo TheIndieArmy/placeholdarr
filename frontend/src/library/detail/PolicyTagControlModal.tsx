@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ThemeMode } from "../../brandTypes";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../../brandAccentUi";
+import { ToggleSwitch } from "../../ToggleSwitch";
 import type { PolicyTagControl } from "../../types/api";
 
 export function PolicyTagControlModal(props: {
@@ -71,13 +72,14 @@ export function PolicyTagControlModal(props: {
               Remove from {props.arrLabel}
             </div>
             {neverTags.length ? (
-              <label className={`flex items-start gap-3 ${props.busy ? "opacity-60" : "cursor-pointer"}`}>
-                <input
-                  type="checkbox"
-                  className="mt-1"
+              <label className={`flex items-start gap-3 select-none ${props.busy ? "opacity-60 cursor-not-allowed" : "cursor-pointer"}`}>
+                <ToggleSwitch
                   checked={removeNever}
                   disabled={props.busy}
-                  onChange={(e) => setRemoveNever(e.target.checked)}
+                  accentHex={props.accentHex}
+                  ariaLabel="Remove Never tags"
+                  onChange={setRemoveNever}
+                  className="mt-0.5"
                 />
                 <span className="min-w-0">
                   <span className={`block text-[13px] font-headline uppercase tracking-wider ${isLight ? "text-slate-500" : "text-slate-400"}`}>
@@ -90,13 +92,14 @@ export function PolicyTagControlModal(props: {
               </label>
             ) : null}
             {pinnedTags.length ? (
-              <label className={`flex items-start gap-3 ${props.busy ? "opacity-60" : "cursor-pointer"}`}>
-                <input
-                  type="checkbox"
-                  className="mt-1"
+              <label className={`flex items-start gap-3 select-none ${props.busy ? "opacity-60 cursor-not-allowed" : "cursor-pointer"}`}>
+                <ToggleSwitch
                   checked={removePinned}
                   disabled={props.busy}
-                  onChange={(e) => setRemovePinned(e.target.checked)}
+                  accentHex={props.accentHex}
+                  ariaLabel="Remove Pinned tags"
+                  onChange={setRemovePinned}
+                  className="mt-0.5"
                 />
                 <span className="min-w-0">
                   <span className={`block text-[13px] font-headline uppercase tracking-wider ${isLight ? "text-slate-500" : "text-slate-400"}`}>

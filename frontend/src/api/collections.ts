@@ -34,6 +34,7 @@ export interface RecipeWritePayload {
   collection_title: string;
   definition: CollectionDefinition;
   run_interval_hours: number | null;
+  run_schedule?: Record<string, unknown> | null;
   active_window: CollectionActiveWindow | null;
 }
 

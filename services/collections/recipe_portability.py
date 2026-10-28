@@ -48,6 +48,9 @@ def portable_recipe(row_payload: dict[str, Any]) -> dict[str, Any]:
         "collection_title": str(row_payload.get("collection_title") or "").strip(),
         "definition": definition,
         "run_interval_hours": row_payload.get("run_interval_hours"),
+        "run_schedule": row_payload.get("run_schedule")
+        if isinstance(row_payload.get("run_schedule"), dict)
+        else None,
         "active_window": row_payload.get("active_window")
         if isinstance(row_payload.get("active_window"), dict)
         else None,
@@ -134,6 +137,20 @@ def prepare_import_recipe(
         if interval < 1 or interval > 24 * 14:
             raise RecipeValidationError(f"run_interval_hours out of range on {name!r}")
 
+    run_schedule = raw.get("run_schedule") if isinstance(raw.get("run_schedule"), dict) else None
+    if run_schedule is not None:
+        try:
+            from services.task_schedule import normalize_schedule, schedule_interval_hours
+
+            run_schedule = normalize_schedule(run_schedule)
+            if str(run_schedule.get("mode") or "") == "interval":
+                interval = schedule_interval_hours(run_schedule) or interval
+            elif not run_schedule.get("enabled"):
+                run_schedule = None
+                interval = None
+        except ValueError as exc:
+            raise RecipeValidationError(f"Invalid run_schedule on {name!r}: {exc}") from exc
+
     return {
         "name": name[:200],
         "enabled": bool(raw.get("enabled", True)),
@@ -143,6 +160,7 @@ def prepare_import_recipe(
         "collection_title": title[:200],
         "definition": normalized,
         "run_interval_hours": interval,
+        "run_schedule": run_schedule,
         "active_window": window,
     }
 

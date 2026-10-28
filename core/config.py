@@ -209,20 +209,22 @@ class Settings(BaseSettings):
     # service name when the dashboard is reached via a public reverse proxy.
     WEBHOOK_BASE_URL: str = os.getenv("WEBHOOK_BASE_URL", "").split('#')[0].strip().rstrip("/")
 
-    # Startup sync mode:
-    # - auto: first successful ARR startup run is full, then lite on later startups
-    # - full: always run full ARR startup sync
-    # - lite: run ARR history delta catch-up only
-    # - off: skip ARR startup sync
-    STARTUP_SYNC_MODE: Literal["auto", "full", "lite", "off"] = "auto"
     # ARR startup check mode:
     # - off: skip ARR preflight checks
     # - config: verify configured URL/API-key pairs only
     # - live: make live ARR API calls to verify reachability/auth
     STARTUP_ARR_CHECK_MODE: Literal["off", "config", "live"] = "live"
+    # Legacy hour intervals (migrated into *_SCHEDULE on boot; kept for read fallback).
     FULL_SYNC_INTERVAL_HOURS: int = 168
-    # Lite sync: ARR catalog diff + calendar date refresh + calendar phase (replaces separate calendar cron when > 0).
+    # Lite sync: ARR catalog diff + scoped determine/materialize (calendar is a separate schedule).
     LITE_SYNC_INTERVAL_HOURS: int = 12
+    # JSON schedules: Interval | Daily | Weekly | Monthly | Cron (see services.task_schedule).
+    FULL_SYNC_SCHEDULE: Optional[dict] = None
+    LITE_SYNC_SCHEDULE: Optional[dict] = None
+    COLLECTIONS_SYNC_SCHEDULE: Optional[dict] = None
+    CALENDAR_SYNC_SCHEDULE: Optional[dict] = None
+    # Dashboard clock display for schedules / next-run (values still stored as HH:MM).
+    UI_CLOCK_FORMAT: str = "12h"
     # Arr tag labels (JSON string arrays) that drive Never / Pinned placeholder policy on sync.
     PLACEHOLDER_POLICY_NEVER_TAGS: str = '["placeholdarr-never"]'
     PLACEHOLDER_POLICY_PINNED_TAGS: str = '["placeholdarr-pinned"]'
@@ -234,7 +236,7 @@ class Settings(BaseSettings):
     # Optional outbound Tautulli API for Collections "most played" sources.
     TAUTULLI_URL: Optional[str] = None
     TAUTULLI_API_KEY: Optional[str] = None
-    # How often to run enabled collection recipes. <= 0 disables the scheduled job.
+    # Legacy: how often to run enabled collection recipes. Prefer COLLECTIONS_SYNC_SCHEDULE.
     COLLECTIONS_SYNC_INTERVAL_HOURS: int = 24
 
     # Dashboard authentication (see services/auth.py). Env AUTH_MODE overrides DB when set.
@@ -391,8 +393,7 @@ class Settings(BaseSettings):
     #   - -1 (negative): infinite lookahead; future items can remain Coming Soon
     # Default: 30 days
     CALENDAR_LOOKAHEAD_DAYS: int = 30
-    # Calendar scheduler cadence (independent from full sync).
-    # <= 0 disables independent calendar scheduler.
+    # Legacy calendar interval hours (migrated into CALENDAR_SYNC_SCHEDULE; 0 meant "piggyback on lite").
     CALENDAR_SYNC_INTERVAL_HOURS: int = 0
     PREFERRED_MOVIE_DATE_TYPE: str = "inCinemas"
     ENABLE_COMING_SOON_COUNTDOWN: bool = True

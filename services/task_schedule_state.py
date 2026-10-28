@@ -4,16 +4,26 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from core.logger import logger
 from services.postgres.db import get_session
 from services.postgres.models import AppConfig
 from services.task_run_history import latest_finished_run
+from services.task_schedule import (
+    bump_next_run_for_schedule,
+    next_occurrence_after,
+    normalize_schedule,
+    schedule_enabled,
+)
 
 _TASK_KEYS = {
     "full_sync": "SCHEDULED_TASK_NEXT_RUN_FULL_SYNC",
     "lite_sync": "SCHEDULED_TASK_NEXT_RUN_LITE_SYNC",
     "collections_sync": "SCHEDULED_TASK_NEXT_RUN_COLLECTIONS_SYNC",
+    "calendar_sync": "SCHEDULED_TASK_NEXT_RUN_CALENDAR_SYNC",
+    # Legacy alias used by older calendar-only task runs.
+    "calendar_only": "SCHEDULED_TASK_NEXT_RUN_CALENDAR_SYNC",
 }
 
 CATCH_UP_MINUTES = 2
@@ -82,17 +92,44 @@ def persist_next_run(task_key: str, next_run: datetime) -> None:
         session.close()
 
 
-def is_task_overdue(task_key: str, interval_hours: int, *, now: datetime | None = None) -> bool:
+def clear_persisted_next_run(task_key: str) -> None:
+    """Drop stored next-run so the next resolve recomputes from the current schedule."""
+    key = _TASK_KEYS.get(str(task_key).strip().lower())
+    if not key:
+        return
+    session = get_session()
+    try:
+        row = session.query(AppConfig).filter(AppConfig.key == key).first()
+        if row:
+            session.delete(row)
+            session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.warning("clear_persisted_next_run failed task_key=%s: %s", task_key, exc)
+    finally:
+        session.close()
+
+
+def is_task_overdue(task_key: str, schedule: dict[str, Any] | int, *, now: datetime | None = None) -> bool:
     """True when the schedule is enabled and due.
 
-    A persisted next-run in the past means overdue (do not let a recent last-run
-    + interval hide a missed schedule clock). With no persisted next-run, fall
-    back to last finished + interval.
+    ``schedule`` may be a schedule dict or a legacy interval_hours int.
     """
-    if int(interval_hours or 0) <= 0:
-        return False
+    if isinstance(schedule, int):
+        if schedule <= 0:
+            return False
+        from services.task_schedule import interval_schedule
+
+        sched = interval_schedule(max(1, int(schedule)))
+    else:
+        try:
+            sched = normalize_schedule(schedule)
+        except ValueError:
+            return False
+        if not schedule_enabled(sched):
+            return False
+
     when = now or _utc_now()
-    safe_hours = max(1, int(interval_hours))
     persisted = get_persisted_next_run(task_key)
     if persisted is not None:
         return persisted <= when
@@ -102,17 +139,47 @@ def is_task_overdue(task_key: str, interval_hours: int, *, now: datetime | None 
         ended = last.ended_at
         if ended.tzinfo is None:
             ended = ended.replace(tzinfo=timezone.utc)
-        candidate = ended.astimezone(timezone.utc) + timedelta(hours=safe_hours)
+        candidate = bump_next_run_for_schedule(sched, completed_at=ended)
         return candidate <= when
     # Enabled schedule with no history and no persisted next-run: treat as due.
     return True
 
 
-def resolve_next_run_time(task_key: str, interval_hours: int) -> datetime:
-    """Next fire time: persisted future time, else last completion + interval, else catch-up soon."""
+def _coerce_schedule(schedule: dict[str, Any] | int) -> dict[str, Any]:
+    if isinstance(schedule, int):
+        from services.task_schedule import interval_schedule
+
+        if int(schedule) <= 0:
+            return normalize_schedule({"enabled": False})
+        return interval_schedule(max(1, int(schedule) or 1))
+    return normalize_schedule(schedule)
+
+
+def resolve_next_run_time(
+    task_key: str,
+    schedule: dict[str, Any] | int,
+    *,
+    ignore_persisted: bool = False,
+) -> datetime:
+    """Next fire time: persisted future time, else next occurrence, else catch-up soon.
+
+    When ``ignore_persisted`` is True (settings schedule change), drop the old
+    clock and compute the next occurrence of the *current* schedule after now.
+    """
     now = _utc_now()
-    safe_hours = max(1, int(interval_hours or 1))
+    sched = _coerce_schedule(schedule)
     key = str(task_key).strip().lower()
+
+    if ignore_persisted:
+        clear_persisted_next_run(key)
+        if not schedule_enabled(sched):
+            return now + timedelta(minutes=_CATCH_UP_MINUTES)
+        nxt = next_occurrence_after(sched, now)
+        if nxt.tzinfo is None:
+            nxt = nxt.replace(tzinfo=timezone.utc)
+        nxt = nxt.astimezone(timezone.utc)
+        persist_next_run(key, nxt)
+        return nxt
 
     persisted = get_persisted_next_run(key)
     if persisted and persisted > now:
@@ -128,7 +195,7 @@ def resolve_next_run_time(task_key: str, interval_hours: int) -> datetime:
         ended = last.ended_at
         if ended.tzinfo is None:
             ended = ended.replace(tzinfo=timezone.utc)
-        candidate = ended.astimezone(timezone.utc) + timedelta(hours=safe_hours)
+        candidate = bump_next_run_for_schedule(sched, completed_at=ended)
         if candidate > now:
             persist_next_run(key, candidate)
             return candidate
@@ -138,12 +205,24 @@ def resolve_next_run_time(task_key: str, interval_hours: int) -> datetime:
     return catch_up
 
 
-def bump_next_run_after_run(task_key: str, interval_hours: int, *, completed_at: datetime | None = None) -> datetime:
-    """After a successful manual or scheduled run, schedule the next interval from completion."""
-    ended = completed_at or _utc_now()
-    if ended.tzinfo is None:
-        ended = ended.replace(tzinfo=timezone.utc)
-    safe_hours = max(1, int(interval_hours or 1))
-    nxt = ended.astimezone(timezone.utc) + timedelta(hours=safe_hours)
+def bump_next_run_after_run(
+    task_key: str,
+    schedule: dict[str, Any] | int,
+    *,
+    completed_at: datetime | None = None,
+) -> datetime:
+    """After a successful manual or scheduled run, schedule the next occurrence."""
+    if isinstance(schedule, int):
+        sched = {
+            "enabled": int(schedule) > 0,
+            "mode": "interval",
+            "interval_hours": max(1, int(schedule) or 1),
+            "time": None,
+            "weekday": None,
+            "monthday": None,
+        }
+    else:
+        sched = normalize_schedule(schedule)
+    nxt = bump_next_run_for_schedule(sched, completed_at=completed_at)
     persist_next_run(task_key, nxt)
     return nxt

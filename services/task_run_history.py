@@ -351,12 +351,27 @@ def abandon_orphaned_working_task_runs(*, reason: str = "interrupted_by_restart"
     return abandoned
 
 
+def _task_keys_for_lookup(task_key: str) -> list[str]:
+    """Expand legacy aliases so history lookups stay coherent across renames."""
+    key = str(task_key or "").strip().lower()
+    if not key:
+        return []
+    # calendar_only predates calendar_sync; treat them as one schedule for overdue / last-run.
+    if key in {"calendar_sync", "calendar_only"}:
+        return ["calendar_sync", "calendar_only"]
+    return [key]
+
+
 def get_working_run(task_key: str | None = None) -> ScheduledTaskRun | None:
     session = get_session()
     try:
         q = session.query(ScheduledTaskRun).filter(ScheduledTaskRun.status == "working")
         if task_key:
-            q = q.filter(ScheduledTaskRun.task_key == str(task_key).strip().lower())
+            keys = _task_keys_for_lookup(task_key)
+            if len(keys) == 1:
+                q = q.filter(ScheduledTaskRun.task_key == keys[0])
+            else:
+                q = q.filter(ScheduledTaskRun.task_key.in_(keys))
         return q.order_by(ScheduledTaskRun.started_at.desc()).first()
     finally:
         session.close()
@@ -380,16 +395,18 @@ def list_recent_runs(*, limit: int = 50) -> list[ScheduledTaskRun]:
 
 
 def latest_finished_run(task_key: str) -> ScheduledTaskRun | None:
+    keys = _task_keys_for_lookup(task_key)
+    if not keys:
+        return None
     session = get_session()
     try:
-        return (
-            session.query(ScheduledTaskRun)
-            .filter(
-                ScheduledTaskRun.task_key == str(task_key).strip().lower(),
-                ScheduledTaskRun.status.in_(("done", "failed", "stopped", "skipped")),
-            )
-            .order_by(ScheduledTaskRun.ended_at.desc().nullslast(), ScheduledTaskRun.started_at.desc())
-            .first()
+        q = session.query(ScheduledTaskRun).filter(
+            ScheduledTaskRun.status.in_(("done", "failed", "stopped", "skipped")),
         )
+        if len(keys) == 1:
+            q = q.filter(ScheduledTaskRun.task_key == keys[0])
+        else:
+            q = q.filter(ScheduledTaskRun.task_key.in_(keys))
+        return q.order_by(ScheduledTaskRun.ended_at.desc().nullslast(), ScheduledTaskRun.started_at.desc()).first()
     finally:
         session.close()

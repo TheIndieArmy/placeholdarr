@@ -14,6 +14,7 @@ from services.messages import render as render_message
 from services.placeholders import ensure_placeholder_file, resolve_calendar_variant_dummy_path
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Movie, Placeholder
+from services.app_timezone import local_today
 from services.source_of_truth.status_intent import DisplayStatus, StatusIntent, StatusSource
 
 
@@ -61,13 +62,62 @@ def _preferred_movie_release_date(movie: Movie) -> tuple[date | None, str | None
     return (None, preferred, True)
 
 
-def _pinned_tba_reason(*, media_type: str, release_type: str | None) -> str:
+def _calendar_token_context(
+    *,
+    media_type: str,
+    target_date: date | None,
+    days_until: int | None,
+    release_type: str | None,
+    movie: Movie | None = None,
+    episode: Episode | None = None,
+    session=None,
+) -> dict[str, Any]:
+    """Build Status Updates tokens for calendar Coming Soon messages."""
+    from services.messages.template_engine import media_tokens_for_episode, media_tokens_for_movie
+    from services.postgres.models import Season, Series
+
+    ctx: dict[str, Any] = {}
+    if media_type == "movie" and release_type:
+        ctx["ReleaseLabel"] = _release_type_label(release_type)
+    if target_date is not None:
+        ctx["ReleaseDate"] = target_date.isoformat()
+    if days_until is not None:
+        ctx["DaysUntil"] = str(int(days_until))
+        ctx["DaysUntilPlusOne"] = str(int(days_until) + 1)
+    if movie is not None:
+        ctx.update(media_tokens_for_movie(movie))
+    elif episode is not None:
+        season = None
+        series = None
+        if session is not None and getattr(episode, "season_id", None) is not None:
+            season = session.get(Season, int(episode.season_id))
+            if season is not None and getattr(season, "series_id", None) is not None:
+                series = session.get(Series, int(season.series_id))
+        ctx.update(media_tokens_for_episode(episode, season, series))
+    return ctx
+
+
+def _pinned_tba_reason(
+    *,
+    media_type: str,
+    release_type: str | None,
+    movie: Movie | None = None,
+    episode: Episode | None = None,
+    session=None,
+) -> str:
     """User-facing TBD/TBA label for pinned placeholders with no release/air date."""
+    cal_ctx = _calendar_token_context(
+        media_type=media_type,
+        target_date=None,
+        days_until=None,
+        release_type=release_type,
+        movie=movie,
+        episode=episode,
+        session=session,
+    )
     if media_type == "movie":
-        release_label = _release_type_label(release_type) if release_type else ""
-        cal_ctx = {"ReleaseLabel": release_label} if release_label else {}
         return render_message("calendar.movie.tba", cal_ctx)
-    return render_message("calendar.tv.tba", {})
+    return render_message("calendar.tv.tba", cal_ctx)
 
 
 def _compute_calendar_decision(
@@ -82,6 +132,9 @@ def _compute_calendar_decision(
     release_type: str | None = None,
     release_type_preferred: bool = False,
     force_pinned: bool = False,
+    movie: Movie | None = None,
+    episode: Episode | None = None,
+    session=None,
 ) -> CalendarDecision:
     release_label = _release_type_label(release_type) if media_type == "movie" else ""
 
@@ -102,7 +155,13 @@ def _compute_calendar_decision(
         if force_pinned:
             return CalendarDecision(
                 status=DisplayStatus.COMING_SOON.value,
-                reason=_pinned_tba_reason(media_type=media_type, release_type=release_type),
+                reason=_pinned_tba_reason(
+                    media_type=media_type,
+                    release_type=release_type,
+                    movie=movie,
+                    episode=episode,
+                    session=session,
+                ),
                 days_until=None,
                 release_type=release_type,
                 release_type_preferred=release_type_preferred,
@@ -169,13 +228,21 @@ def _compute_calendar_decision(
             release_type_preferred=release_type_preferred,
         )
 
-    cal_ctx_movie = {"ReleaseLabel": release_label} if release_type else {}
+    cal_ctx = _calendar_token_context(
+        media_type=media_type,
+        target_date=target_date,
+        days_until=days_until,
+        release_type=release_type,
+        movie=movie,
+        episode=episode,
+        session=session,
+    )
 
     if not countdown_enabled:
         if media_type == "movie":
-            label = render_message("calendar.movie.generic", cal_ctx_movie)
+            label = render_message("calendar.movie.generic", cal_ctx)
         else:
-            label = render_message("calendar.tv.generic", {})
+            label = render_message("calendar.tv.generic", cal_ctx)
         return CalendarDecision(
             status=DisplayStatus.COMING_SOON.value,
             reason=label,
@@ -186,9 +253,9 @@ def _compute_calendar_decision(
 
     if days_until == 0:
         if media_type == "movie":
-            label = render_message("calendar.movie.today", cal_ctx_movie)
+            label = render_message("calendar.movie.today", cal_ctx)
         else:
-            label = render_message("calendar.tv.today", {})
+            label = render_message("calendar.tv.today", cal_ctx)
         return CalendarDecision(
             status=DisplayStatus.COMING_SOON_TODAY.value,
             reason=label,
@@ -198,21 +265,19 @@ def _compute_calendar_decision(
         )
 
     if media_type == "movie":
-        movie_ctx = {**cal_ctx_movie, "DaysUntil": str(days_until)}
         countdown_key = (
             "calendar.movie.countdown.singular"
             if days_until == 1
             else "calendar.movie.countdown.plural"
         )
-        label = render_message(countdown_key, movie_ctx)
+        label = render_message(countdown_key, cal_ctx)
     else:
-        tv_ctx = {"DaysUntil": str(days_until)}
         countdown_key = (
             "calendar.tv.countdown.singular"
             if days_until == 1
             else "calendar.tv.countdown.plural"
         )
-        label = render_message(countdown_key, tv_ctx)
+        label = render_message(countdown_key, cal_ctx)
 
     if days_until <= 6:
         status = DisplayStatus.COMING_SOON_1.value
@@ -287,7 +352,7 @@ def _dummy_variant_for_status(status: str | None) -> str:
 
 def _calendar_settings_snapshot(*, now_date: date | None = None) -> dict[str, Any]:
     """Shared calendar settings used by status, calendar phase, and materializer."""
-    resolved_now = now_date or datetime.now(timezone.utc).date()
+    resolved_now = now_date or local_today()
     return {
         "lookahead_days": int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30),
         "placeholders_enabled": bool(settings.coming_soon_placeholders_enabled),
@@ -328,6 +393,7 @@ def compute_calendar_decision_for_movie(movie: Movie, *, now_date: date | None =
         release_type=release_type,
         release_type_preferred=is_preferred,
         force_pinned=bool(getattr(movie, "force_placeholder", False)),
+        movie=movie,
     )
 
 
@@ -355,6 +421,8 @@ def compute_calendar_decision_for_episode(
         release_type=None,
         release_type_preferred=False,
         force_pinned=force_pinned,
+        episode=episode,
+        session=session,
     )
 
 
@@ -386,6 +454,8 @@ def refresh_placeholder_calendar_status(session, placeholder: Placeholder) -> bo
 
     snap = _calendar_settings_snapshot()
     force_pinned = _placeholder_force_pinned(session, placeholder)
+    movie = session.get(Movie, int(placeholder.movie_id)) if placeholder.movie_id else None
+    episode = session.get(Episode, int(placeholder.episode_id)) if placeholder.episode_id else None
     decision = _compute_calendar_decision(
         target_date=target_date,
         has_file=has_file,
@@ -397,6 +467,9 @@ def refresh_placeholder_calendar_status(session, placeholder: Placeholder) -> bo
         release_type=release_type,
         release_type_preferred=release_type_preferred,
         force_pinned=force_pinned,
+        movie=movie,
+        episode=episode,
+        session=session,
     )
 
     current_status = str(getattr(placeholder, "display_status", "") or "")
@@ -638,7 +711,7 @@ def _run_calendar_phase_inner(stats: dict[str, Any]) -> dict[str, Any]:
     lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
     placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
     countdown_enabled = bool(getattr(settings, "ENABLE_COMING_SOON_COUNTDOWN", True))
-    now_date = datetime.now(timezone.utc).date()
+    now_date = local_today()
     settings_fingerprint = _calendar_variant_settings_fingerprint()
     win_start, win_end = _calendar_phase_window_bounds(now_date, lookahead_days)
     stats["window_start"] = win_start.isoformat()
@@ -724,6 +797,10 @@ def _run_calendar_phase_inner(stats: dict[str, Any]) -> dict[str, Any]:
                     continue
 
                 force_pinned = _placeholder_force_pinned(session, placeholder)
+                movie = session.get(Movie, int(placeholder.movie_id)) if placeholder.movie_id else None
+                episode = (
+                    session.get(Episode, int(placeholder.episode_id)) if placeholder.episode_id else None
+                )
                 decision = _compute_calendar_decision(
                     target_date=target_date,
                     has_file=has_file,
@@ -735,6 +812,9 @@ def _run_calendar_phase_inner(stats: dict[str, Any]) -> dict[str, Any]:
                     release_type=release_type,
                     release_type_preferred=release_type_preferred,
                     force_pinned=force_pinned,
+                    movie=movie,
+                    episode=episode,
+                    session=session,
                 )
 
                 desired_variant = _dummy_variant_for_status(decision.status)

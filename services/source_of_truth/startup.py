@@ -1237,12 +1237,30 @@ def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
         )
         started_at = datetime.now(timezone.utc)
 
-        # Lite boot reuses the scheduled lite pipeline so Tasks/sidebar get the same live phase bars.
-        if selected_mode == "lite":
-            from services.source_of_truth.scheduled_sync import run_lite_sync
+        # Lite / calendar boot reuse scheduled pipelines so Tasks get the same live phase bars.
+        if selected_mode in {"lite", "calendar"}:
+            from services.source_of_truth.scheduled_sync import (
+                run_calendar_only_maintenance,
+                run_lite_sync,
+            )
             from services.source_of_truth.scheduler import reschedule_task_after_completion
 
-            lite_out = run_lite_sync(trigger="startup")
+            lite_out: dict = {}
+            calendar_out: dict = {}
+            if selected_mode == "lite":
+                lite_out = run_lite_sync(trigger="startup")
+                lite_skipped = bool(lite_out.get("skipped") or lite_out.get("cancelled"))
+                if not lite_skipped:
+                    reschedule_task_after_completion("lite_sync")
+                if boot_decision.get("also_run_calendar"):
+                    calendar_out = run_calendar_only_maintenance(trigger="startup")
+                    if not bool(calendar_out.get("skipped")):
+                        reschedule_task_after_completion("calendar_sync")
+            else:
+                calendar_out = run_calendar_only_maintenance(trigger="startup")
+                if not bool(calendar_out.get("skipped")):
+                    reschedule_task_after_completion("calendar_sync")
+
             request_nfo_backfill_stats = _enqueue_startup_request_nfo_backfill()
             determination_stats = (
                 lite_out.get("determination") if isinstance(lite_out.get("determination"), dict) else {}
@@ -1254,7 +1272,7 @@ def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
                 from services.activity_markers import record_startup_source_of_truth_activity
 
                 record_startup_source_of_truth_activity(
-                    mode="lite",
+                    mode=selected_mode,
                     started_at=started_at,
                     completed_at=datetime.now(timezone.utc),
                     determination=determination_stats or None,
@@ -1266,18 +1284,22 @@ def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
                     extra={"emoji_type": "debug"},
                     exc_info=True,
                 )
-            lite_skipped = bool(lite_out.get("skipped") or lite_out.get("cancelled"))
-            if not lite_skipped:
-                reschedule_task_after_completion("lite_sync")
+            ran = False
+            if selected_mode == "lite":
+                ran = not bool(lite_out.get("skipped") or lite_out.get("cancelled"))
+            else:
+                ran = not bool(calendar_out.get("skipped"))
             return {
-                "ran": not lite_skipped,
-                "startup_sync_mode": "lite",
+                "ran": ran,
+                "startup_sync_mode": selected_mode,
                 "boot_decision": boot_decision,
                 "fullsync_ran": False,
                 "request_nfo_backfill": request_nfo_backfill_stats,
                 "primer": {"skipped": True, "reason": "deprecated"},
                 "status_reconcile": {"skipped": True, "reason": "deprecated"},
-                **lite_out,
+                "lite_sync": lite_out or None,
+                "calendar_sync": calendar_out or None,
+                **(lite_out if selected_mode == "lite" else calendar_out),
             }
 
         from services.task_run_history import begin_task_run
@@ -1554,7 +1576,7 @@ def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
 
                 record_task_sync_progress(
                     task_run_id=startup_task_run_id,
-                    mode=str(getattr(settings, 'STARTUP_SYNC_MODE', 'auto') or 'auto'),
+                    mode=str(selected_mode if "selected_mode" in locals() else "full"),
                     started_at=started_at if 'started_at' in locals() else datetime.now(timezone.utc),
                     current_phase='failed',
                     startup_sync_stats=startup_sync_stats if 'startup_sync_stats' in locals() else None,
@@ -1566,7 +1588,7 @@ def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
                 )
             else:
                 record_startup_sync_progress(
-                    mode=str(getattr(settings, 'STARTUP_SYNC_MODE', 'auto') or 'auto'),
+                    mode=str(selected_mode if "selected_mode" in locals() else "full"),
                     started_at=started_at if 'started_at' in locals() else datetime.now(timezone.utc),
                     current_phase='failed',
                     startup_sync_stats=startup_sync_stats if 'startup_sync_stats' in locals() else None,

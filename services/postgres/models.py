@@ -302,8 +302,10 @@ class CollectionRecipe(Base):
     plex_collection_keys = Column(JSON, nullable=True)
     # Block-based rule definition: {"sources": [...], "filters": [...], "limit": int|None, "sort": str|None}
     definition = Column(JSON, nullable=False, default=dict)
-    # Per-recipe schedule override in hours; null = follow COLLECTIONS_SYNC_INTERVAL_HOURS.
+    # Legacy per-recipe interval hours; prefer run_schedule. Null = follow global.
     run_interval_hours = Column(Integer, nullable=True)
+    # Per-recipe schedule override (Interval/Daily/Weekly/Monthly JSON); null = follow global.
+    run_schedule = Column(JSON, nullable=True)
     # Annually recurring active window: {"start": "MM-DD", "end": "MM-DD", "when_inactive": "keep"|"clear"|"delete"}.
     # Wrap-around windows (start > end, e.g. Dec 15 -> Jan 6) are supported. Null = always active.
     active_window = Column(JSON, nullable=True)

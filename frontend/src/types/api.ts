@@ -2,7 +2,13 @@ export type DashboardTab = "activity" | "library" | "collections" | "calendar" |
 
 export type ActivitySubPage = "placeholders" | "tasks" | "operations";
 
-export type TaskKey = "full_sync" | "lite_sync" | "calendar_only" | "placeholder_refresh" | "collections_sync";
+export type TaskKey =
+  | "full_sync"
+  | "lite_sync"
+  | "calendar_sync"
+  | "calendar_only"
+  | "placeholder_refresh"
+  | "collections_sync";
 
 export interface ScheduledTaskRow {
   task_key: TaskKey;
@@ -10,6 +16,10 @@ export interface ScheduledTaskRow {
   enabled: boolean;
   interval_hours: number;
   interval_label: string;
+  schedule_label?: string;
+  timezone?: string;
+  /** Dashboard clock format for absolute next-run display. */
+  clock_format?: "12h" | "24h" | string;
   next_run: string | null;
   running: boolean;
   last_run: string | null;
@@ -576,7 +586,7 @@ export interface SettingsField {
   section: string;
   label: string;
   description: string;
-  type: "bool" | "int" | "url" | "path" | "string" | "choice" | "string_list";
+  type: "bool" | "int" | "url" | "path" | "string" | "choice" | "string_list" | "task_schedule";
   required: boolean;
   secret: boolean;
   restart_required: boolean;
@@ -632,6 +642,8 @@ export interface SettingsStatus {
 export interface SettingsPayload {
   status: SettingsStatus;
   sections: SettingsSection[];
+  /** IANA timezone from container/process ``TZ`` (unset → UTC). */
+  timezone?: string | null;
   /** Not a settings field — used to display webhook URLs Radarr/Sonarr/etc. need. */
   webhook_api_key?: string | null;
   /** Library dest folders for Playback filter multi-select (Movies / TV). */
@@ -920,8 +932,10 @@ export interface CollectionRecipe {
   /** Owned Plex collection ratingKeys per section: { sectionId: { title: ratingKey } }. Read-only. */
   plex_collection_keys?: Record<string, Record<string, string>>;
   definition: CollectionDefinition;
-  /** Null = follow the global COLLECTIONS_SYNC_INTERVAL_HOURS cadence. */
+  /** Null = follow the global collections schedule. Legacy hour interval. */
   run_interval_hours: number | null;
+  /** Null = follow global; otherwise Interval/Daily/Weekly/Monthly/Cron. */
+  run_schedule?: Record<string, unknown> | null;
   active_window: CollectionActiveWindow | null;
   /** Whether today falls inside the active window (always true without one). */
   window_active: boolean;

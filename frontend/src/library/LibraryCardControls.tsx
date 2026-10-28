@@ -11,6 +11,7 @@ import {
 } from "./cardSettings";
 import type { LibrarySortKey } from "./librarySort";
 import { LIBRARY_MOVIES_SORT_OPTIONS, isLibrarySortKey } from "./librarySortSettings";
+import { BrandSelect } from "../BrandSelect";
 
 export function LibraryCardControls(props: {
   settings: LibraryCardSettings;
@@ -77,33 +78,23 @@ export function LibraryCardControls(props: {
             <span className={`material-symbols-outlined ${isLight ? "text-slate-500" : "text-slate-400"}`} style={{ fontSize: 18 }}>
               sort
             </span>
-            <label
-              htmlFor="library-sort-select"
+            <span
               className={`font-headline uppercase tracking-wider text-[12px] ${isLight ? "text-slate-600" : "text-slate-400"}`}
             >
               Sort
-            </label>
-            <select
-              id="library-sort-select"
+            </span>
+            <BrandSelect
+              size="sm"
+              ariaLabel="Sort library"
               value={props.sortKey}
-              onChange={(e) => {
-                const next = e.target.value;
+              options={sortOptions.map((opt) => ({ value: opt.id, label: opt.label }))}
+              triggerClassName={`font-headline uppercase tracking-wider shrink-0 ${
+                isLight ? "border-slate-200 bg-white text-slate-800" : "border-[#424753]/60 bg-[#141a24] text-slate-200"
+              }`}
+              onChange={(next) => {
                 if (isLibrarySortKey(next, props.sortShelf)) props.onSortChange?.(next);
               }}
-              className={`rounded-md border pl-2 pr-8 py-1 font-headline text-[12px] uppercase tracking-wider cursor-pointer shrink-0 focus:outline-none focus-visible:ring-2 ${
-                isLight
-                  ? "border-slate-200 bg-white text-slate-800"
-                  : "border-[#424753]/60 bg-[#141a24] text-slate-200"
-              }`}
-              style={{ ["--tw-ring-color" as string]: accent.hex }}
-              aria-label="Sort library"
-            >
-              {sortOptions.map((opt) => (
-                <option key={opt.id} value={opt.id}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
+            />
           </div>
         </>
       ) : null}

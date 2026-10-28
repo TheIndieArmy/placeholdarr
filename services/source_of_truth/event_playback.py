@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from services.app_timezone import local_today
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -2258,7 +2259,7 @@ def _partition_playback_targets(
     dest_folder: str | None = None,
 ) -> dict[str, Any]:
     """Split lookahead targets into monitor vs search buckets."""
-    eff = now_date or datetime.now(timezone.utc).date()
+    eff = now_date or local_today()
     series_id = int(series_row.id)
     max_known_order = build_series_max_known_order_within_horizon(session, series_id, now_date=eff)
 

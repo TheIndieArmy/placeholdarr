@@ -10,6 +10,7 @@ import glob as _glob
 import re
 import threading
 import unicodedata
+from services.app_timezone import local_today
 from datetime import date, datetime, timezone, timedelta
 from typing import Any, Optional
 
@@ -314,7 +315,7 @@ def _arr_item_link(item_type: str, instance_key: str, instance_id: str | None, t
 def _parse_calendar_month(month_token: str | None) -> date:
     raw = str(month_token or "").strip()
     if not raw:
-        today = datetime.now().date()
+        today = local_today()
         return today.replace(day=1)
 
     try:
@@ -5098,7 +5099,7 @@ async def calendar_view(month: str = Query("")):
     except ValueError as exc:
         return JSONResponse(content={"ok": False, "message": str(exc)}, status_code=400)
 
-    today = datetime.now().date()
+    today = local_today()
     lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
     countdown_enabled = bool(getattr(settings, "ENABLE_COMING_SOON_COUNTDOWN", True))
     placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)

@@ -201,9 +201,22 @@ def _counts_from_phase_metrics(
         total = created + removed + noop + errors
         return total, total
     if key in ("calendar", "calendar_status"):
+        scanned = _as_int(by_label.get("placeholders scanned"))
+        if scanned is not None:
+            return scanned, scanned
         updates = _as_int(by_label.get("calendar updates"))
         if updates is not None:
             return updates, updates
+    if key in ("calendar_dates",):
+        movies = _as_int(by_label.get("movies checked")) or 0
+        episodes = _as_int(by_label.get("episodes checked")) or 0
+        total = movies + episodes
+        if total > 0 or "movies checked" in by_label or "episodes checked" in by_label:
+            return total, total
+        updated = (_as_int(by_label.get("movie dates updated")) or 0) + (
+            _as_int(by_label.get("episode dates updated")) or 0
+        )
+        return updated, updated
     if key in ("catalog_gc", "catalog_cleanup"):
         movies = _as_int(by_label.get("movies purged")) or 0
         series = _as_int(by_label.get("series purged")) or 0
@@ -683,10 +696,8 @@ STARTUP_FULL_SYNC_CORE_PHASES: list[tuple[str, str]] = [
 
 LITE_SYNC_CORE_PHASES: list[tuple[str, str]] = [
     ("discovery", "Catalog discovery"),
-    ("calendar_dates", "Calendar dates"),
     ("determination", "Status determination"),
     ("materialization", "Placeholder materialization"),
-    ("calendar", "Calendar status"),
 ]
 
 CALENDAR_ONLY_PHASES: list[tuple[str, str]] = [
@@ -712,8 +723,8 @@ def _sync_kind_label(kind: str) -> tuple[str, str]:
         return "full_sync", "Full sync"
     if key == "lite_sync":
         return "lite_sync", "Lite sync"
-    if key == "calendar_only":
-        return "calendar_only", "Calendar"
+    if key in {"calendar_only", "calendar_sync"}:
+        return "calendar_sync", "Calendar sync"
     return key or "task", (key or "task").replace("_", " ").title()
 
 

@@ -63,6 +63,7 @@ def _serialize_recipe(row: CollectionRecipe) -> dict[str, Any]:
         else {},
         "definition": row.definition or {},
         "run_interval_hours": row.run_interval_hours,
+        "run_schedule": row.run_schedule if isinstance(row.run_schedule, dict) else None,
         "active_window": window,
         "window_active": window_is_active(window),
         "last_run_at": _iso(row.last_run_at),
@@ -94,6 +95,7 @@ class RecipePayload(BaseModel):
     collection_title: str = Field(..., min_length=1, max_length=200)
     definition: dict[str, Any]
     run_interval_hours: int | None = Field(None, ge=1, le=24 * 14)
+    run_schedule: dict[str, Any] | None = None
     active_window: dict[str, Any] | None = None
 
 
@@ -202,6 +204,7 @@ async def import_recipes(body: ImportRecipesPayload):
                     collection_title=prepared["collection_title"],
                     definition=prepared["definition"],
                     run_interval_hours=prepared["run_interval_hours"],
+                    run_schedule=prepared.get("run_schedule"),
                     active_window=prepared["active_window"],
                     plex_collection_keys=None,
                 )
@@ -221,13 +224,33 @@ async def import_recipes(body: ImportRecipesPayload):
     return {"ok": True, "created": created, "errors": errors, "created_count": len(created)}
 
 
+def _normalize_recipe_schedule(body: RecipePayload) -> tuple[dict[str, Any] | None, int | None]:
+    """Return (run_schedule, run_interval_hours) for persistence.
+
+    ``run_schedule`` null means follow the global collections schedule.
+    An explicit disabled schedule is stored as-is so the recipe stays off the tick.
+    """
+    from services.task_schedule import normalize_schedule, schedule_interval_hours
+
+    if body.run_schedule is not None:
+        sched = normalize_schedule(body.run_schedule)
+        if not sched.get("enabled"):
+            return sched, None
+        hours = schedule_interval_hours(sched) or None
+        return sched, hours
+    return None, body.run_interval_hours
+
+
 @router.post("/api/collections")
 async def create_recipe(body: RecipePayload):
     try:
         normalized = validate_definition(body.definition)
         window = validate_active_window(body.active_window)
         section_ids = normalize_section_ids(body.plex_section_id, body.plex_section_ids)
+        run_schedule, run_hours = _normalize_recipe_schedule(body)
     except RecipeValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     with session_scope() as session:
         row = CollectionRecipe(
@@ -238,7 +261,8 @@ async def create_recipe(body: RecipePayload):
             plex_section_type=body.plex_section_type,
             collection_title=body.collection_title.strip(),
             definition=normalized,
-            run_interval_hours=body.run_interval_hours,
+            run_interval_hours=run_hours,
+            run_schedule=run_schedule,
             active_window=window,
         )
         session.add(row)
@@ -803,7 +827,10 @@ async def update_recipe(recipe_id: int, body: RecipePayload):
         normalized = validate_definition(body.definition)
         window = validate_active_window(body.active_window)
         section_ids = normalize_section_ids(body.plex_section_id, body.plex_section_ids)
+        run_schedule, run_hours = _normalize_recipe_schedule(body)
     except RecipeValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     with session_scope() as session:
         row = session.query(CollectionRecipe).filter(CollectionRecipe.id == recipe_id).first()
@@ -816,7 +843,8 @@ async def update_recipe(recipe_id: int, body: RecipePayload):
         row.plex_section_type = body.plex_section_type
         row.collection_title = body.collection_title.strip()
         row.definition = normalized
-        row.run_interval_hours = body.run_interval_hours
+        row.run_interval_hours = run_hours
+        row.run_schedule = run_schedule
         row.active_window = window
         session.commit()
         session.refresh(row)
