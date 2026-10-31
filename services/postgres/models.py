@@ -741,3 +741,39 @@ class LibraryRefreshThrottle(Base):
 
     def __repr__(self):
         return f"<LibraryRefreshThrottle(section_id={self.section_id}, source={self.source!r})>"
+
+
+class PlexWatchlistItem(Base):
+    """Owner Plex Universal Watchlist rows synced into Placeholdarr."""
+
+    __tablename__ = "plex_watchlist_item"
+    __table_args__ = (
+        Index("ix_plex_watchlist_item_status", "status"),
+        Index("ix_plex_watchlist_item_media_type", "media_type"),
+        Index("ux_plex_watchlist_item_identity_key", "identity_key", unique=True),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # Always set: plex_guid | rating_key:{key} | titlekey:{media}:{title}:{year}
+    identity_key = Column(String(640), nullable=False)
+    plex_guid = Column(String(512), nullable=True)
+    rating_key = Column(String(128), nullable=True)
+    title = Column(String(512), nullable=False, default="")
+    year = Column(Integer, nullable=True)
+    media_type = Column(String(16), nullable=False)  # movie | show
+    tmdb_id = Column(Integer, nullable=True)
+    tvdb_id = Column(Integer, nullable=True)
+    imdb_id = Column(String(32), nullable=True)
+    # new | in_arr | added | excluded | failed
+    status = Column(String(32), nullable=False, default="new")
+    excluded = Column(Boolean, nullable=False, default=False)
+    last_error = Column(String, nullable=True)
+    last_seen_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    first_seen_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    added_at = Column(DateTime(timezone=True), nullable=True)
+    arr_instance_key = Column(String(128), nullable=True)
+    extra = Column(JSON, nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
+
+    def __repr__(self):
+        return f"<PlexWatchlistItem(id={self.id}, title={self.title!r}, status={self.status!r})>"

@@ -1011,6 +1011,25 @@ def _movie_add_payload(
     return payload
 
 
+def _sonarr_monitor_option(monitored: bool, sonarr_monitor: Optional[str] = None) -> str:
+    if not monitored:
+        return "none"
+    raw = str(sonarr_monitor or "all").strip()
+    allowed = {
+        "all",
+        "future",
+        "missing",
+        "existing",
+        "firstSeason",
+        "latestSeason",
+        "pilot",
+        "monitorSpecials",
+        "unmonitorSpecials",
+        "none",
+    }
+    return raw if raw in allowed else "all"
+
+
 def _series_add_payload(
     lookup: dict,
     *,
@@ -1019,20 +1038,32 @@ def _series_add_payload(
     monitored: bool,
     search: bool,
     tag_ids: Optional[List[int]] = None,
+    sonarr_monitor: Optional[str] = None,
 ) -> dict:
     payload = dict(lookup)
     payload.pop("id", None)
     payload["qualityProfileId"] = int(quality_profile_id)
     payload["rootFolderPath"] = str(root_folder_path).rstrip("/")
     payload["monitored"] = bool(monitored)
-    payload["addOptions"] = {"searchForMissingEpisodes": bool(search), "monitor": "all" if monitored else "none"}
+    monitor = _sonarr_monitor_option(monitored, sonarr_monitor)
+    payload["addOptions"] = {"searchForMissingEpisodes": bool(search), "monitor": monitor}
     if tag_ids:
         payload["tags"] = [int(t) for t in tag_ids]
     seasons = payload.get("seasons")
     if isinstance(seasons, list) and monitored:
+        # Prefer Sonarr addOptions.monitor; still mark non-special seasons when monitoring all.
+        mark_all = monitor == "all"
+        mark_first = monitor == "firstSeason"
         for season in seasons:
-            if isinstance(season, dict) and int(season.get("seasonNumber") or 0) != 0:
+            if not isinstance(season, dict):
+                continue
+            num = int(season.get("seasonNumber") or 0)
+            if num == 0:
+                continue
+            if mark_all:
                 season["monitored"] = True
+            elif mark_first:
+                season["monitored"] = num == 1
     return payload
 
 
@@ -1342,6 +1373,7 @@ def add_series_to_sonarr_bulk(
     search: bool,
     tag_ids: Optional[List[int]] = None,
     on_status: Optional[ArrAddIndexStatus] = None,
+    sonarr_monitor: Optional[str] = None,
 ) -> list[tuple[dict, str, Optional[str]]]:
     """Bulk-add looked-up series via POST /series/import."""
     results: list[Optional[tuple[dict, str, Optional[str]]]] = [None] * len(lookups)
@@ -1358,6 +1390,7 @@ def add_series_to_sonarr_bulk(
             monitored=monitored,
             search=search,
             tag_ids=tag_ids,
+            sonarr_monitor=sonarr_monitor,
         )
         pending.append((index, lookup, payload))
         results[index] = (lookup, "ok", None)
@@ -1426,6 +1459,7 @@ def add_series_to_sonarr(
     monitored: bool,
     search: bool,
     tag_ids: Optional[List[int]] = None,
+    sonarr_monitor: Optional[str] = None,
 ) -> tuple[str, Optional[str]]:
     row = add_series_to_sonarr_bulk(
         url=url,
@@ -1436,6 +1470,7 @@ def add_series_to_sonarr(
         monitored=monitored,
         search=search,
         tag_ids=tag_ids,
+        sonarr_monitor=sonarr_monitor,
     )[0]
     return row[1], row[2]
 
@@ -1453,6 +1488,7 @@ def add_missing_titles(
     tag_ids: Optional[List[int]] = None,
     instance_key: str = "",
     on_progress: Optional[ArrAddProgress] = None,
+    sonarr_monitor: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """Lookup each title, then bulk-import into Radarr or Sonarr."""
 
@@ -1531,7 +1567,7 @@ def add_missing_titles(
         emit(item, result_title(item, lookup), status, error)
 
     adder = add_movies_to_radarr if movie else add_series_to_sonarr_bulk
-    added = adder(
+    add_kwargs: dict[str, Any] = dict(
         url=url,
         api_key=api_key,
         lookups=pending_lookups,
@@ -1542,6 +1578,9 @@ def add_missing_titles(
         tag_ids=tag_ids,
         on_status=on_status,
     )
+    if not movie:
+        add_kwargs["sonarr_monitor"] = sonarr_monitor
+    added = adder(**add_kwargs)
     for item, lookup, (_lookup, status, error) in zip(pending_items, pending_lookups, added):
         arr_id = None
         try:

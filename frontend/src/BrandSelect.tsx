@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useRef, useState } from "react";
+import React, { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
 export type BrandSelectOption = {
   value: string;
@@ -10,6 +10,8 @@ const SIZE_CLASS: Record<"sm" | "md", string> = {
   sm: "pl-2 pr-7 py-1 text-[12px] min-h-[1.75rem]",
   md: "pl-2.5 pr-8 py-1.5 text-[14px] min-h-[2.25rem]",
 };
+
+const MENU_MAX_HEIGHT_PX = 240; // matches max-h-60
 
 /** Branded single-select: button trigger + panel (not a native browser select). */
 export function BrandSelect(props: {
@@ -29,6 +31,7 @@ export function BrandSelect(props: {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [open, setOpen] = useState(false);
   const [highlight, setHighlight] = useState(-1);
+  const [openUpward, setOpenUpward] = useState(false);
 
   const selected = props.options.find((o) => o.value === props.value);
   const label = selected?.label ?? "";
@@ -54,6 +57,20 @@ export function BrandSelect(props: {
     const idx = props.options.findIndex((o) => o.value === props.value);
     setHighlight(idx >= 0 ? idx : 0);
   }, [open, props.options, props.value]);
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setOpenUpward(false);
+      return;
+    }
+    const el = rootRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const spaceAbove = rect.top;
+    // Prefer opening upward when the menu would clip below (settings scroll panes / page bottom).
+    setOpenUpward(spaceBelow < MENU_MAX_HEIGHT_PX + 8 && spaceAbove > spaceBelow);
+  }, [open]);
 
   const commit = (opt: BrandSelectOption) => {
     if (opt.disabled) return;
@@ -132,7 +149,10 @@ export function BrandSelect(props: {
           id={listId}
           role="listbox"
           aria-label={props.ariaLabel}
-          className="absolute z-50 mt-1 max-h-60 min-w-full overflow-y-auto rounded-xl border border-[#424753]/60 bg-[#11161d] py-1 shadow-2xl"
+          className={[
+            "absolute z-50 max-h-60 min-w-full overflow-y-auto rounded-xl border border-[#424753]/60 bg-[#11161d] py-1 shadow-2xl",
+            openUpward ? "bottom-full mb-1" : "mt-1",
+          ].join(" ")}
         >
           {props.options.map((opt, index) => {
             const isSelected = opt.value === props.value;

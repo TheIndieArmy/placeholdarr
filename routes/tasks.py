@@ -42,6 +42,7 @@ TASK_LABELS = {
     "calendar_only": "Calendar sync",  # legacy task_key alias
     "placeholder_refresh": "Metadata & art refresh",
     "collections_sync": "Collections sync",
+    "watchlist_sync": "Watchlist sync",
 }
 
 
@@ -129,7 +130,10 @@ def _serialize_run(row: ScheduledTaskRun) -> dict[str, Any]:
 class TaskRunRequest(BaseModel):
     task_key: str = Field(
         ...,
-        description="full_sync | lite_sync | calendar_sync | calendar_only | placeholder_refresh | collections_sync",
+        description=(
+            "full_sync | lite_sync | calendar_sync | calendar_only | "
+            "placeholder_refresh | collections_sync | watchlist_sync"
+        ),
     )
     metadata: bool | None = Field(None, description="When task_key=placeholder_refresh, run metadata refresh phase")
     art: bool | None = Field(None, description="When task_key=placeholder_refresh, run art refresh phase")
@@ -158,7 +162,7 @@ async def tasks_scheduled():
     else:
         clock_format = "12h"
     rows = []
-    for task_key in ("full_sync", "lite_sync", "calendar_sync", "collections_sync"):
+    for task_key in ("full_sync", "lite_sync", "calendar_sync", "collections_sync", "watchlist_sync"):
         sched = meta.get(task_key) or {}
         interval = int(sched.get("interval_hours") or 0)
         schedule_label = str(sched.get("schedule_label") or _interval_label(interval))
@@ -239,7 +243,14 @@ async def tasks_run(body: TaskRunRequest):
     key = str(body.task_key or "").strip().lower()
     if key == "calendar_only":
         key = "calendar_sync"
-    if key not in {"full_sync", "lite_sync", "calendar_sync", "placeholder_refresh", "collections_sync"}:
+    if key not in {
+        "full_sync",
+        "lite_sync",
+        "calendar_sync",
+        "placeholder_refresh",
+        "collections_sync",
+        "watchlist_sync",
+    }:
         raise HTTPException(status_code=400, detail=f"Unknown task_key: {key}")
 
     if key == "full_sync":
@@ -272,6 +283,9 @@ async def tasks_run(body: TaskRunRequest):
     elif key == "collections_sync":
         if get_working_run("collections_sync"):
             raise HTTPException(status_code=409, detail="Task already running: collections sync in progress")
+    elif key == "watchlist_sync":
+        if get_working_run("watchlist_sync"):
+            raise HTTPException(status_code=409, detail="Task already running: watchlist sync in progress")
     else:
         if get_working_run() or get_working_run("full_sync"):
             raise HTTPException(status_code=409, detail="Another maintenance task is already running")
@@ -295,6 +309,15 @@ async def tasks_run(body: TaskRunRequest):
                 from services.collections.scheduled import run_collections_sync
 
                 run_collections_sync(trigger="manual")
+            elif key == "watchlist_sync":
+                from services.watchlist.sync import run_watchlist_sync
+                from services.source_of_truth.scheduler import reschedule_task_after_completion
+
+                run_watchlist_sync(trigger="manual")
+                try:
+                    reschedule_task_after_completion("watchlist_sync")
+                except Exception:
+                    pass
         except Exception as exc:
             logger.error("Manual task run failed task_key=%s: %s", key, exc, extra={"emoji_type": "error"})
 

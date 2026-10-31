@@ -61,6 +61,7 @@ JOB_ID_FULL = "source_of_truth:all_arrs"
 JOB_ID_LITE = "source_of_truth:lite_sync"
 JOB_ID_CALENDAR = "source_of_truth:calendar_sync"
 JOB_ID_COLLECTIONS = "collections:sync"
+JOB_ID_WATCHLIST = "watchlist:sync"
 
 
 def _ensure_scheduler() -> BackgroundScheduler:
@@ -79,7 +80,27 @@ def _job_id_for(task_key: str) -> str | None:
         return JOB_ID_CALENDAR
     if task_key == "collections_sync":
         return JOB_ID_COLLECTIONS
+    if task_key == "watchlist_sync":
+        return JOB_ID_WATCHLIST
     return None
+
+
+def _watchlist_effective_schedule() -> dict[str, Any]:
+    """Disable the APScheduler job when Watchlist sync master switch is off."""
+    from core.config import settings
+
+    if not bool(getattr(settings, "ENABLE_PLEX_WATCHLIST_SYNC", False)):
+        return {
+            "enabled": False,
+            "mode": "interval",
+            "interval_hours": None,
+            "time": None,
+            "weekdays": None,
+            "weekday": None,
+            "monthday": None,
+            "cron": None,
+        }
+    return get_schedule_for_task("watchlist_sync")
 
 
 def _collections_parent_schedule() -> dict[str, Any]:
@@ -254,6 +275,8 @@ def reschedule_task_after_completion(task_key: str, *, completed_at: datetime | 
     key = "calendar_sync" if task_key == "calendar_only" else str(task_key)
     if key == "collections_sync":
         sched = _collections_parent_schedule()
+    elif key == "watchlist_sync":
+        sched = _watchlist_effective_schedule()
     else:
         sched = get_schedule_for_task(key)
     if not schedule_enabled(sched):
@@ -285,6 +308,16 @@ def _run_collections_sync_scheduled():
 
 def _run_calendar_sync_scheduled():
     run_calendar_only_maintenance(trigger="scheduled")
+
+
+def _run_watchlist_sync_scheduled():
+    from services.watchlist.sync import run_watchlist_sync
+
+    run_watchlist_sync(trigger="scheduled")
+    try:
+        reschedule_task_after_completion("watchlist_sync")
+    except Exception:
+        pass
 
 
 def refresh_collections_schedule() -> None:
@@ -355,6 +388,15 @@ def schedule_all_syncs(*, reset_next_run_for: Collection[str] | None = None):
         ignore_persisted="calendar_sync" in reset,
     )
 
+    _start_scheduled_job(
+        "watchlist_sync",
+        _watchlist_effective_schedule(),
+        _run_watchlist_sync_scheduled,
+        "Watchlist sync",
+        job_id=JOB_ID_WATCHLIST,
+        ignore_persisted="watchlist_sync" in reset,
+    )
+
     if _scheduler and not _scheduler.running:
         _scheduler.start()
 
@@ -398,15 +440,24 @@ def get_scheduled_task_metadata() -> dict[str, Any]:
             "schedule_label": "Disabled",
             "timezone": tz_name,
         },
+        "watchlist_sync": {
+            "enabled": False,
+            "interval_hours": 0,
+            "next_run": None,
+            "schedule": None,
+            "schedule_label": "Disabled",
+            "timezone": tz_name,
+        },
     }
-    for task_key in ("full_sync", "lite_sync", "collections_sync", "calendar_sync"):
+    for task_key in ("full_sync", "lite_sync", "collections_sync", "calendar_sync", "watchlist_sync"):
         # Collections job may run on a faster parent tick than the global setting
         # (hourly when any enabled recipe uses a calendar cadence).
-        raw_sched = (
-            _collections_parent_schedule()
-            if task_key == "collections_sync"
-            else get_schedule_for_task(task_key)
-        )
+        if task_key == "collections_sync":
+            raw_sched = _collections_parent_schedule()
+        elif task_key == "watchlist_sync":
+            raw_sched = _watchlist_effective_schedule()
+        else:
+            raw_sched = get_schedule_for_task(task_key)
         try:
             sched = normalize_schedule(raw_sched)
         except ValueError:

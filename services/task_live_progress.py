@@ -725,6 +725,8 @@ def _sync_kind_label(kind: str) -> tuple[str, str]:
         return "lite_sync", "Lite sync"
     if key in {"calendar_only", "calendar_sync"}:
         return "calendar_sync", "Calendar sync"
+    if key == "watchlist_sync":
+        return "watchlist_sync", "Watchlist sync"
     return key or "task", (key or "task").replace("_", " ").title()
 
 
