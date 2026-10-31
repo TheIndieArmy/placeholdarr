@@ -15,6 +15,9 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ### Fixed
 
+- **Corrupt DB bootstrap**: `check_db` only auto-creates when Postgres reports the database does not exist (SQLSTATE `3D000`). Catalog corruption (missing `base/…` files) fails fast with a clear FATAL and holds the process so `restart: unless-stopped` does not CREATE/restart-storm the host.
+- **Exists but unusable DB**: If CREATE reports already exists but connect still fails, treat as unrecoverable (no 30x CREATE retry loop).
+- **Startup “running” log**: Logged only after the database is reachable, not before bootstrap/`check_db`.
 - **Calendar message tokens**: `{ReleaseDate}` and media/episode tokens listed in Status Updates are now populated when Coming Soon messages render (they were allowed in the picker but empty at runtime).
 - **Queue Monitor token picker**: Allowed tokens trimmed to `{Sep}` and `{Progress}`; media/episode chips that never had render data are no longer offered.
 

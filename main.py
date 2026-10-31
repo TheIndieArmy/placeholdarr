@@ -226,7 +226,7 @@ async def lifespan(app: FastAPI):
     signal.signal(signal.SIGHUP, signal.SIG_DFL)
 
     load_env_and_migrate()
-    logger.info("Placeholdarr service is running.", extra={'emoji_type': 'success'})
+    logger.info("Placeholdarr startup beginning.", extra={'emoji_type': 'info'})
     # Helps verify Docker entrypoint drop-priv (PUID/PGID): if uid/gid are 0 here, files on bind mounts will be owned by root.
     logger.info(
         "Runtime process identity uid=%s gid=%s euid=%s egid=%s",
@@ -267,6 +267,7 @@ async def lifespan(app: FastAPI):
     # DB Initialization
     if check_db():
         logger.info("Database is reachable, initializing...", extra={'emoji_type': 'info'})
+        logger.info("Placeholdarr service is running.", extra={'emoji_type': 'success'})
 
         engine = get_engine()
         init_db(engine)
