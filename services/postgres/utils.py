@@ -61,12 +61,13 @@ def _connect(dbname: str):
 
 def _hold_unrecoverable(message: str, detail: BaseException | None = None) -> None:
     """Print a clear fatal and sleep so Docker does not restart-storm the host."""
-    print(f"❌ FATAL: {message}")
+    print(f"❌ FATAL: {message}", flush=True)
     if detail is not None:
-        print(f"❌ Detail: {detail}")
+        print(f"❌ Detail: {detail}", flush=True)
     print(
         "❌ Repair or recreate the Postgres database data, then restart this container. "
-        "Holding to avoid a restart storm under restart: unless-stopped."
+        "Holding to avoid a restart storm under restart: unless-stopped.",
+        flush=True,
     )
     while True:
         time.sleep(_UNRECOVERABLE_HOLD_SECONDS)
@@ -106,7 +107,8 @@ def _wait_for_retry(attempt: int, max_attempts: int, delay_seconds: int) -> bool
         return False
     print(
         f"⏳ Waiting for database readiness ({attempt}/{max_attempts}) "
-        f"host={settings.DB_HOST} port={settings.DB_PORT}"
+        f"host={settings.DB_HOST} port={settings.DB_PORT}",
+        flush=True,
     )
     time.sleep(delay_seconds)
     return True
@@ -122,9 +124,9 @@ def check_db():
             conn = _connect(settings.DB_NAME)
             conn.close()
             if attempt > 1:
-                print(f"✅ Database connection OK after retry {attempt}/{max_attempts}")
+                print(f"✅ Database connection OK after retry {attempt}/{max_attempts}", flush=True)
             else:
-                print("✅ Database connection OK")
+                print("✅ Database connection OK", flush=True)
             return True
 
         except Exception as e:
@@ -141,26 +143,27 @@ def check_db():
                 try:
                     create_result = _try_create_database()
                 except Exception as create_err:
-                    print(f"❌ Failed creating database {settings.DB_NAME}: {create_err}")
+                    print(f"❌ Failed creating database {settings.DB_NAME}: {create_err}", flush=True)
                     last_db_error = create_err
                     if not _wait_for_retry(attempt, max_attempts, delay_seconds):
                         break
                     continue
 
                 if create_result == "created":
-                    print(f"✅ Created missing database: {settings.DB_NAME}")
+                    print(f"✅ Created missing database: {settings.DB_NAME}", flush=True)
                     continue
 
                 # Catalog says it exists, but connect reported missing (or race).
                 # One probe; any failure is unrecoverable (no CREATE retry storm).
                 print(
                     f"❌ Database \"{settings.DB_NAME}\" already exists but is not "
-                    f"connectable. Treating as unrecoverable."
+                    f"connectable. Treating as unrecoverable.",
+                    flush=True,
                 )
                 try:
                     conn = _connect(settings.DB_NAME)
                     conn.close()
-                    print("✅ Database connection OK after create race")
+                    print("✅ Database connection OK after create race", flush=True)
                     return True
                 except Exception as probe_err:
                     _hold_unrecoverable(
@@ -171,5 +174,5 @@ def check_db():
             if not _wait_for_retry(attempt, max_attempts, delay_seconds):
                 break
 
-    print("❌ DB error:", last_db_error)
+    print("❌ DB error:", last_db_error, flush=True)
     sys.exit(1)
