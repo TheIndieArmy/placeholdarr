@@ -2042,6 +2042,7 @@ export function App() {
             onRefreshTasks={() => {
               void refreshTasks();
             }}
+            onOpenPlexSettings={() => tryNavigate("/settings/media-integrations")}
           />
         );
       }
@@ -2152,6 +2153,7 @@ export function App() {
           onOpenOptionalApis={() => tryNavigate("/settings/optional-apis")}
           onOpenArrIntegrations={() => tryNavigate("/settings/arr-integrations")}
           onOpenPlayback={() => tryNavigate("/settings/playback")}
+          onOpenMediaIntegrations={() => tryNavigate("/settings/media-integrations")}
           onLogout={async () => {
             const status = await logoutAuth();
             setAuthStatus(status);
@@ -7867,6 +7869,7 @@ function SettingsPanel(props: {
   onOpenOptionalApis?: () => void;
   onOpenArrIntegrations?: () => void;
   onOpenPlayback?: () => void;
+  onOpenMediaIntegrations?: () => void;
 }) {
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
   const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
@@ -8827,54 +8830,93 @@ function SettingsPanel(props: {
                   const tvScopeField = fieldByKey.get("WATCHLIST_TV_REQUEST_SCOPE");
                   const onNewField = fieldByKey.get("WATCHLIST_ON_NEW");
                   const watchlistEnabled = Boolean(props.values.ENABLE_PLEX_WATCHLIST_SYNC);
+                  const plexCard = ONBOARDING_MEDIA_CARDS.find((card) => card.id === "plex");
+                  const plexReadyForWatchlist = Boolean(
+                    plexCard &&
+                      props.values.ENABLE_PLEX &&
+                      mediaCardConnectionDetailsComplete(plexCard, props.values, allSettingsFieldsByKey),
+                  );
                   return (
                     <div className="px-6 py-5 space-y-6">
-                      <SettingsDensityFrame
-                        legend="Plex Watchlist"
-                        intro={
+                      {!plexReadyForWatchlist ? (
+                        <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-4 py-3 text-[14px] text-yellow-300">
                           <p>
-                            Global watchlist sync policies live here. Manage who is on the roster and per-person sync
-                            on Activity → Watchlist. Connect Plex under Media Integrations (Sign in with Plex). With
-                            Plex Pass, RSS change hints skip full pulls when nothing changed. Arr auto-add behavior and
-                            targets are below.
+                            Watchlist is Plex only. Connect Plex under{" "}
+                            <span className="font-semibold text-yellow-200">Settings → Media Integrations</span>{" "}
+                            before enabling sync or Arr targets. Controls below stay visible but inactive until Plex is
+                            ready.
                           </p>
-                        }
-                      >
-                        {syncFields.map((field) => (
-                          <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
-                        ))}
-                      </SettingsDensityFrame>
-                      <SettingsDensityFrame legend="Arr targets">
-                        <div className={watchlistEnabled ? "" : "opacity-50 pointer-events-none"}>
-                          <WatchlistArrDefaultsEditor
-                            values={props.values}
-                            disabled={!watchlistEnabled}
-                            accentHex={accent.hex}
-                            onChange={(key, value) => handleSettingsValueChange(key, value)}
-                            behaviorSlot={
-                              onNewField ? (
-                                <Fragment key={onNewField.key}>
-                                  {renderStandardField(onNewField, { density: true })}
-                                </Fragment>
-                              ) : null
-                            }
-                            tagsSlot={
-                              tagsField ? (
-                                <Fragment key={tagsField.key}>
-                                  {renderStandardField(tagsField, { density: true })}
-                                </Fragment>
-                              ) : null
-                            }
-                            tvScopeSlot={
-                              tvScopeField ? (
-                                <Fragment key={tvScopeField.key}>
-                                  {renderStandardField(tvScopeField, { density: true })}
-                                </Fragment>
-                              ) : null
-                            }
-                          />
+                          {props.onOpenMediaIntegrations ? (
+                            <button
+                              type="button"
+                              onClick={props.onOpenMediaIntegrations}
+                              className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-yellow-500/40 bg-yellow-500/15 px-3 py-1.5 text-[13px] font-headline uppercase tracking-wider text-yellow-100 hover:bg-yellow-500/25 transition-colors"
+                            >
+                              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
+                                settings
+                              </span>
+                              Connect Plex
+                            </button>
+                          ) : null}
                         </div>
-                      </SettingsDensityFrame>
+                      ) : null}
+                      <div
+                        className={
+                          plexReadyForWatchlist ? "space-y-6" : "space-y-6 opacity-50 pointer-events-none select-none"
+                        }
+                        aria-disabled={!plexReadyForWatchlist}
+                      >
+                        <SettingsDensityFrame
+                          legend="Plex Watchlist"
+                          intro={
+                            <p>
+                              Global watchlist sync policies live here. Manage who is on the roster and per-person sync
+                              on Activity → Watchlist. Connect Plex under Media Integrations (Sign in with Plex). With
+                              Plex Pass, RSS change hints skip full pulls when nothing changed. Arr auto-add behavior and
+                              targets are below.
+                            </p>
+                          }
+                        >
+                          {syncFields.map((field) => (
+                            <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
+                          ))}
+                        </SettingsDensityFrame>
+                        <SettingsDensityFrame legend="Arr targets">
+                          <div
+                            className={
+                              plexReadyForWatchlist && watchlistEnabled ? "" : "opacity-50 pointer-events-none"
+                            }
+                          >
+                            <WatchlistArrDefaultsEditor
+                              values={props.values}
+                              disabled={!plexReadyForWatchlist || !watchlistEnabled}
+                              accentHex={accent.hex}
+                              onChange={(key, value) => handleSettingsValueChange(key, value)}
+                              behaviorSlot={
+                                onNewField ? (
+                                  <Fragment key={onNewField.key}>
+                                    {renderStandardField(onNewField, { density: true })}
+                                  </Fragment>
+                                ) : null
+                              }
+                              tagsSlot={
+                                tagsField ? (
+                                  <Fragment key={tagsField.key}>
+                                    {renderStandardField(tagsField, { density: true })}
+                                  </Fragment>
+                                ) : null
+                              }
+                              tvScopeSlot={
+                                tvScopeField ? (
+                                  <Fragment key={tvScopeField.key}>
+                                    {renderStandardField(tvScopeField, { density: true })}
+                                  </Fragment>
+                                ) : null
+                              }
+                            />
+                          </div>
+                        </SettingsDensityFrame>
+                      </div>
                     </div>
                   );
                 })()

@@ -28,6 +28,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Watchlist Refresh**: Stays disabled while `watchlist_sync` is running; sidebar shows a live Watchlist sync pill.
 - **Watchlist fetch methods**: Owner Discover, friends GraphQL, optional unlocked Home switch; PIN-protected Home and server_only stay blocked in Phase 1.
 - **Watchlist settings section**: Renamed from Watching; sidebar slug `/settings/watchlist` (old `/settings/watching` still opens it).
+- **Watchlist Plex gate**: Activity Watchlist and Settings → Watchlist stay inactive until Plex is connected (same idea as Collections).
 - **Watchlist settings copy**: Global policies only; points admins to Activity → Watchlist for the roster.
 
 ### Fixed

@@ -17,6 +17,7 @@ import {
   type WatchlistUser,
 } from "../api/watchlist";
 import { BrandSelect } from "../BrandSelect";
+import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
 import { ToggleSwitch } from "../ToggleSwitch";
 
 const ARR_BEHAVIOR_OPTIONS = [
@@ -200,6 +201,8 @@ export function WatchlistPanel(props: {
   syncRunning?: boolean;
   /** Kick the shared tasks poll so the sidebar pill and this button update promptly. */
   onRefreshTasks?: () => void;
+  /** Navigate to Settings → Media Integrations (Plex). */
+  onOpenPlexSettings?: () => void;
 }) {
   const semantic = getBrandSemanticTokens(props.brand, props.themeMode, props.accent);
   const isLight = props.themeMode === "light";
@@ -468,6 +471,61 @@ export function WatchlistPanel(props: {
       : tab === "blocklist"
         ? "No rejected titles."
         : "No accepted titles yet.";
+
+  const plexReady = Boolean(summary?.has_token);
+  if (!loading && summary && !plexReady) {
+    return (
+      <div>
+        <div className="flex items-center gap-2 mb-1">
+          <div className="w-2 h-2 rounded-full" style={{ backgroundColor: props.accent.hex }} />
+          <span
+            className="text-[12px] font-headline uppercase tracking-widest"
+            style={{ color: semantic.fgSubtle }}
+          >
+            Plex Watchlist
+          </span>
+        </div>
+        <h1
+          className="mb-6 text-[32px] font-black tracking-tight font-headline"
+          style={{ color: isLight ? semantic.fg : "#fff" }}
+        >
+          Watchlist
+        </h1>
+        <div className="rounded-xl border overflow-hidden" style={{ borderColor: panelBorder, backgroundColor: panelBg }}>
+          <div className="p-12 text-center">
+            <span className="material-symbols-outlined" style={{ fontSize: 44, color: semantic.fgSubtle }}>
+              playlist_add_check
+            </span>
+            <p className="mt-3 text-[18px] font-headline" style={{ color: isLight ? semantic.fg : "#fff" }}>
+              Watchlist is Plex only
+            </p>
+            <p className="mt-2 text-[14px] max-w-lg mx-auto leading-relaxed" style={{ color: semantic.fgMuted }}>
+              This feature syncs Plex watchlists into a review queue and Arr targets. Connect Plex under Settings →
+              Media Integrations to use it.
+            </p>
+            {props.onOpenPlexSettings ? (
+              <button
+                type="button"
+                onClick={props.onOpenPlexSettings}
+                className={`mt-5 inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS}`}
+                style={accentFilledStyle(props.accent.hex)}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
+                  settings
+                </span>
+                Connect Plex
+              </button>
+            ) : null}
+            {error ? (
+              <p className="mt-4 text-[12px] max-w-md mx-auto" style={{ color: semantic.fgSubtle }}>
+                {error}
+              </p>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div>
