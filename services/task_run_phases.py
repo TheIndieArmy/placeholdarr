@@ -161,7 +161,13 @@ class TaskRunPhaseTracker:
     ) -> None:
         kind = str(self._live_kind or "").strip().lower()
         # calendar_sync is the task key; calendar_only remains accepted for older rows.
-        if kind not in {"full_sync", "lite_sync", "calendar_sync", "calendar_only"}:
+        if kind not in {
+            "full_sync",
+            "lite_sync",
+            "calendar_sync",
+            "calendar_only",
+            "watchlist_sync",
+        }:
             return
         try:
             from services.task_live_progress import publish_sync_phase_live

@@ -834,6 +834,119 @@ def trigger_sonarr_search(
     return result is not None
 
 
+def _unmonitor_all_sonarr_seasons(
+    series_id: int,
+    *,
+    url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    series_monitored: bool = True,
+) -> bool:
+    """Keep the series monitored flag, but clear every season so RSS follows episode flags only."""
+    url = url or _default_sonarr_endpoint()[0]
+    api_key = api_key or _default_sonarr_endpoint()[1]
+    if not url or not api_key or not series_id:
+        return False
+    endpoint = _build_endpoint(url, f"series/{int(series_id)}")
+    series_payload = _request_json("GET", endpoint, params={"apikey": api_key})
+    if not isinstance(series_payload, dict):
+        return False
+    series_payload["monitored"] = bool(series_monitored)
+    seasons = series_payload.get("seasons") or []
+    if isinstance(seasons, list):
+        for season in seasons:
+            if isinstance(season, dict):
+                season["monitored"] = False
+    result = _request_json("PUT", endpoint, payload=series_payload, api_key=api_key)
+    return result is not None
+
+
+def monitor_and_search_first_episodes(
+    *,
+    series_id: int,
+    count: int,
+    search: bool = False,
+    include_specials: Optional[bool] = None,
+    url: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> dict[str, Any]:
+    """Monitor only the first ``count`` aired-order episodes; leave the rest unmonitored.
+
+    Used for watchlist/TV request scope ``episode`` (pilot add, then expand to the first
+    ``EPISODES_LOOKAHEAD`` episodes). Seasons are cleared so indexer RSS cannot pull the
+    rest of the series outside that window.
+    """
+    url = url or _default_sonarr_endpoint()[0]
+    api_key = api_key or _default_sonarr_endpoint()[1]
+    try:
+        n = max(1, int(count or 1))
+    except (TypeError, ValueError):
+        n = 1
+    if include_specials is None:
+        include_specials = bool(getattr(settings, "INCLUDE_SPECIALS", False))
+    if not url or not api_key or not series_id:
+        return {"selected": 0, "monitored": 0, "unmonitored": 0, "searched": False, "episode_ids": []}
+
+    rows: List[Dict] = []
+    for attempt in range(4):
+        rows = fetch_sonarr_episodes(int(series_id), url=url, api_key=api_key)
+        if rows:
+            break
+        if attempt < 3:
+            time.sleep(0.75)
+
+    ordered: list[tuple[int, int, int]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            sn = int(row.get("seasonNumber") if row.get("seasonNumber") is not None else -1)
+            en = int(row.get("episodeNumber") if row.get("episodeNumber") is not None else -1)
+            eid = int(row.get("id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if eid <= 0 or sn < 0 or en < 0:
+            continue
+        if sn == 0 and not include_specials:
+            continue
+        ordered.append((sn, en, eid))
+    ordered.sort()
+    episode_ids = [eid for _sn, _en, eid in ordered[:n]]
+    if not episode_ids:
+        return {"selected": 0, "monitored": 0, "unmonitored": 0, "searched": False, "episode_ids": []}
+
+    window = set(episode_ids)
+    outside_ids = [eid for _sn, _en, eid in ordered if eid not in window]
+
+    # Season-level monitor would RSS-grab whole seasons; keep episode flags only.
+    _unmonitor_all_sonarr_seasons(
+        int(series_id),
+        url=url,
+        api_key=api_key,
+        series_monitored=True,
+    )
+    unmon = {"updated": 0}
+    if outside_ids:
+        unmon = set_sonarr_episode_monitored(outside_ids, False, url=url, api_key=api_key) or unmon
+    mon = set_sonarr_episode_monitored(episode_ids, True, url=url, api_key=api_key)
+    searched = False
+    if search and episode_ids:
+        searched = bool(
+            trigger_sonarr_search(
+                series_id=int(series_id),
+                episode_ids=episode_ids,
+                url=url,
+                api_key=api_key,
+            )
+        )
+    return {
+        "selected": len(episode_ids),
+        "monitored": int((mon or {}).get("updated") or 0),
+        "unmonitored": int((unmon or {}).get("updated") or 0),
+        "searched": searched,
+        "episode_ids": episode_ids,
+    }
+
+
 def _coerce_lookup_int(value: Any) -> Optional[int]:
     try:
         parsed = int(value)
@@ -1011,6 +1124,25 @@ def _movie_add_payload(
     return payload
 
 
+def _sonarr_monitor_option(monitored: bool, sonarr_monitor: Optional[str] = None) -> str:
+    if not monitored:
+        return "none"
+    raw = str(sonarr_monitor or "all").strip()
+    allowed = {
+        "all",
+        "future",
+        "missing",
+        "existing",
+        "firstSeason",
+        "latestSeason",
+        "pilot",
+        "monitorSpecials",
+        "unmonitorSpecials",
+        "none",
+    }
+    return raw if raw in allowed else "all"
+
+
 def _series_add_payload(
     lookup: dict,
     *,
@@ -1019,20 +1151,55 @@ def _series_add_payload(
     monitored: bool,
     search: bool,
     tag_ids: Optional[List[int]] = None,
+    sonarr_monitor: Optional[str] = None,
 ) -> dict:
     payload = dict(lookup)
     payload.pop("id", None)
     payload["qualityProfileId"] = int(quality_profile_id)
     payload["rootFolderPath"] = str(root_folder_path).rstrip("/")
     payload["monitored"] = bool(monitored)
-    payload["addOptions"] = {"searchForMissingEpisodes": bool(search), "monitor": "all" if monitored else "none"}
+    monitor = _sonarr_monitor_option(monitored, sonarr_monitor)
+    payload["addOptions"] = {"searchForMissingEpisodes": bool(search), "monitor": monitor}
     if tag_ids:
         payload["tags"] = [int(t) for t in tag_ids]
     seasons = payload.get("seasons")
-    if isinstance(seasons, list) and monitored:
+    if isinstance(seasons, list):
+        # Lookup payloads often mark every season monitored=true. Force season flags to
+        # match addOptions.monitor so RSS cannot grab outside the density/request scope
+        # (pilot/episode window, first season, or full series).
+        latest_num = 0
+        if monitor == "latestSeason":
+            for season in seasons:
+                if not isinstance(season, dict):
+                    continue
+                try:
+                    num = int(season.get("seasonNumber") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if num > latest_num:
+                    latest_num = num
         for season in seasons:
-            if isinstance(season, dict) and int(season.get("seasonNumber") or 0) != 0:
+            if not isinstance(season, dict):
+                continue
+            try:
+                num = int(season.get("seasonNumber") or 0)
+            except (TypeError, ValueError):
+                continue
+            if num == 0:
+                season["monitored"] = False
+                continue
+            if not monitored or monitor in {"none", "pilot"}:
+                # Episode/pilot scope: seasons stay off; specific episodes are monitored later.
+                season["monitored"] = False
+            elif monitor == "firstSeason":
+                season["monitored"] = num == 1
+            elif monitor == "latestSeason":
+                season["monitored"] = num == latest_num and latest_num > 0
+            elif monitor == "all":
                 season["monitored"] = True
+            else:
+                # future / missing / existing: do not inherit lookup's all-season monitored.
+                season["monitored"] = False
     return payload
 
 
@@ -1342,6 +1509,7 @@ def add_series_to_sonarr_bulk(
     search: bool,
     tag_ids: Optional[List[int]] = None,
     on_status: Optional[ArrAddIndexStatus] = None,
+    sonarr_monitor: Optional[str] = None,
 ) -> list[tuple[dict, str, Optional[str]]]:
     """Bulk-add looked-up series via POST /series/import."""
     results: list[Optional[tuple[dict, str, Optional[str]]]] = [None] * len(lookups)
@@ -1358,6 +1526,7 @@ def add_series_to_sonarr_bulk(
             monitored=monitored,
             search=search,
             tag_ids=tag_ids,
+            sonarr_monitor=sonarr_monitor,
         )
         pending.append((index, lookup, payload))
         results[index] = (lookup, "ok", None)
@@ -1426,6 +1595,7 @@ def add_series_to_sonarr(
     monitored: bool,
     search: bool,
     tag_ids: Optional[List[int]] = None,
+    sonarr_monitor: Optional[str] = None,
 ) -> tuple[str, Optional[str]]:
     row = add_series_to_sonarr_bulk(
         url=url,
@@ -1436,6 +1606,7 @@ def add_series_to_sonarr(
         monitored=monitored,
         search=search,
         tag_ids=tag_ids,
+        sonarr_monitor=sonarr_monitor,
     )[0]
     return row[1], row[2]
 
@@ -1453,6 +1624,7 @@ def add_missing_titles(
     tag_ids: Optional[List[int]] = None,
     instance_key: str = "",
     on_progress: Optional[ArrAddProgress] = None,
+    sonarr_monitor: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """Lookup each title, then bulk-import into Radarr or Sonarr."""
 
@@ -1483,12 +1655,16 @@ def add_missing_titles(
             },
         )
 
-    results: list[dict[str, Any]] = []
+    # One slot per input item so callers can zip(items, results) safely.
+    # Lookup failures used to be appended first and successes later, which
+    # mis-paired watchlist (and any other) bulk Accept rows.
+    results: list[Optional[dict[str, Any]]] = [None] * len(items)
     pending_items: list[Any] = []
     pending_lookups: list[dict] = []
+    pending_indices: list[int] = []
     ingest_lookups: list[dict] = []
     movie = media_type == "movie"
-    for item in items:
+    for idx, item in enumerate(items):
         display = result_title(item)
         emit(item, display, "adding")
         try:
@@ -1514,16 +1690,17 @@ def add_missing_titles(
                 )
                 missing = "Sonarr lookup found nothing"
             if not lookup:
-                results.append(row(display, "error", missing))
+                results[idx] = row(display, "error", missing)
                 emit(item, display, "error", missing)
                 continue
             pending_items.append(item)
             pending_lookups.append(lookup)
+            pending_indices.append(idx)
         except Exception as extra:
-            results.append(row(display, "error", str(extra)))
+            results[idx] = row(display, "error", str(extra))
             emit(item, display, "error", str(extra))
     if not pending_lookups:
-        return results
+        return [r for r in results if r is not None]
 
     def on_status(index: int, status: str, error: Optional[str] = None) -> None:
         item = pending_items[index]
@@ -1531,7 +1708,7 @@ def add_missing_titles(
         emit(item, result_title(item, lookup), status, error)
 
     adder = add_movies_to_radarr if movie else add_series_to_sonarr_bulk
-    added = adder(
+    add_kwargs: dict[str, Any] = dict(
         url=url,
         api_key=api_key,
         lookups=pending_lookups,
@@ -1542,19 +1719,24 @@ def add_missing_titles(
         tag_ids=tag_ids,
         on_status=on_status,
     )
-    for item, lookup, (_lookup, status, error) in zip(pending_items, pending_lookups, added):
+    if not movie:
+        add_kwargs["sonarr_monitor"] = sonarr_monitor
+    added = adder(**add_kwargs)
+    for item, lookup, input_idx, (_lookup, status, error) in zip(
+        pending_items, pending_lookups, pending_indices, added
+    ):
         arr_id = None
         try:
             arr_id = int(lookup.get("id") or 0) or None
         except (TypeError, ValueError):
             arr_id = None
-        results.append({
+        results[input_idx] = {
             "title": result_title(item, lookup),
             "instance_key": instance_key,
             "status": status,
             "error": error,
             "arr_id": arr_id,
-        })
+        }
         if status in {"ok", "skipped"} and arr_id:
             ingest_lookups.append(lookup)
     if ingest_lookups and instance_key:
@@ -1571,5 +1753,5 @@ def add_missing_titles(
                 f"Failed to enqueue placeholder ingest after ARR add: {exc}",
                 extra={"emoji_type": "warning"},
             )
-    return results
+    return [r if r is not None else row("Untitled", "error", "Arr add produced no result") for r in results]
 

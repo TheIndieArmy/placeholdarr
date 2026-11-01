@@ -313,6 +313,23 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         cta_path="/settings/library-sync",
         requires_ack=True,
     ),
+    WhatsNewNotice(
+        id="plex-watchlist-0-12-0",
+        since_version="0.12.0",
+        title="Plex Watchlist",
+        body=(
+            "Your Plex watchlists finally have a home in Placeholdarr.\n\n"
+            "Pull in titles you and your friends want to watch, triage them in Activity → Watchlist, "
+            "and Accept into Arr when you're ready. Or let Placeholdarr's flexible settings handle "
+            "it all. You can even adjust settings per user for fine-tuned content control.\n\n"
+            "Sign in with Plex is also available now, so you can get connected quickly. Current "
+            "users can redo the connection under Settings → Media Integrations.\n\n"
+            "Please report issues and feature requests on GitHub."
+        ),
+        cta_label="Open Watchlist settings",
+        cta_path="/settings/watchlist",
+        requires_ack=True,
+    ),
 )
 
 

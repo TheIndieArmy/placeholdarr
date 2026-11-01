@@ -108,8 +108,20 @@ import { useActivityTasks } from "./activity/useActivityTasks";
 import { useActivityFeed } from "./activity/useActivityFeed";
 import { PlaceholdersPanel } from "./activity/PlaceholdersPanel";
 import { TasksPanel } from "./activity/TasksPanel";
+import { WatchlistPanel } from "./activity/WatchlistPanel";
 import { TaskStatusPillPrototype } from "./activity/TaskStatusPillPrototype";
 import { useActiveSearches } from "./activity/useActiveSearches";
+import {
+  PLEX_OAUTH_META_KEYS,
+  PlexMediaConnect,
+  plexConnectedSummary,
+  plexConnectionChangeSectionsWarning,
+} from "./settings/PlexMediaConnect";
+import {
+  WATCHLIST_ARR_SECTION_KEYS,
+  WatchlistArrDefaultsEditor,
+  watchlistArrTargetsIncomplete,
+} from "./settings/WatchlistArrDefaultsEditor";
 import { useCalendarData } from "./calendar/useCalendarData";
 import { useLogsStream } from "./logs/useLogsStream";
 import { useApiHealthCheck } from "./dashboard/useApiHealthCheck";
@@ -132,6 +144,7 @@ const LIBRARY_MOVIES_PATH = "/library";
 const LIBRARY_TV_PATH = "/library/tv";
 const ACTIVITY_PLACEHOLDERS_PATH = "/activity/placeholders";
 const ACTIVITY_TASKS_PATH = "/activity/tasks";
+const ACTIVITY_WATCHLIST_PATH = "/activity/watchlist";
 const ACTIVITY_OPERATIONS_PATH = "/activity/operations";
 const ACTIVITY_DEFAULT_PATH = ACTIVITY_PLACEHOLDERS_PATH;
 /** Default home after onboarding / root redirect. */
@@ -217,6 +230,7 @@ const SETTINGS_SECTION_ORDER = [
   "Optional APIs",
   "Density & Lookahead",
   "Playback",
+  "Watchlist",
   "Library sync",
   "Calendar",
   "Status Updates",
@@ -236,6 +250,7 @@ const SETTINGS_SECTION_ICONS: Record<string, string> = {
   Calendar: "calendar_month",
   "Density & Lookahead": "fast_forward",
   Playback: "play_circle",
+  Watchlist: "playlist_add_check",
   "Status Updates": "edit_notifications",
   "Poster Art": "image",
   "Dummy Video": "movie",
@@ -251,6 +266,7 @@ const SETTINGS_SECTION_SLUGS: Record<string, string> = {
   Calendar: "calendar",
   "Density & Lookahead": "density-lookahead",
   Playback: "playback",
+  Watchlist: "watchlist",
   "Status Updates": "status-updates",
   "Poster Art": "poster-art",
   "Dummy Video": "dummy-video",
@@ -337,6 +353,8 @@ function resolveSettingsSectionFromSlug(slug: string): string | undefined {
   if (slug === "lookahead") return "Density & Lookahead";
   // Former Poster Overlay / Poster Language URLs.
   if (slug === "poster-overlay" || slug === "poster-language") return "Poster Art";
+  // Former Watching settings URL (bookmarks / old CTAs).
+  if (slug === "watching") return "Watchlist";
   return SETTINGS_SECTION_ORDER.find((name) => SETTINGS_SECTION_SLUGS[name] === slug);
 }
 const BEHAVIOR_WIZARD_SECTIONS = [
@@ -491,6 +509,12 @@ const SETTINGS_UI_HIDDEN_FIELD_KEYS = new Set<string>([
   "PLEX_PLAYBACK_NOTIFIER",
   "JELLYFIN_PLAYBACK_NOTIFIER",
   "EMBY_PLAYBACK_NOTIFIER",
+  // Generated / filled by Sign in with Plex; not edited by hand.
+  "PLEX_OAUTH_CLIENT_ID",
+  "PLEX_AUTH_METHOD",
+  "PLEX_ACCOUNT_USERNAME",
+  "PLEX_SERVER_NAME",
+  "PLEX_SERVER_MACHINE_ID",
   // Legacy multi-instance modes; Play Actions lists own runtime behavior.
   "MOVIE_PLACEHOLDER_SEARCH_MODE",
   "TV_PLACEHOLDER_SEARCH_MODE",
@@ -509,6 +533,23 @@ const SETTINGS_UI_HIDDEN_FIELD_KEYS = new Set<string>([
   // Inlined next to badge / Banner heading (preview shows the effect).
   "PLACEHOLDER_POSTER_BADGE_POSITION",
   "PLACEHOLDER_POSTER_BANNER_POSITION",
+  // Legacy single watchlist Arr defaults (migrated into *_TARGETS_JSON).
+  "WATCHLIST_RADARR_INSTANCE_KEY",
+  "WATCHLIST_RADARR_QUALITY_PROFILE_ID",
+  "WATCHLIST_RADARR_ROOT_FOLDER",
+  "WATCHLIST_SONARR_INSTANCE_KEY",
+  "WATCHLIST_SONARR_QUALITY_PROFILE_ID",
+  "WATCHLIST_SONARR_ROOT_FOLDER",
+  // Watchlist RSS / poll meta (filled by sync; not edited by hand).
+  "WATCHLIST_RSS_SELF_URL",
+  "WATCHLIST_RSS_FRIENDS_URL",
+  "WATCHLIST_RSS_SELF_ETAG",
+  "WATCHLIST_RSS_FRIENDS_ETAG",
+  "WATCHLIST_RSS_SELF_HASH",
+  "WATCHLIST_RSS_FRIENDS_HASH",
+  "WATCHLIST_LAST_FULL_FETCH_AT",
+  "WATCHLIST_LAST_POLL_AT",
+  "WATCHLIST_LAST_ERROR",
 ]);
 
 const POSTER_BADGE_POSITION_OPTIONS = [
@@ -967,7 +1008,11 @@ export function App() {
 
   const { placeholderActivity, hasMore, loadingOlder, loadOlder } = useActivityFeed({
     subPage: activitySubPage === "operations" ? "placeholders" : activitySubPage,
-    enabled: authReady && currentTab === "activity" && activitySubPage !== "tasks",
+    enabled:
+      authReady &&
+      currentTab === "activity" &&
+      activitySubPage !== "tasks" &&
+      activitySubPage !== "watchlist",
     onSuccess: markTabDataFresh,
     onError: markTabDataError,
   });
@@ -1946,6 +1991,15 @@ export function App() {
                 setTaskRunError(e instanceof Error ? e.message : "Failed to start collections sync");
               }
             }}
+            onRunWatchlist={async () => {
+              setTaskRunError(null);
+              try {
+                await postTaskRun("watchlist_sync");
+                void refreshTasks();
+              } catch (e) {
+                setTaskRunError(e instanceof Error ? e.message : "Failed to start watchlist sync");
+              }
+            }}
             onRequestRefresh={async (kind) => {
               setTaskRunError(null);
               setTaskRunPending(true);
@@ -1975,6 +2029,44 @@ export function App() {
                 throw e;
               }
             }}
+          />
+        );
+      }
+      if (activitySubPage === "watchlist") {
+        const plexCard = ONBOARDING_MEDIA_CARDS.find((card) => card.id === "plex");
+        const settingsFieldsByKey = new Map<string, SettingsField>();
+        for (const section of settingsPayload?.sections || []) {
+          for (const field of section.fields || []) {
+            settingsFieldsByKey.set(field.key, field);
+          }
+        }
+        // Only force a boolean when settings are loaded. Secrets are blank after refresh, so
+        // "details complete" can false-negative until has_saved_value is known; leave
+        // undefined so WatchlistPanel can trust summary.plex_ready from the API.
+        const settingsLoaded = Boolean(settingsPayload);
+        const plexEnabled = Boolean(fieldValues.ENABLE_PLEX);
+        const detailsComplete = Boolean(
+          plexCard && mediaCardConnectionDetailsComplete(plexCard, fieldValues, settingsFieldsByKey),
+        );
+        let plexReadyForWatchlist: boolean | undefined;
+        if (settingsLoaded && !plexEnabled) {
+          plexReadyForWatchlist = false;
+        } else if (settingsLoaded && plexEnabled && detailsComplete) {
+          plexReadyForWatchlist = true;
+        } else {
+          plexReadyForWatchlist = undefined;
+        }
+        return (
+          <WatchlistPanel
+            {...activityChrome}
+            plexReady={plexReadyForWatchlist}
+            syncRunning={Boolean(
+              scheduledTasks.find((t) => t.task_key === "watchlist_sync")?.running,
+            )}
+            onRefreshTasks={() => {
+              void refreshTasks();
+            }}
+            onOpenPlexSettings={() => tryNavigate("/settings/media-integrations")}
           />
         );
       }
@@ -2068,7 +2160,10 @@ export function App() {
           activeSection={activeSettingsSection}
           values={fieldValues}
           hasUnsavedChanges={combinedSettingsDirty}
-          messagesSaveBlocked={statusMessagesMeta.dirty && statusMessagesMeta.hasValidationErrors}
+          messagesSaveBlocked={
+            (statusMessagesMeta.dirty && statusMessagesMeta.hasValidationErrors) ||
+            watchlistArrTargetsIncomplete(fieldValues)
+          }
           feedback={settingsFeedback}
           feedbackKind={settingsFeedbackKind}
           restartAvailable={restartAvailable}
@@ -2082,6 +2177,7 @@ export function App() {
           onOpenOptionalApis={() => tryNavigate("/settings/optional-apis")}
           onOpenArrIntegrations={() => tryNavigate("/settings/arr-integrations")}
           onOpenPlayback={() => tryNavigate("/settings/playback")}
+          onOpenMediaIntegrations={() => tryNavigate("/settings/media-integrations")}
           onLogout={async () => {
             const status = await logoutAuth();
             setAuthStatus(status);
@@ -2102,6 +2198,9 @@ export function App() {
             setFieldValues((prev) => ({ ...prev, ...partial }));
             setBaselineValues((prev) => ({ ...prev, ...partial }));
           }}
+          onReloadSettings={() => {
+            void loadSettings(false).catch(() => {});
+          }}
           onStatusMessagesMetaChange={handleStatusMessagesMetaChange}
           registerStatusMessagesSaveFlow={registerStatusMessagesSaveFlow}
           onSave={async () => {
@@ -2109,6 +2208,13 @@ export function App() {
             setSettingsFeedbackKind("");
             if (statusMessagesMeta.dirty && statusMessagesMeta.hasValidationErrors) {
               setSettingsFeedback("Fix status message template errors before saving.");
+              setSettingsFeedbackKind("error");
+              return;
+            }
+            if (watchlistArrTargetsIncomplete(fieldValues)) {
+              setSettingsFeedback(
+                "Choose a quality profile and root folder for each enabled watchlist Arr target.",
+              );
               setSettingsFeedbackKind("error");
               return;
             }
@@ -2579,6 +2685,7 @@ export function App() {
                       {(
                         [
                           { label: "Placeholders", path: ACTIVITY_PLACEHOLDERS_PATH, icon: "history" },
+                          { label: "Watchlist", path: ACTIVITY_WATCHLIST_PATH, icon: "playlist_add_check" },
                           { label: "Tasks", path: ACTIVITY_TASKS_PATH, icon: "schedule" },
                         ] as const
                       ).map(({ label, path, icon }) => {
@@ -7782,9 +7889,11 @@ function SettingsPanel(props: {
   registerStatusMessagesSaveFlow: (fn: ((preselectedScope?: ApplyScope) => Promise<void>) | null) => void;
   onTestConnection: (input: { service: "plex" | "jellyfin" | "emby" | "radarr" | "sonarr"; urlKey: string; credentialKey: string }) => Promise<{ ok: boolean; message: string }>;
   onPartialPersist?: (partial: Record<string, unknown>) => Promise<void>;
+  onReloadSettings?: () => void | Promise<void>;
   onOpenOptionalApis?: () => void;
   onOpenArrIntegrations?: () => void;
   onOpenPlayback?: () => void;
+  onOpenMediaIntegrations?: () => void;
 }) {
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
   const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
@@ -8054,7 +8163,9 @@ function SettingsPanel(props: {
                   ? 12
                   : field.key === "CALENDAR_SYNC_SCHEDULE"
                     ? 12
-                    : 24
+                    : field.key === "WATCHLIST_SYNC_SCHEDULE"
+                      ? 1
+                      : 24
             }
             onChange={(next) => handleSettingsValueChange(field.key, next)}
           />
@@ -8280,7 +8391,11 @@ function SettingsPanel(props: {
               type="button"
               onClick={() => props.onSave()}
               disabled={!props.hasUnsavedChanges || props.messagesSaveBlocked}
-              title={props.messagesSaveBlocked ? "Fix status message template errors before saving" : undefined}
+              title={
+                props.messagesSaveBlocked
+                  ? "Fix required fields before saving"
+                  : undefined
+              }
               className={`flex items-center gap-2 px-5 py-2 ${FG_ON_ACCENT_TEXT_CLASS} text-[14px] font-headline uppercase tracking-wider rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed`}
               style={accentFilledStyle(accent.hex)}
             >
@@ -8421,21 +8536,41 @@ function SettingsPanel(props: {
                                     />
                                   </label>
                                   <div className="min-w-0 rounded-xl border border-white/[0.06] bg-black/20 p-3 text-[13px] leading-snug">
-                                    <p className="truncate font-mono text-slate-200" title={address || undefined}>
-                                      {address || "—"}
-                                    </p>
+                                    {(() => {
+                                      const line = mediaCardConnectionSummaryLine(card, props.values, address);
+                                      return (
+                                        <>
+                                          <p
+                                            className={`truncate text-slate-200 ${card.id === "plex" && plexConnectedSummary(props.values).method === "oauth" ? "font-medium" : "font-mono"}`}
+                                            title={line.title}
+                                          >
+                                            {line.primary}
+                                          </p>
+                                          {line.secondary ? (
+                                            <p className="mt-1 truncate font-mono text-[11px] text-slate-500" title={line.secondary}>
+                                              {line.secondary}
+                                            </p>
+                                          ) : null}
+                                        </>
+                                      );
+                                    })()}
                                     </div>
                                   <div className="mt-2 flex min-h-[2.5rem] flex-col justify-center text-[14px]">
                                     {!enabled ? (
                                       <p className="ui-field-description">Integration paused. Placeholdarr will not sync to {card.title} until re-enabled.</p>
                                     ) : (props.integrationsStatus?.media?.[card.id]?.ok === false) ? (
                                       <p className="text-red-300">
-                                        {props.integrationsStatus?.media?.[card.id]?.message || "Connection failed. Open Configure and Test to clear."}
+                                        {props.integrationsStatus?.media?.[card.id]?.message ||
+                                          "Connection failed. Open Configure and Test to clear."}
                                       </p>
                                     ) : urlTest && !urlTest.ok ? (
                                       <p className="text-red-400">{urlTest.message}</p>
                                     ) : !mediaDetailsComplete ? (
-                                      <p className="ui-field-description">Add URL and credentials in Configure.</p>
+                                      <p className="ui-field-description">
+                                        {card.id === "plex"
+                                          ? "Sign in with Plex (or add URL and token) in Configure."
+                                          : "Add URL and credentials in Configure."}
+                                      </p>
                                     ) : null}
                                   </div>
                                   <div className="mt-auto flex flex-col gap-2 pt-4">
@@ -8707,6 +8842,108 @@ function SettingsPanel(props: {
                     </p>
                   ),
                 })
+              ) : active.name === "Watchlist" ? (
+                (() => {
+                  const watchlistArrKeySet = new Set<string>(WATCHLIST_ARR_SECTION_KEYS);
+                  const fieldByKey = new Map(active.fields.map((f) => [f.key, f]));
+                  const syncFields = active.fields.filter(
+                    (field) =>
+                      !watchlistArrKeySet.has(field.key) && !SETTINGS_UI_HIDDEN_FIELD_KEYS.has(field.key),
+                  );
+                  const tagsField = fieldByKey.get("WATCHLIST_ARR_TAGS");
+                  const tvScopeField = fieldByKey.get("WATCHLIST_TV_REQUEST_SCOPE");
+                  const onNewField = fieldByKey.get("WATCHLIST_ON_NEW");
+                  const watchlistEnabled = Boolean(props.values.ENABLE_PLEX_WATCHLIST_SYNC);
+                  const plexCard = ONBOARDING_MEDIA_CARDS.find((card) => card.id === "plex");
+                  const plexReadyForWatchlist = Boolean(
+                    plexCard &&
+                      props.values.ENABLE_PLEX &&
+                      mediaCardConnectionDetailsComplete(plexCard, props.values, allSettingsFieldsByKey),
+                  );
+                  return (
+                    <div className="px-6 py-5 space-y-6">
+                      {!plexReadyForWatchlist ? (
+                        <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-4 py-3 text-[14px] text-yellow-300">
+                          <p>
+                            Watchlist is Plex only. Connect Plex under{" "}
+                            <span className="font-semibold text-yellow-200">Settings → Media Integrations</span>{" "}
+                            before enabling sync or Arr targets. Controls below stay visible but inactive until Plex is
+                            ready.
+                          </p>
+                          {props.onOpenMediaIntegrations ? (
+                            <button
+                              type="button"
+                              onClick={props.onOpenMediaIntegrations}
+                              className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-yellow-500/40 bg-yellow-500/15 px-3 py-1.5 text-[13px] font-headline uppercase tracking-wider text-yellow-100 hover:bg-yellow-500/25 transition-colors"
+                            >
+                              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
+                                settings
+                              </span>
+                              Connect Plex
+                            </button>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      <div
+                        className={
+                          plexReadyForWatchlist ? "space-y-6" : "space-y-6 opacity-50 pointer-events-none select-none"
+                        }
+                        aria-disabled={!plexReadyForWatchlist}
+                      >
+                        <SettingsDensityFrame
+                          legend="Plex Watchlist"
+                          intro={
+                            <p>
+                              Global watchlist sync policies live here. Manage who is on the roster and per-person sync
+                              on Activity → Watchlist. Connect Plex under Media Integrations (Sign in with Plex). With
+                              Plex Pass, RSS change hints skip full pulls when nothing changed. Arr auto-add behavior and
+                              targets are below.
+                            </p>
+                          }
+                        >
+                          {syncFields.map((field) => (
+                            <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
+                          ))}
+                        </SettingsDensityFrame>
+                        <SettingsDensityFrame legend="Arr targets">
+                          <div
+                            className={
+                              plexReadyForWatchlist && watchlistEnabled ? "" : "opacity-50 pointer-events-none"
+                            }
+                          >
+                            <WatchlistArrDefaultsEditor
+                              values={props.values}
+                              disabled={!plexReadyForWatchlist || !watchlistEnabled}
+                              accentHex={accent.hex}
+                              onChange={(key, value) => handleSettingsValueChange(key, value)}
+                              behaviorSlot={
+                                onNewField ? (
+                                  <Fragment key={onNewField.key}>
+                                    {renderStandardField(onNewField, { density: true })}
+                                  </Fragment>
+                                ) : null
+                              }
+                              tagsSlot={
+                                tagsField ? (
+                                  <Fragment key={tagsField.key}>
+                                    {renderStandardField(tagsField, { density: true })}
+                                  </Fragment>
+                                ) : null
+                              }
+                              tvScopeSlot={
+                                tvScopeField ? (
+                                  <Fragment key={tvScopeField.key}>
+                                    {renderStandardField(tvScopeField, { density: true })}
+                                  </Fragment>
+                                ) : null
+                              }
+                            />
+                          </div>
+                        </SettingsDensityFrame>
+                      </div>
+                    </div>
+                  );
+                })()
               ) : active.name === "Optional APIs" ? (
                 (() => {
                   const fieldByKey = new Map(active.fields.map((f) => [f.key, f]));
@@ -8773,6 +9010,7 @@ function SettingsPanel(props: {
           values={props.values}
           accent={accent}
           focusClass={getBrandFocusClass(props.brand, props.themeMode)}
+          themeMode={props.themeMode}
           isNew={mediaPanelOpenedViaAddRef.current}
           testResults={testResults}
           testBusy={mediaFooterTestBusy}
@@ -8784,6 +9022,7 @@ function SettingsPanel(props: {
           onSave={commitMediaPanel}
           onTestBusyChange={setMediaFooterTestBusy}
           onTestPassedChange={setMediaPanelTestPassed}
+          onReloadSettings={props.onReloadSettings}
         />
       );
     })() : null}
@@ -10358,6 +10597,22 @@ function mediaCardConnectionKeys(card: (typeof ONBOARDING_MEDIA_CARDS)[number]):
   return { urlKey, credentialKey: target.credentialKey };
 }
 
+/** Connected-card summary line (Plex OAuth shows account · server; others show URL). */
+function mediaCardConnectionSummaryLine(
+  card: (typeof ONBOARDING_MEDIA_CARDS)[number],
+  values: FieldValueMap,
+  address: string,
+): { primary: string; secondary?: string; title?: string } {
+  if (card.id === "plex") {
+    const plex = plexConnectedSummary(values);
+    if (plex.method === "oauth" && (plex.username || plex.serverName)) {
+      const primary = [plex.username || "Plex account", plex.serverName].filter(Boolean).join(" · ");
+      return { primary, secondary: plex.url || address || undefined, title: plex.url || address || primary };
+    }
+  }
+  return { primary: address || "—", title: address || undefined };
+}
+
 function WebhookStepCopyButton(props: { text: string; ariaLabel: string; variant?: "inline" | "header"; className?: string }) {
   const variant = props.variant ?? "inline";
   const iconSize = variant === "header" ? 16 : 14;
@@ -10811,7 +11066,16 @@ function mediaCardConnectionDetailsComplete(
   const cred = String(values[keys.credentialKey] ?? "").trim();
   if (cred.length > 0) return true;
   const credField = fieldsByKey?.get(keys.credentialKey);
-  return Boolean(credField?.secret && credField.has_saved_value);
+  if (credField?.secret && credField.has_saved_value) return true;
+  // Sign in with Plex also stores PLEX_WATCHLIST_TOKEN (account). Treat a saved
+  // watchlist token + URL as complete when the server token field is redacted.
+  if (card.id === "plex") {
+    const watchlistTok = String(values.PLEX_WATCHLIST_TOKEN ?? "").trim();
+    if (watchlistTok) return true;
+    const wlField = fieldsByKey?.get("PLEX_WATCHLIST_TOKEN");
+    if (wlField?.secret && wlField.has_saved_value) return true;
+  }
+  return false;
 }
 
 /** True when the card should show the connected shell (toggle / configure), not the empty Connect CTA. */
@@ -10834,6 +11098,12 @@ function clearMediaCardConnection(
   for (const key of card.keys) {
     onValueChange(key, "");
   }
+  if (card.id === "plex") {
+    for (const key of PLEX_OAUTH_META_KEYS) {
+      onValueChange(key, "");
+    }
+    onValueChange("PLEX_WATCHLIST_TOKEN", "");
+  }
 }
 
 function mediaCardRemoveConnectionMessage(cardTitle: string): string {
@@ -10855,6 +11125,7 @@ function MediaServerConfigModal(props: {
   values: FieldValueMap;
   accent: BrandAccent;
   focusClass: string;
+  themeMode: ThemeMode;
   isNew: boolean;
   testResults: Record<string, { ok: boolean; message: string }>;
   testBusy: boolean;
@@ -10866,6 +11137,7 @@ function MediaServerConfigModal(props: {
   onSave: () => void;
   onTestBusyChange: (busy: boolean) => void;
   onTestPassedChange: (passed: boolean) => void;
+  onReloadSettings?: () => void | Promise<void>;
   overlayClassName?: string;
   overlayStyle?: CSSProperties;
 }) {
@@ -10882,6 +11154,23 @@ function MediaServerConfigModal(props: {
     Boolean(urlConnTest && !props.testBusy && urlConnTest.message !== "Testing..." && !urlConnTest.ok);
   const urlTestSucceeded =
     Boolean(urlConnTest && !props.testBusy && urlConnTest.message !== "Testing..." && urlConnTest.ok);
+  const openPlexUrlRef = useRef(String(props.values.PLEX_URL ?? "").trim());
+  const [plexUrlChangeConfirmOpen, setPlexUrlChangeConfirmOpen] = useState(false);
+
+  function requestSave() {
+    if (card.id !== "plex") {
+      props.onSave();
+      return;
+    }
+    const prior = openPlexUrlRef.current;
+    const next = String(props.values.PLEX_URL ?? "").trim();
+    if (prior && next && normalizeArrInstanceUrlForDedupe(prior) !== normalizeArrInstanceUrlForDedupe(next)) {
+      setPlexUrlChangeConfirmOpen(true);
+      return;
+    }
+    props.onSave();
+  }
+
   return (
     <div
       className={`fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto p-4 sm:p-6 ${props.overlayClassName ?? ""}`}
@@ -10916,44 +11205,61 @@ function MediaServerConfigModal(props: {
           </button>
         </div>
         <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
-          {availableFields.map((field) => {
-            const value = props.values[field.key];
-            const plexSection = isPlexSectionIdField(field.key);
-            return (
-              <div key={field.key}>
-                <label className="mb-1 block text-[14px] font-semibold text-slate-300">{field.label}</label>
-                {plexSection ? <PlexLibraryTipsDisclosure fieldKey={field.key} /> : null}
-                {!plexSection && field.description ? (
-                  <p className="mb-1.5 text-[13px] text-slate-500">{field.description}</p>
-                ) : null}
-                {field.type === "bool" ? (
-                  <label className="flex w-fit cursor-pointer select-none items-center gap-3">
-                    <ToggleSwitch
-                      checked={settingsBoolUiChecked(field, value)}
-                      onChange={(v) => props.onFieldChange(field.key, settingsBoolStoredFromUi(field, v))}
-                      accentHex={props.accent.hex}
-                      ariaLabel={field.label}
+          {card.id === "plex" ? (
+            <PlexMediaConnect
+              values={props.values}
+              accentHex={props.accent.hex}
+              focusClass={props.focusClass}
+              themeMode={props.themeMode}
+              fields={availableFields}
+              onFieldChange={props.onFieldChange}
+              onConnected={async () => {
+                props.onTestPassedChange(true);
+                await props.onReloadSettings?.();
+                // OAuth already persisted server-side; close like a successful Add.
+                props.onSave();
+              }}
+            />
+          ) : (
+            availableFields.map((field) => {
+              const value = props.values[field.key];
+              const plexSection = isPlexSectionIdField(field.key);
+              return (
+                <div key={field.key}>
+                  <label className="mb-1 block text-[14px] font-semibold text-slate-300">{field.label}</label>
+                  {plexSection ? <PlexLibraryTipsDisclosure fieldKey={field.key} /> : null}
+                  {!plexSection && field.description ? (
+                    <p className="mb-1.5 text-[13px] text-slate-500">{field.description}</p>
+                  ) : null}
+                  {field.type === "bool" ? (
+                    <label className="flex w-fit cursor-pointer select-none items-center gap-3">
+                      <ToggleSwitch
+                        checked={settingsBoolUiChecked(field, value)}
+                        onChange={(v) => props.onFieldChange(field.key, settingsBoolStoredFromUi(field, v))}
+                        accentHex={props.accent.hex}
+                        ariaLabel={field.label}
+                      />
+                      <span className="text-[14px] text-slate-300">
+                        {settingsBoolUiChecked(field, value) ? "Enabled" : "Disabled"}
+                      </span>
+                    </label>
+                  ) : (
+                    <input
+                      className={`w-full rounded-lg border border-[#424753]/40 bg-[#0f1419] px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${props.focusClass}`}
+                      type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
+                      value={String(value ?? "")}
+                      placeholder={
+                        field.secret && field.has_saved_value
+                          ? "Saved value retained unless overwritten"
+                          : `Enter ${field.label.toLowerCase()}...`
+                      }
+                      onChange={(e) => props.onFieldChange(field.key, e.target.value)}
                     />
-                    <span className="text-[14px] text-slate-300">
-                      {settingsBoolUiChecked(field, value) ? "Enabled" : "Disabled"}
-                    </span>
-                  </label>
-                ) : (
-                  <input
-                    className={`w-full rounded-lg border border-[#424753]/40 bg-[#0f1419] px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${props.focusClass}`}
-                    type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
-                    value={String(value ?? "")}
-                    placeholder={
-                      field.secret && field.has_saved_value
-                        ? "Saved value retained unless overwritten"
-                        : `Enter ${field.label.toLowerCase()}...`
-                    }
-                    onChange={(e) => props.onFieldChange(field.key, e.target.value)}
-                  />
-                )}
-              </div>
-            );
-          })}
+                  )}
+                </div>
+              );
+            })
+          )}
         </div>
         <div className="shrink-0 border-t border-[#424753]/40 bg-[#141a24]">
           <div className="flex min-h-[2.75rem] items-center gap-2 px-4 pt-3 text-[14px] text-red-400" aria-live="polite">
@@ -11017,7 +11323,7 @@ function MediaServerConfigModal(props: {
             <button
               type="button"
               disabled={!(props.testPassed || retainedOk) || props.testBusy}
-              onClick={props.onSave}
+              onClick={requestSave}
               aria-label={commitLabel}
               className="btn-brand-tertiary min-w-[6.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-[14px] font-headline uppercase tracking-wider font-semibold border transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >
@@ -11026,6 +11332,21 @@ function MediaServerConfigModal(props: {
           </div>
         </div>
       </div>
+      {plexUrlChangeConfirmOpen ? (
+        <ConfirmModal
+          title="Update Plex connection?"
+          message={plexConnectionChangeSectionsWarning()}
+          confirmLabel="Continue"
+          cancelLabel="Cancel"
+          accentHex={props.accent.hex}
+          themeMode={props.themeMode}
+          onCancel={() => setPlexUrlChangeConfirmOpen(false)}
+          onConfirm={() => {
+            setPlexUrlChangeConfirmOpen(false);
+            props.onSave();
+          }}
+        />
+      ) : null}
     </div>
   );
 }
@@ -11907,9 +12228,24 @@ function OnboardingWizard(props: {
                             </label>
                             )}
                             <div className="min-w-0 rounded-xl border border-white/[0.06] bg-black/20 p-3 text-[13px] leading-snug">
-                              <p className="truncate font-mono text-slate-200" title={address || undefined}>
-                                  {address || "—"}
-                              </p>
+                              {(() => {
+                                const line = mediaCardConnectionSummaryLine(card, props.values, address);
+                                return (
+                                  <>
+                                    <p
+                                      className={`truncate text-slate-200 ${card.id === "plex" && plexConnectedSummary(props.values).method === "oauth" ? "font-medium" : "font-mono"}`}
+                                      title={line.title}
+                                    >
+                                      {line.primary}
+                                    </p>
+                                    {line.secondary ? (
+                                      <p className="mt-1 truncate font-mono text-[11px] text-slate-500" title={line.secondary}>
+                                        {line.secondary}
+                                      </p>
+                                    ) : null}
+                                  </>
+                                );
+                              })()}
                               </div>
                             <div className="mt-2 flex min-h-[2.5rem] flex-col justify-center text-[14px]">
                               {!playFirstMode && !enabled ? (
@@ -11917,7 +12253,11 @@ function OnboardingWizard(props: {
                               ) : urlTest && !urlTest.ok ? (
                                 <p className="text-red-400">{urlTest.message}</p>
                               ) : !mediaDetailsComplete ? (
-                                <p className="ui-field-description">Add URL and credentials in Configure.</p>
+                                <p className="ui-field-description">
+                                  {card.id === "plex"
+                                    ? "Sign in with Plex (or add URL and token) in Configure."
+                                    : "Add URL and credentials in Configure."}
+                                </p>
                               ) : null}
                             </div>
                             <div className="mt-auto flex flex-col gap-2 pt-4">
@@ -12293,6 +12633,7 @@ function OnboardingWizard(props: {
             values={props.values}
             accent={accent}
             focusClass={getBrandFocusClass(props.brand, wizardUiTheme)}
+            themeMode={wizardUiTheme}
             isNew={mediaPanelOpenedViaAddRef.current}
             testResults={testResults}
             testBusy={mediaFooterTestBusy}
@@ -12318,6 +12659,19 @@ function OnboardingWizard(props: {
             }}
             onTestBusyChange={setMediaFooterTestBusy}
             onTestPassedChange={setMediaPanelTestPassed}
+            onReloadSettings={async () => {
+              // OAuth complete already persisted; refresh field baselines from server.
+              try {
+                const payload = await getSettingsCurrent();
+                for (const section of payload.sections || []) {
+                  for (const field of section.fields || []) {
+                    props.onChange(field.key, field.value);
+                  }
+                }
+              } catch {
+                /* keep local oauth field writes */
+              }
+            }}
             overlayClassName={`brand-theme-scope theme-dark layout-${props.brand}-dark`}
             overlayStyle={semanticTokensToCssVars(wizardSemantic) as CSSProperties}
           />
@@ -12364,6 +12718,7 @@ function getActivitySubPage(pathname: string): ActivitySubPage {
   const p = pathname.replace(/\/$/, "") || "/";
   const rest = p.slice("/activity".length) || "/";
   if (rest === "/tasks" || rest.startsWith("/tasks/")) return "tasks";
+  if (rest === "/watchlist" || rest.startsWith("/watchlist/")) return "watchlist";
   if (rest === "/operations" || rest.startsWith("/operations/")) return "operations";
   return "placeholders";
 }

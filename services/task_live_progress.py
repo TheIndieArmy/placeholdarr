@@ -705,6 +705,13 @@ CALENDAR_ONLY_PHASES: list[tuple[str, str]] = [
     ("calendar", "Calendar status"),
 ]
 
+WATCHLIST_SYNC_PHASES: list[tuple[str, str]] = [
+    ("rss", "RSS check"),
+    ("fetch", "Watchlist fetch"),
+    ("upsert", "Catalog upsert"),
+    ("auto_add", "Auto-add to Arr"),
+]
+
 def _task_run_key_for_live(task_run_id: int) -> str:
     from services.postgres.db import get_session
     from services.postgres.models import ScheduledTaskRun
@@ -725,6 +732,8 @@ def _sync_kind_label(kind: str) -> tuple[str, str]:
         return "lite_sync", "Lite sync"
     if key in {"calendar_only", "calendar_sync"}:
         return "calendar_sync", "Calendar sync"
+    if key == "watchlist_sync":
+        return "watchlist_sync", "Watchlist sync"
     return key or "task", (key or "task").replace("_", " ").title()
 
 

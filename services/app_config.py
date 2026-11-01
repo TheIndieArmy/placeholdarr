@@ -216,6 +216,54 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "PLEX_AUTH_METHOD",
+            {
+                "section": "Media Integrations",
+                "label": "Plex auth method",
+                "description": "How Plex was connected: oauth (Sign in with Plex) or manual URL and token.",
+                "type": "string",
+                "required": False,
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "PLEX_ACCOUNT_USERNAME",
+            {
+                "section": "Media Integrations",
+                "label": "Plex account username",
+                "description": "Display name for the signed-in plex.tv account (OAuth).",
+                "type": "string",
+                "required": False,
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "PLEX_SERVER_NAME",
+            {
+                "section": "Media Integrations",
+                "label": "Plex server name",
+                "description": "Friendly name of the selected Plex Media Server (OAuth).",
+                "type": "string",
+                "required": False,
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "PLEX_SERVER_MACHINE_ID",
+            {
+                "section": "Media Integrations",
+                "label": "Plex server machine id",
+                "description": "clientIdentifier of the selected Plex Media Server (OAuth).",
+                "type": "string",
+                "required": False,
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
             "PLEX_PLAYBACK_NOTIFIER",
             {
                 "section": "Media Integrations",
@@ -777,6 +825,399 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "playback_dest_filter": True,
             },
         ),
+        (
+            "ENABLE_PLEX_WATCHLIST_SYNC",
+            {
+                "section": "Watchlist",
+                "label": "Enable Plex Watchlist sync",
+                "description": (
+                    "Sync the Plex Universal Watchlist roster (owner, friends, optional Home) into "
+                    "Activity → Watchlist. Requires Plex connected under Media Integrations "
+                    "(Sign in with Plex preferred). With Plex Pass, RSS change hints skip full "
+                    "fetches when nothing changed. Per-person sync lives on the Watchlist People list."
+                ),
+                "type": "bool",
+                "restart_required": False,
+                "default": False,
+            },
+        ),
+        (
+            "WATCHLIST_SYNC_SCHEDULE",
+            {
+                "section": "Watchlist",
+                "label": "Watchlist poll schedule",
+                "description": (
+                    "How often to check for watchlist changes. Default every 5 minutes. "
+                    "With RSS hints, unchanged polls stay cheap. Disable here or turn off "
+                    "Enable Plex Watchlist sync to stop polling."
+                ),
+                "type": "task_schedule",
+                "default_task": "watchlist_sync",
+                "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
+                "restart_required": False,
+            },
+        ),
+        (
+            "WATCHLIST_SYNC_FRIENDS",
+            {
+                "section": "Watchlist",
+                "label": "Sync friends' watchlists",
+                "description": (
+                    "Master switch for friend GraphQL discovery. Per-person sync still uses the "
+                    "roster on Activity → Watchlist. Friends must allow you to see their watchlist."
+                ),
+                "type": "bool",
+                "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
+                "restart_required": False,
+                "default": True,
+            },
+        ),
+        (
+            "WATCHLIST_SYNC_FRIEND_ONLY",
+            {
+                "section": "Watchlist",
+                "label": "Include friends without server access",
+                "description": (
+                    "Also discover friends who are not shared on this Plex server (friend_only). "
+                    "Default on. Turn off to keep the roster focused on server shares. Manage "
+                    "individuals on Activity → Watchlist."
+                ),
+                "type": "bool",
+                "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
+                "restart_required": False,
+                "default": True,
+            },
+        ),
+        (
+            "WATCHLIST_SYNC_HOME_USERS",
+            {
+                "section": "Watchlist",
+                "label": "Also sync Plex Home managed users",
+                "description": (
+                    "Optional. Switch into unlocked Home managed profiles to read their watchlist. "
+                    "PIN-protected profiles stay on the roster but are not synced until a later "
+                    "release. Off by default (rate limits on large Homes). Per-person toggles: "
+                    "Activity → Watchlist."
+                ),
+                "type": "bool",
+                "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
+                "restart_required": False,
+                "default": False,
+            },
+        ),
+        (
+            "WATCHLIST_USE_RSS_HINT",
+            {
+                "section": "Watchlist",
+                "label": "Use RSS change hints (Plex Pass)",
+                "description": (
+                    "Automatically create owner and friends RSS feeds when Plex Pass allows it. "
+                    "Unchanged feeds skip a full API/GraphQL pull until the reconcile interval."
+                ),
+                "type": "bool",
+                "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
+                "restart_required": False,
+                "default": True,
+            },
+        ),
+        (
+            "WATCHLIST_FULL_RECONCILE_HOURS",
+            {
+                "section": "Watchlist",
+                "label": "Full watchlist reconcile hours",
+                "description": (
+                    "Force a full owner/friends pull at least this often so removals are noticed "
+                    "even if RSS is quiet. Default 2 hours."
+                ),
+                "type": "float",
+                "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
+                "restart_required": False,
+                "default": 2.0,
+            },
+        ),
+        (
+            "WATCHLIST_ON_NEW",
+            {
+                "section": "Watchlist",
+                "label": "Default Arr behavior",
+                "description": (
+                    "Account default for new watchlist titles after sync. "
+                    "Per-person overrides on Activity → Watchlist → People replace this for that user. "
+                    "TV monitor scope still follows TV request scope / density."
+                ),
+                "type": "choice",
+                "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
+                "restart_required": False,
+                "default": "manual",
+                "options": [
+                    {"value": "add_and_search", "label": "Add, monitor, and search"},
+                    {"value": "monitor_only", "label": "Add and monitor"},
+                    {"value": "add_only", "label": "Add only"},
+                    {"value": "manual", "label": "Manual"},
+                ],
+            },
+        ),
+        (
+            "WATCHLIST_TV_REQUEST_SCOPE",
+            {
+                "section": "Watchlist",
+                "label": "TV request scope",
+                "description": "",
+                "type": "choice",
+                "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
+                "restart_required": False,
+                "default": "",
+                "options": [
+                    {"value": "", "label": "Follow TV density setting"},
+                    {"value": "episode", "label": "First episode + lookahead"},
+                    {"value": "season", "label": "First season"},
+                    {"value": "series", "label": "Entire series"},
+                ],
+            },
+        ),
+        (
+            "WATCHLIST_RADARR_TARGETS_JSON",
+            {
+                "section": "Watchlist",
+                "label": "Radarr watchlist targets",
+                "description": (
+                    "JSON list of Radarr instances that receive movie watchlist adds "
+                    "(instance_key, quality_profile_id, root_folder_path)."
+                ),
+                "type": "string",
+                "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
+                "restart_required": False,
+                "default": "[]",
+            },
+        ),
+        (
+            "WATCHLIST_SONARR_TARGETS_JSON",
+            {
+                "section": "Watchlist",
+                "label": "Sonarr watchlist targets",
+                "description": (
+                    "JSON list of Sonarr instances that receive TV watchlist adds "
+                    "(instance_key, quality_profile_id, root_folder_path)."
+                ),
+                "type": "string",
+                "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
+                "restart_required": False,
+                "default": "[]",
+            },
+        ),
+        # Legacy single-target keys (migrated into *_TARGETS_JSON; hidden in Settings UI).
+        (
+            "WATCHLIST_RADARR_INSTANCE_KEY",
+            {
+                "section": "Watchlist",
+                "label": "Default Radarr instance (legacy)",
+                "description": "Migrated into Radarr watchlist targets.",
+                "type": "string",
+                "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "WATCHLIST_RADARR_QUALITY_PROFILE_ID",
+            {
+                "section": "Watchlist",
+                "label": "Default movie quality profile (legacy)",
+                "description": "Migrated into Radarr watchlist targets.",
+                "type": "int",
+                "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
+                "restart_required": False,
+                "default": 0,
+            },
+        ),
+        (
+            "WATCHLIST_RADARR_ROOT_FOLDER",
+            {
+                "section": "Watchlist",
+                "label": "Default movie root folder (legacy)",
+                "description": "Migrated into Radarr watchlist targets.",
+                "type": "string",
+                "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "WATCHLIST_SONARR_INSTANCE_KEY",
+            {
+                "section": "Watchlist",
+                "label": "Default Sonarr instance (legacy)",
+                "description": "Migrated into Sonarr watchlist targets.",
+                "type": "string",
+                "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "WATCHLIST_SONARR_QUALITY_PROFILE_ID",
+            {
+                "section": "Watchlist",
+                "label": "Default TV quality profile (legacy)",
+                "description": "Migrated into Sonarr watchlist targets.",
+                "type": "int",
+                "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
+                "restart_required": False,
+                "default": 0,
+            },
+        ),
+        (
+            "WATCHLIST_SONARR_ROOT_FOLDER",
+            {
+                "section": "Watchlist",
+                "label": "Default TV root folder (legacy)",
+                "description": "Migrated into Sonarr watchlist targets.",
+                "type": "string",
+                "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "WATCHLIST_ARR_TAGS",
+            {
+                "section": "Watchlist",
+                "label": "Arr tags on add",
+                "description": "Comma or space separated tags applied when adding from the watchlist (default placeholdarr-watchlist).",
+                "type": "string",
+                "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
+                "restart_required": False,
+                "default": "placeholdarr-watchlist",
+            },
+        ),
+        (
+            "PLEX_WATCHLIST_TOKEN",
+            {
+                "section": "Watchlist",
+                "label": "Plex watchlist / account token",
+                "description": (
+                    "Optional plex.tv account token used only for watchlist APIs. "
+                    "Leave blank to use the Media Integrations Plex token. "
+                    "Sign in with Plex under Media Integrations fills this automatically."
+                ),
+                "type": "string",
+                "secret": True,
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        # Internal watchlist poll / RSS hint state (hidden in Settings UI).
+        (
+            "WATCHLIST_RSS_SELF_URL",
+            {
+                "section": "Watchlist",
+                "label": "Watchlist RSS self URL",
+                "description": "Auto-created owner watchlist RSS feed URL (Plex Pass).",
+                "type": "string",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "WATCHLIST_RSS_FRIENDS_URL",
+            {
+                "section": "Watchlist",
+                "label": "Watchlist RSS friends URL",
+                "description": "Auto-created friendsWatchlist RSS feed URL (Plex Pass).",
+                "type": "string",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "WATCHLIST_RSS_SELF_ETAG",
+            {
+                "section": "Watchlist",
+                "label": "Watchlist RSS self etag",
+                "description": "ETag for owner watchlist RSS change detection.",
+                "type": "string",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "WATCHLIST_RSS_FRIENDS_ETAG",
+            {
+                "section": "Watchlist",
+                "label": "Watchlist RSS friends etag",
+                "description": "ETag for friendsWatchlist RSS change detection.",
+                "type": "string",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "WATCHLIST_RSS_SELF_HASH",
+            {
+                "section": "Watchlist",
+                "label": "Watchlist RSS self hash",
+                "description": "Content hash for owner watchlist RSS change detection.",
+                "type": "string",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "WATCHLIST_RSS_FRIENDS_HASH",
+            {
+                "section": "Watchlist",
+                "label": "Watchlist RSS friends hash",
+                "description": "Content hash for friendsWatchlist RSS change detection.",
+                "type": "string",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "WATCHLIST_LAST_FULL_FETCH_AT",
+            {
+                "section": "Watchlist",
+                "label": "Watchlist last full fetch",
+                "description": "ISO timestamp of the last full owner/friends watchlist pull.",
+                "type": "string",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "WATCHLIST_LAST_POLL_AT",
+            {
+                "section": "Watchlist",
+                "label": "Watchlist last poll",
+                "description": "ISO timestamp of the last watchlist_sync run.",
+                "type": "string",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "WATCHLIST_LAST_ERROR",
+            {
+                "section": "Watchlist",
+                "label": "Watchlist last error",
+                "description": "Last watchlist_sync error message, if any.",
+                "type": "string",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "PLEX_OAUTH_CLIENT_ID",
+            {
+                "section": "Watchlist",
+                "label": "Plex OAuth client id",
+                "description": "Stable client identifier for Sign in with Plex. Generated automatically on first PIN if empty.",
+                "type": "string",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+
         (
             "PLACEHOLDER_STATUS_UPDATES",
             {
@@ -2529,6 +2970,89 @@ def _upsert_string_config(session, key: str, value: str) -> None:
         session.add(row)
 
 
+def migrate_watchlist_arr_targets_from_legacy(session=None) -> dict[str, Any]:
+    """Seed WATCHLIST_*_TARGETS_JSON from the legacy single-instance keys when empty."""
+    owns_session = session is None
+    session = session or get_session()
+    wrote: list[str] = []
+
+    def _legacy_int(key: str) -> int:
+        row = _get_row(session, key)
+        if row is None or row.value is None or str(row.value).strip() == "":
+            return 0
+        try:
+            return max(0, int(row.value))
+        except (TypeError, ValueError):
+            return 0
+
+    def _legacy_str(key: str) -> str:
+        row = _get_row(session, key)
+        if row is None or row.value is None:
+            return ""
+        return str(row.value).strip()
+
+    def _targets_nonempty(key: str) -> bool:
+        row = _get_row(session, key)
+        if row is None or row.value is None:
+            return False
+        raw = str(row.value).strip()
+        if not raw or raw == "[]":
+            return False
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return False
+        return isinstance(data, list) and len(data) > 0
+
+    def _seed(json_key: str, instance_key: str, profile_key: str, root_key: str) -> None:
+        if _targets_nonempty(json_key):
+            return
+        ik = _legacy_str(instance_key)
+        if not ik:
+            return
+        payload = [
+            {
+                "instance_key": ik,
+                "quality_profile_id": _legacy_int(profile_key),
+                "root_folder_path": _legacy_str(root_key),
+            }
+        ]
+        _upsert_string_config(session, json_key, json.dumps(payload))
+        _set_runtime_value(json_key, json.dumps(payload))
+        wrote.append(json_key)
+
+    try:
+        _seed(
+            "WATCHLIST_RADARR_TARGETS_JSON",
+            "WATCHLIST_RADARR_INSTANCE_KEY",
+            "WATCHLIST_RADARR_QUALITY_PROFILE_ID",
+            "WATCHLIST_RADARR_ROOT_FOLDER",
+        )
+        _seed(
+            "WATCHLIST_SONARR_TARGETS_JSON",
+            "WATCHLIST_SONARR_INSTANCE_KEY",
+            "WATCHLIST_SONARR_QUALITY_PROFILE_ID",
+            "WATCHLIST_SONARR_ROOT_FOLDER",
+        )
+        if wrote:
+            session.commit()
+            logger.info(
+                f"Migrated watchlist Arr targets from legacy keys: {wrote}",
+                extra={"emoji_type": "info"},
+            )
+        return {"ok": True, "wrote": wrote}
+    except Exception as exc:
+        session.rollback()
+        logger.warning(
+            f"Watchlist Arr targets migration failed: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+        return {"ok": False, "wrote": wrote, "error": str(exc)}
+    finally:
+        if owns_session:
+            session.close()
+
+
 def migrate_poster_overlay_layers(session=None) -> dict[str, Any]:
     """Map legacy exclusive overlay mode (+ New Ep. toggle) onto layered settings."""
     owns_session = session is None
@@ -2608,6 +3132,7 @@ def apply_persisted_settings(session=None) -> dict[str, Any]:
         migrate_playback_filters_to_dest_lists()
         migrate_play_also_instances_from_legacy()
         migrate_poster_overlay_layers()
+        migrate_watchlist_arr_targets_from_legacy()
         try:
             from services.task_schedule import migrate_interval_hours_to_schedules
 
@@ -2829,6 +3354,40 @@ def save_settings(
                 derived_library_paths = [movie_path, tv_path]
                 _set_runtime_value("MOVIE_LIBRARY_FOLDER", movie_path)
                 _set_runtime_value("TV_LIBRARY_FOLDER", tv_path)
+
+        def _validate_watchlist_targets_payload(json_key: str, raw: Any) -> str | None:
+            text = str(raw or "").strip()
+            if not text or text == "[]":
+                return None
+            try:
+                data = json.loads(text)
+            except Exception:
+                return "must be a JSON array"
+            if not isinstance(data, list):
+                return "must be a JSON array"
+            for item in data:
+                if not isinstance(item, dict):
+                    return "each target must be an object"
+                key = str(item.get("instance_key") or "").strip()
+                if not key:
+                    return "each target needs instance_key"
+                try:
+                    qp = int(item.get("quality_profile_id") or 0)
+                except (TypeError, ValueError):
+                    qp = 0
+                root = str(item.get("root_folder_path") or item.get("root_folder") or "").strip()
+                if qp <= 0:
+                    return f"quality profile is required for {key}"
+                if not root:
+                    return f"root folder is required for {key}"
+            return None
+
+        for targets_key in ("WATCHLIST_RADARR_TARGETS_JSON", "WATCHLIST_SONARR_TARGETS_JSON"):
+            if targets_key not in validated:
+                continue
+            targets_err = _validate_watchlist_targets_payload(targets_key, validated.get(targets_key))
+            if targets_err:
+                errors[targets_key] = targets_err
 
         enable_plex = bool(validated.get("ENABLE_PLEX", getattr(settings, "ENABLE_PLEX", False)))
         if enable_plex:
@@ -3103,8 +3662,10 @@ def save_settings(
             "LITE_SYNC_SCHEDULE",
             "COLLECTIONS_SYNC_SCHEDULE",
             "CALENDAR_SYNC_SCHEDULE",
+            "WATCHLIST_SYNC_SCHEDULE",
         }
         schedule_keys_changed: set[str] = set()
+        watchlist_enable_changed = False
         for key, value in validated.items():
             meta = SETTINGS_SCHEMA[key]
             row = _get_row(session, key)
@@ -3112,6 +3673,8 @@ def save_settings(
             value_changed = _normalized_stored_setting_value(
                 key, prev_value
             ) != _normalized_stored_setting_value(key, value)
+            if key == "ENABLE_PLEX_WATCHLIST_SYNC" and value_changed:
+                watchlist_enable_changed = True
             if key == "INCLUDE_SPECIALS":
                 if row is not None:
                     specials_before = _coerce_bool(row.value)
@@ -3221,7 +3784,7 @@ def save_settings(
                     extra={"emoji_type": "error"},
                 )
         _set_runtime_value("PLACEHOLDER_CREATE_NFO", True)
-        if schedule_keys_changed:
+        if schedule_keys_changed or watchlist_enable_changed:
             try:
                 from services.source_of_truth.scheduler import refresh_all_schedules
 
@@ -3230,18 +3793,22 @@ def save_settings(
                     "LITE_SYNC_SCHEDULE": "lite_sync",
                     "COLLECTIONS_SYNC_SCHEDULE": "collections_sync",
                     "CALENDAR_SYNC_SCHEDULE": "calendar_sync",
+                    "WATCHLIST_SYNC_SCHEDULE": "watchlist_sync",
                 }
-                # Rebuild all three jobs; clear persisted next-run only for schedules
+                # Rebuild jobs; clear persisted next-run only for schedules
                 # whose JSON actually changed so the new cadence applies immediately.
                 reset_keys = {
                     task_by_key[config_key]
                     for config_key in schedule_keys_changed
                     if config_key in task_by_key
                 }
+                if watchlist_enable_changed:
+                    reset_keys.add("watchlist_sync")
                 refresh_all_schedules(reset_next_run_for=reset_keys)
                 logger.info(
                     "Refreshed APScheduler jobs after schedule settings save "
-                    f"(changed={sorted(schedule_keys_changed)})",
+                    f"(changed={sorted(schedule_keys_changed)}; "
+                    f"watchlist_enable_changed={watchlist_enable_changed})",
                     extra={"emoji_type": "info"},
                 )
             except Exception as exc:

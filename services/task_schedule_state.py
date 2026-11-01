@@ -22,6 +22,7 @@ _TASK_KEYS = {
     "lite_sync": "SCHEDULED_TASK_NEXT_RUN_LITE_SYNC",
     "collections_sync": "SCHEDULED_TASK_NEXT_RUN_COLLECTIONS_SYNC",
     "calendar_sync": "SCHEDULED_TASK_NEXT_RUN_CALENDAR_SYNC",
+    "watchlist_sync": "SCHEDULED_TASK_NEXT_RUN_WATCHLIST_SYNC",
     # Legacy alias used by older calendar-only task runs.
     "calendar_only": "SCHEDULED_TASK_NEXT_RUN_CALENDAR_SYNC",
 }
