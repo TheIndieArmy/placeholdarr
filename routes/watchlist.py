@@ -59,6 +59,32 @@ async def watchlist_users():
     return {"users": watchlist_sync.list_watchlist_users()}
 
 
+class WatchlistUserPatchRequest(BaseModel):
+    sync_enabled: bool
+
+
+@router.patch("/api/watchlist/users/{plex_user_id}")
+async def watchlist_user_patch(plex_user_id: str, body: WatchlistUserPatchRequest):
+    from services.watchlist.roster import set_user_sync_enabled
+
+    updated = set_user_sync_enabled(plex_user_id, bool(body.sync_enabled))
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Watchlist user not found")
+    return {"ok": True, "user": updated}
+
+
+@router.post("/api/watchlist/roster/refresh")
+async def watchlist_roster_refresh():
+    """Reclassify friends ∩ server shares ∩ Home without a full title sync."""
+    from services.watchlist.roster import refresh_roster
+
+    try:
+        result = refresh_roster(preserve_sync_toggles=True)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"ok": True, **result, "users": watchlist_sync.list_watchlist_users()}
+
+
 @router.get("/api/watchlist/summary")
 async def watchlist_summary_only():
     return watchlist_sync.watchlist_summary()
@@ -68,6 +94,11 @@ async def watchlist_summary_only():
 async def watchlist_sync_now():
     """Manual refresh of the owner Plex Watchlist (records a task run)."""
     import threading
+
+    from services.task_run_history import get_working_run
+
+    if get_working_run("watchlist_sync"):
+        raise HTTPException(status_code=409, detail="Task already running: watchlist sync in progress")
 
     def _runner():
         try:

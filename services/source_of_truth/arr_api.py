@@ -834,6 +834,78 @@ def trigger_sonarr_search(
     return result is not None
 
 
+def monitor_and_search_first_episodes(
+    *,
+    series_id: int,
+    count: int,
+    search: bool = False,
+    include_specials: Optional[bool] = None,
+    url: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> dict[str, Any]:
+    """Monitor the first ``count`` aired-order episodes (inclusive), optionally EpisodeSearch them.
+
+    Used for watchlist/TV request scope ``episode`` (first episode + EPISODES_LOOKAHEAD).
+    Sonarr has no native "first N episodes" monitor, so add as pilot then expand here.
+    """
+    url = url or _default_sonarr_endpoint()[0]
+    api_key = api_key or _default_sonarr_endpoint()[1]
+    try:
+        n = max(1, int(count or 1))
+    except (TypeError, ValueError):
+        n = 1
+    if include_specials is None:
+        include_specials = bool(getattr(settings, "INCLUDE_SPECIALS", False))
+    if not url or not api_key or not series_id:
+        return {"selected": 0, "monitored": 0, "searched": False, "episode_ids": []}
+
+    rows: List[Dict] = []
+    for attempt in range(4):
+        rows = fetch_sonarr_episodes(int(series_id), url=url, api_key=api_key)
+        if rows:
+            break
+        if attempt < 3:
+            time.sleep(0.75)
+
+    ordered: list[tuple[int, int, int]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            sn = int(row.get("seasonNumber") if row.get("seasonNumber") is not None else -1)
+            en = int(row.get("episodeNumber") if row.get("episodeNumber") is not None else -1)
+            eid = int(row.get("id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if eid <= 0 or sn < 0 or en < 0:
+            continue
+        if sn == 0 and not include_specials:
+            continue
+        ordered.append((sn, en, eid))
+    ordered.sort()
+    episode_ids = [eid for _sn, _en, eid in ordered[:n]]
+    if not episode_ids:
+        return {"selected": 0, "monitored": 0, "searched": False, "episode_ids": []}
+
+    mon = set_sonarr_episode_monitored(episode_ids, True, url=url, api_key=api_key)
+    searched = False
+    if search and episode_ids:
+        searched = bool(
+            trigger_sonarr_search(
+                series_id=int(series_id),
+                episode_ids=episode_ids,
+                url=url,
+                api_key=api_key,
+            )
+        )
+    return {
+        "selected": len(episode_ids),
+        "monitored": int((mon or {}).get("updated") or 0),
+        "searched": searched,
+        "episode_ids": episode_ids,
+    }
+
+
 def _coerce_lookup_int(value: Any) -> Optional[int]:
     try:
         parsed = int(value)

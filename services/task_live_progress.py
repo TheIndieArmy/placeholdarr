@@ -705,6 +705,13 @@ CALENDAR_ONLY_PHASES: list[tuple[str, str]] = [
     ("calendar", "Calendar status"),
 ]
 
+WATCHLIST_SYNC_PHASES: list[tuple[str, str]] = [
+    ("rss", "RSS check"),
+    ("fetch", "Watchlist fetch"),
+    ("upsert", "Catalog upsert"),
+    ("auto_add", "Auto-add to Arr"),
+]
+
 def _task_run_key_for_live(task_run_id: int) -> str:
     from services.postgres.db import get_session
     from services.postgres.models import ScheduledTaskRun

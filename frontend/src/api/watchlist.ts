@@ -59,11 +59,26 @@ export interface WatchlistUser {
   username?: string | null;
   title: string;
   thumb_url?: string | null;
+  /** owner | friend | home | unknown (fetch channel) */
+  kind?: string | null;
+  /** owner | friend | friend_only | server_only | home | unknown */
+  relationship?: string | null;
+  /** discover | graphql | home_switch | none */
+  fetch_method?: string | null;
+  /** needs_friend_or_token | needs_pin_or_token | home_switch_disabled | friends_sync_disabled | friend_only_disabled | sync_disabled */
+  block_reason?: string | null;
+  /** True when this identity appears on the Plex Home quick-switch list. */
+  on_plex_home?: boolean;
+  /** pin | managed | unlocked when on Home (mainly for relationship=home). */
+  home_profile?: string | null;
   is_admin?: boolean;
   is_restricted?: boolean;
   is_protected?: boolean;
   is_guest?: boolean;
+  /** Stored preference (may be on while Settings policy blocks fetch). */
   sync_enabled?: boolean;
+  /** True only when this person will actually be fetched on the next sync. */
+  sync_effective?: boolean;
   settings_override?: Record<string, unknown> | null;
   last_synced_at?: string | null;
   last_sync_error?: string | null;
@@ -128,6 +143,24 @@ export function getWatchlist(opts?: { status?: string; limit?: number; userIds?:
 
 export function getWatchlistUsers() {
   return fetchJson<{ users: WatchlistUser[] }>("/api/watchlist/users");
+}
+
+export function patchWatchlistUser(plexUserId: string, body: { sync_enabled: boolean }) {
+  return fetchJson<{ ok: boolean; user: WatchlistUser }>(
+    `/api/watchlist/users/${encodeURIComponent(plexUserId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+export function postWatchlistRosterRefresh() {
+  return fetchJson<{ ok: boolean; users: WatchlistUser[]; created?: number; updated?: number }>(
+    "/api/watchlist/roster/refresh",
+    { method: "POST" },
+  );
 }
 
 export function postWatchlistSync() {

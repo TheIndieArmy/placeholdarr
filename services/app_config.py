@@ -831,9 +831,10 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "section": "Watching",
                 "label": "Enable Plex Watchlist sync",
                 "description": (
-                    "Poll the Plex account Universal Watchlist and show titles on the Watchlist page. "
-                    "Requires Plex connected under Media Integrations (Sign in with Plex preferred). "
-                    "Plex Pass enables a faster RSS change hint; sync still works without Pass via API polling."
+                    "Sync the Plex Universal Watchlist roster (owner, friends, optional Home) into "
+                    "Activity → Watchlist. Requires Plex connected under Media Integrations "
+                    "(Sign in with Plex preferred). With Plex Pass, RSS change hints skip full "
+                    "fetches when nothing changed. Per-person sync lives on the Watchlist People list."
                 ),
                 "type": "bool",
                 "restart_required": False,
@@ -846,13 +847,92 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "section": "Watching",
                 "label": "Watchlist poll schedule",
                 "description": (
-                    "How often to refresh the owner Plex Watchlist. Default every 5 minutes via cron. "
-                    "Disable here or turn off Enable Plex Watchlist sync to stop polling."
+                    "How often to check for watchlist changes. Default every 5 minutes. "
+                    "With RSS hints, unchanged polls stay cheap. Disable here or turn off "
+                    "Enable Plex Watchlist sync to stop polling."
                 ),
                 "type": "task_schedule",
                 "default_task": "watchlist_sync",
                 "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
                 "restart_required": False,
+            },
+        ),
+        (
+            "WATCHLIST_SYNC_FRIENDS",
+            {
+                "section": "Watching",
+                "label": "Sync friends' watchlists",
+                "description": (
+                    "Master switch for friend GraphQL discovery. Per-person sync still uses the "
+                    "roster on Activity → Watchlist. Friends must allow you to see their watchlist."
+                ),
+                "type": "bool",
+                "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
+                "restart_required": False,
+                "default": True,
+            },
+        ),
+        (
+            "WATCHLIST_SYNC_FRIEND_ONLY",
+            {
+                "section": "Watching",
+                "label": "Include friends without server access",
+                "description": (
+                    "Also discover friends who are not shared on this Plex server (friend_only). "
+                    "Default on. Turn off to keep the roster focused on server shares. Manage "
+                    "individuals on Activity → Watchlist."
+                ),
+                "type": "bool",
+                "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
+                "restart_required": False,
+                "default": True,
+            },
+        ),
+        (
+            "WATCHLIST_SYNC_HOME_USERS",
+            {
+                "section": "Watching",
+                "label": "Also sync Plex Home managed users",
+                "description": (
+                    "Optional. Switch into unlocked Home managed profiles to read their watchlist. "
+                    "PIN-protected profiles stay on the roster but are not synced until a later "
+                    "release. Off by default (rate limits on large Homes). Per-person toggles: "
+                    "Activity → Watchlist."
+                ),
+                "type": "bool",
+                "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
+                "restart_required": False,
+                "default": False,
+            },
+        ),
+        (
+            "WATCHLIST_USE_RSS_HINT",
+            {
+                "section": "Watching",
+                "label": "Use RSS change hints (Plex Pass)",
+                "description": (
+                    "Automatically create owner and friends RSS feeds when Plex Pass allows it. "
+                    "Unchanged feeds skip a full API/GraphQL pull until the reconcile interval."
+                ),
+                "type": "bool",
+                "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
+                "restart_required": False,
+                "default": True,
+            },
+        ),
+        (
+            "WATCHLIST_FULL_RECONCILE_HOURS",
+            {
+                "section": "Watching",
+                "label": "Full watchlist reconcile hours",
+                "description": (
+                    "Force a full owner/friends pull at least this often so removals are noticed "
+                    "even if RSS is quiet. Default 2 hours."
+                ),
+                "type": "float",
+                "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
+                "restart_required": False,
+                "default": 2.0,
             },
         ),
         (
@@ -1023,6 +1103,106 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 ),
                 "type": "string",
                 "secret": True,
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        # Internal watchlist poll / RSS hint state (hidden in Settings UI).
+        (
+            "WATCHLIST_RSS_SELF_URL",
+            {
+                "section": "Watching",
+                "label": "Watchlist RSS self URL",
+                "description": "Auto-created owner watchlist RSS feed URL (Plex Pass).",
+                "type": "string",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "WATCHLIST_RSS_FRIENDS_URL",
+            {
+                "section": "Watching",
+                "label": "Watchlist RSS friends URL",
+                "description": "Auto-created friendsWatchlist RSS feed URL (Plex Pass).",
+                "type": "string",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "WATCHLIST_RSS_SELF_ETAG",
+            {
+                "section": "Watching",
+                "label": "Watchlist RSS self etag",
+                "description": "ETag for owner watchlist RSS change detection.",
+                "type": "string",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "WATCHLIST_RSS_FRIENDS_ETAG",
+            {
+                "section": "Watching",
+                "label": "Watchlist RSS friends etag",
+                "description": "ETag for friendsWatchlist RSS change detection.",
+                "type": "string",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "WATCHLIST_RSS_SELF_HASH",
+            {
+                "section": "Watching",
+                "label": "Watchlist RSS self hash",
+                "description": "Content hash for owner watchlist RSS change detection.",
+                "type": "string",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "WATCHLIST_RSS_FRIENDS_HASH",
+            {
+                "section": "Watching",
+                "label": "Watchlist RSS friends hash",
+                "description": "Content hash for friendsWatchlist RSS change detection.",
+                "type": "string",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "WATCHLIST_LAST_FULL_FETCH_AT",
+            {
+                "section": "Watching",
+                "label": "Watchlist last full fetch",
+                "description": "ISO timestamp of the last full owner/friends watchlist pull.",
+                "type": "string",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "WATCHLIST_LAST_POLL_AT",
+            {
+                "section": "Watching",
+                "label": "Watchlist last poll",
+                "description": "ISO timestamp of the last watchlist_sync run.",
+                "type": "string",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "WATCHLIST_LAST_ERROR",
+            {
+                "section": "Watching",
+                "label": "Watchlist last error",
+                "description": "Last watchlist_sync error message, if any.",
+                "type": "string",
                 "restart_required": False,
                 "default": "",
             },
