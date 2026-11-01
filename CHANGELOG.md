@@ -11,13 +11,28 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ### Added
 
-- **Plex Watchlist**: OAuth Media connection, scheduled Home sync, and Activity Watchlist with Queue / Accepted / Blocklist.
-- **Watchlist Home users**: Sync every Home member watchlist (v1 switch + rate-limit backoff); membership avatars and Watchlisted-by.
+- **Plex Watchlist**: OAuth Media connection, scheduled owner + friends sync, and Activity Watchlist with Queue / Accepted / Blocklist.
+- **Watchlist friends sync**: Community GraphQL friends list and per-friend watchlists (default on).
+- **Watchlist RSS hints**: Auto-ensure owner + friendsWatchlist RSS (Plex Pass); unchanged feeds skip full pulls until reconcile.
+- **Watchlist Home switch (optional)**: Opt-in Home managed-user switch with rate-limit backoff; Home list still overlays avatars.
 - **Watchlist Arr targets**: Per-instance profile/root; Accept fans out Will add vs Already on with coverage none / partial / complete.
+- **Watchlist roster**: Friends ∩ server shares ∩ Home classification (`owner` / `friend` / `friend_only` / `server_only` / `home`) with unsyncable rows kept visible.
+- **Watchlist per-user sync**: Activity → Watchlist People toggles (`PATCH` sync_enabled) and roster refresh without a full title pull.
+- **Watchlist friend_only policy**: Settings → Watching toggle to include friends without server access (default on).
 - **DaysUntilPlusOne token**: Calendar Coming Soon templates can use `{DaysUntilPlusOne}` (DaysUntil + 1) for day-later countdowns when Arr dates are treated as US release days.
+
+### Changed
+
+- **Plex connection change**: Confirm warns to re-select Paths movie/TV library sections when replacing a server (OAuth pick or manual URL change).
+- **Watchlist Refresh**: Stays disabled while `watchlist_sync` is running; sidebar shows a live Watchlist sync pill.
+- **Watchlist fetch methods**: Owner Discover, friends GraphQL, optional unlocked Home switch; PIN-protected Home and server_only stay blocked in Phase 1.
+- **Watching settings copy**: Global policies only; points admins to Activity → Watchlist for the roster.
 
 ### Fixed
 
+- **Watchlist roster identity merge**: Friends (GraphQL hex uuid), server shares (numeric id + avatar uuid), and Home users now collapse to one row (`friend` when both friend and on server); owner Home numeric id aliases are pruned.
+- **Watchlist Home vs server-only**: Home means on the Plex Home quick-switch list (not a friend); Server only means library share without Home. Home rows show managed / PIN / unlocked.
+- **Watchlist TV episode scope**: Accept uses Sonarr pilot, then monitors and searches the first `EPISODES_LOOKAHEAD` episodes (no longer first-season missing search).
 - **Arr add_missing_titles result order**: Results stay aligned with input items so bulk Accept does not mis-pair titles.
 - **Corrupt DB bootstrap**: `check_db` only auto-creates when Postgres reports the database does not exist (SQLSTATE `3D000`). Catalog corruption (missing `base/…` files) fails fast with a clear FATAL and holds the process so `restart: unless-stopped` does not CREATE/restart-storm the host.
 - **Exists but unusable DB**: If CREATE reports already exists but connect still fails, treat as unrecoverable (no 30x CREATE retry loop).

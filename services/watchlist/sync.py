@@ -1,4 +1,4 @@
-"""Poll Plex Home watchlists, upsert title + membership rows, optional auto Arr add."""
+"""Poll Plex owner + friends watchlists, upsert title + membership rows, optional auto Arr add."""
 
 from __future__ import annotations
 
@@ -7,7 +7,12 @@ from typing import Any, Iterable
 
 from core.config import settings
 from core.logger import logger
-from services.media_servers.plex_watchlist import fetch_watchlists_for_home, plex_watchlist_token
+from services.media_servers.plex_watchlist import (
+    ensure_watchlist_rss_feeds,
+    fetch_watchlists_for_account,
+    plex_watchlist_token,
+    poll_watchlist_rss_feed,
+)
 from services.postgres.db import get_session
 from services.postgres.models import (
     PlexWatchlistItem,
@@ -35,12 +40,24 @@ def identity_key_for(item: dict[str, Any]) -> str:
 
 
 def tv_scope_to_sonarr_monitor(scope: str | None) -> str:
+    """Map watchlist TV request scope to Sonarr ``addOptions.monitor``.
+
+    ``episode`` uses ``pilot`` at add time; Accept then expands to the first
+    ``EPISODES_LOOKAHEAD`` episodes via ``monitor_and_search_first_episodes``.
+    """
     s = str(scope or "").strip().lower()
     if s == "season":
         return "firstSeason"
     if s == "episode":
-        return "firstSeason"
+        return "pilot"
     return "all"
+
+
+def _episodes_lookahead_count() -> int:
+    try:
+        return max(1, int(getattr(settings, "EPISODES_LOOKAHEAD", 3) or 3))
+    except (TypeError, ValueError):
+        return 3
 
 
 def default_tv_request_scope() -> str:
@@ -154,11 +171,13 @@ def _upsert_item_row(
 
 
 def upsert_watchlist_from_home(payload: dict[str, Any]) -> dict[str, Any]:
-    """Upsert Home users, title rows, and per-user memberships from ``fetch_watchlists_for_home``."""
+    """Upsert users, title rows, and memberships from account/friends (or Home) fetch."""
     now = _utcnow()
     users_raw = payload.get("users") if isinstance(payload.get("users"), list) else []
     by_user = payload.get("by_user") if isinstance(payload.get("by_user"), dict) else {}
     errors = payload.get("errors") if isinstance(payload.get("errors"), dict) else {}
+    active_ids = {str(uid).strip() for uid in by_user.keys() if str(uid or "").strip()}
+    prune_stale_home = not bool(getattr(settings, "WATCHLIST_SYNC_HOME_USERS", False))
 
     created = updated = memberships_upserted = memberships_removed = 0
     session = get_session()
@@ -173,12 +192,14 @@ def upsert_watchlist_from_home(payload: dict[str, Any]) -> dict[str, Any]:
             if not uid:
                 continue
             user = existing_users.get(uid)
-            if user is None:
+            is_new = user is None
+            if is_new:
                 user = PlexWatchlistUser(
                     plex_user_id=uid,
                     title=str(raw.get("title") or uid),
                     first_seen_at=now,
                     updated_at=now,
+                    sync_enabled=bool(raw.get("sync_enabled", True)),
                 )
                 session.add(user)
                 existing_users[uid] = user
@@ -186,14 +207,34 @@ def upsert_watchlist_from_home(payload: dict[str, Any]) -> dict[str, Any]:
             user.username = str(raw.get("username") or "") or user.username
             user.title = str(raw.get("title") or user.title or uid)
             user.thumb_url = str(raw.get("thumb_url") or "") or user.thumb_url
+            kind = str(raw.get("kind") or "").strip().lower()
+            if kind in {"owner", "friend", "home", "unknown"}:
+                user.kind = kind
+            elif not getattr(user, "kind", None):
+                user.kind = "unknown"
+            rel = str(raw.get("relationship") or "").strip().lower()
+            if rel:
+                user.relationship = rel
+            fm = str(raw.get("fetch_method") or "").strip().lower()
+            if fm:
+                user.fetch_method = fm
+            br = raw.get("block_reason")
+            if br is not None:
+                user.block_reason = str(br) if br else None
             user.is_admin = bool(raw.get("is_admin"))
             user.is_restricted = bool(raw.get("is_restricted"))
             user.is_protected = bool(raw.get("is_protected"))
             user.is_guest = bool(raw.get("is_guest"))
+            # Preserve admin sync toggles; only seed default on create.
+            if is_new and "sync_enabled" in raw:
+                user.sync_enabled = bool(raw.get("sync_enabled"))
             user.updated_at = now
             err = errors.get(uid)
-            user.last_sync_error = str(err) if err else None
-            # Do not clear settings_override / sync_enabled here (future per-user policy).
+            if err:
+                user.last_sync_error = str(err)
+            elif uid in by_user:
+                user.last_sync_error = None
+            # Do not clear settings_override here (future per-user policy).
 
         session.flush()
 
@@ -251,6 +292,28 @@ def upsert_watchlist_from_home(payload: dict[str, Any]) -> dict[str, Any]:
 
             if user is not None and uid_s not in errors:
                 user.last_synced_at = now
+
+        # Drop stale Home memberships when Home switch sync is off.
+        # Do not prune server_only / friend_only / friend rows when Home is off.
+        if prune_stale_home:
+            for uid, user in list(existing_users.items()):
+                if uid in active_ids:
+                    continue
+                kind = str(getattr(user, "kind", "") or "").lower()
+                rel = str(getattr(user, "relationship", "") or "").lower()
+                if rel != "home" and kind != "home":
+                    continue
+                stale_mems = (
+                    session.query(PlexWatchlistMembership)
+                    .filter(PlexWatchlistMembership.plex_user_id == uid)
+                    .all()
+                )
+                for mem in stale_mems:
+                    session.delete(mem)
+                    memberships_removed += 1
+                user.block_reason = "home_switch_disabled"
+                user.last_sync_error = "Home switch sync disabled"
+                user.updated_at = now
 
         session.flush()
         _apply_coverage_statuses(session, list(existing_items.values()))
@@ -523,6 +586,10 @@ def add_watchlist_items_to_arr(
                             extra={"emoji_type": "warning"},
                         )
 
+                # Episode scope: add as pilot without Sonarr missing-search, then
+                # monitor+EpisodeSearch the first EPISODES_LOOKAHEAD episodes.
+                episode_window = media_type == "show" and scope == "episode" and monitored
+                add_search = bool(search) and not episode_window
                 results = arr_api.add_missing_titles(
                     media_type=media_type,
                     url=url,
@@ -531,7 +598,7 @@ def add_watchlist_items_to_arr(
                     quality_profile_id=qp,
                     root_folder_path=root,
                     monitored=monitored,
-                    search=bool(search),
+                    search=add_search,
                     tag_ids=tag_ids or None,
                     instance_key=key,
                     sonarr_monitor=sonarr_monitor if media_type == "show" else None,
@@ -552,6 +619,25 @@ def add_watchlist_items_to_arr(
                             row_keys[rid].append(key)
                         if status == "ok":
                             row_had_new[rid] = True
+                        if episode_window:
+                            try:
+                                arr_id = int(result.get("arr_id") or 0)
+                            except (TypeError, ValueError):
+                                arr_id = 0
+                            if arr_id > 0:
+                                try:
+                                    arr_api.monitor_and_search_first_episodes(
+                                        series_id=arr_id,
+                                        count=_episodes_lookahead_count(),
+                                        search=bool(search),
+                                        url=url,
+                                        api_key=api_key,
+                                    )
+                                except Exception as exc:
+                                    logger.warning(
+                                        f"Watchlist episode window failed for {row.title!r} on {key}: {exc}",
+                                        extra={"emoji_type": "warning"},
+                                    )
                     else:
                         row_errors[rid].append(
                             f"{key}: {result.get('error') or 'Arr add failed'}"
@@ -738,17 +824,45 @@ def watchlist_summary() -> dict[str, Any]:
 
 
 def _serialize_user(u: PlexWatchlistUser) -> dict[str, Any]:
+    from services.watchlist.roster import effective_sync_enabled, home_profile_detail
+
+    sync_on = bool(u.sync_enabled)
+    rel = getattr(u, "relationship", None)
+    rel_s = str(rel or "").strip().lower()
+    block = getattr(u, "block_reason", None)
+    effective = effective_sync_enabled(
+        sync_enabled=sync_on,
+        relationship=str(rel) if rel else None,
+        is_protected=bool(u.is_protected),
+        block_reason=str(block) if block else None,
+    )
+    meta = u.settings_override if isinstance(u.settings_override, dict) else {}
+    on_home = bool(meta.get("on_plex_home")) if "on_plex_home" in meta else rel_s == "home"
+    home_profile = meta.get("home_profile")
+    if rel_s == "home" and not home_profile:
+        home_profile = home_profile_detail(
+            in_home=True,
+            is_restricted=bool(u.is_restricted),
+            is_protected=bool(u.is_protected),
+        )
     return {
         "plex_user_id": u.plex_user_id,
         "plex_uuid": u.plex_uuid,
         "username": u.username,
         "title": u.title,
         "thumb_url": u.thumb_url,
+        "kind": str(getattr(u, "kind", None) or "unknown"),
+        "relationship": rel,
+        "fetch_method": getattr(u, "fetch_method", None),
+        "block_reason": block,
+        "on_plex_home": bool(on_home),
+        "home_profile": str(home_profile) if home_profile else None,
         "is_admin": bool(u.is_admin),
         "is_restricted": bool(u.is_restricted),
         "is_protected": bool(u.is_protected),
         "is_guest": bool(u.is_guest),
-        "sync_enabled": bool(u.sync_enabled),
+        "sync_enabled": sync_on,
+        "sync_effective": effective,
         "settings_override": u.settings_override,
         "last_synced_at": u.last_synced_at.isoformat() if u.last_synced_at else None,
         "last_sync_error": u.last_sync_error,
@@ -807,42 +921,138 @@ def _serialize_item(
     }
 
 
-def _persist_poll_meta(*, at: str | None, error: str | None) -> None:
-    """Best-effort write of last poll metadata into AppConfig + runtime settings."""
+def _persist_config_values(values: dict[str, str]) -> None:
+    """Best-effort write of string AppConfig keys + runtime settings attrs."""
+    if not values:
+        return
     try:
         from services.postgres.models import AppConfig
 
         session = get_session()
         try:
-            for key, value in (
-                ("WATCHLIST_LAST_POLL_AT", at or ""),
-                ("WATCHLIST_LAST_ERROR", error or ""),
-            ):
-                if key == "WATCHLIST_LAST_POLL_AT" and at is None:
-                    continue
+            for key, value in values.items():
                 row = session.query(AppConfig).filter(AppConfig.key == key).first()
                 if row is None:
                     session.add(AppConfig(key=key, value=value))
                 else:
                     row.value = value
+                try:
+                    setattr(settings, key, value)
+                except Exception:
+                    pass
             session.commit()
         finally:
             session.close()
-        if at is not None:
-            try:
-                setattr(settings, "WATCHLIST_LAST_POLL_AT", at)
-            except Exception:
-                pass
-        try:
-            setattr(settings, "WATCHLIST_LAST_ERROR", error or "")
-        except Exception:
-            pass
     except Exception as exc:
-        logger.debug(f"watchlist poll meta persist skipped: {exc}", extra={"emoji_type": "debug"})
+        logger.debug(f"watchlist config persist skipped: {exc}", extra={"emoji_type": "debug"})
+
+
+def _persist_poll_meta(*, at: str | None, error: str | None) -> None:
+    """Best-effort write of last poll metadata into AppConfig + runtime settings."""
+    payload: dict[str, str] = {"WATCHLIST_LAST_ERROR": error or ""}
+    if at is not None:
+        payload["WATCHLIST_LAST_POLL_AT"] = at
+    _persist_config_values(payload)
+
+
+def _hours_since_iso(raw: str | None) -> float | None:
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    try:
+        ts = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return max(0.0, (_utcnow() - ts.astimezone(timezone.utc)).total_seconds() / 3600.0)
+    except Exception:
+        return None
+
+
+def _watchlist_rss_gate(*, force_full: bool) -> dict[str, Any]:
+    """Ensure RSS feeds and decide whether a full fetch is needed."""
+    result: dict[str, Any] = {
+        "use_rss": bool(getattr(settings, "WATCHLIST_USE_RSS_HINT", True)),
+        "force_full": force_full,
+        "need_full": True,
+        "self_changed": True,
+        "friends_changed": True,
+        "rss_available": False,
+        "reconcile_due": True,
+    }
+    if not result["use_rss"]:
+        return result
+
+    feeds = ensure_watchlist_rss_feeds()
+    self_url = str(feeds.get("watchlist") or getattr(settings, "WATCHLIST_RSS_SELF_URL", "") or "").strip()
+    friends_url = str(
+        feeds.get("friendsWatchlist") or getattr(settings, "WATCHLIST_RSS_FRIENDS_URL", "") or ""
+    ).strip()
+    persist: dict[str, str] = {}
+    if self_url:
+        persist["WATCHLIST_RSS_SELF_URL"] = self_url
+    if friends_url:
+        persist["WATCHLIST_RSS_FRIENDS_URL"] = friends_url
+    if persist:
+        _persist_config_values(persist)
+
+    if not self_url and not friends_url:
+        result["rss_available"] = False
+        return result
+
+    result["rss_available"] = True
+    if force_full:
+        # Still ensure feeds above; skip change detection and always pull.
+        return result
+
+    self_poll = (
+        poll_watchlist_rss_feed(
+            self_url,
+            etag=str(getattr(settings, "WATCHLIST_RSS_SELF_ETAG", "") or "") or None,
+            content_hash=str(getattr(settings, "WATCHLIST_RSS_SELF_HASH", "") or "") or None,
+        )
+        if self_url
+        else {"changed": False, "available": False}
+    )
+    friends_poll = (
+        poll_watchlist_rss_feed(
+            friends_url,
+            etag=str(getattr(settings, "WATCHLIST_RSS_FRIENDS_ETAG", "") or "") or None,
+            content_hash=str(getattr(settings, "WATCHLIST_RSS_FRIENDS_HASH", "") or "") or None,
+        )
+        if friends_url
+        else {"changed": False, "available": False}
+    )
+    result["self_changed"] = bool(self_poll.get("changed"))
+    result["friends_changed"] = bool(friends_poll.get("changed"))
+
+    rss_meta: dict[str, str] = {}
+    if self_poll.get("etag"):
+        rss_meta["WATCHLIST_RSS_SELF_ETAG"] = str(self_poll.get("etag"))
+    if self_poll.get("content_hash"):
+        rss_meta["WATCHLIST_RSS_SELF_HASH"] = str(self_poll.get("content_hash"))
+    if friends_poll.get("etag"):
+        rss_meta["WATCHLIST_RSS_FRIENDS_ETAG"] = str(friends_poll.get("etag"))
+    if friends_poll.get("content_hash"):
+        rss_meta["WATCHLIST_RSS_FRIENDS_HASH"] = str(friends_poll.get("content_hash"))
+    if rss_meta:
+        _persist_config_values(rss_meta)
+
+    try:
+        reconcile_h = float(getattr(settings, "WATCHLIST_FULL_RECONCILE_HOURS", 2.0) or 2.0)
+    except (TypeError, ValueError):
+        reconcile_h = 2.0
+    reconcile_h = max(0.25, reconcile_h)
+    since = _hours_since_iso(str(getattr(settings, "WATCHLIST_LAST_FULL_FETCH_AT", "") or "") or None)
+    reconcile_due = since is None or since >= reconcile_h
+    result["reconcile_due"] = reconcile_due
+    result["need_full"] = bool(
+        reconcile_due or result["self_changed"] or result["friends_changed"] or not result["rss_available"]
+    )
+    return result
 
 
 def run_watchlist_sync(*, trigger: str = "manual") -> dict[str, Any]:
-    """Full poll (+ optional auto-add). Records a scheduled task run when possible."""
+    """Owner + friends poll (+ optional auto-add). Records a scheduled task run when possible."""
     task_run_id = None
     try:
         task_run_id = begin_task_run(task_key="watchlist_sync", trigger=trigger)
@@ -850,27 +1060,159 @@ def run_watchlist_sync(*, trigger: str = "manual") -> dict[str, Any]:
         logger.debug(f"watchlist begin_task_run skipped: {exc}", extra={"emoji_type": "debug"})
 
     summary: dict[str, Any] = {"ok": False, "trigger": trigger}
+    phases = None
     try:
         if not bool(getattr(settings, "ENABLE_PLEX_WATCHLIST_SYNC", False)) and trigger == "scheduled":
             summary["skipped"] = "disabled"
             if task_run_id:
-                finish_task_run(task_run_id, status="SKIPPED", summary=summary, skip_reason="disabled")
+                finish_task_run(task_run_id, status="skipped", summary=summary, skip_reason="disabled")
             return summary
         if not plex_watchlist_token():
             raise RuntimeError("No Plex token for watchlist (configure PLEX_TOKEN or sign in with Plex)")
 
-        home_payload = fetch_watchlists_for_home(limit_per_user=1000)
-        upsert = upsert_watchlist_from_home(home_payload)
-        auto = auto_add_new_items()
-        summary.update({"ok": True, "upsert": upsert, "auto_add": auto})
-        _persist_poll_meta(at=_utcnow().isoformat(), error=None)
         if task_run_id:
-            finish_task_run(task_run_id, status="DONE", summary=summary)
+            try:
+                from services.task_live_progress import WATCHLIST_SYNC_PHASES, seed_sync_live_phases
+                from services.task_run_phases import TaskRunPhaseTracker
+
+                seed_sync_live_phases(
+                    int(task_run_id),
+                    kind="watchlist_sync",
+                    label="Watchlist sync",
+                    phase_defs=WATCHLIST_SYNC_PHASES,
+                )
+                phases = TaskRunPhaseTracker(int(task_run_id), started_at=_utcnow())
+            except Exception as live_exc:
+                logger.debug(
+                    f"watchlist_sync live seed skipped: {live_exc}",
+                    extra={"emoji_type": "debug"},
+                )
+
+        force_full = str(trigger or "").lower() in {"manual", "startup"}
+
+        # Light roster refresh even when RSS skips a full title pull.
+        roster_meta: dict[str, Any] = {}
+        try:
+            from services.watchlist.roster import refresh_roster
+
+            roster_meta = refresh_roster(preserve_sync_toggles=True)
+            summary["roster"] = {
+                "users": roster_meta.get("users"),
+                "created": roster_meta.get("created"),
+                "updated": roster_meta.get("updated"),
+            }
+        except Exception as roster_exc:
+            logger.warning(f"Watchlist roster refresh failed: {roster_exc}", extra={"emoji_type": "warning"})
+            summary["roster_error"] = str(roster_exc)
+
+        if phases is not None:
+            phases.begin("rss", "RSS check")
+        rss_gate = _watchlist_rss_gate(force_full=force_full)
+        summary["rss"] = {
+            "available": bool(rss_gate.get("rss_available")),
+            "need_full": bool(rss_gate.get("need_full")),
+            "self_changed": bool(rss_gate.get("self_changed")),
+            "friends_changed": bool(rss_gate.get("friends_changed")),
+            "reconcile_due": bool(rss_gate.get("reconcile_due")),
+        }
+        if phases is not None:
+            if not rss_gate.get("use_rss"):
+                phases.end("rss", status="skipped", done=0, total=0, unit_label="feeds")
+            else:
+                phases.end(
+                    "rss",
+                    done=1 if rss_gate.get("rss_available") else 0,
+                    total=1,
+                    unit_label="feeds",
+                )
+
+        if not rss_gate.get("need_full"):
+            summary.update({"ok": True, "skipped_full_fetch": True, "upsert": {"fetched": 0}, "auto_add": {}})
+            if phases is not None:
+                phases.begin("fetch", "Watchlist fetch")
+                phases.end("fetch", status="skipped", done=0, total=0, unit_label="users")
+                phases.begin("upsert", "Catalog upsert")
+                phases.end("upsert", status="skipped", done=0, total=0, unit_label="titles")
+                phases.begin("auto_add", "Auto-add to Arr")
+                phases.end("auto_add", status="skipped", done=0, total=0, unit_label="titles")
+            _persist_poll_meta(at=_utcnow().isoformat(), error=None)
+            if task_run_id:
+                finish_task_run(task_run_id, status="done", summary=summary)
+            return summary
+
+        enabled_ids: set[str] = set()
+        roster_count = 0
+        session = get_session()
+        try:
+            all_users = session.query(PlexWatchlistUser).all()
+            roster_count = len(all_users)
+            for u in all_users:
+                if not bool(u.sync_enabled):
+                    continue
+                uid = str(u.plex_user_id or "").strip()
+                if uid:
+                    enabled_ids.add(uid)
+        finally:
+            session.close()
+
+        if phases is not None:
+            phases.begin("fetch", "Watchlist fetch")
+        # Empty enabled set means admin disabled everyone (skip pulls). None = no roster yet.
+        enabled_arg: set[str] | None = enabled_ids if roster_count > 0 else None
+        account_payload = fetch_watchlists_for_account(
+            limit_per_user=1000,
+            enabled_user_ids=enabled_arg,
+        )
+        users_raw = account_payload.get("users") if isinstance(account_payload, dict) else None
+        users_count = len(users_raw) if isinstance(users_raw, list) else 0
+        fetched_users = (
+            len(account_payload.get("by_user") or {}) if isinstance(account_payload, dict) else 0
+        )
+        if phases is not None:
+            phases.end("fetch", done=fetched_users, total=users_count, unit_label="users")
+
+        if phases is not None:
+            phases.begin("upsert", "Catalog upsert")
+        upsert = upsert_watchlist_from_home(account_payload)
+        fetched = int(upsert.get("fetched") or 0) if isinstance(upsert, dict) else 0
+        if phases is not None:
+            phases.end("upsert", done=fetched, total=fetched, unit_label="titles")
+
+        if phases is not None:
+            phases.begin("auto_add", "Auto-add to Arr")
+        auto = auto_add_new_items()
+        if phases is not None:
+            mode = str((auto or {}).get("mode") or "")
+            attempted = int((auto or {}).get("attempted") or 0)
+            if mode == "manual" or attempted <= 0:
+                phases.end("auto_add", status="skipped", done=0, total=0, unit_label="titles")
+            else:
+                added = int((auto or {}).get("added") or 0)
+                phases.end(
+                    "auto_add",
+                    done=added,
+                    total=attempted,
+                    unit_label="titles",
+                )
+
+        summary.update({"ok": True, "upsert": upsert, "auto_add": auto, "source": "roster"})
+        _persist_poll_meta(at=_utcnow().isoformat(), error=None)
+        _persist_config_values({"WATCHLIST_LAST_FULL_FETCH_AT": _utcnow().isoformat()})
+        if task_run_id:
+            finish_task_run(task_run_id, status="done", summary=summary)
         return summary
     except Exception as exc:
         logger.error(f"Watchlist sync failed: {exc}", extra={"emoji_type": "error"})
         summary["error"] = str(exc)
         _persist_poll_meta(at=_utcnow().isoformat(), error=str(exc))
+        if phases is not None:
+            try:
+                for phase in phases.phases():
+                    if str(phase.get("status") or "").lower() == "working":
+                        phases.end(str(phase.get("key") or "fetch"), failed=True, status="failed")
+                        break
+            except Exception:
+                pass
         if task_run_id:
-            finish_task_run(task_run_id, status="FAILED", summary=summary, error_message=str(exc))
+            finish_task_run(task_run_id, status="failed", summary=summary, error_message=str(exc))
         return summary

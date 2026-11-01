@@ -115,6 +115,7 @@ import {
   PLEX_OAUTH_META_KEYS,
   PlexMediaConnect,
   plexConnectedSummary,
+  plexConnectionChangeSectionsWarning,
 } from "./settings/PlexMediaConnect";
 import {
   WATCHLIST_ARR_SECTION_KEYS,
@@ -537,6 +538,16 @@ const SETTINGS_UI_HIDDEN_FIELD_KEYS = new Set<string>([
   "WATCHLIST_SONARR_INSTANCE_KEY",
   "WATCHLIST_SONARR_QUALITY_PROFILE_ID",
   "WATCHLIST_SONARR_ROOT_FOLDER",
+  // Watchlist RSS / poll meta (filled by sync; not edited by hand).
+  "WATCHLIST_RSS_SELF_URL",
+  "WATCHLIST_RSS_FRIENDS_URL",
+  "WATCHLIST_RSS_SELF_ETAG",
+  "WATCHLIST_RSS_FRIENDS_ETAG",
+  "WATCHLIST_RSS_SELF_HASH",
+  "WATCHLIST_RSS_FRIENDS_HASH",
+  "WATCHLIST_LAST_FULL_FETCH_AT",
+  "WATCHLIST_LAST_POLL_AT",
+  "WATCHLIST_LAST_ERROR",
 ]);
 
 const POSTER_BADGE_POSITION_OPTIONS = [
@@ -2020,7 +2031,17 @@ export function App() {
         );
       }
       if (activitySubPage === "watchlist") {
-        return <WatchlistPanel {...activityChrome} />;
+        return (
+          <WatchlistPanel
+            {...activityChrome}
+            syncRunning={Boolean(
+              scheduledTasks.find((t) => t.task_key === "watchlist_sync")?.running,
+            )}
+            onRefreshTasks={() => {
+              void refreshTasks();
+            }}
+          />
+        );
       }
       return (
         <PlaceholdersPanel
@@ -8809,9 +8830,10 @@ function SettingsPanel(props: {
                         legend="Plex Watchlist"
                         intro={
                           <p>
-                            Poll the owner Plex Universal Watchlist into Placeholdarr. Connect Plex under Media
-                            Integrations (Sign in with Plex). Review titles on Activity → Watchlist, or auto-add them
-                            to Arr with monitor-only or search-now behavior.
+                            Global watchlist policies live here. Manage who is on the roster and per-person sync on
+                            Activity → Watchlist. Connect Plex under Media Integrations (Sign in with Plex). With Plex
+                            Pass, RSS change hints skip full pulls when nothing changed. Review titles on Activity →
+                            Watchlist, or auto-add them to Arr with monitor-only or search-now behavior.
                           </p>
                         }
                       >
@@ -8912,6 +8934,7 @@ function SettingsPanel(props: {
           values={props.values}
           accent={accent}
           focusClass={getBrandFocusClass(props.brand, props.themeMode)}
+          themeMode={props.themeMode}
           isNew={mediaPanelOpenedViaAddRef.current}
           testResults={testResults}
           testBusy={mediaFooterTestBusy}
@@ -11017,6 +11040,7 @@ function MediaServerConfigModal(props: {
   values: FieldValueMap;
   accent: BrandAccent;
   focusClass: string;
+  themeMode: ThemeMode;
   isNew: boolean;
   testResults: Record<string, { ok: boolean; message: string }>;
   testBusy: boolean;
@@ -11045,6 +11069,23 @@ function MediaServerConfigModal(props: {
     Boolean(urlConnTest && !props.testBusy && urlConnTest.message !== "Testing..." && !urlConnTest.ok);
   const urlTestSucceeded =
     Boolean(urlConnTest && !props.testBusy && urlConnTest.message !== "Testing..." && urlConnTest.ok);
+  const openPlexUrlRef = useRef(String(props.values.PLEX_URL ?? "").trim());
+  const [plexUrlChangeConfirmOpen, setPlexUrlChangeConfirmOpen] = useState(false);
+
+  function requestSave() {
+    if (card.id !== "plex") {
+      props.onSave();
+      return;
+    }
+    const prior = openPlexUrlRef.current;
+    const next = String(props.values.PLEX_URL ?? "").trim();
+    if (prior && next && normalizeArrInstanceUrlForDedupe(prior) !== normalizeArrInstanceUrlForDedupe(next)) {
+      setPlexUrlChangeConfirmOpen(true);
+      return;
+    }
+    props.onSave();
+  }
+
   return (
     <div
       className={`fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto p-4 sm:p-6 ${props.overlayClassName ?? ""}`}
@@ -11084,6 +11125,7 @@ function MediaServerConfigModal(props: {
               values={props.values}
               accentHex={props.accent.hex}
               focusClass={props.focusClass}
+              themeMode={props.themeMode}
               fields={availableFields}
               onFieldChange={props.onFieldChange}
               onConnected={async () => {
@@ -11196,7 +11238,7 @@ function MediaServerConfigModal(props: {
             <button
               type="button"
               disabled={!(props.testPassed || retainedOk) || props.testBusy}
-              onClick={props.onSave}
+              onClick={requestSave}
               aria-label={commitLabel}
               className="btn-brand-tertiary min-w-[6.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-[14px] font-headline uppercase tracking-wider font-semibold border transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >
@@ -11205,6 +11247,21 @@ function MediaServerConfigModal(props: {
           </div>
         </div>
       </div>
+      {plexUrlChangeConfirmOpen ? (
+        <ConfirmModal
+          title="Update Plex connection?"
+          message={plexConnectionChangeSectionsWarning()}
+          confirmLabel="Continue"
+          cancelLabel="Cancel"
+          accentHex={props.accent.hex}
+          themeMode={props.themeMode}
+          onCancel={() => setPlexUrlChangeConfirmOpen(false)}
+          onConfirm={() => {
+            setPlexUrlChangeConfirmOpen(false);
+            props.onSave();
+          }}
+        />
+      ) : null}
     </div>
   );
 }
@@ -12491,6 +12548,7 @@ function OnboardingWizard(props: {
             values={props.values}
             accent={accent}
             focusClass={getBrandFocusClass(props.brand, wizardUiTheme)}
+            themeMode={wizardUiTheme}
             isNew={mediaPanelOpenedViaAddRef.current}
             testResults={testResults}
             testBusy={mediaFooterTestBusy}

@@ -1,11 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { Brand, ThemeMode } from "../brandTypes";
 import { getBrandSemanticTokens } from "../brandSemanticTheme";
 import { BrandCheckbox } from "../BrandCheckbox";
 import {
   getWatchlist,
+  patchWatchlistUser,
   postWatchlistAdd,
   postWatchlistExclude,
+  postWatchlistRosterRefresh,
   postWatchlistSync,
   type WatchlistItem,
   type WatchlistItemUser,
@@ -13,9 +16,10 @@ import {
   type WatchlistSummary,
   type WatchlistUser,
 } from "../api/watchlist";
+import { ToggleSwitch } from "../ToggleSwitch";
 
 type StripAccent = { hex: string; text: string; icon: string; hoverHex: string };
-type WatchlistTab = "accepted" | "queue" | "blocklist";
+type WatchlistTab = "accepted" | "queue" | "blocklist" | "people";
 type AcceptIntensity = "add_and_search" | "monitor_only" | "add_only";
 
 const ACCEPT_OPTIONS: Array<{ value: AcceptIntensity; label: string; hint: string }> = [
@@ -83,6 +87,69 @@ function userDisplayName(u: { title?: string | null; username?: string | null; p
   return String(u.title || u.username || u.plex_user_id || "User").trim() || "User";
 }
 
+function relationshipLabel(rel: string | null | undefined, kind?: string | null): string {
+  const r = String(rel || kind || "").trim().toLowerCase();
+  if (r === "owner") return "Owner";
+  // friend = friends ∩ (Home and/or this server); friend_only = friends list only.
+  if (r === "friend") return "Friend + Home";
+  if (r === "friend_only") return "Friend";
+  // Share access only; not on the Plex Home quick-switch list.
+  if (r === "server_only") return "Server only";
+  // On Home list, not a GraphQL friend (adult or managed).
+  if (r === "home" || r === "managed") return "Home";
+  if (r === "unknown") return "Unknown";
+  return r ? r.replace(/_/g, " ") : "—";
+}
+
+function homeProfileLabel(profile: string | null | undefined): string | null {
+  const p = String(profile || "").trim().toLowerCase();
+  if (p === "pin") return "PIN protected";
+  if (p === "managed") return "Managed";
+  if (p === "unlocked") return "Unlocked";
+  return null;
+}
+
+const POLICY_OR_HARD_BLOCKS = new Set([
+  "needs_friend_or_token",
+  "needs_pin_or_token",
+  "home_switch_disabled",
+  "friends_sync_disabled",
+  "friend_only_disabled",
+]);
+
+function blockReasonCopy(u: WatchlistUser): string | null {
+  const code = String(u.block_reason || "").trim();
+  if (code === "needs_friend_or_token") return "Needs friend access or a user token";
+  if (code === "needs_pin_or_token") return "Needs Home PIN or a user token";
+  if (code === "home_switch_disabled") {
+    return "Not syncing: Home switch is off in Settings → Watching";
+  }
+  if (code === "friends_sync_disabled") {
+    return "Not syncing: friends sync is off in Settings → Watching";
+  }
+  if (code === "friend_only_disabled") {
+    return "Not syncing: friends without server access is off in Settings → Watching";
+  }
+  if (code === "sync_disabled") return "Sync disabled for this person";
+  if (u.last_sync_error) return String(u.last_sync_error);
+  return null;
+}
+
+function userIsBlocked(u: WatchlistUser): boolean {
+  const code = String(u.block_reason || "").trim();
+  return POLICY_OR_HARD_BLOCKS.has(code);
+}
+
+function syncToggleLocked(u: WatchlistUser): boolean {
+  return POLICY_OR_HARD_BLOCKS.has(String(u.block_reason || "").trim());
+}
+
+/** What the switch should show: only “on” when a fetch will actually run. */
+function syncToggleChecked(u: WatchlistUser): boolean {
+  if (typeof u.sync_effective === "boolean") return u.sync_effective;
+  return Boolean(u.sync_enabled) && !syncToggleLocked(u);
+}
+
 function intensityToFlags(intensity: AcceptIntensity): { search: boolean; monitored: boolean } {
   if (intensity === "add_and_search") return { search: true, monitored: true };
   if (intensity === "add_only") return { search: false, monitored: false };
@@ -120,6 +187,10 @@ export function WatchlistPanel(props: {
   brand: Brand;
   themeMode: ThemeMode;
   accent: StripAccent;
+  /** True while a watchlist_sync task run is WORKING (from scheduled tasks poll). */
+  syncRunning?: boolean;
+  /** Kick the shared tasks poll so the sidebar pill and this button update promptly. */
+  onRefreshTasks?: () => void;
 }) {
   const semantic = getBrandSemanticTokens(props.brand, props.themeMode, props.accent);
   const isLight = props.themeMode === "light";
@@ -137,9 +208,13 @@ export function WatchlistPanel(props: {
   const [tab, setTab] = useState<WatchlistTab>("queue");
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Record<number, boolean>>({});
-  const [syncing, setSyncing] = useState(false);
+  /** Local gap between click and the first poll that reports syncRunning. */
+  const [syncStarting, setSyncStarting] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [rosterBusy, setRosterBusy] = useState(false);
   const [acceptMenuFor, setAcceptMenuFor] = useState<"bulk" | number | null>(null);
+  const wasSyncRunningRef = useRef(false);
+  const syncBusy = Boolean(props.syncRunning) || syncStarting;
 
   const load = useCallback(async () => {
     setError(null);
@@ -168,6 +243,34 @@ export function WatchlistPanel(props: {
     setSelected({});
     setAcceptMenuFor(null);
   }, [tab, selectedUserIds]);
+
+  useEffect(() => {
+    if (props.syncRunning) {
+      setSyncStarting(false);
+      wasSyncRunningRef.current = true;
+      return;
+    }
+    if (wasSyncRunningRef.current) {
+      wasSyncRunningRef.current = false;
+      setSyncStarting(false);
+      void load();
+    }
+  }, [props.syncRunning, load]);
+
+  // Bridging poll: POST returns before begin_task_run; keep asking until running or timeout.
+  useEffect(() => {
+    if (!syncStarting || props.syncRunning) return;
+    props.onRefreshTasks?.();
+    const pollId = window.setInterval(() => props.onRefreshTasks?.(), 1500);
+    const failsafeId = window.setTimeout(() => {
+      setSyncStarting(false);
+      void load();
+    }, 15000);
+    return () => {
+      window.clearInterval(pollId);
+      window.clearTimeout(failsafeId);
+    };
+  }, [syncStarting, props.syncRunning, props.onRefreshTasks, load]);
 
   const toggleUserFilter = (plexUserId: string) => {
     setSelectedUserIds((prev) =>
@@ -215,16 +318,22 @@ export function WatchlistPanel(props: {
   };
 
   const onRefresh = async () => {
-    setSyncing(true);
+    if (syncBusy) return;
+    setSyncStarting(true);
     setError(null);
     try {
       await postWatchlistSync();
-      await new Promise((r) => setTimeout(r, 1200));
-      await load();
+      props.onRefreshTasks?.();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Refresh failed");
-    } finally {
-      setSyncing(false);
+      setSyncStarting(false);
+      const msg = e instanceof Error ? e.message : "Refresh failed";
+      if (/already running/i.test(msg)) {
+        setSyncStarting(true);
+        props.onRefreshTasks?.();
+        setError(null);
+        return;
+      }
+      setError(msg);
     }
   };
 
@@ -286,6 +395,48 @@ export function WatchlistPanel(props: {
     }
   };
 
+  const onRosterRefresh = async () => {
+    setRosterBusy(true);
+    setError(null);
+    try {
+      const result = await postWatchlistRosterRefresh();
+      setUsers(result.users || []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Roster refresh failed");
+    } finally {
+      setRosterBusy(false);
+    }
+  };
+
+  const onToggleUserSync = async (u: WatchlistUser, enabled: boolean) => {
+    if (syncToggleLocked(u)) return;
+    setUsers((prev) =>
+      prev.map((row) => (row.plex_user_id === u.plex_user_id ? { ...row, sync_enabled: enabled } : row)),
+    );
+    try {
+      const result = await patchWatchlistUser(u.plex_user_id, { sync_enabled: enabled });
+      setUsers((prev) =>
+        prev.map((row) =>
+          row.plex_user_id === u.plex_user_id
+            ? {
+                ...row,
+                ...result.user,
+                title: result.user.title || row.title,
+                thumb_url: result.user.thumb_url ?? row.thumb_url,
+              }
+            : row,
+        ),
+      );
+    } catch (e) {
+      setUsers((prev) =>
+        prev.map((row) =>
+          row.plex_user_id === u.plex_user_id ? { ...row, sync_enabled: u.sync_enabled } : row,
+        ),
+      );
+      setError(e instanceof Error ? e.message : "Could not update sync toggle");
+    }
+  };
+
   const emptyCopy =
     tab === "queue"
       ? "No requests waiting. New watchlist titles appear here for Accept or Reject."
@@ -303,17 +454,18 @@ export function WatchlistPanel(props: {
                 Plex Watchlist
               </h2>
               <p className="text-[13px] mt-0.5" style={{ color: semantic.fgMuted }}>
-                Review Home watchlist requests. Accept sends titles to Arr; Reject moves them to the blocklist.
+                Review roster watchlist requests. Accept sends titles to Arr; Reject moves them to the blocklist.
+                Global policies stay in Settings → Watching.
               </p>
             </div>
             <button
               type="button"
-              disabled={syncing}
+              disabled={syncBusy}
               onClick={() => void onRefresh()}
               className="px-3 py-1.5 rounded-lg text-[12px] uppercase tracking-wider disabled:opacity-50"
               style={{ backgroundColor: props.accent.hex, color: semantic.fgOnAccent }}
             >
-              {syncing ? "Refreshing…" : "Refresh now"}
+              {syncBusy ? "Refreshing…" : "Refresh now"}
             </button>
           </div>
           <div className="mt-3 flex flex-wrap gap-3 text-[13px]" style={{ color: semantic.fgMuted }}>
@@ -334,70 +486,6 @@ export function WatchlistPanel(props: {
             <p className="mt-2 text-[13px] text-red-400">Last error: {summary.last_error}</p>
           ) : null}
         </div>
-
-        {users.length > 0 ? (
-          <div className="px-4 py-3 border-b" style={{ borderColor: headBorder }}>
-            <div className="flex items-center justify-between gap-3 mb-2">
-              <div className="text-[12px] font-headline uppercase tracking-widest" style={{ color: semantic.fgSubtle }}>
-                Users
-                {selectedUserIds.length ? (
-                  <span className="ml-2 normal-case tracking-normal text-slate-400">
-                    Filtering {selectedUserIds.length} selected
-                  </span>
-                ) : (
-                  <span className="ml-2 normal-case tracking-normal text-slate-500">Tap to filter</span>
-                )}
-              </div>
-              {selectedUserIds.length ? (
-                <button
-                  type="button"
-                  onClick={() => setSelectedUserIds([])}
-                  className="text-[12px] uppercase tracking-wider"
-                  style={{ color: semantic.fgMuted }}
-                >
-                  Clear filter
-                </button>
-              ) : null}
-            </div>
-            <div className="flex gap-3 overflow-x-auto pb-1 overscroll-x-contain">
-              {users.map((u) => {
-                const on = selectedUserIds.includes(u.plex_user_id);
-                const name = userDisplayName(u);
-                const blocked = Boolean(u.is_protected && u.last_sync_error);
-                return (
-                  <button
-                    key={u.plex_user_id}
-                    type="button"
-                    onClick={() => toggleUserFilter(u.plex_user_id)}
-                    title={
-                      blocked
-                        ? u.last_sync_error || "Protected user (PIN required to sync)"
-                        : name
-                    }
-                    className="flex w-[4.5rem] shrink-0 flex-col items-center gap-1.5 rounded-xl border px-1.5 py-2 transition-colors"
-                    style={{
-                      borderColor: on ? props.accent.hex : semantic.border,
-                      backgroundColor: on ? `${props.accent.hex}22` : "transparent",
-                    }}
-                  >
-                    <div
-                      className="rounded-full"
-                      style={on ? { boxShadow: `0 0 0 2px ${props.accent.hex}` } : undefined}
-                    >
-                      <UserAvatar thumbUrl={u.thumb_url} title={name} size={44} dimmed={blocked} />
-                    </div>
-                    <span
-                      className="w-full truncate text-center text-[11px] leading-tight"
-                      style={{ color: on ? semantic.fg : semantic.fgMuted }}
-                    >
-                      {name}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        ) : null}
 
         <div
           className="px-4 pt-3 flex flex-wrap items-end gap-1 border-b"
@@ -439,8 +527,227 @@ export function WatchlistPanel(props: {
               </button>
             );
           })}
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "people"}
+            onClick={() => setTab("people")}
+            className="ml-auto px-3 py-2 text-[13px] font-headline uppercase tracking-wider border-b-2 -mb-px transition-colors"
+            style={{
+              borderColor: tab === "people" ? props.accent.hex : "transparent",
+              color: tab === "people" ? semantic.fg : semantic.fgMuted,
+            }}
+          >
+            People
+            <span
+              className="ml-2 inline-flex min-w-[1.25rem] justify-center rounded-full px-1.5 py-0.5 text-[11px] tabular-nums"
+              style={{
+                backgroundColor: tab === "people" ? `${props.accent.hex}33` : "rgba(66,71,83,0.35)",
+                color: tab === "people" ? props.accent.hex : semantic.fgSubtle,
+              }}
+            >
+              {users.length}
+            </span>
+          </button>
         </div>
 
+        {tab !== "people" && users.length > 0 ? (
+          <div className="px-4 pt-3 border-b" style={{ borderColor: headBorder }}>
+            <div className="flex items-center justify-between gap-3 mb-2">
+              <div className="text-[12px] font-headline uppercase tracking-widest" style={{ color: semantic.fgSubtle }}>
+                Filter
+                {selectedUserIds.length ? (
+                  <span className="ml-2 normal-case tracking-normal text-slate-400">
+                    Filtering {selectedUserIds.length} selected
+                  </span>
+                ) : (
+                  <span className="ml-2 normal-case tracking-normal text-slate-500">Tap to filter titles</span>
+                )}
+              </div>
+              {selectedUserIds.length ? (
+                <button
+                  type="button"
+                  onClick={() => setSelectedUserIds([])}
+                  className="text-[12px] uppercase tracking-wider"
+                  style={{ color: semantic.fgMuted }}
+                >
+                  Clear filter
+                </button>
+              ) : null}
+            </div>
+            <div className="flex gap-3 overflow-x-auto pb-3 overscroll-x-contain">
+              {users.map((u) => {
+                const on = selectedUserIds.includes(u.plex_user_id);
+                const name = userDisplayName(u);
+                const blocked = userIsBlocked(u);
+                const dimmed = blocked || !syncToggleChecked(u);
+                return (
+                  <button
+                    key={u.plex_user_id}
+                    type="button"
+                    onClick={() => toggleUserFilter(u.plex_user_id)}
+                    title={blockReasonCopy(u) || name}
+                    className="flex w-[4.5rem] shrink-0 flex-col items-center gap-1.5 rounded-xl border px-1.5 py-2 transition-colors"
+                    style={{
+                      borderColor: on ? props.accent.hex : semantic.border,
+                      backgroundColor: on ? `${props.accent.hex}22` : "transparent",
+                      opacity: dimmed && !on ? 0.55 : 1,
+                    }}
+                  >
+                    <div
+                      className="rounded-full"
+                      style={on ? { boxShadow: `0 0 0 2px ${props.accent.hex}` } : undefined}
+                    >
+                      <UserAvatar thumbUrl={u.thumb_url} title={name} size={44} dimmed={dimmed} />
+                    </div>
+                    <span
+                      className="w-full truncate text-center text-[11px] leading-tight"
+                      style={{ color: on ? semantic.fg : semantic.fgMuted }}
+                    >
+                      {name}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
+
+        {tab === "people" ? (
+          <>
+            <div
+              className="px-4 py-3 border-b flex flex-wrap items-center gap-2"
+              style={{ borderColor: headBorder }}
+            >
+              <div className="text-[13px]" style={{ color: semantic.fgMuted }}>
+                Per-person sync. Greyed toggles mean Settings → Watching (or a missing path) blocks
+                fetch for that account type right now.
+              </div>
+              <button
+                type="button"
+                disabled={rosterBusy || syncBusy}
+                onClick={() => void onRosterRefresh()}
+                className="ml-auto px-3 py-1.5 rounded-lg border text-[12px] uppercase tracking-wider disabled:opacity-50"
+                style={{ borderColor: semantic.border, color: semantic.fg }}
+              >
+                {rosterBusy ? "Refreshing…" : "Refresh roster"}
+              </button>
+            </div>
+            {error ? <div className="px-4 py-2 text-[13px] text-red-400">{error}</div> : null}
+            <div className="overflow-x-auto">
+              <table className="w-full table-fixed">
+                <colgroup>
+                  <col className="w-14" />
+                  <col />
+                  <col className="w-[8.5rem]" />
+                  <col className="w-[11rem]" />
+                  <col className="w-16" />
+                </colgroup>
+                <thead>
+                  <tr className="border-b" style={{ borderColor: headBorder }}>
+                    {["", "Person", "Relationship", "Last sync", "Sync"].map((h, idx) => (
+                      <th
+                        key={`${h}-${idx}`}
+                        className="px-2 py-2 text-left text-[12px] font-headline uppercase tracking-widest font-normal"
+                        style={{ color: semantic.fgSubtle }}
+                      >
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {loading ? (
+                    <tr>
+                      <td colSpan={5} className="px-3 py-6 text-[14px]" style={{ color: semantic.fgMuted }}>
+                        Loading…
+                      </td>
+                    </tr>
+                  ) : users.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="px-3 py-6 text-[14px]" style={{ color: semantic.fgMuted }}>
+                        No roster yet. Run Refresh now or Refresh roster after Plex is connected.
+                      </td>
+                    </tr>
+                  ) : (
+                    users.map((u) => {
+                      const name = userDisplayName(u);
+                      const blocked = userIsBlocked(u);
+                      const reason = blockReasonCopy(u);
+                      const locked = syncToggleLocked(u);
+                      const checked = syncToggleChecked(u);
+                      return (
+                        <tr key={`roster-${u.plex_user_id}`} className="border-b last:border-0" style={{ borderColor: rowBorder }}>
+                          <td className="px-2 py-3 align-middle">
+                            <UserAvatar
+                              thumbUrl={u.thumb_url}
+                              title={name}
+                              size={36}
+                              dimmed={blocked || !checked}
+                            />
+                          </td>
+                          <td className="px-2 py-3 align-middle min-w-0">
+                            <div className="truncate text-[14px] font-medium" style={{ color: semantic.fg }}>
+                              {name}
+                            </div>
+                            {reason ? (
+                              <p
+                                className="mt-0.5 text-[12px] leading-snug"
+                                style={{ color: blocked ? "#f87171" : semantic.fgSubtle }}
+                              >
+                                {reason}
+                              </p>
+                            ) : u.username && u.username !== name ? (
+                              <p className="mt-0.5 text-[12px] truncate" style={{ color: semantic.fgSubtle }}>
+                                {u.username}
+                              </p>
+                            ) : null}
+                          </td>
+                          <td className="px-2 py-3 align-middle">
+                            <div className="flex flex-col items-start gap-1">
+                              <span
+                                className="inline-block rounded-md px-1.5 py-0.5 text-[10px] uppercase tracking-wider"
+                                style={{
+                                  backgroundColor: `${props.accent.hex}18`,
+                                  color: semantic.fgMuted,
+                                }}
+                              >
+                                {relationshipLabel(u.relationship, u.kind)}
+                              </span>
+                              {u.relationship === "home" && homeProfileLabel(u.home_profile) ? (
+                                <span className="text-[11px]" style={{ color: semantic.fgSubtle }}>
+                                  {homeProfileLabel(u.home_profile)}
+                                </span>
+                              ) : u.relationship === "friend" && u.on_plex_home === false ? (
+                                <span className="text-[11px]" style={{ color: semantic.fgSubtle }}>
+                                  Server share
+                                </span>
+                              ) : null}
+                            </div>
+                          </td>
+                          <td className="px-2 py-3 align-middle text-[13px]" style={{ color: semantic.fgMuted }}>
+                            {formatWhen(u.last_synced_at ?? null)}
+                          </td>
+                          <td className="px-2 py-3 align-middle">
+                            <ToggleSwitch
+                              size="sm"
+                              checked={checked}
+                              disabled={locked || rosterBusy}
+                              accentHex={props.accent.hex}
+                              ariaLabel={`Sync watchlist for ${name}`}
+                              onChange={(next) => void onToggleUserSync(u, next)}
+                            />
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </>
+        ) : (
+          <>
         <div
           className="px-4 py-3 border-b flex flex-wrap items-center gap-2"
           style={{ borderColor: headBorder }}
@@ -748,6 +1055,8 @@ export function WatchlistPanel(props: {
             </tbody>
           </table>
         </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -767,22 +1076,56 @@ function AcceptMenuButton(props: {
   bulk?: boolean;
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
+
+  const placeMenu = useCallback(() => {
+    const btn = rootRef.current;
+    const menu = menuRef.current;
+    if (!btn || !menu) return;
+    const rect = btn.getBoundingClientRect();
+    const menuRect = menu.getBoundingClientRect();
+    const gap = 4;
+    const pad = 8;
+    const spaceBelow = window.innerHeight - rect.bottom - pad;
+    const placeAbove = menuRect.height > spaceBelow && rect.top > spaceBelow;
+    let top = placeAbove ? rect.top - menuRect.height - gap : rect.bottom + gap;
+    let left = rect.right - menuRect.width;
+    top = Math.max(pad, Math.min(top, window.innerHeight - menuRect.height - pad));
+    left = Math.max(pad, Math.min(left, window.innerWidth - menuRect.width - pad));
+    setMenuPos({ top, left });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!props.open) {
+      setMenuPos(null);
+      return;
+    }
+    placeMenu();
+  }, [props.open, placeMenu]);
 
   useEffect(() => {
     if (!props.open) return;
     const onDoc = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) props.onClose();
+      const t = e.target as Node;
+      if (rootRef.current?.contains(t) || menuRef.current?.contains(t)) return;
+      props.onClose();
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") props.onClose();
     };
+    const onReposition = () => placeMenu();
     document.addEventListener("mousedown", onDoc);
     window.addEventListener("keydown", onKey);
+    window.addEventListener("resize", onReposition);
+    window.addEventListener("scroll", onReposition, true);
     return () => {
       document.removeEventListener("mousedown", onDoc);
       window.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", onReposition);
+      window.removeEventListener("scroll", onReposition, true);
     };
-  }, [props.open, props.onClose]);
+  }, [props.open, props.onClose, placeMenu]);
 
   return (
     <div ref={rootRef} className="relative inline-block">
@@ -801,33 +1144,41 @@ function AcceptMenuButton(props: {
       >
         {props.label}
       </button>
-      {props.open ? (
-        <div
-          role="menu"
-          className={`absolute z-30 mt-1 w-[18rem] rounded-xl border shadow-xl overflow-hidden ${
-            props.bulk ? "right-0" : "right-0"
-          }`}
-          style={{ borderColor: props.border, backgroundColor: props.panelBg }}
-        >
-          {ACCEPT_OPTIONS.map((opt) => (
-            <button
-              key={opt.value}
-              type="button"
-              role="menuitem"
-              onClick={() => props.onPick(opt.value)}
-              className="w-full text-left px-3 py-2.5 hover:bg-white/5 border-b last:border-0"
-              style={{ borderColor: props.border }}
+      {props.open
+        ? createPortal(
+            <div
+              ref={menuRef}
+              role="menu"
+              className="fixed z-[90] w-[18rem] rounded-xl border shadow-xl overflow-hidden"
+              style={{
+                borderColor: props.border,
+                backgroundColor: props.panelBg,
+                top: menuPos?.top ?? -9999,
+                left: menuPos?.left ?? -9999,
+                visibility: menuPos ? "visible" : "hidden",
+              }}
             >
-              <div className="text-[13px] font-medium" style={{ color: props.fg }}>
-                {opt.label}
-              </div>
-              <div className="text-[12px] mt-0.5" style={{ color: props.fgMuted }}>
-                {opt.hint}
-              </div>
-            </button>
-          ))}
-        </div>
-      ) : null}
+              {ACCEPT_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  role="menuitem"
+                  onClick={() => props.onPick(opt.value)}
+                  className="w-full text-left px-3 py-2.5 hover:bg-white/5 border-b last:border-0"
+                  style={{ borderColor: props.border }}
+                >
+                  <div className="text-[13px] font-medium" style={{ color: props.fg }}>
+                    {opt.label}
+                  </div>
+                  <div className="text-[12px] mt-0.5" style={{ color: props.fgMuted }}>
+                    {opt.hint}
+                  </div>
+                </button>
+              ))}
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

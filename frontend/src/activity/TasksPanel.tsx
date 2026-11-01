@@ -304,7 +304,8 @@ export function TasksPanel(props: {
                     ) : null}
                     {task.task_key === "watchlist_sync" ? (
                       <p className="text-[12px] font-normal mt-0.5 max-w-md" style={{ color: semantic.fgSubtle }}>
-                        Poll the owner Plex Watchlist and optionally auto-add new titles to Arr.
+                        Poll owner and friends Plex watchlists (RSS hints when available) and optionally auto-add new
+                        titles to Arr.
                       </p>
                     ) : null}
                   </td>

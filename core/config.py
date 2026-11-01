@@ -189,6 +189,21 @@ class Settings(BaseSettings):
     WATCHLIST_SYNC_SCHEDULE: Optional[dict] = None
     WATCHLIST_ON_NEW: str = "manual"
     WATCHLIST_TV_REQUEST_SCOPE: str = ""
+    # Owner + friends via GraphQL (default). Home user-switch is opt-in.
+    WATCHLIST_SYNC_FRIENDS: bool = True
+    # Friends who are not on this server (friend_only) still sync via GraphQL by default.
+    WATCHLIST_SYNC_FRIEND_ONLY: bool = True
+    WATCHLIST_SYNC_HOME_USERS: bool = False
+    WATCHLIST_USE_RSS_HINT: bool = True
+    WATCHLIST_FULL_RECONCILE_HOURS: float = 2.0
+    # Auto-created RSS URLs / etags (Plex Pass); not user-facing.
+    WATCHLIST_RSS_SELF_URL: str = ""
+    WATCHLIST_RSS_FRIENDS_URL: str = ""
+    WATCHLIST_RSS_SELF_ETAG: str = ""
+    WATCHLIST_RSS_FRIENDS_ETAG: str = ""
+    WATCHLIST_RSS_SELF_HASH: str = ""
+    WATCHLIST_RSS_FRIENDS_HASH: str = ""
+    WATCHLIST_LAST_FULL_FETCH_AT: Optional[str] = None
     # JSON list of {instance_key, quality_profile_id, root_folder_path} for fan-out adds.
     WATCHLIST_RADARR_TARGETS_JSON: str = "[]"
     WATCHLIST_SONARR_TARGETS_JSON: str = "[]"

@@ -7,6 +7,8 @@ import {
   type PlexOauthServer,
 } from "../api/plex";
 import { BrandSelect } from "../BrandSelect";
+import { ConfirmModal } from "../ConfirmModal";
+import type { ThemeMode } from "../brandTypes";
 
 type Mode = "oauth" | "manual";
 type OauthPhase = "idle" | "waiting" | "pick_server" | "saving" | "done" | "error";
@@ -17,6 +19,14 @@ export const PLEX_OAUTH_META_KEYS = [
   "PLEX_SERVER_NAME",
   "PLEX_SERVER_MACHINE_ID",
 ] as const;
+
+/** Shown when replacing a Plex connection that may leave Paths section IDs pointing at the old server. */
+export function plexConnectionChangeSectionsWarning(): string {
+  return (
+    "If this points at a different Plex Media Server, re-select movie and TV library sections under Paths. " +
+    "Section IDs from the previous server will not match."
+  );
+}
 
 export function plexConnectedSummary(values: Record<string, unknown>): {
   method: string;
@@ -36,6 +46,7 @@ export function PlexMediaConnect(props: {
   values: Record<string, unknown>;
   accentHex: string;
   focusClass: string;
+  themeMode?: ThemeMode;
   fields: Array<{ key: string; label: string; description?: string; type: string; secret?: boolean; has_saved_value?: boolean }>;
   onFieldChange: (key: string, value: unknown) => void;
   onConnected: () => void | Promise<void>;
@@ -51,6 +62,7 @@ export function PlexMediaConnect(props: {
   const [pendingToken, setPendingToken] = useState<string | null>(null);
   const [pendingClientId, setPendingClientId] = useState<string | null>(null);
   const [pendingUsername, setPendingUsername] = useState<string | null>(null);
+  const [serverChangeConfirmOpen, setServerChangeConfirmOpen] = useState(false);
   const pollRef = useRef<number | null>(null);
   const pinRef = useRef<{ id: number; client_id: string } | null>(null);
 
@@ -126,6 +138,7 @@ export function PlexMediaConnect(props: {
 
   const completeOauth = async () => {
     if (!selectedMachine) return;
+    setServerChangeConfirmOpen(false);
     setPhase("saving");
     setMessage("Saving Plex connection…");
     try {
@@ -152,6 +165,22 @@ export function PlexMediaConnect(props: {
       setPhase("error");
       setMessage(e instanceof Error ? e.message : "Failed to save Plex connection");
     }
+  };
+
+  const requestCompleteOauth = () => {
+    if (!selectedMachine) return;
+    const priorMachine = String(props.values.PLEX_SERVER_MACHINE_ID ?? "").trim();
+    const priorUrl = String(props.values.PLEX_URL ?? "").trim();
+    const sameServer = Boolean(priorMachine) && priorMachine === selectedMachine;
+    if (sameServer) {
+      void completeOauth();
+      return;
+    }
+    if (priorUrl || priorMachine) {
+      setServerChangeConfirmOpen(true);
+      return;
+    }
+    void completeOauth();
   };
 
   const changeServer = async () => {
@@ -238,7 +267,7 @@ export function PlexMediaConnect(props: {
               <button
                 type="button"
                 disabled={!selectedMachine || phase === "saving"}
-                onClick={() => void completeOauth()}
+                onClick={requestCompleteOauth}
                 className="w-full rounded-xl py-2.5 text-[14px] font-semibold disabled:opacity-40"
                 style={{ backgroundColor: props.accentHex, color: "#0b0f14" }}
               >
@@ -393,6 +422,19 @@ export function PlexMediaConnect(props: {
           </div>
         );
       })}
+
+      {serverChangeConfirmOpen ? (
+        <ConfirmModal
+          title="Update Plex connection?"
+          message={plexConnectionChangeSectionsWarning()}
+          confirmLabel="Continue"
+          cancelLabel="Cancel"
+          accentHex={props.accentHex}
+          themeMode={props.themeMode ?? "dark"}
+          onCancel={() => setServerChangeConfirmOpen(false)}
+          onConfirm={() => void completeOauth()}
+        />
+      ) : null}
     </div>
   );
 }

@@ -786,11 +786,13 @@ class PlexWatchlistItem(Base):
 
 
 class PlexWatchlistUser(Base):
-    """Plex Home users discovered for watchlist sync (per-user policy later)."""
+    """Plex watchlist identities (owner, friends, optional Home) for membership UI."""
 
     __tablename__ = "plex_watchlist_user"
     __table_args__ = (
         Index("ix_plex_watchlist_user_title", "title"),
+        Index("ix_plex_watchlist_user_kind", "kind"),
+        Index("ix_plex_watchlist_user_relationship", "relationship"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -799,6 +801,15 @@ class PlexWatchlistUser(Base):
     username = Column(String(256), nullable=True)
     title = Column(String(256), nullable=False, default="")
     thumb_url = Column(String(1024), nullable=True)
+    # Fetch channel: owner | friend | home | unknown (token reserved for Phase 2)
+    kind = Column(String(16), nullable=False, default="unknown")
+    # Roster relationship: owner | friend (∩ Home/server) | friend_only | server_only
+    # (share, not Home) | home (on Home list, not friend) | unknown
+    relationship = Column(String(32), nullable=True)
+    # discover | graphql | home_switch | none
+    fetch_method = Column(String(32), nullable=True)
+    # needs_friend_or_token | needs_pin_or_token | home_switch_disabled | sync_disabled
+    block_reason = Column(String(64), nullable=True)
     is_admin = Column(Boolean, nullable=False, default=False)
     is_restricted = Column(Boolean, nullable=False, default=False)
     is_protected = Column(Boolean, nullable=False, default=False)
@@ -816,7 +827,7 @@ class PlexWatchlistUser(Base):
 
 
 class PlexWatchlistMembership(Base):
-    """Which Plex Home user(s) currently have a title on their Universal Watchlist."""
+    """Which watchlist identities currently have a title on their Universal Watchlist."""
 
     __tablename__ = "plex_watchlist_membership"
     __table_args__ = (
