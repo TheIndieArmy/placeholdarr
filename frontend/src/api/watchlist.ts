@@ -97,6 +97,8 @@ export interface WatchlistItemUser {
 export interface WatchlistSummary {
   enabled: boolean;
   has_token: boolean;
+  /** ENABLE_PLEX + URL + token; false after disconnect even if a secret token was retained. */
+  plex_ready?: boolean;
   on_new: string;
   tv_request_scope: string;
   arr_tags?: string;

@@ -2033,9 +2033,33 @@ export function App() {
         );
       }
       if (activitySubPage === "watchlist") {
+        const plexCard = ONBOARDING_MEDIA_CARDS.find((card) => card.id === "plex");
+        const settingsFieldsByKey = new Map<string, SettingsField>();
+        for (const section of settingsPayload?.sections || []) {
+          for (const field of section.fields || []) {
+            settingsFieldsByKey.set(field.key, field);
+          }
+        }
+        // Only force a boolean when settings are loaded. Secrets are blank after refresh, so
+        // "details complete" can false-negative until has_saved_value is known; leave
+        // undefined so WatchlistPanel can trust summary.plex_ready from the API.
+        const settingsLoaded = Boolean(settingsPayload);
+        const plexEnabled = Boolean(fieldValues.ENABLE_PLEX);
+        const detailsComplete = Boolean(
+          plexCard && mediaCardConnectionDetailsComplete(plexCard, fieldValues, settingsFieldsByKey),
+        );
+        let plexReadyForWatchlist: boolean | undefined;
+        if (settingsLoaded && !plexEnabled) {
+          plexReadyForWatchlist = false;
+        } else if (settingsLoaded && plexEnabled && detailsComplete) {
+          plexReadyForWatchlist = true;
+        } else {
+          plexReadyForWatchlist = undefined;
+        }
         return (
           <WatchlistPanel
             {...activityChrome}
+            plexReady={plexReadyForWatchlist}
             syncRunning={Boolean(
               scheduledTasks.find((t) => t.task_key === "watchlist_sync")?.running,
             )}
@@ -11042,7 +11066,16 @@ function mediaCardConnectionDetailsComplete(
   const cred = String(values[keys.credentialKey] ?? "").trim();
   if (cred.length > 0) return true;
   const credField = fieldsByKey?.get(keys.credentialKey);
-  return Boolean(credField?.secret && credField.has_saved_value);
+  if (credField?.secret && credField.has_saved_value) return true;
+  // Sign in with Plex also stores PLEX_WATCHLIST_TOKEN (account). Treat a saved
+  // watchlist token + URL as complete when the server token field is redacted.
+  if (card.id === "plex") {
+    const watchlistTok = String(values.PLEX_WATCHLIST_TOKEN ?? "").trim();
+    if (watchlistTok) return true;
+    const wlField = fieldsByKey?.get("PLEX_WATCHLIST_TOKEN");
+    if (wlField?.secret && wlField.has_saved_value) return true;
+  }
+  return false;
 }
 
 /** True when the card should show the connected shell (toggle / configure), not the empty Connect CTA. */

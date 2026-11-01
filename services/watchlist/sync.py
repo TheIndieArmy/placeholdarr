@@ -700,6 +700,19 @@ def add_watchlist_items_to_arr(
     return {"added": added, "skipped": skipped, "failed": failed}
 
 
+def _user_counts_for_on_new(user: PlexWatchlistUser) -> bool:
+    """Only effectively syncing people should steer auto-add Arr behavior."""
+    from services.watchlist.roster import effective_sync_enabled
+
+    block = getattr(user, "block_reason", None)
+    return effective_sync_enabled(
+        sync_enabled=bool(user.sync_enabled),
+        relationship=str(getattr(user, "relationship", None) or ""),
+        is_protected=bool(user.is_protected),
+        block_reason=str(block) if block else None,
+    )
+
+
 def auto_add_new_items() -> dict[str, Any]:
     default_mode = watchlist_action_mode()
     session = get_session()
@@ -727,7 +740,13 @@ def auto_add_new_items() -> dict[str, Any]:
         by_mode: dict[str, list[int]] = {}
         for row in rows:
             rid = int(row.id)
-            members = [users_by_id[uid] for uid in mems_by_item.get(rid, []) if uid in users_by_id]
+            # Stale memberships from disabled / policy-blocked people must not promote
+            # titles past the account default (e.g. leftover add_and_search override).
+            members = [
+                users_by_id[uid]
+                for uid in mems_by_item.get(rid, [])
+                if uid in users_by_id and _user_counts_for_on_new(users_by_id[uid])
+            ]
             mode = effective_on_new_for_users(members, default=default_mode)
             by_mode.setdefault(mode, []).append(rid)
     finally:
@@ -869,9 +888,15 @@ def watchlist_summary() -> dict[str, Any]:
     enabled = bool(getattr(settings, "ENABLE_PLEX_WATCHLIST_SYNC", False))
     last = getattr(settings, "WATCHLIST_LAST_POLL_AT", None)
     last_error = getattr(settings, "WATCHLIST_LAST_ERROR", None)
+    plex_url = str(getattr(settings, "PLEX_URL", "") or "").strip()
+    plex_enabled = bool(getattr(settings, "ENABLE_PLEX", False))
+    token_present = bool(plex_watchlist_token())
     return {
         "enabled": enabled,
-        "has_token": bool(plex_watchlist_token()),
+        # Token alone is not enough: disconnect clears URL/enable but blank secrets
+        # are retained on save, so leftover tokens can outlive a removed connection.
+        "has_token": token_present,
+        "plex_ready": bool(plex_enabled and plex_url and token_present),
         "on_new": watchlist_action_mode(),
         "tv_request_scope": default_tv_request_scope(),
         "arr_tags": str(getattr(settings, "WATCHLIST_ARR_TAGS", "") or "placeholdarr-watchlist"),

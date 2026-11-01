@@ -19,6 +19,7 @@ import {
 import { BrandSelect } from "../BrandSelect";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
 import { ToggleSwitch } from "../ToggleSwitch";
+import { UI_SECTION_FRAME_CLASS } from "../uiSectionFrame";
 
 const ARR_BEHAVIOR_OPTIONS = [
   { value: "", label: "Default" },
@@ -203,6 +204,13 @@ export function WatchlistPanel(props: {
   onRefreshTasks?: () => void;
   /** Navigate to Settings → Media Integrations (Plex). */
   onOpenPlexSettings?: () => void;
+  /**
+   * Optional App hint once settings are loaded:
+   * - true: Plex enable + connection details look complete
+   * - false: ENABLE_PLEX is off (optimistic empty state after disconnect)
+   * - undefined: let summary.plex_ready decide (needed after refresh when secrets are blank)
+   */
+  plexReady?: boolean;
 }) {
   const semantic = getBrandSemanticTokens(props.brand, props.themeMode, props.accent);
   const isLight = props.themeMode === "light";
@@ -472,34 +480,41 @@ export function WatchlistPanel(props: {
         ? "No rejected titles."
         : "No accepted titles yet.";
 
-  const plexReady = Boolean(summary?.has_token);
-  if (!loading && summary && !plexReady) {
+  // App false = known disconnected. App true = connected. Otherwise use API plex_ready
+  // after load (refresh-safe: secrets are redacted in field values).
+  const plexReady =
+    props.plexReady === false
+      ? false
+      : props.plexReady === true
+        ? true
+        : loading || !summary
+          ? null
+          : Boolean(summary.plex_ready);
+  if (plexReady === false) {
     return (
       <div>
         <div className="flex items-center gap-2 mb-1">
-          <div className="w-2 h-2 rounded-full" style={{ backgroundColor: props.accent.hex }} />
-          <span
-            className="text-[12px] font-headline uppercase tracking-widest"
-            style={{ color: semantic.fgSubtle }}
-          >
+          <div className="w-2 h-2 rounded-full bg-green-500" />
+          <span className="text-[12px] font-headline uppercase tracking-widest text-slate-500">
             Plex Watchlist
           </span>
         </div>
         <h1
-          className="mb-6 text-[32px] font-black tracking-tight font-headline"
-          style={{ color: isLight ? semantic.fg : "#fff" }}
+          className={`mb-6 text-[32px] font-black tracking-tight font-headline ${
+            isLight ? "text-slate-900" : "text-white"
+          }`}
         >
           Watchlist
         </h1>
-        <div className="rounded-xl border overflow-hidden" style={{ borderColor: panelBorder, backgroundColor: panelBg }}>
+        <div className={`${UI_SECTION_FRAME_CLASS} overflow-hidden`}>
           <div className="p-12 text-center">
-            <span className="material-symbols-outlined" style={{ fontSize: 44, color: semantic.fgSubtle }}>
+            <span className="material-symbols-outlined text-slate-500" style={{ fontSize: 44 }}>
               playlist_add_check
             </span>
-            <p className="mt-3 text-[18px] font-headline" style={{ color: isLight ? semantic.fg : "#fff" }}>
+            <p className={`mt-3 text-[18px] font-headline ${isLight ? "text-slate-900" : "text-white"}`}>
               Watchlist is Plex only
             </p>
-            <p className="mt-2 text-[14px] max-w-lg mx-auto leading-relaxed" style={{ color: semantic.fgMuted }}>
+            <p className="mt-2 text-[14px] max-w-lg mx-auto leading-relaxed text-slate-500">
               This feature syncs Plex watchlists into a review queue and Arr targets. Connect Plex under Settings →
               Media Integrations to use it.
             </p>
@@ -516,11 +531,7 @@ export function WatchlistPanel(props: {
                 Connect Plex
               </button>
             ) : null}
-            {error ? (
-              <p className="mt-4 text-[12px] max-w-md mx-auto" style={{ color: semantic.fgSubtle }}>
-                {error}
-              </p>
-            ) : null}
+            {error ? <p className="mt-4 text-[12px] max-w-md mx-auto text-slate-500">{error}</p> : null}
           </div>
         </div>
       </div>
