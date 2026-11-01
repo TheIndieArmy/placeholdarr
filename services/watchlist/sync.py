@@ -1,4 +1,4 @@
-"""Poll Plex owner watchlist, upsert rows, optional auto Arr add."""
+"""Poll Plex Home watchlists, upsert title + membership rows, optional auto Arr add."""
 
 from __future__ import annotations
 
@@ -7,9 +7,13 @@ from typing import Any, Iterable
 
 from core.config import settings
 from core.logger import logger
-from services.media_servers.plex_watchlist import fetch_owner_watchlist, plex_watchlist_token
+from services.media_servers.plex_watchlist import fetch_watchlists_for_home, plex_watchlist_token
 from services.postgres.db import get_session
-from services.postgres.models import Movie, PlexWatchlistItem, Series
+from services.postgres.models import (
+    PlexWatchlistItem,
+    PlexWatchlistMembership,
+    PlexWatchlistUser,
+)
 from services.task_run_history import begin_task_run, finish_task_run
 
 
@@ -56,94 +60,235 @@ def watchlist_action_mode() -> str:
     return "manual"
 
 
-def _in_arr_library(session, *, media_type: str, tmdb_id: int | None, tvdb_id: int | None, imdb_id: str | None) -> bool:
-    if media_type == "movie":
-        if tmdb_id and session.query(Movie.id).filter(Movie.tmdbid == int(tmdb_id)).first():
-            return True
-        if imdb_id and session.query(Movie.id).filter(Movie.imdbid == str(imdb_id)).first():
-            return True
-        return False
-    if tvdb_id and session.query(Series.id).filter(Series.tvdbid == int(tvdb_id)).first():
-        return True
-    if tmdb_id and session.query(Series.id).filter(Series.sonarr_tmdbid == int(tmdb_id)).first():
-        return True
-    if imdb_id and session.query(Series.id).filter(Series.imdbid == str(imdb_id)).first():
-        return True
-    return False
-
-
-def _resolve_status_for_row(session, row: PlexWatchlistItem) -> str:
+def _resolve_status_for_row(
+    session,
+    row: PlexWatchlistItem,
+    *,
+    coverage: str | None = None,
+) -> str:
+    """Resolve stored decision status (new/added/excluded/failed). No ``in_arr``."""
+    _ = session
     if row.excluded:
         return "excluded"
+    cov = str(coverage or "").strip().lower()
+    # Full watchlist-target coverage ⇒ already allowed into the pipeline.
+    if cov == "complete" and not row.excluded:
+        return "added"
     if row.status == "added":
         return "added"
-    if row.status == "failed" and row.last_error:
-        # Keep failed until next successful add or clear
-        pass
-    if _in_arr_library(
-        session,
-        media_type=str(row.media_type),
-        tmdb_id=row.tmdb_id,
-        tvdb_id=row.tvdb_id,
-        imdb_id=row.imdb_id,
-    ):
-        return "in_arr" if row.status != "added" else "added"
     if row.status == "failed":
         return "failed"
+    # Migrate legacy in_arr → new (Queue) until coverage says complete.
+    if row.status == "in_arr":
+        return "new"
     return "new"
 
 
-def upsert_watchlist_from_plex(remote: list[dict[str, Any]]) -> dict[str, Any]:
+def _apply_coverage_statuses(session, rows: list[PlexWatchlistItem]) -> None:
+    """Batch-enrich and set decision status from watchlist-target coverage."""
+    if not rows:
+        return
+    from services.watchlist.catalog import enrich_watchlist_items
+
+    enrichments = enrich_watchlist_items(session, rows)
+    for row in rows:
+        cov = str((enrichments.get(int(row.id)) or {}).get("coverage") or "none")
+        prev = row.status
+        row.status = _resolve_status_for_row(session, row, coverage=cov)
+        if row.status == "added" and prev != "added" and row.added_at is None and cov == "complete":
+            row.added_at = _utcnow()
+            row.last_error = None
+
+
+def _upsert_item_row(
+    session,
+    existing: dict[str, PlexWatchlistItem],
+    item: dict[str, Any],
+    *,
+    now: datetime,
+) -> tuple[PlexWatchlistItem, bool]:
+    key = identity_key_for(item)
+    row = existing.get(key)
+    created = False
+    if row is None:
+        row = PlexWatchlistItem(
+            identity_key=key,
+            plex_guid=item.get("plex_guid"),
+            rating_key=item.get("rating_key"),
+            title=str(item.get("title") or ""),
+            year=item.get("year"),
+            media_type=str(item.get("media_type") or "movie"),
+            tmdb_id=item.get("tmdb_id"),
+            tvdb_id=item.get("tvdb_id"),
+            imdb_id=item.get("imdb_id"),
+            status="new",
+            excluded=False,
+            first_seen_at=now,
+            last_seen_at=now,
+            updated_at=now,
+            extra={"thumb": item.get("thumb")},
+        )
+        session.add(row)
+        session.flush()
+        existing[key] = row
+        created = True
+    else:
+        row.title = str(item.get("title") or row.title)
+        row.year = item.get("year") if item.get("year") is not None else row.year
+        row.media_type = str(item.get("media_type") or row.media_type)
+        row.plex_guid = item.get("plex_guid") or row.plex_guid
+        row.rating_key = item.get("rating_key") or row.rating_key
+        row.tmdb_id = item.get("tmdb_id") or row.tmdb_id
+        row.tvdb_id = item.get("tvdb_id") or row.tvdb_id
+        row.imdb_id = item.get("imdb_id") or row.imdb_id
+        row.last_seen_at = now
+        row.updated_at = now
+        if item.get("thumb"):
+            extra = dict(row.extra or {}) if isinstance(row.extra, dict) else {}
+            extra["thumb"] = item.get("thumb")
+            row.extra = extra
+    # Coverage-based promote runs in a batch after upsert (see _apply_coverage_statuses).
+    if not row.excluded and row.status not in {"added", "failed", "excluded"}:
+        row.status = "new"
+    return row, created
+
+
+def upsert_watchlist_from_home(payload: dict[str, Any]) -> dict[str, Any]:
+    """Upsert Home users, title rows, and per-user memberships from ``fetch_watchlists_for_home``."""
     now = _utcnow()
-    seen_keys: set[str] = set()
-    created = updated = 0
+    users_raw = payload.get("users") if isinstance(payload.get("users"), list) else []
+    by_user = payload.get("by_user") if isinstance(payload.get("by_user"), dict) else {}
+    errors = payload.get("errors") if isinstance(payload.get("errors"), dict) else {}
+
+    created = updated = memberships_upserted = memberships_removed = 0
     session = get_session()
     try:
-        existing = {r.identity_key: r for r in session.query(PlexWatchlistItem).all()}
-        for item in remote:
-            key = identity_key_for(item)
-            seen_keys.add(key)
-            row = existing.get(key)
-            if row is None:
-                row = PlexWatchlistItem(
-                    identity_key=key,
-                    plex_guid=item.get("plex_guid"),
-                    rating_key=item.get("rating_key"),
-                    title=str(item.get("title") or ""),
-                    year=item.get("year"),
-                    media_type=str(item.get("media_type") or "movie"),
-                    tmdb_id=item.get("tmdb_id"),
-                    tvdb_id=item.get("tvdb_id"),
-                    imdb_id=item.get("imdb_id"),
-                    status="new",
-                    excluded=False,
-                    first_seen_at=now,
-                    last_seen_at=now,
-                    updated_at=now,
-                    extra={"thumb": item.get("thumb")},
-                )
-                session.add(row)
-                existing[key] = row
-                created += 1
-            else:
-                row.title = str(item.get("title") or row.title)
-                row.year = item.get("year") if item.get("year") is not None else row.year
-                row.media_type = str(item.get("media_type") or row.media_type)
-                row.plex_guid = item.get("plex_guid") or row.plex_guid
-                row.rating_key = item.get("rating_key") or row.rating_key
-                row.tmdb_id = item.get("tmdb_id") or row.tmdb_id
-                row.tvdb_id = item.get("tvdb_id") or row.tvdb_id
-                row.imdb_id = item.get("imdb_id") or row.imdb_id
-                row.last_seen_at = now
-                row.updated_at = now
-                updated += 1
-            row.status = _resolve_status_for_row(session, row)
+        existing_items = {r.identity_key: r for r in session.query(PlexWatchlistItem).all()}
+        existing_users = {u.plex_user_id: u for u in session.query(PlexWatchlistUser).all()}
 
-        # Items no longer on the remote list: leave rows (history), but do not delete in v1.
+        for raw in users_raw:
+            if not isinstance(raw, dict):
+                continue
+            uid = str(raw.get("plex_user_id") or "").strip()
+            if not uid:
+                continue
+            user = existing_users.get(uid)
+            if user is None:
+                user = PlexWatchlistUser(
+                    plex_user_id=uid,
+                    title=str(raw.get("title") or uid),
+                    first_seen_at=now,
+                    updated_at=now,
+                )
+                session.add(user)
+                existing_users[uid] = user
+            user.plex_uuid = str(raw.get("plex_uuid") or "") or user.plex_uuid
+            user.username = str(raw.get("username") or "") or user.username
+            user.title = str(raw.get("title") or user.title or uid)
+            user.thumb_url = str(raw.get("thumb_url") or "") or user.thumb_url
+            user.is_admin = bool(raw.get("is_admin"))
+            user.is_restricted = bool(raw.get("is_restricted"))
+            user.is_protected = bool(raw.get("is_protected"))
+            user.is_guest = bool(raw.get("is_guest"))
+            user.updated_at = now
+            err = errors.get(uid)
+            user.last_sync_error = str(err) if err else None
+            # Do not clear settings_override / sync_enabled here (future per-user policy).
+
+        session.flush()
+
+        for uid, items in by_user.items():
+            uid_s = str(uid or "").strip()
+            if not uid_s:
+                continue
+            user = existing_users.get(uid_s)
+            if user is not None and not bool(user.sync_enabled):
+                continue
+            if not isinstance(items, list):
+                items = []
+            seen_item_ids: set[int] = set()
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                row, was_created = _upsert_item_row(session, existing_items, item, now=now)
+                if was_created:
+                    created += 1
+                else:
+                    updated += 1
+                seen_item_ids.add(int(row.id))
+                mem = (
+                    session.query(PlexWatchlistMembership)
+                    .filter(
+                        PlexWatchlistMembership.watchlist_item_id == int(row.id),
+                        PlexWatchlistMembership.plex_user_id == uid_s,
+                    )
+                    .first()
+                )
+                if mem is None:
+                    session.add(
+                        PlexWatchlistMembership(
+                            watchlist_item_id=int(row.id),
+                            plex_user_id=uid_s,
+                            first_seen_at=now,
+                            last_seen_at=now,
+                        )
+                    )
+                    memberships_upserted += 1
+                else:
+                    mem.last_seen_at = now
+                    memberships_upserted += 1
+
+            # Drop memberships for this user that disappeared from their remote list.
+            existing_mems = (
+                session.query(PlexWatchlistMembership)
+                .filter(PlexWatchlistMembership.plex_user_id == uid_s)
+                .all()
+            )
+            for mem in existing_mems:
+                if int(mem.watchlist_item_id) not in seen_item_ids:
+                    session.delete(mem)
+                    memberships_removed += 1
+
+            if user is not None and uid_s not in errors:
+                user.last_synced_at = now
+
+        session.flush()
+        _apply_coverage_statuses(session, list(existing_items.values()))
         session.commit()
     finally:
         session.close()
-    return {"fetched": len(remote), "created": created, "updated": updated, "seen": len(seen_keys)}
+
+    total_fetched = sum(len(v) for v in by_user.values() if isinstance(v, list))
+    return {
+        "fetched": total_fetched,
+        "users": len(users_raw),
+        "created": created,
+        "updated": updated,
+        "memberships_upserted": memberships_upserted,
+        "memberships_removed": memberships_removed,
+        "user_errors": {str(k): str(v) for k, v in errors.items()},
+    }
+
+
+def upsert_watchlist_from_plex(remote: list[dict[str, Any]]) -> dict[str, Any]:
+    """Legacy single-list upsert (owner-only). Prefer ``upsert_watchlist_from_home``."""
+    return upsert_watchlist_from_home(
+        {
+            "users": [
+                {
+                    "plex_user_id": "owner",
+                    "title": "Owner",
+                    "username": "Owner",
+                    "is_admin": True,
+                    "is_restricted": False,
+                    "is_protected": False,
+                    "is_guest": False,
+                }
+            ],
+            "by_user": {"owner": remote},
+            "errors": {},
+        }
+    )
 
 
 def normalize_watchlist_target(raw: Any) -> dict[str, Any] | None:
@@ -291,6 +436,10 @@ def add_watchlist_items_to_arr(
             )
             override_targets = [shim] if shim else []
 
+        from services.watchlist.catalog import enrich_watchlist_items
+
+        enrichments = enrich_watchlist_items(session, rows) if override_targets is None else {}
+
         for media_type, media_rows in by_media.items():
             if not media_rows:
                 continue
@@ -302,7 +451,22 @@ def add_watchlist_items_to_arr(
                     if settings.resolve_arr_instance(arr_type, instance_key=str(t.get("instance_key") or ""))
                 ]
             else:
-                media_targets = arr_targets_for_media(media_type)
+                # Prefer will_add_keys (missing watchlist targets); fall back to full target list.
+                will_keys: set[str] = set()
+                for row in media_rows:
+                    enr = enrichments.get(int(row.id)) or {}
+                    for k in enr.get("will_add_keys") or []:
+                        if str(k).strip():
+                            will_keys.add(str(k).strip())
+                all_targets = arr_targets_for_media(media_type)
+                if will_keys:
+                    media_targets = [
+                        t
+                        for t in all_targets
+                        if str(t.get("instance_key") or "").strip() in will_keys
+                    ]
+                else:
+                    media_targets = all_targets
 
             if not media_targets:
                 for row in media_rows:
@@ -372,6 +536,13 @@ def add_watchlist_items_to_arr(
                     instance_key=key,
                     sonarr_monitor=sonarr_monitor if media_type == "show" else None,
                 )
+                # add_missing_titles returns one result per input item in the same order.
+                if len(results) != len(media_rows):
+                    for row in media_rows:
+                        row_errors[int(row.id)].append(
+                            f"{key}: Arr add returned {len(results)} results for {len(media_rows)} titles"
+                        )
+                    continue
                 for row, result in zip(media_rows, results):
                     rid = int(row.id)
                     status = str(result.get("status") or "")
@@ -443,27 +614,80 @@ def set_excluded(item_ids: Iterable[int], excluded: bool) -> int:
         rows = session.query(PlexWatchlistItem).filter(PlexWatchlistItem.id.in_(ids)).all()
         for row in rows:
             row.excluded = bool(excluded)
-            row.status = "excluded" if excluded else _resolve_status_for_row(session, row)
             row.updated_at = _utcnow()
             if excluded:
+                row.status = "excluded"
                 row.last_error = None
+        if not excluded:
+            _apply_coverage_statuses(session, rows)
         session.commit()
         return len(rows)
     finally:
         session.close()
 
 
-def list_watchlist_items(*, status: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
+def list_watchlist_users() -> list[dict[str, Any]]:
     session = get_session()
     try:
+        rows = (
+            session.query(PlexWatchlistUser)
+            .order_by(PlexWatchlistUser.is_admin.desc(), PlexWatchlistUser.title.asc())
+            .all()
+        )
+        return [_serialize_user(u) for u in rows]
+    finally:
+        session.close()
+
+
+def list_watchlist_items(
+    *,
+    status: str | None = None,
+    limit: int = 500,
+    plex_user_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    from sqlalchemy import exists
+
+    session = get_session()
+    try:
+        users_by_id = {u.plex_user_id: u for u in session.query(PlexWatchlistUser).all()}
         q = session.query(PlexWatchlistItem).order_by(PlexWatchlistItem.last_seen_at.desc())
+        filter_ids = [str(x).strip() for x in (plex_user_ids or []) if str(x).strip()]
+        if filter_ids:
+            # EXISTS avoids SELECT DISTINCT over the JSON `extra` column (Postgres has no
+            # equality operator for json, which broke user-filtered list queries).
+            q = q.filter(
+                exists().where(
+                    PlexWatchlistMembership.watchlist_item_id == PlexWatchlistItem.id,
+                    PlexWatchlistMembership.plex_user_id.in_(filter_ids),
+                )
+            )
         if status and status != "all":
             if status == "excluded":
                 q = q.filter(PlexWatchlistItem.excluded.is_(True))
             else:
                 q = q.filter(PlexWatchlistItem.status == status, PlexWatchlistItem.excluded.is_(False))
         rows = q.limit(max(1, min(int(limit or 500), 2000))).all()
-        return [_serialize_item(r) for r in rows]
+        item_ids = [int(r.id) for r in rows]
+        mems_by_item: dict[int, list[PlexWatchlistMembership]] = {i: [] for i in item_ids}
+        if item_ids:
+            for mem in (
+                session.query(PlexWatchlistMembership)
+                .filter(PlexWatchlistMembership.watchlist_item_id.in_(item_ids))
+                .all()
+            ):
+                mems_by_item.setdefault(int(mem.watchlist_item_id), []).append(mem)
+        from services.watchlist.catalog import enrich_watchlist_items
+
+        enrichments = enrich_watchlist_items(session, rows)
+        return [
+            _serialize_item(
+                r,
+                memberships=mems_by_item.get(int(r.id), []),
+                users_by_id=users_by_id,
+                library=enrichments.get(int(r.id)),
+            )
+            for r in rows
+        ]
     finally:
         session.close()
 
@@ -472,14 +696,28 @@ def watchlist_summary() -> dict[str, Any]:
     session = get_session()
     try:
         rows = session.query(PlexWatchlistItem).all()
+        user_count = session.query(PlexWatchlistUser).count()
+        from services.watchlist.catalog import enrich_watchlist_items
+
+        enrichments = enrich_watchlist_items(session, rows) if rows else {}
     finally:
         session.close()
-    counts = {"new": 0, "in_arr": 0, "added": 0, "excluded": 0, "failed": 0, "total": len(rows)}
+    counts = {"new": 0, "added": 0, "excluded": 0, "failed": 0, "total": len(rows)}
+    coverage_counts = {"none": 0, "partial": 0, "complete": 0}
     for r in rows:
         if r.excluded or r.status == "excluded":
             counts["excluded"] += 1
+        elif r.status == "in_arr":
+            counts["new"] += 1
         elif r.status in counts:
             counts[r.status] += 1
+        else:
+            counts["new"] += 1
+        cov = str((enrichments.get(int(r.id)) or {}).get("coverage") or "none")
+        if cov in coverage_counts:
+            coverage_counts[cov] += 1
+        else:
+            coverage_counts["none"] += 1
     enabled = bool(getattr(settings, "ENABLE_PLEX_WATCHLIST_SYNC", False))
     last = getattr(settings, "WATCHLIST_LAST_POLL_AT", None)
     last_error = getattr(settings, "WATCHLIST_LAST_ERROR", None)
@@ -493,11 +731,58 @@ def watchlist_summary() -> dict[str, Any]:
         "sonarr_targets": arr_targets_for_media("show"),
         "last_poll_at": last,
         "last_error": last_error or None,
+        "user_count": int(user_count or 0),
         "counts": counts,
+        "coverage_counts": coverage_counts,
     }
 
 
-def _serialize_item(r: PlexWatchlistItem) -> dict[str, Any]:
+def _serialize_user(u: PlexWatchlistUser) -> dict[str, Any]:
+    return {
+        "plex_user_id": u.plex_user_id,
+        "plex_uuid": u.plex_uuid,
+        "username": u.username,
+        "title": u.title,
+        "thumb_url": u.thumb_url,
+        "is_admin": bool(u.is_admin),
+        "is_restricted": bool(u.is_restricted),
+        "is_protected": bool(u.is_protected),
+        "is_guest": bool(u.is_guest),
+        "sync_enabled": bool(u.sync_enabled),
+        "settings_override": u.settings_override,
+        "last_synced_at": u.last_synced_at.isoformat() if u.last_synced_at else None,
+        "last_sync_error": u.last_sync_error,
+    }
+
+
+def _serialize_item(
+    r: PlexWatchlistItem,
+    *,
+    memberships: list[PlexWatchlistMembership] | None = None,
+    users_by_id: dict[str, PlexWatchlistUser] | None = None,
+    library: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    users_out: list[dict[str, Any]] = []
+    for mem in memberships or []:
+        uid = str(mem.plex_user_id or "")
+        user = (users_by_id or {}).get(uid)
+        users_out.append(
+            {
+                "plex_user_id": uid,
+                "title": (user.title if user else uid),
+                "username": (user.username if user else None),
+                "thumb_url": (user.thumb_url if user else None),
+                "is_admin": bool(user.is_admin) if user else False,
+            }
+        )
+    users_out.sort(key=lambda u: (0 if u.get("is_admin") else 1, str(u.get("title") or "").lower()))
+    thumb = None
+    if isinstance(r.extra, dict):
+        thumb = r.extra.get("thumb") or None
+    status = "excluded" if r.excluded else r.status
+    if status == "in_arr":
+        status = "new"
+    lib = library if isinstance(library, dict) else None
     return {
         "id": r.id,
         "identity_key": r.identity_key,
@@ -509,13 +794,16 @@ def _serialize_item(r: PlexWatchlistItem) -> dict[str, Any]:
         "tmdb_id": r.tmdb_id,
         "tvdb_id": r.tvdb_id,
         "imdb_id": r.imdb_id,
-        "status": "excluded" if r.excluded else r.status,
+        "status": status,
         "excluded": bool(r.excluded),
         "last_error": r.last_error,
         "last_seen_at": r.last_seen_at.isoformat() if r.last_seen_at else None,
         "first_seen_at": r.first_seen_at.isoformat() if r.first_seen_at else None,
         "added_at": r.added_at.isoformat() if r.added_at else None,
         "arr_instance_key": r.arr_instance_key,
+        "thumb": thumb,
+        "users": users_out,
+        "library": lib,
     }
 
 
@@ -571,8 +859,8 @@ def run_watchlist_sync(*, trigger: str = "manual") -> dict[str, Any]:
         if not plex_watchlist_token():
             raise RuntimeError("No Plex token for watchlist (configure PLEX_TOKEN or sign in with Plex)")
 
-        remote = fetch_owner_watchlist(limit=1000)
-        upsert = upsert_watchlist_from_plex(remote)
+        home_payload = fetch_watchlists_for_home(limit_per_user=1000)
+        upsert = upsert_watchlist_from_home(home_payload)
         auto = auto_add_new_items()
         summary.update({"ok": True, "upsert": upsert, "auto_add": auto})
         _persist_poll_meta(at=_utcnow().isoformat(), error=None)

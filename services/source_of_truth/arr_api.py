@@ -1519,12 +1519,16 @@ def add_missing_titles(
             },
         )
 
-    results: list[dict[str, Any]] = []
+    # One slot per input item so callers can zip(items, results) safely.
+    # Lookup failures used to be appended first and successes later, which
+    # mis-paired watchlist (and any other) bulk Accept rows.
+    results: list[Optional[dict[str, Any]]] = [None] * len(items)
     pending_items: list[Any] = []
     pending_lookups: list[dict] = []
+    pending_indices: list[int] = []
     ingest_lookups: list[dict] = []
     movie = media_type == "movie"
-    for item in items:
+    for idx, item in enumerate(items):
         display = result_title(item)
         emit(item, display, "adding")
         try:
@@ -1550,16 +1554,17 @@ def add_missing_titles(
                 )
                 missing = "Sonarr lookup found nothing"
             if not lookup:
-                results.append(row(display, "error", missing))
+                results[idx] = row(display, "error", missing)
                 emit(item, display, "error", missing)
                 continue
             pending_items.append(item)
             pending_lookups.append(lookup)
+            pending_indices.append(idx)
         except Exception as extra:
-            results.append(row(display, "error", str(extra)))
+            results[idx] = row(display, "error", str(extra))
             emit(item, display, "error", str(extra))
     if not pending_lookups:
-        return results
+        return [r for r in results if r is not None]
 
     def on_status(index: int, status: str, error: Optional[str] = None) -> None:
         item = pending_items[index]
@@ -1581,19 +1586,21 @@ def add_missing_titles(
     if not movie:
         add_kwargs["sonarr_monitor"] = sonarr_monitor
     added = adder(**add_kwargs)
-    for item, lookup, (_lookup, status, error) in zip(pending_items, pending_lookups, added):
+    for item, lookup, input_idx, (_lookup, status, error) in zip(
+        pending_items, pending_lookups, pending_indices, added
+    ):
         arr_id = None
         try:
             arr_id = int(lookup.get("id") or 0) or None
         except (TypeError, ValueError):
             arr_id = None
-        results.append({
+        results[input_idx] = {
             "title": result_title(item, lookup),
             "instance_key": instance_key,
             "status": status,
             "error": error,
             "arr_id": arr_id,
-        })
+        }
         if status in {"ok", "skipped"} and arr_id:
             ingest_lookups.append(lookup)
     if ingest_lookups and instance_key:
@@ -1610,5 +1617,5 @@ def add_missing_titles(
                 f"Failed to enqueue placeholder ingest after ARR add: {exc}",
                 extra={"emoji_type": "warning"},
             )
-    return results
+    return [r if r is not None else row("Untitled", "error", "Arr add produced no result") for r in results]
 

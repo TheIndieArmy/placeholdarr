@@ -744,7 +744,7 @@ class LibraryRefreshThrottle(Base):
 
 
 class PlexWatchlistItem(Base):
-    """Owner Plex Universal Watchlist rows synced into Placeholdarr."""
+    """Canonical watchlist title rows (union across Plex Home users)."""
 
     __tablename__ = "plex_watchlist_item"
     __table_args__ = (
@@ -775,5 +775,74 @@ class PlexWatchlistItem(Base):
     extra = Column(JSON, nullable=True)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
 
+    memberships = relationship(
+        "PlexWatchlistMembership",
+        back_populates="item",
+        cascade="all, delete-orphan",
+    )
+
     def __repr__(self):
         return f"<PlexWatchlistItem(id={self.id}, title={self.title!r}, status={self.status!r})>"
+
+
+class PlexWatchlistUser(Base):
+    """Plex Home users discovered for watchlist sync (per-user policy later)."""
+
+    __tablename__ = "plex_watchlist_user"
+    __table_args__ = (
+        Index("ix_plex_watchlist_user_title", "title"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    plex_user_id = Column(String(64), nullable=False, unique=True)
+    plex_uuid = Column(String(64), nullable=True)
+    username = Column(String(256), nullable=True)
+    title = Column(String(256), nullable=False, default="")
+    thumb_url = Column(String(1024), nullable=True)
+    is_admin = Column(Boolean, nullable=False, default=False)
+    is_restricted = Column(Boolean, nullable=False, default=False)
+    is_protected = Column(Boolean, nullable=False, default=False)
+    is_guest = Column(Boolean, nullable=False, default=False)
+    # Future: {"on_new": "...", "radarr_targets": [...], "sonarr_targets": [...]}
+    settings_override = Column(JSON, nullable=True)
+    sync_enabled = Column(Boolean, nullable=False, default=True)
+    last_synced_at = Column(DateTime(timezone=True), nullable=True)
+    last_sync_error = Column(String, nullable=True)
+    first_seen_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
+
+    def __repr__(self):
+        return f"<PlexWatchlistUser(plex_user_id={self.plex_user_id!r}, title={self.title!r})>"
+
+
+class PlexWatchlistMembership(Base):
+    """Which Plex Home user(s) currently have a title on their Universal Watchlist."""
+
+    __tablename__ = "plex_watchlist_membership"
+    __table_args__ = (
+        Index("ix_plex_watchlist_membership_plex_user_id", "plex_user_id"),
+        Index(
+            "uq_plex_watchlist_membership_item_user",
+            "watchlist_item_id",
+            "plex_user_id",
+            unique=True,
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    watchlist_item_id = Column(
+        Integer,
+        ForeignKey("plex_watchlist_item.id", ondelete="CASCADE", name="fk_plex_watchlist_membership_item"),
+        nullable=False,
+    )
+    plex_user_id = Column(String(64), nullable=False)
+    first_seen_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    last_seen_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+    item = relationship("PlexWatchlistItem", back_populates="memberships")
+
+    def __repr__(self):
+        return (
+            f"<PlexWatchlistMembership(item_id={self.watchlist_item_id}, "
+            f"plex_user_id={self.plex_user_id!r})>"
+        )

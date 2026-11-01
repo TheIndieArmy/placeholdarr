@@ -871,10 +871,10 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "restart_required": False,
                 "default": "manual",
                 "options": [
-                    {"value": "manual", "label": "Manual (review on Watchlist page)"},
+                    {"value": "add_and_search", "label": "Add and search"},
                     {"value": "monitor_only", "label": "Monitor only (auto-add, no search)"},
                     {"value": "add_only", "label": "Add only (no monitor, no search)"},
-                    {"value": "add_and_search", "label": "Add and search"},
+                    {"value": "manual", "label": "Manual (review on Watchlist page)"},
                 ],
             },
         ),

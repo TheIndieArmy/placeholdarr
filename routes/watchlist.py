@@ -37,10 +37,26 @@ class WatchlistExcludeRequest(BaseModel):
 
 
 @router.get("/api/watchlist")
-async def watchlist_list(status: str | None = None, limit: int = 500):
+async def watchlist_list(
+    status: str | None = None,
+    limit: int = 500,
+    user_ids: str | None = None,
+):
+    """List watchlist titles. ``user_ids`` is a comma-separated plex_user_id filter (OR)."""
+    filter_ids = [p.strip() for p in str(user_ids or "").split(",") if p.strip()]
     summary = watchlist_sync.watchlist_summary()
-    items = watchlist_sync.list_watchlist_items(status=status, limit=limit)
-    return {"summary": summary, "items": items}
+    items = watchlist_sync.list_watchlist_items(
+        status=status,
+        limit=limit,
+        plex_user_ids=filter_ids or None,
+    )
+    users = watchlist_sync.list_watchlist_users()
+    return {"summary": summary, "items": items, "users": users}
+
+
+@router.get("/api/watchlist/users")
+async def watchlist_users():
+    return {"users": watchlist_sync.list_watchlist_users()}
 
 
 @router.get("/api/watchlist/summary")

@@ -1,20 +1,80 @@
 import { fetchJson } from "./client";
 
-export type WatchlistStatus = "new" | "in_arr" | "added" | "excluded" | "failed" | "all";
+export type WatchlistStatus = "new" | "added" | "excluded" | "failed" | "all";
 
 export interface WatchlistCounts {
   new: number;
-  in_arr: number;
   added: number;
   excluded: number;
   failed: number;
   total: number;
+  in_arr?: number;
+}
+
+export interface WatchlistCoverageCounts {
+  none: number;
+  partial: number;
+  complete: number;
 }
 
 export interface WatchlistArrTarget {
   instance_key: string;
   quality_profile_id?: number | null;
   root_folder_path?: string | null;
+}
+
+export interface WatchlistLibraryInstance {
+  instance_key: string;
+  item_id: number;
+  item_type: "movie" | "series" | string;
+  is_watchlist_target: boolean;
+  has_file: boolean;
+  has_placeholder: boolean;
+  has_missing?: boolean;
+  monitored?: boolean;
+  state?: string;
+  stats?: { files?: number; placeholders?: number; missing?: number; future?: number; total?: number };
+}
+
+export interface WatchlistLibrary {
+  state: "not_in_library" | "missing" | "placeholder" | "file" | string;
+  coverage: "none" | "partial" | "complete" | string;
+  target_keys: string[];
+  matched_target_keys: string[];
+  missing_target_keys: string[];
+  other_instance_keys: string[];
+  already_on_keys: string[];
+  will_add_keys: string[];
+  instances: WatchlistLibraryInstance[];
+  item_id: number | null;
+  item_type: "movie" | "series" | string;
+  display_status?: string | null;
+  poster_url?: string | null;
+  stats?: { files?: number; placeholders?: number; missing?: number } | null;
+}
+
+export interface WatchlistUser {
+  plex_user_id: string;
+  plex_uuid?: string | null;
+  username?: string | null;
+  title: string;
+  thumb_url?: string | null;
+  is_admin?: boolean;
+  is_restricted?: boolean;
+  is_protected?: boolean;
+  is_guest?: boolean;
+  sync_enabled?: boolean;
+  settings_override?: Record<string, unknown> | null;
+  last_synced_at?: string | null;
+  last_sync_error?: string | null;
+}
+
+export interface WatchlistItemUser {
+  plex_user_id: string;
+  title: string;
+  username?: string | null;
+  thumb_url?: string | null;
+  is_admin?: boolean;
 }
 
 export interface WatchlistSummary {
@@ -27,7 +87,9 @@ export interface WatchlistSummary {
   sonarr_targets?: WatchlistArrTarget[];
   last_poll_at: string | null;
   last_error: string | null;
+  user_count?: number;
   counts: WatchlistCounts;
+  coverage_counts?: WatchlistCoverageCounts;
 }
 
 export interface WatchlistItem {
@@ -48,16 +110,24 @@ export interface WatchlistItem {
   first_seen_at: string | null;
   added_at: string | null;
   arr_instance_key: string | null;
+  thumb?: string | null;
+  users?: WatchlistItemUser[];
+  library?: WatchlistLibrary | null;
 }
 
-export function getWatchlist(opts?: { status?: string; limit?: number }) {
+export function getWatchlist(opts?: { status?: string; limit?: number; userIds?: string[] }) {
   const params = new URLSearchParams();
   if (opts?.status) params.set("status", opts.status);
   if (opts?.limit != null) params.set("limit", String(opts.limit));
+  if (opts?.userIds?.length) params.set("user_ids", opts.userIds.join(","));
   const qs = params.toString();
-  return fetchJson<{ summary: WatchlistSummary; items: WatchlistItem[] }>(
+  return fetchJson<{ summary: WatchlistSummary; items: WatchlistItem[]; users: WatchlistUser[] }>(
     `/api/watchlist${qs ? `?${qs}` : ""}`,
   );
+}
+
+export function getWatchlistUsers() {
+  return fetchJson<{ users: WatchlistUser[] }>("/api/watchlist/users");
 }
 
 export function postWatchlistSync() {
@@ -94,4 +164,3 @@ export function postWatchlistExclude(itemIds: number[], excluded: boolean) {
     body: JSON.stringify({ item_ids: itemIds, excluded }),
   });
 }
-
