@@ -16,7 +16,18 @@ import {
   type WatchlistSummary,
   type WatchlistUser,
 } from "../api/watchlist";
+import { BrandSelect } from "../BrandSelect";
+import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
 import { ToggleSwitch } from "../ToggleSwitch";
+import { UI_SECTION_FRAME_CLASS } from "../uiSectionFrame";
+
+const ARR_BEHAVIOR_OPTIONS = [
+  { value: "", label: "Default" },
+  { value: "add_and_search", label: "Add, monitor, and search" },
+  { value: "monitor_only", label: "Add and monitor" },
+  { value: "add_only", label: "Add only" },
+  { value: "manual", label: "Manual" },
+] as const;
 
 type StripAccent = { hex: string; text: string; icon: string; hoverHex: string };
 type WatchlistTab = "accepted" | "queue" | "blocklist" | "people";
@@ -122,13 +133,13 @@ function blockReasonCopy(u: WatchlistUser): string | null {
   if (code === "needs_friend_or_token") return "Needs friend access or a user token";
   if (code === "needs_pin_or_token") return "Needs Home PIN or a user token";
   if (code === "home_switch_disabled") {
-    return "Not syncing: Home switch is off in Settings → Watching";
+    return "Not syncing: Home switch is off in Settings → Watchlist";
   }
   if (code === "friends_sync_disabled") {
-    return "Not syncing: friends sync is off in Settings → Watching";
+    return "Not syncing: friends sync is off in Settings → Watchlist";
   }
   if (code === "friend_only_disabled") {
-    return "Not syncing: friends without server access is off in Settings → Watching";
+    return "Not syncing: friends without server access is off in Settings → Watchlist";
   }
   if (code === "sync_disabled") return "Sync disabled for this person";
   if (u.last_sync_error) return String(u.last_sync_error);
@@ -191,6 +202,15 @@ export function WatchlistPanel(props: {
   syncRunning?: boolean;
   /** Kick the shared tasks poll so the sidebar pill and this button update promptly. */
   onRefreshTasks?: () => void;
+  /** Navigate to Settings → Media Integrations (Plex). */
+  onOpenPlexSettings?: () => void;
+  /**
+   * Optional App hint once settings are loaded:
+   * - true: Plex enable + connection details look complete
+   * - false: ENABLE_PLEX is off (optimistic empty state after disconnect)
+   * - undefined: let summary.plex_ready decide (needed after refresh when secrets are blank)
+   */
+  plexReady?: boolean;
 }) {
   const semantic = getBrandSemanticTokens(props.brand, props.themeMode, props.accent);
   const isLight = props.themeMode === "light";
@@ -383,7 +403,7 @@ export function WatchlistPanel(props: {
       });
       if (result.failed && result.failed > 0 && !result.added) {
         setError(
-          `Accept failed for ${result.failed} title${result.failed === 1 ? "" : "s"}. Check Watching Arr targets (profile and root are required).`,
+          `Accept failed for ${result.failed} title${result.failed === 1 ? "" : "s"}. Check Watchlist Arr targets (profile and root are required).`,
         );
       }
       setSelected({});
@@ -408,6 +428,13 @@ export function WatchlistPanel(props: {
     }
   };
 
+  const mergePatchedUser = (prev: WatchlistUser, next: WatchlistUser): WatchlistUser => ({
+    ...prev,
+    ...next,
+    title: next.title || prev.title,
+    thumb_url: next.thumb_url ?? prev.thumb_url,
+  });
+
   const onToggleUserSync = async (u: WatchlistUser, enabled: boolean) => {
     if (syncToggleLocked(u)) return;
     setUsers((prev) =>
@@ -416,16 +443,7 @@ export function WatchlistPanel(props: {
     try {
       const result = await patchWatchlistUser(u.plex_user_id, { sync_enabled: enabled });
       setUsers((prev) =>
-        prev.map((row) =>
-          row.plex_user_id === u.plex_user_id
-            ? {
-                ...row,
-                ...result.user,
-                title: result.user.title || row.title,
-                thumb_url: result.user.thumb_url ?? row.thumb_url,
-              }
-            : row,
-        ),
+        prev.map((row) => (row.plex_user_id === u.plex_user_id ? mergePatchedUser(row, result.user) : row)),
       );
     } catch (e) {
       setUsers((prev) =>
@@ -437,12 +455,88 @@ export function WatchlistPanel(props: {
     }
   };
 
+  const onChangeUserArrBehavior = async (u: WatchlistUser, value: string) => {
+    const nextOnNew = value.trim() ? value.trim() : null;
+    setUsers((prev) =>
+      prev.map((row) => (row.plex_user_id === u.plex_user_id ? { ...row, on_new: nextOnNew } : row)),
+    );
+    try {
+      const result = await patchWatchlistUser(u.plex_user_id, { on_new: nextOnNew });
+      setUsers((prev) =>
+        prev.map((row) => (row.plex_user_id === u.plex_user_id ? mergePatchedUser(row, result.user) : row)),
+      );
+    } catch (e) {
+      setUsers((prev) =>
+        prev.map((row) => (row.plex_user_id === u.plex_user_id ? { ...row, on_new: u.on_new } : row)),
+      );
+      setError(e instanceof Error ? e.message : "Could not update Arr behavior");
+    }
+  };
+
   const emptyCopy =
     tab === "queue"
       ? "No requests waiting. New watchlist titles appear here for Accept or Reject."
       : tab === "blocklist"
         ? "No rejected titles."
         : "No accepted titles yet.";
+
+  // App false = known disconnected. App true = connected. Otherwise use API plex_ready
+  // after load (refresh-safe: secrets are redacted in field values).
+  const plexReady =
+    props.plexReady === false
+      ? false
+      : props.plexReady === true
+        ? true
+        : loading || !summary
+          ? null
+          : Boolean(summary.plex_ready);
+  if (plexReady === false) {
+    return (
+      <div>
+        <div className="flex items-center gap-2 mb-1">
+          <div className="w-2 h-2 rounded-full bg-green-500" />
+          <span className="text-[12px] font-headline uppercase tracking-widest text-slate-500">
+            Plex Watchlist
+          </span>
+        </div>
+        <h1
+          className={`mb-6 text-[32px] font-black tracking-tight font-headline ${
+            isLight ? "text-slate-900" : "text-white"
+          }`}
+        >
+          Watchlist
+        </h1>
+        <div className={`${UI_SECTION_FRAME_CLASS} overflow-hidden`}>
+          <div className="p-12 text-center">
+            <span className="material-symbols-outlined text-slate-500" style={{ fontSize: 44 }}>
+              playlist_add_check
+            </span>
+            <p className={`mt-3 text-[18px] font-headline ${isLight ? "text-slate-900" : "text-white"}`}>
+              Watchlist is Plex only
+            </p>
+            <p className="mt-2 text-[14px] max-w-lg mx-auto leading-relaxed text-slate-500">
+              This feature syncs Plex watchlists into a review queue and Arr targets. Connect Plex under Settings →
+              Media Integrations to use it.
+            </p>
+            {props.onOpenPlexSettings ? (
+              <button
+                type="button"
+                onClick={props.onOpenPlexSettings}
+                className={`mt-5 inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS}`}
+                style={accentFilledStyle(props.accent.hex)}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
+                  settings
+                </span>
+                Connect Plex
+              </button>
+            ) : null}
+            {error ? <p className="mt-4 text-[12px] max-w-md mx-auto text-slate-500">{error}</p> : null}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -455,7 +549,7 @@ export function WatchlistPanel(props: {
               </h2>
               <p className="text-[13px] mt-0.5" style={{ color: semantic.fgMuted }}>
                 Review roster watchlist requests. Accept sends titles to Arr; Reject moves them to the blocklist.
-                Global policies stay in Settings → Watching.
+                Global policies stay in Settings → Watchlist.
               </p>
             </div>
             <button
@@ -478,7 +572,8 @@ export function WatchlistPanel(props: {
               <strong style={{ color: semantic.fg }}>{summary?.has_token ? "Present" : "Missing"}</strong>
             </span>
             <span>
-              When new: <strong style={{ color: semantic.fg }}>{summary?.on_new || "manual"}</strong>
+              Default Arr behavior:{" "}
+              <strong style={{ color: semantic.fg }}>{summary?.on_new || "manual"}</strong>
             </span>
             <span>Last poll: {formatWhen(summary?.last_poll_at ?? null)}</span>
           </div>
@@ -620,8 +715,9 @@ export function WatchlistPanel(props: {
               style={{ borderColor: headBorder }}
             >
               <div className="text-[13px]" style={{ color: semantic.fgMuted }}>
-                Per-person sync. Greyed toggles mean Settings → Watching (or a missing path) blocks
-                fetch for that account type right now.
+                Per-person sync and Arr behavior. Greyed sync toggles mean Settings → Watchlist (or a missing
+                path) blocks fetch. Arr behavior Default uses Settings → Watchlist; any other choice overrides
+                only that person.
               </div>
               <button
                 type="button"
@@ -640,12 +736,13 @@ export function WatchlistPanel(props: {
                   <col className="w-14" />
                   <col />
                   <col className="w-[8.5rem]" />
+                  <col className="w-[12.5rem]" />
                   <col className="w-[11rem]" />
                   <col className="w-16" />
                 </colgroup>
                 <thead>
                   <tr className="border-b" style={{ borderColor: headBorder }}>
-                    {["", "Person", "Relationship", "Last sync", "Sync"].map((h, idx) => (
+                    {["", "Person", "Relationship", "Arr behavior", "Last sync", "Sync"].map((h, idx) => (
                       <th
                         key={`${h}-${idx}`}
                         className="px-2 py-2 text-left text-[12px] font-headline uppercase tracking-widest font-normal"
@@ -659,13 +756,13 @@ export function WatchlistPanel(props: {
                 <tbody>
                   {loading ? (
                     <tr>
-                      <td colSpan={5} className="px-3 py-6 text-[14px]" style={{ color: semantic.fgMuted }}>
+                      <td colSpan={6} className="px-3 py-6 text-[14px]" style={{ color: semantic.fgMuted }}>
                         Loading…
                       </td>
                     </tr>
                   ) : users.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="px-3 py-6 text-[14px]" style={{ color: semantic.fgMuted }}>
+                      <td colSpan={6} className="px-3 py-6 text-[14px]" style={{ color: semantic.fgMuted }}>
                         No roster yet. Run Refresh now or Refresh roster after Plex is connected.
                       </td>
                     </tr>
@@ -724,6 +821,16 @@ export function WatchlistPanel(props: {
                                 </span>
                               ) : null}
                             </div>
+                          </td>
+                          <td className="px-2 py-3 align-middle">
+                            <BrandSelect
+                              fullWidth
+                              disabled={rosterBusy}
+                              value={u.on_new || ""}
+                              options={[...ARR_BEHAVIOR_OPTIONS]}
+                              onChange={(value) => void onChangeUserArrBehavior(u, value)}
+                              ariaLabel={`Arr behavior for ${name}`}
+                            />
                           </td>
                           <td className="px-2 py-3 align-middle text-[13px]" style={{ color: semantic.fgMuted }}>
                             {formatWhen(u.last_synced_at ?? null)}

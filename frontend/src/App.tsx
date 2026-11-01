@@ -230,7 +230,7 @@ const SETTINGS_SECTION_ORDER = [
   "Optional APIs",
   "Density & Lookahead",
   "Playback",
-  "Watching",
+  "Watchlist",
   "Library sync",
   "Calendar",
   "Status Updates",
@@ -250,7 +250,7 @@ const SETTINGS_SECTION_ICONS: Record<string, string> = {
   Calendar: "calendar_month",
   "Density & Lookahead": "fast_forward",
   Playback: "play_circle",
-  Watching: "playlist_add_check",
+  Watchlist: "playlist_add_check",
   "Status Updates": "edit_notifications",
   "Poster Art": "image",
   "Dummy Video": "movie",
@@ -266,7 +266,7 @@ const SETTINGS_SECTION_SLUGS: Record<string, string> = {
   Calendar: "calendar",
   "Density & Lookahead": "density-lookahead",
   Playback: "playback",
-  Watching: "watching",
+  Watchlist: "watchlist",
   "Status Updates": "status-updates",
   "Poster Art": "poster-art",
   "Dummy Video": "dummy-video",
@@ -353,6 +353,8 @@ function resolveSettingsSectionFromSlug(slug: string): string | undefined {
   if (slug === "lookahead") return "Density & Lookahead";
   // Former Poster Overlay / Poster Language URLs.
   if (slug === "poster-overlay" || slug === "poster-language") return "Poster Art";
+  // Former Watching settings URL (bookmarks / old CTAs).
+  if (slug === "watching") return "Watchlist";
   return SETTINGS_SECTION_ORDER.find((name) => SETTINGS_SECTION_SLUGS[name] === slug);
 }
 const BEHAVIOR_WIZARD_SECTIONS = [
@@ -2031,15 +2033,40 @@ export function App() {
         );
       }
       if (activitySubPage === "watchlist") {
+        const plexCard = ONBOARDING_MEDIA_CARDS.find((card) => card.id === "plex");
+        const settingsFieldsByKey = new Map<string, SettingsField>();
+        for (const section of settingsPayload?.sections || []) {
+          for (const field of section.fields || []) {
+            settingsFieldsByKey.set(field.key, field);
+          }
+        }
+        // Only force a boolean when settings are loaded. Secrets are blank after refresh, so
+        // "details complete" can false-negative until has_saved_value is known; leave
+        // undefined so WatchlistPanel can trust summary.plex_ready from the API.
+        const settingsLoaded = Boolean(settingsPayload);
+        const plexEnabled = Boolean(fieldValues.ENABLE_PLEX);
+        const detailsComplete = Boolean(
+          plexCard && mediaCardConnectionDetailsComplete(plexCard, fieldValues, settingsFieldsByKey),
+        );
+        let plexReadyForWatchlist: boolean | undefined;
+        if (settingsLoaded && !plexEnabled) {
+          plexReadyForWatchlist = false;
+        } else if (settingsLoaded && plexEnabled && detailsComplete) {
+          plexReadyForWatchlist = true;
+        } else {
+          plexReadyForWatchlist = undefined;
+        }
         return (
           <WatchlistPanel
             {...activityChrome}
+            plexReady={plexReadyForWatchlist}
             syncRunning={Boolean(
               scheduledTasks.find((t) => t.task_key === "watchlist_sync")?.running,
             )}
             onRefreshTasks={() => {
               void refreshTasks();
             }}
+            onOpenPlexSettings={() => tryNavigate("/settings/media-integrations")}
           />
         );
       }
@@ -2150,6 +2177,7 @@ export function App() {
           onOpenOptionalApis={() => tryNavigate("/settings/optional-apis")}
           onOpenArrIntegrations={() => tryNavigate("/settings/arr-integrations")}
           onOpenPlayback={() => tryNavigate("/settings/playback")}
+          onOpenMediaIntegrations={() => tryNavigate("/settings/media-integrations")}
           onLogout={async () => {
             const status = await logoutAuth();
             setAuthStatus(status);
@@ -7865,6 +7893,7 @@ function SettingsPanel(props: {
   onOpenOptionalApis?: () => void;
   onOpenArrIntegrations?: () => void;
   onOpenPlayback?: () => void;
+  onOpenMediaIntegrations?: () => void;
 }) {
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
   const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
@@ -8813,7 +8842,7 @@ function SettingsPanel(props: {
                     </p>
                   ),
                 })
-              ) : active.name === "Watching" ? (
+              ) : active.name === "Watchlist" ? (
                 (() => {
                   const watchlistArrKeySet = new Set<string>(WATCHLIST_ARR_SECTION_KEYS);
                   const fieldByKey = new Map(active.fields.map((f) => [f.key, f]));
@@ -8823,48 +8852,95 @@ function SettingsPanel(props: {
                   );
                   const tagsField = fieldByKey.get("WATCHLIST_ARR_TAGS");
                   const tvScopeField = fieldByKey.get("WATCHLIST_TV_REQUEST_SCOPE");
+                  const onNewField = fieldByKey.get("WATCHLIST_ON_NEW");
                   const watchlistEnabled = Boolean(props.values.ENABLE_PLEX_WATCHLIST_SYNC);
+                  const plexCard = ONBOARDING_MEDIA_CARDS.find((card) => card.id === "plex");
+                  const plexReadyForWatchlist = Boolean(
+                    plexCard &&
+                      props.values.ENABLE_PLEX &&
+                      mediaCardConnectionDetailsComplete(plexCard, props.values, allSettingsFieldsByKey),
+                  );
                   return (
                     <div className="px-6 py-5 space-y-6">
-                      <SettingsDensityFrame
-                        legend="Plex Watchlist"
-                        intro={
+                      {!plexReadyForWatchlist ? (
+                        <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-4 py-3 text-[14px] text-yellow-300">
                           <p>
-                            Global watchlist policies live here. Manage who is on the roster and per-person sync on
-                            Activity → Watchlist. Connect Plex under Media Integrations (Sign in with Plex). With Plex
-                            Pass, RSS change hints skip full pulls when nothing changed. Review titles on Activity →
-                            Watchlist, or auto-add them to Arr with monitor-only or search-now behavior.
+                            Watchlist is Plex only. Connect Plex under{" "}
+                            <span className="font-semibold text-yellow-200">Settings → Media Integrations</span>{" "}
+                            before enabling sync or Arr targets. Controls below stay visible but inactive until Plex is
+                            ready.
                           </p>
-                        }
-                      >
-                        {syncFields.map((field) => (
-                          <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
-                        ))}
-                      </SettingsDensityFrame>
-                      <SettingsDensityFrame legend="Arr targets">
-                        <div className={watchlistEnabled ? "" : "opacity-50 pointer-events-none"}>
-                          <WatchlistArrDefaultsEditor
-                            values={props.values}
-                            disabled={!watchlistEnabled}
-                            accentHex={accent.hex}
-                            onChange={(key, value) => handleSettingsValueChange(key, value)}
-                            tagsSlot={
-                              tagsField ? (
-                                <Fragment key={tagsField.key}>
-                                  {renderStandardField(tagsField, { density: true })}
-                                </Fragment>
-                              ) : null
-                            }
-                            tvScopeSlot={
-                              tvScopeField ? (
-                                <Fragment key={tvScopeField.key}>
-                                  {renderStandardField(tvScopeField, { density: true })}
-                                </Fragment>
-                              ) : null
-                            }
-                          />
+                          {props.onOpenMediaIntegrations ? (
+                            <button
+                              type="button"
+                              onClick={props.onOpenMediaIntegrations}
+                              className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-yellow-500/40 bg-yellow-500/15 px-3 py-1.5 text-[13px] font-headline uppercase tracking-wider text-yellow-100 hover:bg-yellow-500/25 transition-colors"
+                            >
+                              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
+                                settings
+                              </span>
+                              Connect Plex
+                            </button>
+                          ) : null}
                         </div>
-                      </SettingsDensityFrame>
+                      ) : null}
+                      <div
+                        className={
+                          plexReadyForWatchlist ? "space-y-6" : "space-y-6 opacity-50 pointer-events-none select-none"
+                        }
+                        aria-disabled={!plexReadyForWatchlist}
+                      >
+                        <SettingsDensityFrame
+                          legend="Plex Watchlist"
+                          intro={
+                            <p>
+                              Global watchlist sync policies live here. Manage who is on the roster and per-person sync
+                              on Activity → Watchlist. Connect Plex under Media Integrations (Sign in with Plex). With
+                              Plex Pass, RSS change hints skip full pulls when nothing changed. Arr auto-add behavior and
+                              targets are below.
+                            </p>
+                          }
+                        >
+                          {syncFields.map((field) => (
+                            <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
+                          ))}
+                        </SettingsDensityFrame>
+                        <SettingsDensityFrame legend="Arr targets">
+                          <div
+                            className={
+                              plexReadyForWatchlist && watchlistEnabled ? "" : "opacity-50 pointer-events-none"
+                            }
+                          >
+                            <WatchlistArrDefaultsEditor
+                              values={props.values}
+                              disabled={!plexReadyForWatchlist || !watchlistEnabled}
+                              accentHex={accent.hex}
+                              onChange={(key, value) => handleSettingsValueChange(key, value)}
+                              behaviorSlot={
+                                onNewField ? (
+                                  <Fragment key={onNewField.key}>
+                                    {renderStandardField(onNewField, { density: true })}
+                                  </Fragment>
+                                ) : null
+                              }
+                              tagsSlot={
+                                tagsField ? (
+                                  <Fragment key={tagsField.key}>
+                                    {renderStandardField(tagsField, { density: true })}
+                                  </Fragment>
+                                ) : null
+                              }
+                              tvScopeSlot={
+                                tvScopeField ? (
+                                  <Fragment key={tvScopeField.key}>
+                                    {renderStandardField(tvScopeField, { density: true })}
+                                  </Fragment>
+                                ) : null
+                              }
+                            />
+                          </div>
+                        </SettingsDensityFrame>
+                      </div>
                     </div>
                   );
                 })()
@@ -10990,7 +11066,16 @@ function mediaCardConnectionDetailsComplete(
   const cred = String(values[keys.credentialKey] ?? "").trim();
   if (cred.length > 0) return true;
   const credField = fieldsByKey?.get(keys.credentialKey);
-  return Boolean(credField?.secret && credField.has_saved_value);
+  if (credField?.secret && credField.has_saved_value) return true;
+  // Sign in with Plex also stores PLEX_WATCHLIST_TOKEN (account). Treat a saved
+  // watchlist token + URL as complete when the server token field is redacted.
+  if (card.id === "plex") {
+    const watchlistTok = String(values.PLEX_WATCHLIST_TOKEN ?? "").trim();
+    if (watchlistTok) return true;
+    const wlField = fieldsByKey?.get("PLEX_WATCHLIST_TOKEN");
+    if (wlField?.secret && wlField.has_saved_value) return true;
+  }
+  return false;
 }
 
 /** True when the card should show the connected shell (toggle / configure), not the empty Connect CTA. */

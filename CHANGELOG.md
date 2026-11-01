@@ -9,6 +9,21 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+## Pre-release
+
+## Released
+
+## [0.12.0] - 2026-11-01
+
+### Summary
+
+- **Plex Watchlist**: Owner and friends sync into Activity Queue / Accepted / Blocklist.
+- **Sign in with Plex**: OAuth Media connection to pick account and server (manual URL/token still works).
+- **Watchlist roster**: Friends ∩ server ∩ Home with per-person sync toggles.
+- **Watchlist Arr targets**: Per-instance profile/root; Default Arr behavior with per-person overrides.
+- **Watchlist settings**: Settings → Watchlist; Plex-only gate like Collections.
+- **Watchlist TV monitor**: Accept/episode scope keeps Sonarr flags aligned with density so RSS cannot over-fetch.
+
 ### Added
 
 - **Plex Watchlist**: OAuth Media connection, scheduled owner + friends sync, and Activity Watchlist with Queue / Accepted / Blocklist.
@@ -18,7 +33,9 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Watchlist Arr targets**: Per-instance profile/root; Accept fans out Will add vs Already on with coverage none / partial / complete.
 - **Watchlist roster**: Friends ∩ server shares ∩ Home classification (`owner` / `friend` / `friend_only` / `server_only` / `home`) with unsyncable rows kept visible.
 - **Watchlist per-user sync**: Activity → Watchlist People toggles (`PATCH` sync_enabled) and roster refresh without a full title pull.
-- **Watchlist friend_only policy**: Settings → Watching toggle to include friends without server access (default on).
+- **Watchlist Default Arr behavior**: Settings → Watchlist sets the account default; People can override per person (`on_new`).
+- **Watchlist friend_only policy**: Settings → Watchlist toggle to include friends without server access (default on).
+- **What's New (0.12.0)**: Ack notice for Plex Watchlist and Sign in with Plex.
 - **DaysUntilPlusOne token**: Calendar Coming Soon templates can use `{DaysUntilPlusOne}` (DaysUntil + 1) for day-later countdowns when Arr dates are treated as US release days.
 
 ### Changed
@@ -26,23 +43,24 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Plex connection change**: Confirm warns to re-select Paths movie/TV library sections when replacing a server (OAuth pick or manual URL change).
 - **Watchlist Refresh**: Stays disabled while `watchlist_sync` is running; sidebar shows a live Watchlist sync pill.
 - **Watchlist fetch methods**: Owner Discover, friends GraphQL, optional unlocked Home switch; PIN-protected Home and server_only stay blocked in Phase 1.
-- **Watching settings copy**: Global policies only; points admins to Activity → Watchlist for the roster.
+- **Watchlist settings section**: Settings → Watchlist; sidebar slug `/settings/watchlist` (legacy `/settings/watching` still opens it).
+- **Watchlist Plex gate**: Activity Watchlist and Settings → Watchlist stay inactive until Plex is connected (same idea as Collections).
+- **Watchlist settings copy**: Global policies only; points admins to Activity → Watchlist for the roster.
 
 ### Fixed
 
+- **Watchlist TV monitor vs density**: Episode/season Accept no longer leaves Sonarr seasons fully monitored from lookup defaults; episode scope keeps only the lookahead window monitored so indexer RSS cannot grab the rest of the series.
 - **Watchlist roster identity merge**: Friends (GraphQL hex uuid), server shares (numeric id + avatar uuid), and Home users now collapse to one row (`friend` when both friend and on server); owner Home numeric id aliases are pruned.
 - **Watchlist Home vs server-only**: Home means on the Plex Home quick-switch list (not a friend); Server only means library share without Home. Home rows show managed / PIN / unlocked.
 - **Watchlist TV episode scope**: Accept uses Sonarr pilot, then monitors and searches the first `EPISODES_LOOKAHEAD` episodes (no longer first-season missing search).
+- **Watchlist Activity Plex gate**: Empty state follows Settings readiness (`ENABLE_PLEX` + URL), not a leftover retained token after disconnect.
+- **Watchlist auto-add overrides**: Disabled or policy-blocked roster people no longer steer Arr behavior for shared titles.
 - **Arr add_missing_titles result order**: Results stay aligned with input items so bulk Accept does not mis-pair titles.
 - **Corrupt DB bootstrap**: `check_db` only auto-creates when Postgres reports the database does not exist (SQLSTATE `3D000`). Catalog corruption (missing `base/…` files) fails fast with a clear FATAL and holds the process so `restart: unless-stopped` does not CREATE/restart-storm the host.
 - **Exists but unusable DB**: If CREATE reports already exists but connect still fails, treat as unrecoverable (no 30x CREATE retry loop).
 - **Startup “running” log**: Logged only after the database is reachable, not before bootstrap/`check_db`.
 - **Calendar message tokens**: `{ReleaseDate}` and media/episode tokens listed in Status Updates are now populated when Coming Soon messages render (they were allowed in the picker but empty at runtime).
 - **Queue Monitor token picker**: Allowed tokens trimmed to `{Sep}` and `{Progress}`; media/episode chips that never had render data are no longer offered.
-
-## Pre-release
-
-## Released
 
 ## [0.11.6] - 2026-10-27
 

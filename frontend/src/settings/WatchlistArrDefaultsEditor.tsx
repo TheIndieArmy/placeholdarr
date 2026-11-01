@@ -9,9 +9,10 @@ export const WATCHLIST_ARR_DEFAULT_KEYS = [
   "WATCHLIST_SONARR_TARGETS_JSON",
 ] as const;
 
-/** Keys owned by the Arr targets section (not the sync-behavior frame). */
+/** Keys owned by the Arr targets section (not the Plex Watchlist sync frame). */
 export const WATCHLIST_ARR_SECTION_KEYS = [
   ...WATCHLIST_ARR_DEFAULT_KEYS,
+  "WATCHLIST_ON_NEW",
   "WATCHLIST_ARR_TAGS",
   "WATCHLIST_TV_REQUEST_SCOPE",
   // Legacy single-target keys (migrated; keep out of sync frame).
@@ -306,6 +307,8 @@ export function WatchlistArrDefaultsEditor(props: {
   disabled?: boolean;
   accentHex?: string;
   onChange: (key: string, value: unknown) => void;
+  /** Auto-add / Accept default (Arr behavior) above targets. */
+  behaviorSlot?: ReactNode;
   /** Shared tags control rendered above the Movies/TV cards. */
   tagsSlot?: ReactNode;
   /** TV-only control (request scope) rendered inside the TV card. */
@@ -313,12 +316,13 @@ export function WatchlistArrDefaultsEditor(props: {
 }) {
   return (
     <div className="space-y-3">
+      {props.behaviorSlot ? <div className="space-y-1">{props.behaviorSlot}</div> : null}
       <div>
         <div className="text-[13px] font-headline uppercase tracking-widest text-slate-400">
           Arr add targets
         </div>
         <p className="text-[13px] text-slate-500 mt-1">
-          Watchlist auto-add and Add to Arr send each title to every instance you enable here.
+          Watchlist auto-add and Accept send each title to every instance you enable here.
         </p>
       </div>
       {props.tagsSlot ? <div className="space-y-1">{props.tagsSlot}</div> : null}

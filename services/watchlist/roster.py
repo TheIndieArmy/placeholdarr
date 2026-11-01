@@ -47,9 +47,9 @@ POLICY_OR_HARD_BLOCKS = frozenset(
 BLOCK_REASON_MESSAGES = {
     BLOCK_NEEDS_FRIEND_OR_TOKEN: "Needs Plex friend access or a user token",
     BLOCK_NEEDS_PIN_OR_TOKEN: "Needs Home PIN or a user token",
-    BLOCK_HOME_SWITCH_OFF: "Not syncing: Home switch is off in Settings → Watching",
-    BLOCK_FRIENDS_SYNC_OFF: "Not syncing: friends sync is off in Settings → Watching",
-    BLOCK_FRIEND_ONLY_OFF: "Not syncing: friends without server access is off in Settings → Watching",
+    BLOCK_HOME_SWITCH_OFF: "Not syncing: Home switch is off in Settings → Watchlist",
+    BLOCK_FRIENDS_SYNC_OFF: "Not syncing: friends sync is off in Settings → Watchlist",
+    BLOCK_FRIEND_ONLY_OFF: "Not syncing: friends without server access is off in Settings → Watchlist",
     BLOCK_SYNC_DISABLED: "Sync disabled for this user",
 }
 
@@ -648,13 +648,19 @@ def persist_roster(rows: list[dict[str, Any]], *, preserve_sync_toggles: bool = 
             user.is_protected = bool(raw.get("is_protected"))
             user.is_guest = bool(raw.get("is_guest"))
             # Stash Home membership tags without a dedicated column (roster meta only).
+            # Preserve per-user Arr behavior override (on_new) across roster refresh.
             meta = dict(user.settings_override) if isinstance(user.settings_override, dict) else {}
+            preserved_on_new = meta.get("on_new")
             meta["on_plex_home"] = bool(raw.get("on_plex_home"))
             hp = raw.get("home_profile")
             if hp:
                 meta["home_profile"] = str(hp)
             else:
                 meta.pop("home_profile", None)
+            if preserved_on_new is not None and str(preserved_on_new).strip():
+                meta["on_new"] = preserved_on_new
+            else:
+                meta.pop("on_new", None)
             user.settings_override = meta or None
             if is_new or not preserve_sync_toggles:
                 user.sync_enabled = bool(raw.get("sync_enabled", user.sync_enabled))
@@ -701,7 +707,19 @@ def refresh_roster(*, preserve_sync_toggles: bool = True) -> dict[str, Any]:
     return result
 
 
-def set_user_sync_enabled(plex_user_id: str, enabled: bool) -> dict[str, Any] | None:
+def patch_watchlist_user(
+    plex_user_id: str,
+    *,
+    sync_enabled: bool | None = None,
+    on_new: str | None | object = ...,
+) -> dict[str, Any] | None:
+    """Update roster sync toggle and/or per-user Arr behavior override.
+
+    ``on_new``:
+      - omitted (``...``): leave unchanged
+      - ``None`` or ``\"\"``: clear override (use Settings default)
+      - mode string: store override
+    """
     uid = str(plex_user_id or "").strip()
     if not uid:
         return None
@@ -710,23 +728,34 @@ def set_user_sync_enabled(plex_user_id: str, enabled: bool) -> dict[str, Any] | 
         user = session.query(PlexWatchlistUser).filter(PlexWatchlistUser.plex_user_id == uid).first()
         if user is None:
             return None
-        # Policy / hard blocks cannot be enabled while the gate is closed.
-        rel = str(getattr(user, "relationship", None) or REL_UNKNOWN)
-        hard = block_reason_for(rel, is_protected=bool(user.is_protected), sync_enabled=True)
-        if enabled and hard in POLICY_OR_HARD_BLOCKS:
-            user.sync_enabled = False
-            user.block_reason = hard
-        else:
-            user.sync_enabled = bool(enabled)
-            user.block_reason = block_reason_for(
-                rel,
-                is_protected=bool(user.is_protected),
-                sync_enabled=bool(user.sync_enabled),
-            )
-        if user.block_reason:
-            user.last_sync_error = BLOCK_REASON_MESSAGES.get(user.block_reason, user.last_sync_error)
-        elif user.last_sync_error in set(BLOCK_REASON_MESSAGES.values()):
-            user.last_sync_error = None
+        if sync_enabled is not None:
+            # Policy / hard blocks cannot be enabled while the gate is closed.
+            rel = str(getattr(user, "relationship", None) or REL_UNKNOWN)
+            hard = block_reason_for(rel, is_protected=bool(user.is_protected), sync_enabled=True)
+            if sync_enabled and hard in POLICY_OR_HARD_BLOCKS:
+                user.sync_enabled = False
+                user.block_reason = hard
+            else:
+                user.sync_enabled = bool(sync_enabled)
+                user.block_reason = block_reason_for(
+                    rel,
+                    is_protected=bool(user.is_protected),
+                    sync_enabled=bool(user.sync_enabled),
+                )
+            if user.block_reason:
+                user.last_sync_error = BLOCK_REASON_MESSAGES.get(user.block_reason, user.last_sync_error)
+            elif user.last_sync_error in set(BLOCK_REASON_MESSAGES.values()):
+                user.last_sync_error = None
+        if on_new is not ...:
+            from services.watchlist.sync import normalize_on_new_mode
+
+            meta = dict(user.settings_override) if isinstance(user.settings_override, dict) else {}
+            mode = normalize_on_new_mode(on_new) if on_new not in (None, "") else None
+            if mode:
+                meta["on_new"] = mode
+            else:
+                meta.pop("on_new", None)
+            user.settings_override = meta or None
         user.updated_at = _utcnow()
         session.commit()
         from services.watchlist.sync import _serialize_user
@@ -734,3 +763,8 @@ def set_user_sync_enabled(plex_user_id: str, enabled: bool) -> dict[str, Any] | 
         return _serialize_user(user)
     finally:
         session.close()
+
+
+def set_user_sync_enabled(plex_user_id: str, enabled: bool) -> dict[str, Any] | None:
+    """Backward-compatible wrapper for sync toggle only."""
+    return patch_watchlist_user(plex_user_id, sync_enabled=bool(enabled))
