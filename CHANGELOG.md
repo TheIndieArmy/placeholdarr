@@ -18,8 +18,8 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Watchlist Arr targets**: Per-instance profile/root; Accept fans out Will add vs Already on with coverage none / partial / complete.
 - **Watchlist roster**: Friends ∩ server shares ∩ Home classification (`owner` / `friend` / `friend_only` / `server_only` / `home`) with unsyncable rows kept visible.
 - **Watchlist per-user sync**: Activity → Watchlist People toggles (`PATCH` sync_enabled) and roster refresh without a full title pull.
-- **Watchlist Default Arr behavior**: Settings → Watching sets the account default; People can override per person (`on_new`).
-- **Watchlist friend_only policy**: Settings → Watching toggle to include friends without server access (default on).
+- **Watchlist Default Arr behavior**: Settings → Watchlist sets the account default; People can override per person (`on_new`).
+- **Watchlist friend_only policy**: Settings → Watchlist toggle to include friends without server access (default on).
 - **DaysUntilPlusOne token**: Calendar Coming Soon templates can use `{DaysUntilPlusOne}` (DaysUntil + 1) for day-later countdowns when Arr dates are treated as US release days.
 
 ### Changed
@@ -27,7 +27,8 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Plex connection change**: Confirm warns to re-select Paths movie/TV library sections when replacing a server (OAuth pick or manual URL change).
 - **Watchlist Refresh**: Stays disabled while `watchlist_sync` is running; sidebar shows a live Watchlist sync pill.
 - **Watchlist fetch methods**: Owner Discover, friends GraphQL, optional unlocked Home switch; PIN-protected Home and server_only stay blocked in Phase 1.
-- **Watching settings copy**: Global policies only; points admins to Activity → Watchlist for the roster.
+- **Watchlist settings section**: Renamed from Watching; sidebar slug `/settings/watchlist` (old `/settings/watching` still opens it).
+- **Watchlist settings copy**: Global policies only; points admins to Activity → Watchlist for the roster.
 
 ### Fixed
 

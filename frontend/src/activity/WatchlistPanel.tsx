@@ -131,13 +131,13 @@ function blockReasonCopy(u: WatchlistUser): string | null {
   if (code === "needs_friend_or_token") return "Needs friend access or a user token";
   if (code === "needs_pin_or_token") return "Needs Home PIN or a user token";
   if (code === "home_switch_disabled") {
-    return "Not syncing: Home switch is off in Settings → Watching";
+    return "Not syncing: Home switch is off in Settings → Watchlist";
   }
   if (code === "friends_sync_disabled") {
-    return "Not syncing: friends sync is off in Settings → Watching";
+    return "Not syncing: friends sync is off in Settings → Watchlist";
   }
   if (code === "friend_only_disabled") {
-    return "Not syncing: friends without server access is off in Settings → Watching";
+    return "Not syncing: friends without server access is off in Settings → Watchlist";
   }
   if (code === "sync_disabled") return "Sync disabled for this person";
   if (u.last_sync_error) return String(u.last_sync_error);
@@ -392,7 +392,7 @@ export function WatchlistPanel(props: {
       });
       if (result.failed && result.failed > 0 && !result.added) {
         setError(
-          `Accept failed for ${result.failed} title${result.failed === 1 ? "" : "s"}. Check Watching Arr targets (profile and root are required).`,
+          `Accept failed for ${result.failed} title${result.failed === 1 ? "" : "s"}. Check Watchlist Arr targets (profile and root are required).`,
         );
       }
       setSelected({});
@@ -480,7 +480,7 @@ export function WatchlistPanel(props: {
               </h2>
               <p className="text-[13px] mt-0.5" style={{ color: semantic.fgMuted }}>
                 Review roster watchlist requests. Accept sends titles to Arr; Reject moves them to the blocklist.
-                Global policies stay in Settings → Watching.
+                Global policies stay in Settings → Watchlist.
               </p>
             </div>
             <button
@@ -646,8 +646,8 @@ export function WatchlistPanel(props: {
               style={{ borderColor: headBorder }}
             >
               <div className="text-[13px]" style={{ color: semantic.fgMuted }}>
-                Per-person sync and Arr behavior. Greyed sync toggles mean Settings → Watching (or a missing
-                path) blocks fetch. Arr behavior Default uses Settings → Watching; any other choice overrides
+                Per-person sync and Arr behavior. Greyed sync toggles mean Settings → Watchlist (or a missing
+                path) blocks fetch. Arr behavior Default uses Settings → Watchlist; any other choice overrides
                 only that person.
               </div>
               <button

@@ -570,7 +570,7 @@ def add_watchlist_items_to_arr(
                     row.status = "failed"
                     row.last_error = (
                         f"No {arr_type} watchlist targets configured. "
-                        "Enable at least one instance under Settings → Watching → Arr targets."
+                        "Enable at least one instance under Settings → Watchlist → Arr targets."
                     )
                     failed += 1
                 continue

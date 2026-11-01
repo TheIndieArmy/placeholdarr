@@ -47,9 +47,9 @@ POLICY_OR_HARD_BLOCKS = frozenset(
 BLOCK_REASON_MESSAGES = {
     BLOCK_NEEDS_FRIEND_OR_TOKEN: "Needs Plex friend access or a user token",
     BLOCK_NEEDS_PIN_OR_TOKEN: "Needs Home PIN or a user token",
-    BLOCK_HOME_SWITCH_OFF: "Not syncing: Home switch is off in Settings → Watching",
-    BLOCK_FRIENDS_SYNC_OFF: "Not syncing: friends sync is off in Settings → Watching",
-    BLOCK_FRIEND_ONLY_OFF: "Not syncing: friends without server access is off in Settings → Watching",
+    BLOCK_HOME_SWITCH_OFF: "Not syncing: Home switch is off in Settings → Watchlist",
+    BLOCK_FRIENDS_SYNC_OFF: "Not syncing: friends sync is off in Settings → Watchlist",
+    BLOCK_FRIEND_ONLY_OFF: "Not syncing: friends without server access is off in Settings → Watchlist",
     BLOCK_SYNC_DISABLED: "Sync disabled for this user",
 }
 

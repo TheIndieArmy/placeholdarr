@@ -828,7 +828,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "ENABLE_PLEX_WATCHLIST_SYNC",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Enable Plex Watchlist sync",
                 "description": (
                     "Sync the Plex Universal Watchlist roster (owner, friends, optional Home) into "
@@ -844,7 +844,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_SYNC_SCHEDULE",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Watchlist poll schedule",
                 "description": (
                     "How often to check for watchlist changes. Default every 5 minutes. "
@@ -860,7 +860,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_SYNC_FRIENDS",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Sync friends' watchlists",
                 "description": (
                     "Master switch for friend GraphQL discovery. Per-person sync still uses the "
@@ -875,7 +875,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_SYNC_FRIEND_ONLY",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Include friends without server access",
                 "description": (
                     "Also discover friends who are not shared on this Plex server (friend_only). "
@@ -891,7 +891,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_SYNC_HOME_USERS",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Also sync Plex Home managed users",
                 "description": (
                     "Optional. Switch into unlocked Home managed profiles to read their watchlist. "
@@ -908,7 +908,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_USE_RSS_HINT",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Use RSS change hints (Plex Pass)",
                 "description": (
                     "Automatically create owner and friends RSS feeds when Plex Pass allows it. "
@@ -923,7 +923,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_FULL_RECONCILE_HOURS",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Full watchlist reconcile hours",
                 "description": (
                     "Force a full owner/friends pull at least this often so removals are noticed "
@@ -938,7 +938,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_ON_NEW",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Default Arr behavior",
                 "description": (
                     "Account default for new watchlist titles after sync. "
@@ -960,7 +960,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_TV_REQUEST_SCOPE",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "TV request scope",
                 "description": "",
                 "type": "choice",
@@ -978,7 +978,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_RADARR_TARGETS_JSON",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Radarr watchlist targets",
                 "description": (
                     "JSON list of Radarr instances that receive movie watchlist adds "
@@ -993,7 +993,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_SONARR_TARGETS_JSON",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Sonarr watchlist targets",
                 "description": (
                     "JSON list of Sonarr instances that receive TV watchlist adds "
@@ -1009,7 +1009,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_RADARR_INSTANCE_KEY",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Default Radarr instance (legacy)",
                 "description": "Migrated into Radarr watchlist targets.",
                 "type": "string",
@@ -1021,7 +1021,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_RADARR_QUALITY_PROFILE_ID",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Default movie quality profile (legacy)",
                 "description": "Migrated into Radarr watchlist targets.",
                 "type": "int",
@@ -1033,7 +1033,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_RADARR_ROOT_FOLDER",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Default movie root folder (legacy)",
                 "description": "Migrated into Radarr watchlist targets.",
                 "type": "string",
@@ -1045,7 +1045,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_SONARR_INSTANCE_KEY",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Default Sonarr instance (legacy)",
                 "description": "Migrated into Sonarr watchlist targets.",
                 "type": "string",
@@ -1057,7 +1057,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_SONARR_QUALITY_PROFILE_ID",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Default TV quality profile (legacy)",
                 "description": "Migrated into Sonarr watchlist targets.",
                 "type": "int",
@@ -1069,7 +1069,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_SONARR_ROOT_FOLDER",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Default TV root folder (legacy)",
                 "description": "Migrated into Sonarr watchlist targets.",
                 "type": "string",
@@ -1081,7 +1081,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_ARR_TAGS",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Arr tags on add",
                 "description": "Comma or space separated tags applied when adding from the watchlist (default placeholdarr-watchlist).",
                 "type": "string",
@@ -1093,7 +1093,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "PLEX_WATCHLIST_TOKEN",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Plex watchlist / account token",
                 "description": (
                     "Optional plex.tv account token used only for watchlist APIs. "
@@ -1110,7 +1110,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_RSS_SELF_URL",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Watchlist RSS self URL",
                 "description": "Auto-created owner watchlist RSS feed URL (Plex Pass).",
                 "type": "string",
@@ -1121,7 +1121,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_RSS_FRIENDS_URL",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Watchlist RSS friends URL",
                 "description": "Auto-created friendsWatchlist RSS feed URL (Plex Pass).",
                 "type": "string",
@@ -1132,7 +1132,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_RSS_SELF_ETAG",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Watchlist RSS self etag",
                 "description": "ETag for owner watchlist RSS change detection.",
                 "type": "string",
@@ -1143,7 +1143,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_RSS_FRIENDS_ETAG",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Watchlist RSS friends etag",
                 "description": "ETag for friendsWatchlist RSS change detection.",
                 "type": "string",
@@ -1154,7 +1154,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_RSS_SELF_HASH",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Watchlist RSS self hash",
                 "description": "Content hash for owner watchlist RSS change detection.",
                 "type": "string",
@@ -1165,7 +1165,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_RSS_FRIENDS_HASH",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Watchlist RSS friends hash",
                 "description": "Content hash for friendsWatchlist RSS change detection.",
                 "type": "string",
@@ -1176,7 +1176,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_LAST_FULL_FETCH_AT",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Watchlist last full fetch",
                 "description": "ISO timestamp of the last full owner/friends watchlist pull.",
                 "type": "string",
@@ -1187,7 +1187,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_LAST_POLL_AT",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Watchlist last poll",
                 "description": "ISO timestamp of the last watchlist_sync run.",
                 "type": "string",
@@ -1198,7 +1198,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "WATCHLIST_LAST_ERROR",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Watchlist last error",
                 "description": "Last watchlist_sync error message, if any.",
                 "type": "string",
@@ -1209,7 +1209,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "PLEX_OAUTH_CLIENT_ID",
             {
-                "section": "Watching",
+                "section": "Watchlist",
                 "label": "Plex OAuth client id",
                 "description": "Stable client identifier for Sign in with Plex. Generated automatically on first PIN if empty.",
                 "type": "string",

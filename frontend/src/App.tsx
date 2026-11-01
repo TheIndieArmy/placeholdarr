@@ -230,7 +230,7 @@ const SETTINGS_SECTION_ORDER = [
   "Optional APIs",
   "Density & Lookahead",
   "Playback",
-  "Watching",
+  "Watchlist",
   "Library sync",
   "Calendar",
   "Status Updates",
@@ -250,7 +250,7 @@ const SETTINGS_SECTION_ICONS: Record<string, string> = {
   Calendar: "calendar_month",
   "Density & Lookahead": "fast_forward",
   Playback: "play_circle",
-  Watching: "playlist_add_check",
+  Watchlist: "playlist_add_check",
   "Status Updates": "edit_notifications",
   "Poster Art": "image",
   "Dummy Video": "movie",
@@ -266,7 +266,7 @@ const SETTINGS_SECTION_SLUGS: Record<string, string> = {
   Calendar: "calendar",
   "Density & Lookahead": "density-lookahead",
   Playback: "playback",
-  Watching: "watching",
+  Watchlist: "watchlist",
   "Status Updates": "status-updates",
   "Poster Art": "poster-art",
   "Dummy Video": "dummy-video",
@@ -353,6 +353,8 @@ function resolveSettingsSectionFromSlug(slug: string): string | undefined {
   if (slug === "lookahead") return "Density & Lookahead";
   // Former Poster Overlay / Poster Language URLs.
   if (slug === "poster-overlay" || slug === "poster-language") return "Poster Art";
+  // Former Watching settings URL (bookmarks / old CTAs).
+  if (slug === "watching") return "Watchlist";
   return SETTINGS_SECTION_ORDER.find((name) => SETTINGS_SECTION_SLUGS[name] === slug);
 }
 const BEHAVIOR_WIZARD_SECTIONS = [
@@ -8813,7 +8815,7 @@ function SettingsPanel(props: {
                     </p>
                   ),
                 })
-              ) : active.name === "Watching" ? (
+              ) : active.name === "Watchlist" ? (
                 (() => {
                   const watchlistArrKeySet = new Set<string>(WATCHLIST_ARR_SECTION_KEYS);
                   const fieldByKey = new Map(active.fields.map((f) => [f.key, f]));
