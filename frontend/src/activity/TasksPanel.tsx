@@ -197,6 +197,7 @@ export function TasksPanel(props: {
   activeSearches: ActiveSearchesResponse;
   onRequestRun: (kind: "full" | "lite" | "calendar") => void;
   onRunCollections: () => Promise<void> | void;
+  onRunWatchlist?: () => Promise<void> | void;
   onRequestRefresh: (kind: "metadata" | "art" | "both") => Promise<void> | void;
   onStopRun: (runId: number) => Promise<void> | void;
 }) {
@@ -301,6 +302,11 @@ export function TasksPanel(props: {
                         Release date refresh and Coming Soon / countdown status updates.
                       </p>
                     ) : null}
+                    {task.task_key === "watchlist_sync" ? (
+                      <p className="text-[12px] font-normal mt-0.5 max-w-md" style={{ color: semantic.fgSubtle }}>
+                        Poll the owner Plex Watchlist and optionally auto-add new titles to Arr.
+                      </p>
+                    ) : null}
                   </td>
                   <td className="px-3 py-3 text-[14px]" style={{ color: semantic.fgMuted }}>
                     {task.interval_label}
@@ -342,6 +348,10 @@ export function TasksPanel(props: {
                       onClick={() => {
                         if (task.task_key === "collections_sync") {
                           void props.onRunCollections();
+                          return;
+                        }
+                        if (task.task_key === "watchlist_sync") {
+                          void props.onRunWatchlist?.();
                           return;
                         }
                         if (task.task_key === "full_sync") {

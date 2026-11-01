@@ -11,10 +11,14 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ### Added
 
+- **Plex Watchlist**: OAuth Media connection, scheduled Home sync, and Activity Watchlist with Queue / Accepted / Blocklist.
+- **Watchlist Home users**: Sync every Home member watchlist (v1 switch + rate-limit backoff); membership avatars and Watchlisted-by.
+- **Watchlist Arr targets**: Per-instance profile/root; Accept fans out Will add vs Already on with coverage none / partial / complete.
 - **DaysUntilPlusOne token**: Calendar Coming Soon templates can use `{DaysUntilPlusOne}` (DaysUntil + 1) for day-later countdowns when Arr dates are treated as US release days.
 
 ### Fixed
 
+- **Arr add_missing_titles result order**: Results stay aligned with input items so bulk Accept does not mis-pair titles.
 - **Corrupt DB bootstrap**: `check_db` only auto-creates when Postgres reports the database does not exist (SQLSTATE `3D000`). Catalog corruption (missing `base/…` files) fails fast with a clear FATAL and holds the process so `restart: unless-stopped` does not CREATE/restart-storm the host.
 - **Exists but unusable DB**: If CREATE reports already exists but connect still fails, treat as unrecoverable (no 30x CREATE retry loop).
 - **Startup “running” log**: Logged only after the database is reachable, not before bootstrap/`check_db`.

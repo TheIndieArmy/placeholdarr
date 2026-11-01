@@ -588,6 +588,12 @@ app.include_router(dashboard_router)
 from routes.tasks import router as tasks_router
 app.include_router(tasks_router)
 
+from routes.watchlist import router as watchlist_router
+app.include_router(watchlist_router)
+
+from routes.plex_oauth import router as plex_oauth_router
+app.include_router(plex_oauth_router)
+
 # Rule-based Plex collection builder
 from routes.collections import router as collections_router
 app.include_router(collections_router)

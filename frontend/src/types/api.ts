@@ -1,6 +1,6 @@
 export type DashboardTab = "activity" | "library" | "collections" | "calendar" | "logs" | "settings" | "setup";
 
-export type ActivitySubPage = "placeholders" | "tasks" | "operations";
+export type ActivitySubPage = "placeholders" | "tasks" | "operations" | "watchlist";
 
 export type TaskKey =
   | "full_sync"
@@ -8,7 +8,8 @@ export type TaskKey =
   | "calendar_sync"
   | "calendar_only"
   | "placeholder_refresh"
-  | "collections_sync";
+  | "collections_sync"
+  | "watchlist_sync";
 
 export interface ScheduledTaskRow {
   task_key: TaskKey;

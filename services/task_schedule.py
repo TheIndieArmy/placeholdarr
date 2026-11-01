@@ -47,6 +47,7 @@ TASK_SCHEDULE_KEYS = {
     "lite_sync": "LITE_SYNC_SCHEDULE",
     "collections_sync": "COLLECTIONS_SYNC_SCHEDULE",
     "calendar_sync": "CALENDAR_SYNC_SCHEDULE",
+    "watchlist_sync": "WATCHLIST_SYNC_SCHEDULE",
 }
 
 LEGACY_INTERVAL_KEYS = {
@@ -62,6 +63,8 @@ DEFAULT_INTERVAL_HOURS = {
     "collections_sync": 24,
     # Twice daily (same cadence as lite); legacy calendar hours 0 still migrate via get_schedule.
     "calendar_sync": 12,
+    # Prefer cron */5; interval fallback if schedule missing.
+    "watchlist_sync": 1,
 }
 
 DEFAULT_TIME = "03:00"
@@ -98,6 +101,13 @@ def interval_schedule(hours: int) -> dict[str, Any]:
         return _disabled_schedule()
     out = _enabled_base("interval")
     out["interval_hours"] = max(1, n)
+    return out
+
+
+def cron_schedule(expression: str) -> dict[str, Any]:
+    """Enabled 5-field cron schedule."""
+    out = _enabled_base("cron")
+    out["cron"] = validate_cron_expression(str(expression or "").strip())
     return out
 
 
@@ -144,6 +154,8 @@ def _schedule_dicts_equal(a: dict[str, Any], b: dict[str, Any]) -> bool:
 
 def default_schedule_for_task(task_key: str) -> dict[str, Any]:
     key = str(task_key or "").strip().lower()
+    if key == "watchlist_sync":
+        return cron_schedule("*/5 * * * *")
     hours = int(DEFAULT_INTERVAL_HOURS.get(key, 24))
     return schedule_from_legacy_hours(hours)
 
@@ -576,20 +588,25 @@ def migrate_interval_hours_to_schedules(session) -> list[str]:
     written: list[str] = []
     remapped_repaired = False
     for task_key, schedule_key in TASK_SCHEDULE_KEYS.items():
-        legacy_key = LEGACY_INTERVAL_KEYS[task_key]
-        legacy_row = session.query(AppConfig).filter(AppConfig.key == legacy_key).first()
+        legacy_key = LEGACY_INTERVAL_KEYS.get(task_key)
+        legacy_row = (
+            session.query(AppConfig).filter(AppConfig.key == legacy_key).first() if legacy_key else None
+        )
         if legacy_row is not None and legacy_row.value not in (None, ""):
             try:
                 hours = int(legacy_row.value)
             except (TypeError, ValueError):
-                hours = int(DEFAULT_INTERVAL_HOURS[task_key])
+                hours = int(DEFAULT_INTERVAL_HOURS.get(task_key, 24))
         else:
-            hours = int(DEFAULT_INTERVAL_HOURS[task_key])
+            hours = int(DEFAULT_INTERVAL_HOURS.get(task_key, 24))
         # Legacy calendar 0 = piggyback on lite; seed the calendar default interval.
         if task_key == "calendar_sync" and hours <= 0:
-            hours = int(DEFAULT_INTERVAL_HOURS[task_key])
+            hours = int(DEFAULT_INTERVAL_HOURS.get(task_key, 12))
 
-        faithful = schedule_from_legacy_hours(hours)
+        if task_key == "watchlist_sync":
+            faithful = cron_schedule("*/5 * * * *")
+        else:
+            faithful = schedule_from_legacy_hours(hours)
         existing = session.query(AppConfig).filter(AppConfig.key == schedule_key).first()
 
         if existing is not None and isinstance(existing.value, dict) and existing.value:
