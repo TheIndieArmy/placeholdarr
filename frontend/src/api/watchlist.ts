@@ -79,6 +79,8 @@ export interface WatchlistUser {
   sync_enabled?: boolean;
   /** True only when this person will actually be fetched on the next sync. */
   sync_effective?: boolean;
+  /** Per-user Arr behavior override; null/undefined means Settings default. */
+  on_new?: string | null;
   settings_override?: Record<string, unknown> | null;
   last_synced_at?: string | null;
   last_sync_error?: string | null;
@@ -145,7 +147,10 @@ export function getWatchlistUsers() {
   return fetchJson<{ users: WatchlistUser[] }>("/api/watchlist/users");
 }
 
-export function patchWatchlistUser(plexUserId: string, body: { sync_enabled: boolean }) {
+export function patchWatchlistUser(
+  plexUserId: string,
+  body: { sync_enabled?: boolean; on_new?: string | null },
+) {
   return fetchJson<{ ok: boolean; user: WatchlistUser }>(
     `/api/watchlist/users/${encodeURIComponent(plexUserId)}`,
     {

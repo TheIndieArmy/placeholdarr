@@ -834,6 +834,32 @@ def trigger_sonarr_search(
     return result is not None
 
 
+def _unmonitor_all_sonarr_seasons(
+    series_id: int,
+    *,
+    url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    series_monitored: bool = True,
+) -> bool:
+    """Keep the series monitored flag, but clear every season so RSS follows episode flags only."""
+    url = url or _default_sonarr_endpoint()[0]
+    api_key = api_key or _default_sonarr_endpoint()[1]
+    if not url or not api_key or not series_id:
+        return False
+    endpoint = _build_endpoint(url, f"series/{int(series_id)}")
+    series_payload = _request_json("GET", endpoint, params={"apikey": api_key})
+    if not isinstance(series_payload, dict):
+        return False
+    series_payload["monitored"] = bool(series_monitored)
+    seasons = series_payload.get("seasons") or []
+    if isinstance(seasons, list):
+        for season in seasons:
+            if isinstance(season, dict):
+                season["monitored"] = False
+    result = _request_json("PUT", endpoint, payload=series_payload, api_key=api_key)
+    return result is not None
+
+
 def monitor_and_search_first_episodes(
     *,
     series_id: int,
@@ -843,10 +869,11 @@ def monitor_and_search_first_episodes(
     url: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Monitor the first ``count`` aired-order episodes (inclusive), optionally EpisodeSearch them.
+    """Monitor only the first ``count`` aired-order episodes; leave the rest unmonitored.
 
-    Used for watchlist/TV request scope ``episode`` (first episode + EPISODES_LOOKAHEAD).
-    Sonarr has no native "first N episodes" monitor, so add as pilot then expand here.
+    Used for watchlist/TV request scope ``episode`` (pilot add, then expand to the first
+    ``EPISODES_LOOKAHEAD`` episodes). Seasons are cleared so indexer RSS cannot pull the
+    rest of the series outside that window.
     """
     url = url or _default_sonarr_endpoint()[0]
     api_key = api_key or _default_sonarr_endpoint()[1]
@@ -857,7 +884,7 @@ def monitor_and_search_first_episodes(
     if include_specials is None:
         include_specials = bool(getattr(settings, "INCLUDE_SPECIALS", False))
     if not url or not api_key or not series_id:
-        return {"selected": 0, "monitored": 0, "searched": False, "episode_ids": []}
+        return {"selected": 0, "monitored": 0, "unmonitored": 0, "searched": False, "episode_ids": []}
 
     rows: List[Dict] = []
     for attempt in range(4):
@@ -885,8 +912,21 @@ def monitor_and_search_first_episodes(
     ordered.sort()
     episode_ids = [eid for _sn, _en, eid in ordered[:n]]
     if not episode_ids:
-        return {"selected": 0, "monitored": 0, "searched": False, "episode_ids": []}
+        return {"selected": 0, "monitored": 0, "unmonitored": 0, "searched": False, "episode_ids": []}
 
+    window = set(episode_ids)
+    outside_ids = [eid for _sn, _en, eid in ordered if eid not in window]
+
+    # Season-level monitor would RSS-grab whole seasons; keep episode flags only.
+    _unmonitor_all_sonarr_seasons(
+        int(series_id),
+        url=url,
+        api_key=api_key,
+        series_monitored=True,
+    )
+    unmon = {"updated": 0}
+    if outside_ids:
+        unmon = set_sonarr_episode_monitored(outside_ids, False, url=url, api_key=api_key) or unmon
     mon = set_sonarr_episode_monitored(episode_ids, True, url=url, api_key=api_key)
     searched = False
     if search and episode_ids:
@@ -901,6 +941,7 @@ def monitor_and_search_first_episodes(
     return {
         "selected": len(episode_ids),
         "monitored": int((mon or {}).get("updated") or 0),
+        "unmonitored": int((unmon or {}).get("updated") or 0),
         "searched": searched,
         "episode_ids": episode_ids,
     }
@@ -1122,20 +1163,43 @@ def _series_add_payload(
     if tag_ids:
         payload["tags"] = [int(t) for t in tag_ids]
     seasons = payload.get("seasons")
-    if isinstance(seasons, list) and monitored:
-        # Prefer Sonarr addOptions.monitor; still mark non-special seasons when monitoring all.
-        mark_all = monitor == "all"
-        mark_first = monitor == "firstSeason"
+    if isinstance(seasons, list):
+        # Lookup payloads often mark every season monitored=true. Force season flags to
+        # match addOptions.monitor so RSS cannot grab outside the density/request scope
+        # (pilot/episode window, first season, or full series).
+        latest_num = 0
+        if monitor == "latestSeason":
+            for season in seasons:
+                if not isinstance(season, dict):
+                    continue
+                try:
+                    num = int(season.get("seasonNumber") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if num > latest_num:
+                    latest_num = num
         for season in seasons:
             if not isinstance(season, dict):
                 continue
-            num = int(season.get("seasonNumber") or 0)
-            if num == 0:
+            try:
+                num = int(season.get("seasonNumber") or 0)
+            except (TypeError, ValueError):
                 continue
-            if mark_all:
-                season["monitored"] = True
-            elif mark_first:
+            if num == 0:
+                season["monitored"] = False
+                continue
+            if not monitored or monitor in {"none", "pilot"}:
+                # Episode/pilot scope: seasons stay off; specific episodes are monitored later.
+                season["monitored"] = False
+            elif monitor == "firstSeason":
                 season["monitored"] = num == 1
+            elif monitor == "latestSeason":
+                season["monitored"] = num == latest_num and latest_num > 0
+            elif monitor == "all":
+                season["monitored"] = True
+            else:
+                # future / missing / existing: do not inherit lookup's all-season monitored.
+                season["monitored"] = False
     return payload
 
 

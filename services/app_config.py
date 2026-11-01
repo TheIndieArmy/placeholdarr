@@ -939,22 +939,21 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "WATCHLIST_ON_NEW",
             {
                 "section": "Watching",
-                "label": "When new on watchlist",
+                "label": "Default Arr behavior",
                 "description": (
-                    "Manual: review on the Watchlist page. "
-                    "Monitor only: auto-add monitored, no search. "
-                    "Add only: auto-add unmonitored, no search. "
-                    "Add and search: auto-add monitored and search immediately."
+                    "Account default for new watchlist titles after sync. "
+                    "Per-person overrides on Activity → Watchlist → People replace this for that user. "
+                    "TV monitor scope still follows TV request scope / density."
                 ),
                 "type": "choice",
                 "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
                 "restart_required": False,
                 "default": "manual",
                 "options": [
-                    {"value": "add_and_search", "label": "Add and search"},
-                    {"value": "monitor_only", "label": "Monitor only (auto-add, no search)"},
-                    {"value": "add_only", "label": "Add only (no monitor, no search)"},
-                    {"value": "manual", "label": "Manual (review on Watchlist page)"},
+                    {"value": "add_and_search", "label": "Add, monitor, and search"},
+                    {"value": "monitor_only", "label": "Add and monitor"},
+                    {"value": "add_only", "label": "Add only"},
+                    {"value": "manual", "label": "Manual"},
                 ],
             },
         ),

@@ -16,7 +16,16 @@ import {
   type WatchlistSummary,
   type WatchlistUser,
 } from "../api/watchlist";
+import { BrandSelect } from "../BrandSelect";
 import { ToggleSwitch } from "../ToggleSwitch";
+
+const ARR_BEHAVIOR_OPTIONS = [
+  { value: "", label: "Default" },
+  { value: "add_and_search", label: "Add, monitor, and search" },
+  { value: "monitor_only", label: "Add and monitor" },
+  { value: "add_only", label: "Add only" },
+  { value: "manual", label: "Manual" },
+] as const;
 
 type StripAccent = { hex: string; text: string; icon: string; hoverHex: string };
 type WatchlistTab = "accepted" | "queue" | "blocklist" | "people";
@@ -408,6 +417,13 @@ export function WatchlistPanel(props: {
     }
   };
 
+  const mergePatchedUser = (prev: WatchlistUser, next: WatchlistUser): WatchlistUser => ({
+    ...prev,
+    ...next,
+    title: next.title || prev.title,
+    thumb_url: next.thumb_url ?? prev.thumb_url,
+  });
+
   const onToggleUserSync = async (u: WatchlistUser, enabled: boolean) => {
     if (syncToggleLocked(u)) return;
     setUsers((prev) =>
@@ -416,16 +432,7 @@ export function WatchlistPanel(props: {
     try {
       const result = await patchWatchlistUser(u.plex_user_id, { sync_enabled: enabled });
       setUsers((prev) =>
-        prev.map((row) =>
-          row.plex_user_id === u.plex_user_id
-            ? {
-                ...row,
-                ...result.user,
-                title: result.user.title || row.title,
-                thumb_url: result.user.thumb_url ?? row.thumb_url,
-              }
-            : row,
-        ),
+        prev.map((row) => (row.plex_user_id === u.plex_user_id ? mergePatchedUser(row, result.user) : row)),
       );
     } catch (e) {
       setUsers((prev) =>
@@ -434,6 +441,24 @@ export function WatchlistPanel(props: {
         ),
       );
       setError(e instanceof Error ? e.message : "Could not update sync toggle");
+    }
+  };
+
+  const onChangeUserArrBehavior = async (u: WatchlistUser, value: string) => {
+    const nextOnNew = value.trim() ? value.trim() : null;
+    setUsers((prev) =>
+      prev.map((row) => (row.plex_user_id === u.plex_user_id ? { ...row, on_new: nextOnNew } : row)),
+    );
+    try {
+      const result = await patchWatchlistUser(u.plex_user_id, { on_new: nextOnNew });
+      setUsers((prev) =>
+        prev.map((row) => (row.plex_user_id === u.plex_user_id ? mergePatchedUser(row, result.user) : row)),
+      );
+    } catch (e) {
+      setUsers((prev) =>
+        prev.map((row) => (row.plex_user_id === u.plex_user_id ? { ...row, on_new: u.on_new } : row)),
+      );
+      setError(e instanceof Error ? e.message : "Could not update Arr behavior");
     }
   };
 
@@ -478,7 +503,8 @@ export function WatchlistPanel(props: {
               <strong style={{ color: semantic.fg }}>{summary?.has_token ? "Present" : "Missing"}</strong>
             </span>
             <span>
-              When new: <strong style={{ color: semantic.fg }}>{summary?.on_new || "manual"}</strong>
+              Default Arr behavior:{" "}
+              <strong style={{ color: semantic.fg }}>{summary?.on_new || "manual"}</strong>
             </span>
             <span>Last poll: {formatWhen(summary?.last_poll_at ?? null)}</span>
           </div>
@@ -620,8 +646,9 @@ export function WatchlistPanel(props: {
               style={{ borderColor: headBorder }}
             >
               <div className="text-[13px]" style={{ color: semantic.fgMuted }}>
-                Per-person sync. Greyed toggles mean Settings → Watching (or a missing path) blocks
-                fetch for that account type right now.
+                Per-person sync and Arr behavior. Greyed sync toggles mean Settings → Watching (or a missing
+                path) blocks fetch. Arr behavior Default uses Settings → Watching; any other choice overrides
+                only that person.
               </div>
               <button
                 type="button"
@@ -640,12 +667,13 @@ export function WatchlistPanel(props: {
                   <col className="w-14" />
                   <col />
                   <col className="w-[8.5rem]" />
+                  <col className="w-[12.5rem]" />
                   <col className="w-[11rem]" />
                   <col className="w-16" />
                 </colgroup>
                 <thead>
                   <tr className="border-b" style={{ borderColor: headBorder }}>
-                    {["", "Person", "Relationship", "Last sync", "Sync"].map((h, idx) => (
+                    {["", "Person", "Relationship", "Arr behavior", "Last sync", "Sync"].map((h, idx) => (
                       <th
                         key={`${h}-${idx}`}
                         className="px-2 py-2 text-left text-[12px] font-headline uppercase tracking-widest font-normal"
@@ -659,13 +687,13 @@ export function WatchlistPanel(props: {
                 <tbody>
                   {loading ? (
                     <tr>
-                      <td colSpan={5} className="px-3 py-6 text-[14px]" style={{ color: semantic.fgMuted }}>
+                      <td colSpan={6} className="px-3 py-6 text-[14px]" style={{ color: semantic.fgMuted }}>
                         Loading…
                       </td>
                     </tr>
                   ) : users.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="px-3 py-6 text-[14px]" style={{ color: semantic.fgMuted }}>
+                      <td colSpan={6} className="px-3 py-6 text-[14px]" style={{ color: semantic.fgMuted }}>
                         No roster yet. Run Refresh now or Refresh roster after Plex is connected.
                       </td>
                     </tr>
@@ -724,6 +752,16 @@ export function WatchlistPanel(props: {
                                 </span>
                               ) : null}
                             </div>
+                          </td>
+                          <td className="px-2 py-3 align-middle">
+                            <BrandSelect
+                              fullWidth
+                              disabled={rosterBusy}
+                              value={u.on_new || ""}
+                              options={[...ARR_BEHAVIOR_OPTIONS]}
+                              onChange={(value) => void onChangeUserArrBehavior(u, value)}
+                              ariaLabel={`Arr behavior for ${name}`}
+                            />
                           </td>
                           <td className="px-2 py-3 align-middle text-[13px]" style={{ color: semantic.fgMuted }}>
                             {formatWhen(u.last_synced_at ?? null)}

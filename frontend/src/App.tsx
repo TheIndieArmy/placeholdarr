@@ -8823,6 +8823,7 @@ function SettingsPanel(props: {
                   );
                   const tagsField = fieldByKey.get("WATCHLIST_ARR_TAGS");
                   const tvScopeField = fieldByKey.get("WATCHLIST_TV_REQUEST_SCOPE");
+                  const onNewField = fieldByKey.get("WATCHLIST_ON_NEW");
                   const watchlistEnabled = Boolean(props.values.ENABLE_PLEX_WATCHLIST_SYNC);
                   return (
                     <div className="px-6 py-5 space-y-6">
@@ -8830,10 +8831,10 @@ function SettingsPanel(props: {
                         legend="Plex Watchlist"
                         intro={
                           <p>
-                            Global watchlist policies live here. Manage who is on the roster and per-person sync on
-                            Activity → Watchlist. Connect Plex under Media Integrations (Sign in with Plex). With Plex
-                            Pass, RSS change hints skip full pulls when nothing changed. Review titles on Activity →
-                            Watchlist, or auto-add them to Arr with monitor-only or search-now behavior.
+                            Global watchlist sync policies live here. Manage who is on the roster and per-person sync
+                            on Activity → Watchlist. Connect Plex under Media Integrations (Sign in with Plex). With
+                            Plex Pass, RSS change hints skip full pulls when nothing changed. Arr auto-add behavior and
+                            targets are below.
                           </p>
                         }
                       >
@@ -8848,6 +8849,13 @@ function SettingsPanel(props: {
                             disabled={!watchlistEnabled}
                             accentHex={accent.hex}
                             onChange={(key, value) => handleSettingsValueChange(key, value)}
+                            behaviorSlot={
+                              onNewField ? (
+                                <Fragment key={onNewField.key}>
+                                  {renderStandardField(onNewField, { density: true })}
+                                </Fragment>
+                              ) : null
+                            }
                             tagsSlot={
                               tagsField ? (
                                 <Fragment key={tagsField.key}>

@@ -60,14 +60,24 @@ async def watchlist_users():
 
 
 class WatchlistUserPatchRequest(BaseModel):
-    sync_enabled: bool
+    sync_enabled: bool | None = None
+    # null / "" clears per-user Arr behavior override (use Settings default).
+    on_new: str | None = None
 
 
 @router.patch("/api/watchlist/users/{plex_user_id}")
 async def watchlist_user_patch(plex_user_id: str, body: WatchlistUserPatchRequest):
-    from services.watchlist.roster import set_user_sync_enabled
+    from services.watchlist.roster import patch_watchlist_user
 
-    updated = set_user_sync_enabled(plex_user_id, bool(body.sync_enabled))
+    payload = body.model_dump(exclude_unset=True)
+    if not payload:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    kwargs: dict = {}
+    if "sync_enabled" in payload:
+        kwargs["sync_enabled"] = payload.get("sync_enabled")
+    if "on_new" in payload:
+        kwargs["on_new"] = payload.get("on_new")
+    updated = patch_watchlist_user(plex_user_id, **kwargs)
     if updated is None:
         raise HTTPException(status_code=404, detail="Watchlist user not found")
     return {"ok": True, "user": updated}

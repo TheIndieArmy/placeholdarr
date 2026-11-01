@@ -40,10 +40,11 @@ def identity_key_for(item: dict[str, Any]) -> str:
 
 
 def tv_scope_to_sonarr_monitor(scope: str | None) -> str:
-    """Map watchlist TV request scope to Sonarr ``addOptions.monitor``.
+    """Map watchlist TV request scope (or TV density fallback) to Sonarr monitor.
 
-    ``episode`` uses ``pilot`` at add time; Accept then expands to the first
-    ``EPISODES_LOOKAHEAD`` episodes via ``monitor_and_search_first_episodes``.
+    ``episode`` adds as ``pilot`` (seasons unmonitored), then Accept expands to the
+    first ``EPISODES_LOOKAHEAD`` episodes only so indexer RSS cannot grab the rest.
+    ``season`` uses ``firstSeason``. ``series`` uses ``all``.
     """
     s = str(scope or "").strip().lower()
     if s == "season":
@@ -70,11 +71,44 @@ def default_tv_request_scope() -> str:
     return "episode"
 
 
+_ON_NEW_MODES = frozenset({"manual", "monitor_only", "add_only", "add_and_search"})
+_ON_NEW_RANK = {"manual": 0, "add_only": 1, "monitor_only": 2, "add_and_search": 3}
+
+
 def watchlist_action_mode() -> str:
     mode = str(getattr(settings, "WATCHLIST_ON_NEW", "manual") or "manual").strip().lower()
-    if mode in {"manual", "monitor_only", "add_only", "add_and_search"}:
+    if mode in _ON_NEW_MODES:
         return mode
     return "manual"
+
+
+def normalize_on_new_mode(raw: Any) -> str | None:
+    """Return a valid on_new mode, or None when unset / invalid."""
+    mode = str(raw or "").strip().lower()
+    return mode if mode in _ON_NEW_MODES else None
+
+
+def on_new_override_for_user(user: PlexWatchlistUser | None) -> str | None:
+    if user is None:
+        return None
+    meta = user.settings_override if isinstance(user.settings_override, dict) else {}
+    return normalize_on_new_mode(meta.get("on_new"))
+
+
+def effective_on_new_for_users(users: list[PlexWatchlistUser], *, default: str | None = None) -> str:
+    """Resolve Arr behavior for a title shared by one or more roster users.
+
+    Per-user overrides replace the account default for that person. When several
+    people share a title, the strongest non-default-aware mode wins so one
+    ``add_and_search`` override still auto-adds.
+    """
+    base = normalize_on_new_mode(default) or watchlist_action_mode()
+    modes: list[str] = []
+    for user in users:
+        modes.append(on_new_override_for_user(user) or base)
+    if not modes:
+        return base
+    return max(modes, key=lambda m: _ON_NEW_RANK.get(m, 0))
 
 
 def _resolve_status_for_row(
@@ -667,30 +701,58 @@ def add_watchlist_items_to_arr(
 
 
 def auto_add_new_items() -> dict[str, Any]:
-    mode = watchlist_action_mode()
-    if mode == "manual":
-        return {"mode": mode, "attempted": 0}
-    search = mode == "add_and_search"
-    monitored = mode != "add_only"
+    default_mode = watchlist_action_mode()
     session = get_session()
     try:
-        ids = [
-            int(r.id)
-            for r in session.query(PlexWatchlistItem.id)
+        rows = (
+            session.query(PlexWatchlistItem)
             .filter(
                 PlexWatchlistItem.excluded.is_(False),
                 PlexWatchlistItem.status == "new",
             )
             .all()
-        ]
+        )
+        if not rows:
+            return {"mode": default_mode, "attempted": 0, "by_mode": {}}
+        users_by_id = {u.plex_user_id: u for u in session.query(PlexWatchlistUser).all()}
+        item_ids = [int(r.id) for r in rows]
+        mems_by_item: dict[int, list[str]] = {i: [] for i in item_ids}
+        if item_ids:
+            for mem in (
+                session.query(PlexWatchlistMembership)
+                .filter(PlexWatchlistMembership.watchlist_item_id.in_(item_ids))
+                .all()
+            ):
+                mems_by_item.setdefault(int(mem.watchlist_item_id), []).append(str(mem.plex_user_id))
+        by_mode: dict[str, list[int]] = {}
+        for row in rows:
+            rid = int(row.id)
+            members = [users_by_id[uid] for uid in mems_by_item.get(rid, []) if uid in users_by_id]
+            mode = effective_on_new_for_users(members, default=default_mode)
+            by_mode.setdefault(mode, []).append(rid)
     finally:
         session.close()
-    if not ids:
-        return {"mode": mode, "attempted": 0}
-    summary = add_watchlist_items_to_arr(ids, search=search, monitored=monitored)
-    summary["mode"] = mode
-    summary["attempted"] = len(ids)
-    return summary
+
+    attempted = 0
+    combined: dict[str, Any] = {
+        "mode": default_mode,
+        "by_mode": {k: len(v) for k, v in by_mode.items()},
+        "added": 0,
+        "skipped": 0,
+        "failed": 0,
+    }
+    for mode, ids in by_mode.items():
+        if mode == "manual" or not ids:
+            continue
+        search = mode == "add_and_search"
+        monitored = mode != "add_only"
+        summary = add_watchlist_items_to_arr(ids, search=search, monitored=monitored)
+        attempted += len(ids)
+        combined["added"] = int(combined.get("added") or 0) + int(summary.get("added") or 0)
+        combined["skipped"] = int(combined.get("skipped") or 0) + int(summary.get("skipped") or 0)
+        combined["failed"] = int(combined.get("failed") or 0) + int(summary.get("failed") or 0)
+    combined["attempted"] = attempted
+    return combined
 
 
 def set_excluded(item_ids: Iterable[int], excluded: bool) -> int:
@@ -845,6 +907,7 @@ def _serialize_user(u: PlexWatchlistUser) -> dict[str, Any]:
             is_restricted=bool(u.is_restricted),
             is_protected=bool(u.is_protected),
         )
+    on_new = on_new_override_for_user(u)
     return {
         "plex_user_id": u.plex_user_id,
         "plex_uuid": u.plex_uuid,
@@ -863,6 +926,7 @@ def _serialize_user(u: PlexWatchlistUser) -> dict[str, Any]:
         "is_guest": bool(u.is_guest),
         "sync_enabled": sync_on,
         "sync_effective": effective,
+        "on_new": on_new,
         "settings_override": u.settings_override,
         "last_synced_at": u.last_synced_at.isoformat() if u.last_synced_at else None,
         "last_sync_error": u.last_sync_error,
