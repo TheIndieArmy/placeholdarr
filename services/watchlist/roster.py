@@ -18,7 +18,7 @@ from services.media_servers.plex_watchlist import (
 from services.postgres.db import get_session
 from services.postgres.models import PlexWatchlistMembership, PlexWatchlistUser
 
-# Relationship labels (Pulsarr-style intersect of friends ∩ server ∩ Home).
+# Relationship labels from intersecting friends, server shares, and Plex Home.
 REL_OWNER = "owner"
 REL_FRIEND = "friend"
 REL_FRIEND_ONLY = "friend_only"
