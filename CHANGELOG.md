@@ -9,6 +9,15 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Changed
+
+- **Watchlist Activity when sync is off**: Empty state with Settings CTA if nothing has synced yet; banner and Accept/Reject kept when history exists.
+- **Watchlist timing columns**: Synced, Accepted, and Rejected timestamps on Activity tables, with clickable column sort.
+- **Watchlist filter roster**: Activity filter avatars grouped by account type (Owner, Home, Friend, and so on).
+- **Watchlist Library Future**: Titles with no file/placeholder that are outside the Coming Soon window show as Future instead of Missing.
+- **Watchlist Library cell**: Color-coded Real / PH / Miss / Future counts; click for per-Arr-instance breakdown.
+- **Watchlist By cell**: Full cell opens the watchlisted-by dialog (not only the avatar stack).
+
 ## Pre-release
 
 ## Released

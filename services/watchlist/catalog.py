@@ -23,20 +23,32 @@ def effective_targets(
     return arr_targets_for_media("movie" if media_type == "movie" else "show")
 
 
-def _presence_state(*, has_file: bool, has_placeholder: bool, in_catalog: bool) -> str:
+def _presence_state(
+    *,
+    has_file: bool,
+    has_placeholder: bool,
+    in_catalog: bool,
+    is_future: bool = False,
+) -> str:
     if not in_catalog:
         return "not_in_library"
     if has_file:
         return "file"
     if has_placeholder:
         return "placeholder"
+    # No file and no placeholder: Future (outside Coming Soon window) vs truly Missing.
+    if is_future:
+        return "future"
     return "missing"
 
 
 def _movie_instance_payload(m: Movie, *, target_keys: set[str]) -> dict[str, Any]:
+    from services.library_future_semantics import movie_row_is_future_outside_lookahead
+
     key = str(m.instance_key or "").strip()
     has_file = bool(m.has_file)
     has_ph = bool(m.has_placeholder)
+    is_future = (not has_file) and (not has_ph) and bool(movie_row_is_future_outside_lookahead(m))
     return {
         "instance_key": key,
         "item_id": int(m.id),
@@ -44,8 +56,14 @@ def _movie_instance_payload(m: Movie, *, target_keys: set[str]) -> dict[str, Any
         "is_watchlist_target": key in target_keys,
         "has_file": has_file,
         "has_placeholder": has_ph,
+        "has_future": is_future,
         "monitored": bool(m.radarr_monitored),
-        "state": _presence_state(has_file=has_file, has_placeholder=has_ph, in_catalog=True),
+        "state": _presence_state(
+            has_file=has_file,
+            has_placeholder=has_ph,
+            in_catalog=True,
+            is_future=is_future,
+        ),
     }
 
 
@@ -54,8 +72,11 @@ def _series_instance_payload(s: Series, *, target_keys: set[str]) -> dict[str, A
     files = int(s.episode_files or 0)
     placeholders = int(s.episode_placeholders or 0)
     missing = int(s.episode_missing or 0)
+    future = int(s.episode_future or 0)
     has_file = files > 0 or bool(s.has_files)
     has_ph = placeholders > 0
+    # Align with Library shelf: Future only when unresolved is all future (no missing eps).
+    is_future = (not has_file) and (not has_ph) and missing == 0 and future > 0
     return {
         "instance_key": key,
         "item_id": int(s.id),
@@ -64,13 +85,19 @@ def _series_instance_payload(s: Series, *, target_keys: set[str]) -> dict[str, A
         "has_file": has_file,
         "has_placeholder": has_ph,
         "has_missing": missing > 0,
+        "has_future": is_future,
         "monitored": bool(s.sonarr_monitored),
-        "state": _presence_state(has_file=has_file, has_placeholder=has_ph, in_catalog=True),
+        "state": _presence_state(
+            has_file=has_file,
+            has_placeholder=has_ph,
+            in_catalog=True,
+            is_future=is_future,
+        ),
         "stats": {
             "files": files,
             "placeholders": placeholders,
             "missing": missing,
-            "future": int(s.episode_future or 0),
+            "future": future,
             "total": int(s.episode_total or 0),
         },
     }
@@ -102,6 +129,8 @@ def _rollup_state(instances: list[dict[str, Any]]) -> str:
         return "file"
     if any(i.get("has_placeholder") for i in instances):
         return "placeholder"
+    if any(i.get("has_future") or i.get("state") == "future" for i in instances):
+        return "future"
     return "missing"
 
 
@@ -155,12 +184,14 @@ def _build_enrichment_for_hits(
         files = sum(int((i.get("stats") or {}).get("files") or 0) for i in rollup_from)
         placeholders = sum(int((i.get("stats") or {}).get("placeholders") or 0) for i in rollup_from)
         miss = sum(int((i.get("stats") or {}).get("missing") or 0) for i in rollup_from)
-        stats = {"files": files, "placeholders": placeholders, "missing": miss}
+        fut = sum(int((i.get("stats") or {}).get("future") or 0) for i in rollup_from)
+        stats = {"files": files, "placeholders": placeholders, "missing": miss, "future": fut}
     elif rollup_from:
         stats = {
             "files": 1 if any(i.get("has_file") for i in rollup_from) else 0,
             "placeholders": 1 if any(i.get("has_placeholder") for i in rollup_from) else 0,
             "missing": 1 if state == "missing" else 0,
+            "future": 1 if state == "future" else 0,
         }
 
     already_on = []
