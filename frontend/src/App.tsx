@@ -213,6 +213,18 @@ function formatDashboardDataAge(msAgo: number): string {
 }
 const LOG_TAIL_LINES = 2000;
 const STUDIO_THEME_MODE_STORAGE_KEY = "placeholdarr:studio-theme-mode";
+const SIDEBAR_PINNED_STORAGE_KEY = "placeholdarr:sidebar-pinned";
+
+function readStoredSidebarPinned(): boolean {
+  try {
+    const v = localStorage.getItem(SIDEBAR_PINNED_STORAGE_KEY);
+    // Default expanded (pinned) so existing layouts stay familiar until the user collapses.
+    if (v == null) return true;
+    return v === "1" || v === "true";
+  } catch {
+    return true;
+  }
+}
 
 function readStoredThemeMode(): ThemeMode {
   try {
@@ -801,6 +813,10 @@ export function App() {
 
   const brand = BRAND;
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readStoredThemeMode());
+  const [sidebarPinned, setSidebarPinned] = useState<boolean>(() => readStoredSidebarPinned());
+  const [sidebarHover, setSidebarHover] = useState(false);
+  const sidebarHoverLeaveTimer = useRef<number | null>(null);
+  const sidebarExpanded = sidebarPinned || sidebarHover;
 
   const [logLevel, setLogLevel] = useState<"all" | "debug" | "info" | "warn" | "error" | "critical">("all");
   const [logFilter, setLogFilter] = useState("");
@@ -2403,6 +2419,22 @@ export function App() {
   }, [themeMode]);
 
   useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_PINNED_STORAGE_KEY, sidebarPinned ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, [sidebarPinned]);
+
+  useEffect(() => {
+    return () => {
+      if (sidebarHoverLeaveTimer.current != null) {
+        window.clearTimeout(sidebarHoverLeaveTimer.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     setUnauthorizedHandler(() => {
       setAuthStatus((prev) =>
         prev
@@ -2589,268 +2621,468 @@ export function App() {
           } : { backgroundColor: studioLightChrome.page }),
         }}
       >
-        {/* Sidebar */}
-        <aside
-          className={`hidden md:flex flex-col h-full w-64 z-20 flex-shrink-0 pb-0 pt-0 ${isStudioGlass ? "bg-white/8 backdrop-blur-2xl border-r" : "shadow-[12px_0_24px_rgba(40,42,48,0.10)]"}`}
-          style={isStudioGlass ? { borderRightWidth: 1, borderRightStyle: "solid", borderRightColor: brandSemantic.glassBorder } : { backgroundColor: studioLightChrome.sidebar, borderRightWidth: 1, borderRightStyle: "solid", borderRightColor: studioLightChrome.border }}
+        {/* Sidebar: collapsed icon rail reserves width; hover/pin expands over content. */}
+        <div
+          className={`relative hidden h-full shrink-0 md:block transition-[width] duration-200 ease-out ${
+            sidebarPinned ? "w-64" : "w-16"
+          }`}
         >
-          <div
-            className="flex h-16 w-full shrink-0 items-center justify-center border-b px-3"
-            style={{ backgroundColor: isStudioGlass ? brandSemantic.topBarBand : studioTopBarBlue, borderBottomColor: topBarDivider }}
+          <aside
+            className={`absolute inset-y-0 left-0 z-30 flex h-full flex-col overflow-hidden pb-0 pt-0 transition-[width,box-shadow] duration-200 ease-out ${
+              sidebarExpanded ? "w-64" : "w-16"
+            } ${
+              !sidebarPinned && sidebarExpanded
+                ? isStudioGlass
+                  ? "shadow-[16px_0_40px_rgba(0,0,0,0.45)]"
+                  : "shadow-[16px_0_40px_rgba(40,42,48,0.18)]"
+                : ""
+            } ${isStudioGlass ? "bg-white/8 backdrop-blur-2xl border-r" : ""}`}
+            style={
+              isStudioGlass
+                ? {
+                    borderRightWidth: 1,
+                    borderRightStyle: "solid",
+                    borderRightColor: brandSemantic.glassBorder,
+                  }
+                : {
+                    backgroundColor: studioLightChrome.sidebar,
+                    borderRightWidth: 1,
+                    borderRightStyle: "solid",
+                    borderRightColor: studioLightChrome.border,
+                  }
+            }
+            onMouseEnter={() => {
+              if (sidebarHoverLeaveTimer.current != null) {
+                window.clearTimeout(sidebarHoverLeaveTimer.current);
+                sidebarHoverLeaveTimer.current = null;
+              }
+              if (!sidebarPinned) setSidebarHover(true);
+            }}
+            onMouseLeave={() => {
+              if (sidebarPinned) return;
+              if (sidebarHoverLeaveTimer.current != null) {
+                window.clearTimeout(sidebarHoverLeaveTimer.current);
+              }
+              sidebarHoverLeaveTimer.current = window.setTimeout(() => {
+                setSidebarHover(false);
+                sidebarHoverLeaveTimer.current = null;
+              }, 180);
+            }}
           >
-            <BrandLogo
-              brand={brand}
-              accentHex={brandAccent.hex}
-              variant={isStudioGlass ? "blue" : "yellow"}
-              className="max-h-[52px] w-full max-w-[13.5rem] object-contain object-center"
-            />
-          </div>
+            <div
+              className="flex h-16 w-full shrink-0 items-center overflow-hidden border-b"
+              style={{
+                backgroundColor: isStudioGlass ? brandSemantic.topBarBand : studioTopBarBlue,
+                borderBottomColor: topBarDivider,
+              }}
+            >
+              {/* Logo stays left-anchored; collapsed rail clips the wordmark. */}
+              <BrandLogo
+                brand={brand}
+                accentHex={brandAccent.hex}
+                variant={isStudioGlass ? "blue" : "yellow"}
+                className="ml-3 h-10 w-[13.5rem] max-w-none shrink-0 object-contain object-left"
+              />
+            </div>
 
-          {/* Nav (scrolls above sticky bottom chrome / task progress) */}
-          <nav className="min-h-0 flex-1 space-y-1.5 overflow-y-auto font-brand-label pt-4 pb-6">
-            {(() => {
-              const navItemBase =
-                "nav-item flex items-center w-full px-6 py-3 gap-4 font-brand-label text-[16px] uppercase tracking-widest transition-all duration-200";
-              const navInactiveClass =
-                `${navItemBase} group ` +
-                (isStudioGlass
-                  ? "text-slate-400 hover:text-slate-100 hover:bg-[color:var(--brand-nav-hover)]"
-                  : "text-slate-600 hover:text-slate-900 hover:bg-[color:var(--brand-nav-hover)]");
-              const navActiveClass = `${navItemBase} nav-sel-pill`;
-              const librarySectionActive = isActive("/library");
-              const moviesSubActive =
-                location.pathname === LIBRARY_MOVIES_PATH ||
-                location.pathname === `${LIBRARY_MOVIES_PATH}/` ||
-                location.pathname.startsWith("/library/movie/");
-              const tvSubActive = location.pathname === LIBRARY_TV_PATH || location.pathname.startsWith("/library/series/");
-              const subBase =
-                "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-[13px] font-headline uppercase tracking-wider transition-colors ";
-              const subActiveClass = isStudioGlass
-                ? "bg-[#1e2430] text-slate-100"
-                : "bg-[color:var(--brand-fg)] text-[color:var(--brand-accent)]";
-              const subInactiveClass = isStudioGlass
-                ? "text-slate-400 hover:bg-[#1e2430]/50 hover:text-slate-200"
-                : "text-slate-600 hover:bg-slate-100 hover:text-slate-900";
+            {/* Nav (scrolls above sticky bottom chrome / task progress) */}
+            <nav className="min-h-0 flex-1 space-y-1.5 overflow-x-hidden overflow-y-auto font-brand-label pt-4 pb-6">
+              {(() => {
+                // Icon gutter = collapsed button content width (aside 64px - 8px margins),
+                // so icons stay put while the rail width animates.
+                const navItemBase =
+                  "nav-item flex items-center w-full gap-0 py-3 font-brand-label text-[16px] uppercase tracking-widest transition-colors duration-200";
+                const navInactiveClass =
+                  `${navItemBase} group ` +
+                  (isStudioGlass
+                    ? "text-slate-400 hover:text-slate-100 hover:bg-[color:var(--brand-nav-hover)]"
+                    : "text-slate-600 hover:text-slate-900 hover:bg-[color:var(--brand-nav-hover)]");
+                const navActiveClass = `${navItemBase} nav-sel-pill`;
+                const librarySectionActive = isActive("/library");
+                const moviesSubActive =
+                  location.pathname === LIBRARY_MOVIES_PATH ||
+                  location.pathname === `${LIBRARY_MOVIES_PATH}/` ||
+                  location.pathname.startsWith("/library/movie/");
+                const tvSubActive =
+                  location.pathname === LIBRARY_TV_PATH || location.pathname.startsWith("/library/series/");
+                // Fixed row height + same icon gutter in both rail states.
+                const subBase =
+                  "mx-2 flex h-8 w-[calc(100%-1rem)] items-center gap-0 rounded-md text-left text-[13px] font-headline uppercase tracking-wider transition-colors ";
+                const subActiveClass = isStudioGlass
+                  ? "bg-[#1e2430] text-slate-100"
+                  : "bg-[color:var(--brand-fg)] text-[color:var(--brand-accent)]";
+                const subInactiveClass = isStudioGlass
+                  ? "text-slate-400 hover:bg-[#1e2430]/50 hover:text-slate-200"
+                  : "text-slate-600 hover:bg-slate-100 hover:text-slate-900";
+                const subWrapClass = "mt-1 space-y-0.5";
+                const navIcon = (name: string) => (
+                  <span className="flex h-6 w-12 shrink-0 items-center justify-center">
+                    <span className="material-symbols-outlined">{name}</span>
+                  </span>
+                );
+                const subIcon = (name: string) => (
+                  <span className="flex h-6 w-12 shrink-0 items-center justify-center">
+                    <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
+                      {name}
+                    </span>
+                  </span>
+                );
+                const navLabel = (text: ReactNode) => (
+                  <span
+                    className={`min-w-0 overflow-hidden whitespace-nowrap transition-[opacity,max-width] duration-200 ease-out ${
+                      sidebarExpanded ? "max-w-[12rem] opacity-100" : "max-w-0 opacity-0"
+                    }`}
+                  >
+                    {text}
+                  </span>
+                );
+                const subLabel = (text: string) => (
+                  <span
+                    className={`min-w-0 overflow-hidden whitespace-nowrap leading-none transition-[opacity,max-width] duration-200 ease-out ${
+                      sidebarExpanded ? "max-w-[12rem] opacity-100" : "max-w-0 opacity-0"
+                    }`}
+                  >
+                    {text}
+                  </span>
+                );
 
-              return (
-                <>
-                  {librarySectionActive ? (
-                    <button type="button" onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)} className={navActiveClass}>
-                      <span className="material-symbols-outlined">movie_filter</span>
-                      <span>Library</span>
-                    </button>
-                  ) : (
-                    <button type="button" onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)} className={navInactiveClass}>
-                      <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">movie_filter</span>
-                      <span>Library</span>
-                    </button>
-                  )}
-                  {currentTab === "library" ? (
-                    <div className="mt-1 space-y-0.5 pl-6 pr-3">
+                return (
+                  <>
+                    {librarySectionActive ? (
                       <button
                         type="button"
                         onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)}
-                        className={subBase + (moviesSubActive ? subActiveClass : subInactiveClass)}
+                        className={navActiveClass}
+                        title="Library"
                       >
-                        <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
-                          movie
-                        </span>
-                        <span className="truncate">Movies</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => tryNavigate(LIBRARY_TV_PATH)}
-                        className={subBase + (tvSubActive ? subActiveClass : subInactiveClass)}
-                      >
-                        <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
-                          tv_gen
-                        </span>
-                        <span className="truncate">TV</span>
-                      </button>
-                    </div>
-                  ) : null}
-
-                  {isActive("/activity") ? (
-                    <button type="button" onClick={() => tryNavigate(ACTIVITY_DEFAULT_PATH)} className={navActiveClass}>
-                      <span className="material-symbols-outlined">analytics</span>
-                      <span>Activity</span>
-                    </button>
-                  ) : (
-                    <button type="button" onClick={() => tryNavigate(ACTIVITY_DEFAULT_PATH)} className={navInactiveClass}>
-                      <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">analytics</span>
-                      <span>Activity</span>
-                    </button>
-                  )}
-                  {currentTab === "activity" ? (
-                    <div className="mt-1 space-y-0.5 pl-6 pr-3">
-                      {(
-                        [
-                          { label: "Placeholders", path: ACTIVITY_PLACEHOLDERS_PATH, icon: "history" },
-                          { label: "Watchlist", path: ACTIVITY_WATCHLIST_PATH, icon: "playlist_add_check" },
-                          { label: "Tasks", path: ACTIVITY_TASKS_PATH, icon: "schedule" },
-                        ] as const
-                      ).map(({ label, path, icon }) => {
-                        const isSubActive = location.pathname === path || location.pathname.startsWith(`${path}/`);
-                        return (
-                          <button
-                            key={path}
-                            type="button"
-                            onClick={() => tryNavigate(path)}
-                            className={subBase + (isSubActive ? subActiveClass : subInactiveClass)}
-                          >
-                            <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
-                              {icon}
-                            </span>
-                            <span className="truncate">{label}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ) : null}
-
-                  {[
-                    { icon: "video_library", label: "Collections", path: "/collections", beta: false },
-                    { icon: "calendar_month", label: "Calendar", path: "/calendar", beta: false },
-                    { icon: "terminal", label: "Logs", path: "/logs", beta: false },
-                    { icon: "settings", label: "Settings", path: "/settings", beta: false },
-                  ].map(({ icon, label, path, beta }) => {
-                    const settingsFail =
-                      path === "/settings" &&
-                      (Boolean(integrationsStatus?.settings_has_failure) ||
-                        arrInstancesHaveMissingApiKey(fieldValues));
-                    return isActive(path) ? (
-                      <button key={path} type="button" onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)} className={navActiveClass}>
-                        <span className="material-symbols-outlined">{icon}</span>
-                        <span className="flex items-center gap-1.5">
-                          <span>{label}</span>
-                          {settingsFail ? (
-                            <IntegrationFailureBadge
-                              title={
-                                arrInstancesHaveMissingApiKey(fieldValues)
-                                  ? "ARR API key missing"
-                                  : "Media or ARR connection problem"
-                              }
-                            />
-                          ) : null}
-                          {beta ? (
-                            <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">
-                              Beta
-                            </span>
-                          ) : null}
-                        </span>
+                        {navIcon("movie_filter")}
+                        {navLabel("Library")}
                       </button>
                     ) : (
-                      <button key={path} type="button" onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)} className={navInactiveClass}>
-                        <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">{icon}</span>
-                        <span className="flex items-center gap-1.5">
-                          <span>{label}</span>
-                          {settingsFail ? (
-                            <IntegrationFailureBadge
-                              title={
-                                arrInstancesHaveMissingApiKey(fieldValues)
-                                  ? "ARR API key missing"
-                                  : "Media or ARR connection problem"
-                              }
-                            />
-                          ) : null}
-                          {beta ? (
-                            <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">
-                              Beta
+                      <button
+                        type="button"
+                        onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)}
+                        className={navInactiveClass}
+                        title="Library"
+                      >
+                        {navIcon("movie_filter")}
+                        {navLabel("Library")}
+                      </button>
+                    )}
+                    {currentTab === "library" ? (
+                      <div className={subWrapClass}>
+                        <button
+                          type="button"
+                          onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)}
+                          className={subBase + (moviesSubActive ? subActiveClass : subInactiveClass)}
+                          title="Movies"
+                        >
+                          {subIcon("movie")}
+                          {subLabel("Movies")}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => tryNavigate(LIBRARY_TV_PATH)}
+                          className={subBase + (tvSubActive ? subActiveClass : subInactiveClass)}
+                          title="TV"
+                        >
+                          {subIcon("tv_gen")}
+                          {subLabel("TV")}
+                        </button>
+                      </div>
+                    ) : null}
+
+                    {isActive("/activity") ? (
+                      <button
+                        type="button"
+                        onClick={() => tryNavigate(ACTIVITY_DEFAULT_PATH)}
+                        className={navActiveClass}
+                        title="Activity"
+                      >
+                        {navIcon("analytics")}
+                        {navLabel("Activity")}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => tryNavigate(ACTIVITY_DEFAULT_PATH)}
+                        className={navInactiveClass}
+                        title="Activity"
+                      >
+                        {navIcon("analytics")}
+                        {navLabel("Activity")}
+                      </button>
+                    )}
+                    {currentTab === "activity" ? (
+                      <div className={subWrapClass}>
+                        {(
+                          [
+                            { label: "Placeholders", path: ACTIVITY_PLACEHOLDERS_PATH, icon: "history" },
+                            { label: "Watchlist", path: ACTIVITY_WATCHLIST_PATH, icon: "playlist_add_check" },
+                            { label: "Tasks", path: ACTIVITY_TASKS_PATH, icon: "schedule" },
+                          ] as const
+                        ).map(({ label, path, icon }) => {
+                          const isSubActive =
+                            location.pathname === path || location.pathname.startsWith(`${path}/`);
+                          return (
+                            <button
+                              key={path}
+                              type="button"
+                              onClick={() => tryNavigate(path)}
+                              className={subBase + (isSubActive ? subActiveClass : subInactiveClass)}
+                              title={label}
+                            >
+                              {subIcon(icon)}
+                              {subLabel(label)}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+
+                    {[
+                      { icon: "video_library", label: "Collections", path: "/collections", beta: false },
+                      { icon: "calendar_month", label: "Calendar", path: "/calendar", beta: false },
+                      { icon: "terminal", label: "Logs", path: "/logs", beta: false },
+                      { icon: "settings", label: "Settings", path: "/settings", beta: false },
+                    ].map(({ icon, label, path, beta }) => {
+                      const settingsFail =
+                        path === "/settings" &&
+                        (Boolean(integrationsStatus?.settings_has_failure) ||
+                          arrInstancesHaveMissingApiKey(fieldValues));
+                      return isActive(path) ? (
+                        <button
+                          key={path}
+                          type="button"
+                          onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)}
+                          className={navActiveClass + (!sidebarExpanded ? " relative" : "")}
+                          title={label}
+                        >
+                          {navIcon(icon)}
+                          {navLabel(
+                            <span className="flex items-center gap-1.5">
+                              <span>{label}</span>
+                              {settingsFail ? (
+                                <IntegrationFailureBadge
+                                  title={
+                                    arrInstancesHaveMissingApiKey(fieldValues)
+                                      ? "ARR API key missing"
+                                      : "Media or ARR connection problem"
+                                  }
+                                />
+                              ) : null}
+                              {beta ? (
+                                <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">
+                                  Beta
+                                </span>
+                              ) : null}
+                            </span>,
+                          )}
+                          {!sidebarExpanded && settingsFail ? (
+                            <span className="absolute right-1 top-1">
+                              <IntegrationFailureBadge
+                                size="sm"
+                                title={
+                                  arrInstancesHaveMissingApiKey(fieldValues)
+                                    ? "ARR API key missing"
+                                    : "Media or ARR connection problem"
+                                }
+                              />
                             </span>
                           ) : null}
+                        </button>
+                      ) : (
+                        <button
+                          key={path}
+                          type="button"
+                          onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)}
+                          className={navInactiveClass + (!sidebarExpanded ? " relative" : "")}
+                          title={label}
+                        >
+                          {navIcon(icon)}
+                          {navLabel(
+                            <span className="flex items-center gap-1.5">
+                              <span>{label}</span>
+                              {settingsFail ? (
+                                <IntegrationFailureBadge
+                                  title={
+                                    arrInstancesHaveMissingApiKey(fieldValues)
+                                      ? "ARR API key missing"
+                                      : "Media or ARR connection problem"
+                                  }
+                                />
+                              ) : null}
+                              {beta ? (
+                                <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">
+                                  Beta
+                                </span>
+                              ) : null}
+                            </span>,
+                          )}
+                          {!sidebarExpanded && settingsFail ? (
+                            <span className="absolute right-1 top-1">
+                              <IntegrationFailureBadge
+                                size="sm"
+                                title={
+                                  arrInstancesHaveMissingApiKey(fieldValues)
+                                    ? "ARR API key missing"
+                                    : "Media or ARR connection problem"
+                                }
+                              />
+                            </span>
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                  </>
+                );
+              })()}
+              {currentTab === "settings" && settingsSectionNames.length ? (
+                <div className="mt-1 space-y-0.5">
+                  {settingsSectionNames.map((name) => {
+                    const subPath = `/settings/${SETTINGS_SECTION_SLUGS[name] ?? ""}`;
+                    const isSubActive = location.pathname === subPath;
+                    const sectionFail =
+                      (name === "Media Integrations" && Boolean(integrationsStatus?.media_has_failure)) ||
+                      (name === "ARR Integrations" &&
+                        (Boolean(integrationsStatus?.arr_has_failure) ||
+                          arrInstancesHaveMissingApiKey(fieldValues)));
+                    const settingsSubBase =
+                      "relative mx-2 flex h-8 w-[calc(100%-1rem)] items-center gap-0 rounded-md text-left text-[13px] font-headline uppercase tracking-wide transition-colors ";
+                    const subActiveClass = isStudioGlass
+                      ? "bg-[#1e2430] text-slate-100"
+                      : "bg-[color:var(--brand-fg)] text-[color:var(--brand-accent)]";
+                    const subInactiveClass = isStudioGlass
+                      ? "text-slate-400 hover:bg-[#1e2430]/50 hover:text-slate-200"
+                      : "text-slate-600 hover:bg-slate-100 hover:text-slate-900";
+                    return (
+                      <button
+                        key={name}
+                        type="button"
+                        onClick={() => tryNavigate(subPath)}
+                        className={`${settingsSubBase}${isSubActive ? subActiveClass : subInactiveClass}`}
+                        title={name}
+                      >
+                        <span className="flex h-6 w-12 shrink-0 items-center justify-center">
+                          <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
+                            {SETTINGS_SECTION_ICONS[name] || "settings"}
+                          </span>
                         </span>
+                        <span
+                          className={`min-w-0 overflow-hidden whitespace-nowrap leading-none transition-[opacity,max-width] duration-200 ease-out ${
+                            sidebarExpanded ? "max-w-[12rem] flex-1 opacity-100" : "max-w-0 opacity-0"
+                          }`}
+                        >
+                          {name}
+                        </span>
+                        {sectionFail ? (
+                          sidebarExpanded ? (
+                            <IntegrationFailureBadge
+                              size="sm"
+                              title={
+                                name === "Media Integrations"
+                                  ? "Media connection problem"
+                                  : arrInstancesHaveMissingApiKey(fieldValues)
+                                    ? "ARR API key missing"
+                                    : "ARR connection problem"
+                              }
+                            />
+                          ) : (
+                            <span className="absolute right-0.5 top-0.5">
+                              <IntegrationFailureBadge
+                                size="sm"
+                                title={
+                                  name === "Media Integrations"
+                                    ? "Media connection problem"
+                                    : arrInstancesHaveMissingApiKey(fieldValues)
+                                      ? "ARR API key missing"
+                                      : "ARR connection problem"
+                                }
+                              />
+                            </span>
+                          )
+                        ) : null}
                       </button>
                     );
                   })}
-                </>
-              );
-            })()}
-            {currentTab === "settings" && settingsSectionNames.length ? (
-              <div className="mt-1 space-y-0.5 pl-6 pr-3">
-                {settingsSectionNames.map((name) => {
-                  const subPath = `/settings/${SETTINGS_SECTION_SLUGS[name] ?? ""}`;
-                  const isSubActive = location.pathname === subPath;
-                  const sectionFail =
-                    (name === "Media Integrations" && Boolean(integrationsStatus?.media_has_failure)) ||
-                    (name === "ARR Integrations" &&
-                      (Boolean(integrationsStatus?.arr_has_failure) ||
-                        arrInstancesHaveMissingApiKey(fieldValues)));
-                  const subBase =
-                    "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-[13px] font-headline uppercase tracking-wide transition-colors ";
-                  const subActiveClass = isStudioGlass
-                    ? "bg-[#1e2430] text-slate-100"
-                    : "bg-[color:var(--brand-fg)] text-[color:var(--brand-accent)]";
-                  const subInactiveClass = isStudioGlass
-                    ? "text-slate-400 hover:bg-[#1e2430]/50 hover:text-slate-200"
-                    : "text-slate-600 hover:bg-slate-100 hover:text-slate-900";
-                  return (
-                    <button
-                      key={name}
-                      type="button"
-                      onClick={() => tryNavigate(subPath)}
-                      className={`${subBase}${isSubActive ? subActiveClass : subInactiveClass}`}
-                      title={name}
-                    >
-                      <span className="material-symbols-outlined shrink-0" style={{ fontSize: 14 }}>
-                        {SETTINGS_SECTION_ICONS[name] || "settings"}
-                      </span>
-                      <span className="min-w-0 flex-1 leading-snug">{name}</span>
-                      {sectionFail ? (
-                        <IntegrationFailureBadge
-                          size="sm"
-                          title={
-                            name === "Media Integrations"
-                              ? "Media connection problem"
-                              : arrInstancesHaveMissingApiKey(fieldValues)
-                                ? "ARR API key missing"
-                              : "ARR connection problem"
-                          }
-                        />
-                      ) : null}
-                    </button>
-                  );
-                })}
-              </div>
-            ) : null}
-          </nav>
+                </div>
+              ) : null}
+            </nav>
 
-          <div className="mt-auto w-full shrink-0">
-            <TaskStatusPillPrototype
-              isStudioGlass={isStudioGlass}
-              themeMode={themeMode}
-              accentHex={brandAccent.hex}
-              taskRuns={taskHistory}
-              onStopRun={async (runId) => {
-                setTaskRunError(null);
-                try {
-                  await postTaskAbandon({ runId, reason: "stopped_by_user" });
-                  void refreshTasks();
-                } catch (e) {
-                  setTaskRunError(e instanceof Error ? e.message : "Failed to stop task");
-                  throw e;
-                }
-              }}
-            />
-            <LibraryReconcileSidebarFooter
-              isStudioGlass={isStudioGlass}
-              yieldToTaskLive={taskHistory.some(
-                (run) => String(run.status || "").toUpperCase() === "WORKING" && Boolean(run.live),
-              )}
-            />
-            <button
-              type="button"
-              onClick={() => void openWhatsNewCatalog()}
-              title="What's new"
-              className={`mx-4 mb-3 flex w-[calc(100%-2rem)] items-center justify-center rounded-full border px-3 py-1.5 font-headline text-[12px] uppercase tracking-widest transition-colors ${
-                isStudioGlass
-                  ? "border-[#424753]/55 bg-[#1e2430]/80 text-slate-300 hover:border-[#424753]/80 hover:text-white"
-                  : "border-[#c5d0de] bg-white/80 text-slate-600 hover:text-slate-900"
-              }`}
-            >
-              v{appVersionLabel || "…"}
-            </button>
-          </div>
-        </aside>
+            <div className="mt-auto w-full shrink-0">
+              <TaskStatusPillPrototype
+                isStudioGlass={isStudioGlass}
+                themeMode={themeMode}
+                accentHex={brandAccent.hex}
+                compact={!sidebarExpanded}
+                taskRuns={taskHistory}
+                onStopRun={async (runId) => {
+                  setTaskRunError(null);
+                  try {
+                    await postTaskAbandon({ runId, reason: "stopped_by_user" });
+                    void refreshTasks();
+                  } catch (e) {
+                    setTaskRunError(e instanceof Error ? e.message : "Failed to stop task");
+                    throw e;
+                  }
+                }}
+              />
+              <LibraryReconcileSidebarFooter
+                isStudioGlass={isStudioGlass}
+                compact={!sidebarExpanded}
+                yieldToTaskLive={taskHistory.some(
+                  (run) => String(run.status || "").toUpperCase() === "WORKING" && Boolean(run.live),
+                )}
+              />
+              {sidebarExpanded ? (
+                <div className="mx-4 mb-3 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSidebarPinned((prev) => {
+                        const next = !prev;
+                        if (next) {
+                          setSidebarHover(false);
+                        } else {
+                          // Stay expanded under the cursor; collapse when the pointer leaves.
+                          if (sidebarHoverLeaveTimer.current != null) {
+                            window.clearTimeout(sidebarHoverLeaveTimer.current);
+                            sidebarHoverLeaveTimer.current = null;
+                          }
+                          setSidebarHover(true);
+                        }
+                        return next;
+                      });
+                    }}
+                    title={sidebarPinned ? "Collapse sidebar" : "Pin sidebar open"}
+                    aria-pressed={sidebarPinned}
+                    className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full border transition-colors ${
+                      isStudioGlass
+                        ? "border-[#424753]/55 bg-[#1e2430]/80 text-slate-300 hover:border-[#424753]/80 hover:text-white"
+                        : "border-[#c5d0de] bg-white/80 text-slate-600 hover:text-slate-900"
+                    }`}
+                  >
+                    <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
+                      {sidebarPinned ? "keyboard_double_arrow_left" : "keep"}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void openWhatsNewCatalog()}
+                    title="What's new"
+                    className={`flex min-w-0 flex-1 items-center justify-center rounded-full border px-3 py-1.5 font-headline text-[12px] uppercase tracking-widest transition-colors ${
+                      isStudioGlass
+                        ? "border-[#424753]/55 bg-[#1e2430]/80 text-slate-300 hover:border-[#424753]/80 hover:text-white"
+                        : "border-[#c5d0de] bg-white/80 text-slate-600 hover:text-slate-900"
+                    }`}
+                  >
+                    v{appVersionLabel || "…"}
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          </aside>
+        </div>
 
         {/* Main area */}
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden">

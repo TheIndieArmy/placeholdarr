@@ -319,6 +319,7 @@ function MinimizedReconcilePill(props: {
   queued: boolean;
   kind: LibraryReconcileSidebarStatus["kind"];
   onExpand?: () => void;
+  compact?: boolean;
 }) {
   const glass = props.isStudioGlass;
   const track = glass ? "bg-[#2a3340]" : "bg-slate-200";
@@ -335,6 +336,61 @@ function MinimizedReconcilePill(props: {
         : props.queued
           ? track
           : fill;
+  const iconName =
+    props.kind === "success"
+      ? "check_circle"
+      : props.kind === "error"
+        ? "error"
+        : props.queued
+          ? "schedule"
+          : "progress_activity";
+  const iconClass =
+    props.kind === "success"
+      ? glass
+        ? "text-emerald-400"
+        : "text-emerald-600"
+      : props.kind === "error"
+        ? glass
+          ? "text-rose-400"
+          : "text-rose-600"
+        : props.queued
+          ? glass
+            ? "text-slate-400"
+            : "text-slate-500"
+          : `animate-spin ${glass ? "text-sky-400" : "text-sky-600"}`;
+  const title = `${props.label}: ${props.stageText}`;
+
+  if (props.compact) {
+    const shell = `mx-auto flex h-11 w-11 items-center justify-center rounded-xl border ${
+      glass
+        ? "border-[#424753]/55 bg-[#1e2430]/90 text-slate-200"
+        : "border-[#c5d0de] bg-white/90 text-slate-700"
+    }${
+      props.onExpand
+        ? glass
+          ? " transition-colors hover:border-sky-500/40 hover:bg-[#252e3a]"
+          : " transition-colors hover:border-sky-500/50 hover:bg-white"
+        : ""
+    }`;
+    const body = (
+      <span className={`material-symbols-outlined ${iconClass}`} style={{ fontSize: 18 }} aria-hidden>
+        {iconName}
+      </span>
+    );
+    if (props.onExpand) {
+      return (
+        <button type="button" onClick={props.onExpand} aria-expanded={false} title={title} className={shell}>
+          {body}
+        </button>
+      );
+    }
+    return (
+      <div className={shell} title={title}>
+        {body}
+      </div>
+    );
+  }
+
   const shell = `w-full rounded-lg border px-3 py-2.5 text-left ${
     glass
       ? "border-[#424753]/55 bg-[#1e2430]/90 text-slate-200"
@@ -349,31 +405,8 @@ function MinimizedReconcilePill(props: {
 
   const body = (
     <div className="flex items-start gap-2">
-      <span
-        className={`material-symbols-outlined mt-0.5 shrink-0 ${
-          props.kind === "success"
-            ? glass
-              ? "text-emerald-400"
-              : "text-emerald-600"
-            : props.kind === "error"
-              ? glass
-                ? "text-rose-400"
-                : "text-rose-600"
-              : props.queued
-                ? glass
-                  ? "text-slate-400"
-                  : "text-slate-500"
-                : `animate-spin ${glass ? "text-sky-400" : "text-sky-600"}`
-        }`}
-        style={{ fontSize: 16 }}
-      >
-        {props.kind === "success"
-          ? "check_circle"
-          : props.kind === "error"
-            ? "error"
-            : props.queued
-              ? "schedule"
-              : "progress_activity"}
+      <span className={`material-symbols-outlined mt-0.5 shrink-0 ${iconClass}`} style={{ fontSize: 16 }}>
+        {iconName}
       </span>
       <span className="min-w-0 flex-1">
         <span className={`block font-headline text-[12px] uppercase tracking-wider ${fg}`}>
@@ -409,6 +442,8 @@ export function LibraryReconcileSidebarFooter(props: {
   isStudioGlass: boolean;
   /** When a task live-progress pill is active, hide reconcile chrome so they do not stack. */
   yieldToTaskLive?: boolean;
+  /** Collapsed sidebar rail: icon-only status. */
+  compact?: boolean;
 }) {
   const ctx = useContext(LibraryReconcileContext);
   const status = ctx?.status ?? IDLE_STATUS;
@@ -474,8 +509,10 @@ export function LibraryReconcileSidebarFooter(props: {
 
   const canExpand = Boolean(liveModel?.phases?.length) && (busy || kind === "success");
 
+  const compact = Boolean(props.compact);
+
   return (
-    <div className="relative w-full shrink-0 px-4 pb-2" aria-live="polite">
+    <div className={`relative w-full shrink-0 pb-2 ${compact ? "px-2" : "px-4"}`} aria-live="polite">
       {!expanded || !canExpand || !liveModel ? (
         <MinimizedReconcilePill
           isStudioGlass={glass}
@@ -485,12 +522,15 @@ export function LibraryReconcileSidebarFooter(props: {
           pct={pct}
           queued={queued}
           kind={kind}
+          compact={compact}
           onExpand={canExpand ? () => setExpanded(true) : undefined}
         />
       ) : (
         <div
           id={panelId}
           className={`min-w-0 overflow-hidden rounded-xl border p-3 transition-all duration-300 ease-out ${
+            compact ? "absolute bottom-2 left-2 z-40 w-64 shadow-2xl" : ""
+          } ${
             glass
               ? "border-[#424753]/50 bg-[#141a24] text-slate-100"
               : "border-[#c5d0de] bg-[#eef3f8] text-slate-900"
