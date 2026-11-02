@@ -17,6 +17,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Watchlist Library Future**: Titles with no file/placeholder that are outside the Coming Soon window show as Future instead of Missing.
 - **Watchlist Library cell**: Color-coded Real / PH / Miss / Future counts; click for per-Arr-instance breakdown.
 - **Watchlist By cell**: Full cell opens the watchlisted-by dialog (not only the avatar stack).
+- **Collapsible sidebar**: Icon rail when collapsed; hover expands; pin keeps it open (persisted). Task and reconcile progress stay visible as compact indicators.
 
 ## Pre-release
 
