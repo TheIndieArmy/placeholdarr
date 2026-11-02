@@ -2067,6 +2067,7 @@ export function App() {
               void refreshTasks();
             }}
             onOpenPlexSettings={() => tryNavigate("/settings/media-integrations")}
+            onOpenWatchlistSettings={() => tryNavigate("/settings/watchlist")}
           />
         );
       }

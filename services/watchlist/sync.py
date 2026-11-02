@@ -779,12 +779,16 @@ def set_excluded(item_ids: Iterable[int], excluded: bool) -> int:
     session = get_session()
     try:
         rows = session.query(PlexWatchlistItem).filter(PlexWatchlistItem.id.in_(ids)).all()
+        now = _utcnow()
         for row in rows:
             row.excluded = bool(excluded)
-            row.updated_at = _utcnow()
+            row.updated_at = now
             if excluded:
                 row.status = "excluded"
                 row.last_error = None
+                row.excluded_at = now
+            else:
+                row.excluded_at = None
         if not excluded:
             _apply_coverage_statuses(session, rows)
         session.commit()
@@ -1003,6 +1007,7 @@ def _serialize_item(
         "last_seen_at": r.last_seen_at.isoformat() if r.last_seen_at else None,
         "first_seen_at": r.first_seen_at.isoformat() if r.first_seen_at else None,
         "added_at": r.added_at.isoformat() if r.added_at else None,
+        "excluded_at": r.excluded_at.isoformat() if getattr(r, "excluded_at", None) else None,
         "arr_instance_key": r.arr_instance_key,
         "thumb": thumb,
         "users": users_out,
