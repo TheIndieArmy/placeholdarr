@@ -29,6 +29,8 @@ class WatchlistAddRequest(BaseModel):
     instance_key: str | None = None
     quality_profile_id: int | None = None
     root_folder_path: str | None = None
+    # Required when Arr maps a watchlist title to a different primary series/movie.
+    confirm_remap: bool = False
 
 
 class WatchlistExcludeRequest(BaseModel):
@@ -152,6 +154,7 @@ async def watchlist_add(body: WatchlistAddRequest):
             instance_key=body.instance_key,
             quality_profile_id=body.quality_profile_id,
             root_folder_path=body.root_folder_path,
+            confirm_remap=bool(body.confirm_remap),
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

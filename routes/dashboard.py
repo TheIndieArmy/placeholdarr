@@ -4441,6 +4441,13 @@ async def movie_detail(movie_id: int):
             "updated_at": _iso(movie.updated_at),
             "created_at": _iso(movie.created_at),
             "arr_instance_links": _movie_arr_instance_links(session, movie) or [],
+            "watchlist": _watchlist_section_for_library_item(
+                session,
+                media_type="movie",
+                title=movie.title,
+                tmdb_id=movie.tmdbid,
+                imdb_id=movie.imdbid,
+            ),
         }
     finally:
         session.close()
@@ -4656,9 +4663,65 @@ async def series_detail(series_id: int):
             "created_at": _iso(series.created_at),
             "seasons": seasons_out,
             "arr_instance_links": _series_arr_instance_links(session, series) or [],
+            "watchlist": _watchlist_section_for_library_item(
+                session,
+                media_type="show",
+                title=series.title,
+                tmdb_id=series.sonarr_tmdbid,
+                tvdb_id=series.tvdbid,
+                imdb_id=series.imdbid,
+            ),
         }
     finally:
         session.close()
+
+
+def _watchlist_section_for_library_item(
+    session,
+    *,
+    media_type: str,
+    title: str | None,
+    tmdb_id: int | None = None,
+    tvdb_id: int | None = None,
+    imdb_id: str | None = None,
+) -> dict:
+    """People/aliases from Plex Watchlist that map to this Arr library title."""
+    try:
+        from services.watchlist.remap import watchlist_entries_for_library_item
+
+        entries = watchlist_entries_for_library_item(
+            session,
+            media_type=media_type,
+            title=title,
+            tmdb_id=tmdb_id,
+            tvdb_id=tvdb_id,
+            imdb_id=imdb_id,
+        )
+    except Exception:
+        entries = []
+    people: list[dict] = []
+    seen: set[str] = set()
+    aliases: list[str] = []
+    for entry in entries:
+        alias = entry.get("alias_of_library")
+        if alias and alias not in aliases:
+            aliases.append(str(alias))
+        for user in entry.get("users") or []:
+            uid = str(user.get("plex_user_id") or "")
+            if not uid or uid in seen:
+                continue
+            seen.add(uid)
+            people.append(
+                {
+                    **user,
+                    "watchlisted_as": alias if alias else None,
+                }
+            )
+    return {
+        "entries": entries,
+        "users": people,
+        "alias_titles": aliases,
+    }
 
 
 def _scoped_movie_placeholder_ids(session, movie_id: int) -> list[int]:
