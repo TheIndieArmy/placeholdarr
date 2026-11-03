@@ -35,6 +35,16 @@
   --bad: #ef4444;
 }
 
+/*
+ * Viewport mode (see frontend/src/viewport/):
+ * The app shell sets data-viewport="mobile"|"desktop" and class viewport-mobile|viewport-desktop
+ * at Tailwind md (768px). Prefer isMobile / useViewportMode() for structure; use these selectors
+ * for mobile-only visual overrides that should not change desktop.
+ *
+ * Examples:
+ *   .viewport-mobile .some-panel { ... }
+ *   [data-viewport="mobile"] .some-panel { ... }
+ */
 * { box-sizing: border-box; }
 body {
   margin: 0;
