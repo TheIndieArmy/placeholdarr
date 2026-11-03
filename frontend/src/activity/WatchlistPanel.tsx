@@ -10,6 +10,7 @@ import {
   postWatchlistExclude,
   postWatchlistRosterRefresh,
   postWatchlistSync,
+  type WatchlistArrRemap,
   type WatchlistItem,
   type WatchlistItemUser,
   type WatchlistLibrary,
@@ -195,6 +196,22 @@ function libraryPath(lib: WatchlistLibrary | null | undefined): string | null {
   if (!lib?.item_id) return null;
   const kind = lib.item_type === "series" || lib.item_type === "show" ? "series" : "movie";
   return `/library/${kind}/${lib.item_id}`;
+}
+
+function remapLabel(remap: WatchlistArrRemap | null | undefined, lib?: WatchlistLibrary | null): string | null {
+  if (remap?.remapped && remap.arr_title) {
+    const year = remap.arr_year ? ` (${remap.arr_year})` : "";
+    return `${remap.arr_title}${year}`;
+  }
+  if (lib?.arr_title) {
+    const year = lib.arr_year ? ` (${lib.arr_year})` : "";
+    return `${lib.arr_title}${year}`;
+  }
+  return null;
+}
+
+function formatArrTargetLabel(title: string, year?: number | null): string {
+  return year ? `${title} (${year})` : title;
 }
 
 function formatWhen(iso: string | null): string {
@@ -549,14 +566,57 @@ export function WatchlistPanel(props: {
     setError(null);
     setAcceptMenuFor(null);
     const { search, monitored } = intensityToFlags(intensity);
+    const remappedRows = items.filter((row) => ids.includes(row.id) && row.arr_remap?.remapped && row.arr_remap.arr_title);
+    if (remappedRows.length) {
+      const lines = remappedRows.slice(0, 5).map((row) => {
+        const arr = formatArrTargetLabel(String(row.arr_remap?.arr_title), row.arr_remap?.arr_year);
+        return `${row.title} adds as ${arr}`;
+      });
+      const extra =
+        remappedRows.length > 5 ? `\n…and ${remappedRows.length - 5} more.` : "";
+      const ok = window.confirm(
+        `Arr maps ${remappedRows.length} watchlisted title${remappedRows.length === 1 ? "" : "s"} to a different series/movie.\n\n${lines.join("\n")}${extra}\n\nAccept the Arr title${remappedRows.length === 1 ? "" : "s"}?`,
+      );
+      if (!ok) {
+        setBusy(false);
+        return;
+      }
+    }
     try {
       const result = await postWatchlistAdd({
         item_ids: ids,
         search,
         monitored,
         tv_scope: summary?.tv_request_scope || undefined,
+        confirm_remap: remappedRows.length > 0,
       });
-      if (result.failed && result.failed > 0 && !result.added) {
+      const pending = result.needs_remap_confirm || [];
+      if (pending.length && !(result.added || 0)) {
+        const lines = pending.slice(0, 5).map((row) => {
+          const arr = row.arr_title
+            ? formatArrTargetLabel(String(row.arr_title), row.arr_year)
+            : "Arr title";
+          return `${row.watchlist_title || "Title"} adds as ${arr}`;
+        });
+        const extra = pending.length > 5 ? `\n…and ${pending.length - 5} more.` : "";
+        const ok = window.confirm(
+          `Arr maps ${pending.length} watchlisted title${pending.length === 1 ? "" : "s"} to a different series/movie.\n\n${lines.join("\n")}${extra}\n\nAccept the Arr title${pending.length === 1 ? "" : "s"}?`,
+        );
+        if (ok) {
+          const confirmed = await postWatchlistAdd({
+            item_ids: pending.map((p) => p.id),
+            search,
+            monitored,
+            tv_scope: summary?.tv_request_scope || undefined,
+            confirm_remap: true,
+          });
+          if (confirmed.failed && confirmed.failed > 0 && !confirmed.added) {
+            setError(
+              `Accept failed for ${confirmed.failed} title${confirmed.failed === 1 ? "" : "s"}. Check Watchlist Arr targets (profile and root are required).`,
+            );
+          }
+        }
+      } else if (result.failed && result.failed > 0 && !result.added) {
         setError(
           `Accept failed for ${result.failed} title${result.failed === 1 ? "" : "s"}. Check Watchlist Arr targets (profile and root are required).`,
         );
@@ -1171,7 +1231,7 @@ export function WatchlistPanel(props: {
 
         {error ? <div className="px-4 py-2 text-[13px] text-red-400">{error}</div> : null}
 
-        <div className="overflow-x-auto">
+        <div className="max-h-[min(70vh,52rem)] overflow-auto">
           <table
             className="w-full table-fixed"
             style={{ minWidth: tableMinWidthForTab(tab) }}
@@ -1206,7 +1266,7 @@ export function WatchlistPanel(props: {
                 </>
               )}
             </colgroup>
-            <thead>
+            <thead className="sticky top-0 z-[1]" style={{ backgroundColor: panelBg }}>
               <tr className="border-b" style={{ borderColor: headBorder }}>
                 <th className="px-2 py-2 w-10 overflow-hidden">
                   <BrandCheckbox
@@ -1314,6 +1374,8 @@ export function WatchlistPanel(props: {
                   const willAdd = lib?.will_add_keys || [];
                   const waitingLibrary =
                     row.status === "added" && (!lib || lib.state === "not_in_library" || lib.coverage !== "complete");
+                  const arrAs = remapLabel(row.arr_remap, lib);
+                  const remapped = Boolean(row.arr_remap?.remapped && arrAs);
                   return (
                     <tr key={row.id} className="border-b last:border-0" style={{ borderColor: rowBorder }}>
                       <td className="px-2 py-3 align-middle overflow-hidden">
@@ -1404,6 +1466,15 @@ export function WatchlistPanel(props: {
                               {willAdd.length ? willAdd.join(", ") : "—"}
                             </div>
                           </div>
+                          {remapped && arrAs ? (
+                            <div
+                              className="mt-1.5 text-[11px] truncate"
+                              style={{ color: "#fbbf24" }}
+                              title={`Arr maps this watchlist title to ${arrAs}`}
+                            >
+                              As {arrAs}
+                            </div>
+                          ) : null}
                           {row.last_error ? (
                             <div className="text-[11px] text-red-400 truncate mt-1.5" title={row.last_error}>
                               {row.last_error}
@@ -1414,14 +1485,25 @@ export function WatchlistPanel(props: {
 
                       {tab === "accepted" ? (
                         <td className="px-2 py-3 text-[13px] align-middle overflow-hidden" style={{ color: semantic.fgMuted }}>
-                          <div className="truncate">
-                            {waitingLibrary ? "Accepted · waiting for library" : statusLabel(row.status)}
-                          </div>
-                          {alreadyOn.length ? (
-                            <div className="text-[11px] mt-1 truncate" style={{ color: semantic.fgSubtle }} title={alreadyOn.join(", ")}>
-                              On {alreadyOn.join(", ")}
+                          <div className="min-w-0">
+                            <div className="truncate" style={{ color: semantic.fg }}>
+                              {statusLabel(row.status)}
+                              {remapped && arrAs ? ` as ${arrAs}` : ""}
                             </div>
-                          ) : null}
+                            {waitingLibrary ? (
+                              <div className="text-[11px] mt-1 truncate" style={{ color: semantic.fgSubtle }}>
+                                Waiting for library
+                              </div>
+                            ) : alreadyOn.length ? (
+                              <div
+                                className="text-[11px] mt-1 truncate"
+                                style={{ color: semantic.fgSubtle }}
+                                title={alreadyOn.join(", ")}
+                              >
+                                On {alreadyOn.join(", ")}
+                              </div>
+                            ) : null}
+                          </div>
                         </td>
                       ) : null}
 

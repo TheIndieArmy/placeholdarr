@@ -9,6 +9,30 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+## Pre-release
+
+## Released
+
+## [0.12.1] - 2026-11-03
+
+### Summary
+
+- **Watchlist Arr remaps**: Alias titles need Accept confirm; auto-add leaves them in Queue.
+- **Watchlist Library identity**: Presence and links follow the Arr catalog title.
+- **Library Watchlist section**: Detail pages show members and alias titles.
+- **Arr add placeholder ingest**: Wait for the real *arr webhook instead of a synthetic add job.
+- **Watchlist Activity when sync is off**: Empty state with Settings CTA when nothing has synced yet.
+- **Watchlist timing columns**: Synced, Accepted, and Rejected timestamps with sort.
+- **Watchlist filter roster**: Filter avatars grouped by account type.
+- **Watchlist Library cell**: Real / PH / Miss / Future counts with per-instance breakdown.
+- **Watchlist By cell**: Full cell opens the watchlisted-by dialog.
+- **Watchlist Activity table scroll**: Horizontal scrollbar stays on the visible table panel.
+- **Collapsible sidebar**: Icon rail, hover expand, pin.
+
+### Fixed
+
+- **Arr add placeholder ingest**: Watchlist/Collections adds no longer invent a SeriesAdd/MovieAdded job; placeholders wait for the real *arr webhook so episode lists are not pulled mid-refresh.
+
 ### Changed
 
 - **Watchlist Activity when sync is off**: Empty state with Settings CTA if nothing has synced yet; banner and Accept/Reject kept when history exists.
@@ -18,10 +42,10 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Watchlist Library cell**: Color-coded Real / PH / Miss / Future counts; click for per-Arr-instance breakdown.
 - **Watchlist By cell**: Full cell opens the watchlisted-by dialog (not only the avatar stack).
 - **Collapsible sidebar**: Icon rail when collapsed; hover expands; pin keeps it open (persisted). Task and reconcile progress stay visible as compact indicators.
-
-## Pre-release
-
-## Released
+- **Watchlist Arr remaps**: Alias titles that Arr maps to a different series/movie need Accept confirm; auto-add leaves them in Queue.
+- **Watchlist Library identity**: Presence and Library links use the Arr catalog title (including alternate-title matches).
+- **Library Watchlist section**: Movie and series detail show who watchlisted the title and alias names when they differ.
+- **Watchlist Activity table scroll**: Horizontal scrollbar stays on the visible table panel instead of only at the page bottom.
 
 ## [0.12.0] - 2026-11-01
 

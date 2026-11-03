@@ -381,6 +381,32 @@ export interface MovieDetailResponse {
   last_search?: string | null;
   updated_at?: string | null;
   created_at?: string | null;
+  watchlist?: LibraryWatchlistSection | null;
+}
+
+export interface LibraryWatchlistUser {
+  plex_user_id: string;
+  title: string;
+  username?: string | null;
+  thumb_url?: string | null;
+  is_admin?: boolean;
+  watchlisted_as?: string | null;
+}
+
+export interface LibraryWatchlistEntry {
+  watchlist_item_id: number;
+  watchlist_title: string;
+  watchlist_year?: number | null;
+  status?: string | null;
+  alias_of_library?: string | null;
+  remapped?: boolean;
+  users: LibraryWatchlistUser[];
+}
+
+export interface LibraryWatchlistSection {
+  entries: LibraryWatchlistEntry[];
+  users: LibraryWatchlistUser[];
+  alias_titles: string[];
 }
 
 export interface SeriesEpisodeDetail {
@@ -480,6 +506,7 @@ export interface SeriesDetailResponse {
   updated_at?: string | null;
   created_at?: string | null;
   seasons: SeriesSeasonDetail[];
+  watchlist?: LibraryWatchlistSection | null;
 }
 
 export interface DetailErrorResponse {

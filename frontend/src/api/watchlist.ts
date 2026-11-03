@@ -52,6 +52,22 @@ export interface WatchlistLibrary {
   display_status?: string | null;
   poster_url?: string | null;
   stats?: { files?: number; placeholders?: number; missing?: number; future?: number } | null;
+  /** Arr catalog title when presence is for a remapped / parent series-movie. */
+  arr_title?: string | null;
+  arr_year?: number | null;
+}
+
+export interface WatchlistArrRemap {
+  remapped?: boolean;
+  matched_via_alternate?: boolean;
+  lookup_miss?: boolean;
+  watchlist_title?: string | null;
+  arr_title?: string | null;
+  arr_year?: number | null;
+  tvdb_id?: number | null;
+  tmdb_id?: number | null;
+  imdb_id?: string | null;
+  resolved_at?: string | null;
 }
 
 export interface WatchlistUser {
@@ -134,6 +150,7 @@ export interface WatchlistItem {
   thumb?: string | null;
   users?: WatchlistItemUser[];
   library?: WatchlistLibrary | null;
+  arr_remap?: WatchlistArrRemap | null;
 }
 
 export function getWatchlist(opts?: { status?: string; limit?: number; userIds?: string[] }) {
@@ -188,15 +205,25 @@ export function postWatchlistAdd(body: {
   instance_key?: string;
   quality_profile_id?: number;
   root_folder_path?: string;
+  confirm_remap?: boolean;
 }) {
-  return fetchJson<{ ok: boolean; skipped?: number; failed?: number; added?: number }>(
-    "/api/watchlist/add",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    },
-  );
+  return fetchJson<{
+    ok: boolean;
+    skipped?: number;
+    failed?: number;
+    added?: number;
+    needs_remap_confirm?: Array<{
+      id: number;
+      watchlist_title?: string | null;
+      arr_title?: string | null;
+      arr_year?: number | null;
+      media_type?: string | null;
+    }>;
+  }>("/api/watchlist/add", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 export function postWatchlistExclude(itemIds: number[], excluded: boolean) {

@@ -970,20 +970,38 @@ def _lookup_year(row: dict) -> Optional[int]:
 
 
 def _pick_title_lookup(result: Any, *, title: str, year: Optional[int]) -> Optional[dict]:
-    """Prefer an exact title (and year when known); otherwise the first *arr hit."""
+    """Prefer an exact primary or alternate title (and year when known); else first hit."""
+    from services.watchlist.remap import alternate_titles_from_lookup, normalize_title
+
     rows = result if isinstance(result, list) else [result] if isinstance(result, dict) else []
     dicts = [row for row in rows if isinstance(row, dict)]
     if not dicts:
         return None
-    want = str(title or "").strip().lower()
+    want = normalize_title(title)
     want_year = _coerce_lookup_int(year)
-    exact = [row for row in dicts if str(row.get("title") or "").strip().lower() == want]
+
+    def _primary_match(row: dict) -> bool:
+        return normalize_title(str(row.get("title") or "")) == want
+
+    def _alias_match(row: dict) -> bool:
+        if not want:
+            return False
+        return any(normalize_title(alt) == want for alt in alternate_titles_from_lookup(row))
+
+    exact = [row for row in dicts if _primary_match(row)]
     if want_year:
         year_exact = [row for row in exact if _lookup_year(row) == want_year]
         if year_exact:
             return year_exact[0]
     if exact:
         return exact[0]
+    alias = [row for row in dicts if _alias_match(row)]
+    if want_year:
+        year_alias = [row for row in alias if _lookup_year(row) == want_year]
+        if year_alias:
+            return year_alias[0]
+    if alias:
+        return alias[0]
     return dicts[0]
 
 
@@ -1662,7 +1680,6 @@ def add_missing_titles(
     pending_items: list[Any] = []
     pending_lookups: list[dict] = []
     pending_indices: list[int] = []
-    ingest_lookups: list[dict] = []
     movie = media_type == "movie"
     for idx, item in enumerate(items):
         display = result_title(item)
@@ -1730,28 +1747,21 @@ def add_missing_titles(
             arr_id = int(lookup.get("id") or 0) or None
         except (TypeError, ValueError):
             arr_id = None
+        from services.watchlist.remap import remap_metadata_from_lookup
+
+        remap_meta = remap_metadata_from_lookup(
+            lookup,
+            watchlist_title=str(getattr(item, "title", None) or display or ""),
+        )
         results[input_idx] = {
             "title": result_title(item, lookup),
             "instance_key": instance_key,
             "status": status,
             "error": error,
             "arr_id": arr_id,
+            "arr_remap": remap_meta,
         }
-        if status in {"ok", "skipped"} and arr_id:
-            ingest_lookups.append(lookup)
-    if ingest_lookups and instance_key:
-        try:
-            from services.handlers import enqueue_synthetic_arr_adds
-
-            enqueue_synthetic_arr_adds(
-                instance_key=instance_key,
-                movie=movie,
-                lookups=ingest_lookups,
-            )
-        except Exception as exc:
-            logger.warning(
-                f"Failed to enqueue placeholder ingest after ARR add: {exc}",
-                extra={"emoji_type": "warning"},
-            )
+    # Placeholder ingest waits for *arr MovieAdded / SeriesAdd webhooks so we do
+    # not race RefreshSeries/RefreshMovie and cache an empty episode/movie catalog.
     return [r if r is not None else row("Untitled", "error", "Arr add produced no result") for r in results]
 

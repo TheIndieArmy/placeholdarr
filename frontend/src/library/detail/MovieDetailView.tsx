@@ -4,6 +4,7 @@ import { DetailCollectionStrip } from "./DetailCollectionStrip";
 import { DetailFactCard, DetailFactRow, DetailFactTagList } from "./DetailFactCard";
 import { DetailHero } from "./DetailHero";
 import { DetailMetaStrip } from "./DetailMetaStrip";
+import { DetailWatchlistSection } from "./DetailWatchlistSection";
 import { MovieFileStateSection } from "./FileStateSections";
 import { DeterminationWhyLink } from "./DeterminationWhyLink";
 import { PlaceholderPolicyCycle } from "./PlaceholderPolicyCycle";
@@ -86,7 +87,15 @@ export function MovieDetailView(props: {
           accentHex={props.accent.hex}
         />
 
-        <div className="space-y-6">
+        <div className="mt-6">
+          <DetailWatchlistSection
+            watchlist={payload.watchlist}
+            libraryTitle={payload.title}
+            themeMode={props.themeMode}
+          />
+        </div>
+
+        <div className="space-y-6 mt-6">
           {payload.actors?.length ? (
             <div
               className={`rounded-xl border p-6 ${isLight ? "bg-white border-[#d7e2f0]" : "bg-[#171c22] border-[#424753]/40"}`}
