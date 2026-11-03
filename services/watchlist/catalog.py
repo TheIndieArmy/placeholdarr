@@ -23,20 +23,32 @@ def effective_targets(
     return arr_targets_for_media("movie" if media_type == "movie" else "show")
 
 
-def _presence_state(*, has_file: bool, has_placeholder: bool, in_catalog: bool) -> str:
+def _presence_state(
+    *,
+    has_file: bool,
+    has_placeholder: bool,
+    in_catalog: bool,
+    is_future: bool = False,
+) -> str:
     if not in_catalog:
         return "not_in_library"
     if has_file:
         return "file"
     if has_placeholder:
         return "placeholder"
+    # No file and no placeholder: Future (outside Coming Soon window) vs truly Missing.
+    if is_future:
+        return "future"
     return "missing"
 
 
 def _movie_instance_payload(m: Movie, *, target_keys: set[str]) -> dict[str, Any]:
+    from services.library_future_semantics import movie_row_is_future_outside_lookahead
+
     key = str(m.instance_key or "").strip()
     has_file = bool(m.has_file)
     has_ph = bool(m.has_placeholder)
+    is_future = (not has_file) and (not has_ph) and bool(movie_row_is_future_outside_lookahead(m))
     return {
         "instance_key": key,
         "item_id": int(m.id),
@@ -44,8 +56,14 @@ def _movie_instance_payload(m: Movie, *, target_keys: set[str]) -> dict[str, Any
         "is_watchlist_target": key in target_keys,
         "has_file": has_file,
         "has_placeholder": has_ph,
+        "has_future": is_future,
         "monitored": bool(m.radarr_monitored),
-        "state": _presence_state(has_file=has_file, has_placeholder=has_ph, in_catalog=True),
+        "state": _presence_state(
+            has_file=has_file,
+            has_placeholder=has_ph,
+            in_catalog=True,
+            is_future=is_future,
+        ),
     }
 
 
@@ -54,8 +72,11 @@ def _series_instance_payload(s: Series, *, target_keys: set[str]) -> dict[str, A
     files = int(s.episode_files or 0)
     placeholders = int(s.episode_placeholders or 0)
     missing = int(s.episode_missing or 0)
+    future = int(s.episode_future or 0)
     has_file = files > 0 or bool(s.has_files)
     has_ph = placeholders > 0
+    # Align with Library shelf: Future only when unresolved is all future (no missing eps).
+    is_future = (not has_file) and (not has_ph) and missing == 0 and future > 0
     return {
         "instance_key": key,
         "item_id": int(s.id),
@@ -64,13 +85,19 @@ def _series_instance_payload(s: Series, *, target_keys: set[str]) -> dict[str, A
         "has_file": has_file,
         "has_placeholder": has_ph,
         "has_missing": missing > 0,
+        "has_future": is_future,
         "monitored": bool(s.sonarr_monitored),
-        "state": _presence_state(has_file=has_file, has_placeholder=has_ph, in_catalog=True),
+        "state": _presence_state(
+            has_file=has_file,
+            has_placeholder=has_ph,
+            in_catalog=True,
+            is_future=is_future,
+        ),
         "stats": {
             "files": files,
             "placeholders": placeholders,
             "missing": missing,
-            "future": int(s.episode_future or 0),
+            "future": future,
             "total": int(s.episode_total or 0),
         },
     }
@@ -102,6 +129,8 @@ def _rollup_state(instances: list[dict[str, Any]]) -> str:
         return "file"
     if any(i.get("has_placeholder") for i in instances):
         return "placeholder"
+    if any(i.get("has_future") or i.get("state") == "future" for i in instances):
+        return "future"
     return "missing"
 
 
@@ -155,12 +184,14 @@ def _build_enrichment_for_hits(
         files = sum(int((i.get("stats") or {}).get("files") or 0) for i in rollup_from)
         placeholders = sum(int((i.get("stats") or {}).get("placeholders") or 0) for i in rollup_from)
         miss = sum(int((i.get("stats") or {}).get("missing") or 0) for i in rollup_from)
-        stats = {"files": files, "placeholders": placeholders, "missing": miss}
+        fut = sum(int((i.get("stats") or {}).get("future") or 0) for i in rollup_from)
+        stats = {"files": files, "placeholders": placeholders, "missing": miss, "future": fut}
     elif rollup_from:
         stats = {
             "files": 1 if any(i.get("has_file") for i in rollup_from) else 0,
             "placeholders": 1 if any(i.get("has_placeholder") for i in rollup_from) else 0,
             "missing": 1 if state == "missing" else 0,
+            "future": 1 if state == "future" else 0,
         }
 
     already_on = []
@@ -190,6 +221,13 @@ def _build_enrichment_for_hits(
 
 def enrich_watchlist_items(session, items: Iterable[Any]) -> dict[int, dict[str, Any]]:
     """Return ``{watchlist_item_id: enrichment}`` for the given ORM rows or dict-like items."""
+    from services.watchlist.remap import (
+        catalog_ids_from_remap,
+        get_cached_arr_remap,
+        normalize_title,
+        payload_title_aliases,
+    )
+
     rows = list(items)
     if not rows:
         return {}
@@ -199,8 +237,11 @@ def enrich_watchlist_items(session, items: Iterable[Any]) -> dict[int, dict[str,
     show_tvdbs: set[int] = set()
     show_tmdbs: set[int] = set()
     show_imdbs: set[str] = set()
+    # Title keys for alias fallback when Plex Discover ids disagree with Arr.
+    show_title_keys: set[str] = set()
+    movie_title_keys: set[str] = set()
 
-    normalized: list[tuple[int, str, int | None, int | None, str | None]] = []
+    normalized: list[tuple[int, str, int | None, int | None, str | None, list[str]]] = []
     for row in rows:
         if isinstance(row, dict):
             rid = int(row["id"])
@@ -208,12 +249,16 @@ def enrich_watchlist_items(session, items: Iterable[Any]) -> dict[int, dict[str,
             tmdb_id = row.get("tmdb_id")
             tvdb_id = row.get("tvdb_id")
             imdb_id = row.get("imdb_id")
+            title = row.get("title")
+            extra = row.get("extra")
         else:
             rid = int(row.id)
             media_type = str(row.media_type or "movie")
             tmdb_id = row.tmdb_id
             tvdb_id = row.tvdb_id
             imdb_id = row.imdb_id
+            title = row.title
+            extra = getattr(row, "extra", None)
         try:
             tmdb_i = int(tmdb_id) if tmdb_id not in (None, "", 0, "0") else None
         except (TypeError, ValueError):
@@ -223,12 +268,39 @@ def enrich_watchlist_items(session, items: Iterable[Any]) -> dict[int, dict[str,
         except (TypeError, ValueError):
             tvdb_i = None
         imdb_s = str(imdb_id or "").strip() or None
-        normalized.append((rid, media_type, tmdb_i, tvdb_i, imdb_s))
+        remap = get_cached_arr_remap(extra)
+        rtmdb, rtvdb, rimdb = catalog_ids_from_remap(remap)
+        if rtmdb:
+            tmdb_i = tmdb_i or rtmdb
+        if rtvdb:
+            tvdb_i = tvdb_i or rtvdb
+        if rimdb:
+            imdb_s = imdb_s or rimdb
+        # Prefer Arr remap ids when present so presence tracks the Arr series/movie.
+        if isinstance(remap, dict) and remap.get("remapped"):
+            if rtmdb:
+                tmdb_i = rtmdb
+            if rtvdb:
+                tvdb_i = rtvdb
+            if rimdb:
+                imdb_s = rimdb
+        title_keys: list[str] = []
+        for candidate in (
+            title,
+            (remap.get("arr_title") if isinstance(remap, dict) else None),
+            (remap.get("watchlist_title") if isinstance(remap, dict) else None),
+        ):
+            key = normalize_title(candidate)
+            if key and key not in title_keys:
+                title_keys.append(key)
+        normalized.append((rid, media_type, tmdb_i, tvdb_i, imdb_s, title_keys))
         if media_type == "movie":
             if tmdb_i:
                 movie_tmdbs.add(tmdb_i)
             if imdb_s:
                 movie_imdbs.add(imdb_s)
+            for key in title_keys:
+                movie_title_keys.add(key)
         else:
             if tvdb_i:
                 show_tvdbs.add(tvdb_i)
@@ -236,55 +308,80 @@ def enrich_watchlist_items(session, items: Iterable[Any]) -> dict[int, dict[str,
                 show_tmdbs.add(tmdb_i)
             if imdb_s:
                 show_imdbs.add(imdb_s)
+            for key in title_keys:
+                show_title_keys.add(key)
 
     movies: list[Movie] = []
-    if movie_tmdbs or movie_imdbs:
+    if movie_tmdbs or movie_imdbs or movie_title_keys:
         q = session.query(Movie).filter(Movie.is_deleted.is_(False))
-        clauses = []
-        if movie_tmdbs:
-            clauses.append(Movie.tmdbid.in_(list(movie_tmdbs)))
-        if movie_imdbs:
-            clauses.append(Movie.imdbid.in_(list(movie_imdbs)))
-        if len(clauses) == 1:
-            movies = q.filter(clauses[0]).all()
-        elif clauses:
-            from sqlalchemy import or_
+        # Title/alias fallback needs the full movie set; id filters alone stay narrow.
+        if movie_title_keys:
+            movies = q.all()
+        else:
+            clauses = []
+            if movie_tmdbs:
+                clauses.append(Movie.tmdbid.in_(list(movie_tmdbs)))
+            if movie_imdbs:
+                clauses.append(Movie.imdbid.in_(list(movie_imdbs)))
+            if len(clauses) == 1:
+                movies = q.filter(clauses[0]).all()
+            elif clauses:
+                from sqlalchemy import or_
 
-            movies = q.filter(or_(*clauses)).all()
+                movies = q.filter(or_(*clauses)).all()
 
     series_rows: list[Series] = []
-    if show_tvdbs or show_tmdbs or show_imdbs:
+    if show_tvdbs or show_tmdbs or show_imdbs or show_title_keys:
         q = session.query(Series).filter(Series.is_deleted.is_(False))
-        clauses = []
-        if show_tvdbs:
-            clauses.append(Series.tvdbid.in_(list(show_tvdbs)))
-        if show_tmdbs:
-            clauses.append(Series.sonarr_tmdbid.in_(list(show_tmdbs)))
-        if show_imdbs:
-            clauses.append(Series.imdbid.in_(list(show_imdbs)))
-        if len(clauses) == 1:
-            series_rows = q.filter(clauses[0]).all()
-        elif clauses:
-            from sqlalchemy import or_
+        if show_title_keys:
+            series_rows = q.all()
+        else:
+            clauses = []
+            if show_tvdbs:
+                clauses.append(Series.tvdbid.in_(list(show_tvdbs)))
+            if show_tmdbs:
+                clauses.append(Series.sonarr_tmdbid.in_(list(show_tmdbs)))
+            if show_imdbs:
+                clauses.append(Series.imdbid.in_(list(show_imdbs)))
+            if len(clauses) == 1:
+                series_rows = q.filter(clauses[0]).all()
+            elif clauses:
+                from sqlalchemy import or_
 
-            series_rows = q.filter(or_(*clauses)).all()
+                series_rows = q.filter(or_(*clauses)).all()
 
     movies_by_tmdb: dict[int, list[Movie]] = {}
     movies_by_imdb: dict[str, list[Movie]] = {}
+    movies_by_title: dict[str, list[Movie]] = {}
     for m in movies:
         movies_by_tmdb.setdefault(int(m.tmdbid), []).append(m)
         if m.imdbid:
             movies_by_imdb.setdefault(str(m.imdbid).strip(), []).append(m)
+        for alias in payload_title_aliases(getattr(m, "radarr_payload_raw", None)):
+            key = normalize_title(alias)
+            if key:
+                movies_by_title.setdefault(key, []).append(m)
+        primary = normalize_title(getattr(m, "title", None))
+        if primary:
+            movies_by_title.setdefault(primary, []).append(m)
 
     series_by_tvdb: dict[int, list[Series]] = {}
     series_by_tmdb: dict[int, list[Series]] = {}
     series_by_imdb: dict[str, list[Series]] = {}
+    series_by_title: dict[str, list[Series]] = {}
     for s in series_rows:
         series_by_tvdb.setdefault(int(s.tvdbid), []).append(s)
         if s.sonarr_tmdbid:
             series_by_tmdb.setdefault(int(s.sonarr_tmdbid), []).append(s)
         if s.imdbid:
             series_by_imdb.setdefault(str(s.imdbid).strip(), []).append(s)
+        for alias in payload_title_aliases(getattr(s, "sonarr_payload_raw", None)):
+            key = normalize_title(alias)
+            if key:
+                series_by_title.setdefault(key, []).append(s)
+        primary = normalize_title(getattr(s, "title", None))
+        if primary:
+            series_by_title.setdefault(primary, []).append(s)
 
     movie_ids = [int(m.id) for m in movies]
     display_by_movie: dict[int, str] = {}
@@ -307,15 +404,17 @@ def enrich_watchlist_items(session, items: Iterable[Any]) -> dict[int, dict[str,
     show_target_set = set(show_targets)
 
     out: dict[int, dict[str, Any]] = {}
-    for rid, media_type, tmdb_i, tvdb_i, imdb_s in normalized:
+    for rid, media_type, tmdb_i, tvdb_i, imdb_s, title_keys in normalized:
         if media_type == "movie":
             target_keys = movie_targets
             target_set = movie_target_set
             hits: list[Movie] = []
             seen_ids: set[int] = set()
+            title_buckets = [movies_by_title.get(k, []) for k in title_keys]
             for bucket in (
                 movies_by_tmdb.get(tmdb_i or -1, []),
                 movies_by_imdb.get(imdb_s or "", []),
+                *title_buckets,
             ):
                 for m in bucket:
                     if int(m.id) in seen_ids:
@@ -331,22 +430,28 @@ def enrich_watchlist_items(session, items: Iterable[Any]) -> dict[int, dict[str,
             if primary:
                 poster = f"/api/library/poster/movie/{int(primary.id)}"
             display = display_by_movie.get(int(primary.id)) if primary else None
-            out[rid] = _build_enrichment_for_hits(
+            enrich = _build_enrichment_for_hits(
                 media_type="movie",
                 target_keys=target_keys,
                 instances=instances,
                 display_status=display,
                 poster_url=poster,
             )
+            if primary is not None:
+                enrich["arr_title"] = str(primary.title or "") or None
+                enrich["arr_year"] = int(primary.year) if primary.year else None
+            out[rid] = enrich
         else:
             target_keys = show_targets
             target_set = show_target_set
             hits_s: list[Series] = []
             seen_ids = set()
+            title_buckets_s = [series_by_title.get(k, []) for k in title_keys]
             for bucket in (
                 series_by_tvdb.get(tvdb_i or -1, []),
                 series_by_tmdb.get(tmdb_i or -1, []),
                 series_by_imdb.get(imdb_s or "", []),
+                *title_buckets_s,
             ):
                 for s in bucket:
                     if int(s.id) in seen_ids:
@@ -359,13 +464,17 @@ def enrich_watchlist_items(session, items: Iterable[Any]) -> dict[int, dict[str,
             instances = [_series_instance_payload(s, target_keys=target_set) for s in hits_s]
             primary_s = next((s for s in hits_s if str(s.instance_key or "") in target_set), hits_s[0])
             poster = f"/api/library/poster/series/{int(primary_s.id)}" if primary_s else None
-            out[rid] = _build_enrichment_for_hits(
+            enrich = _build_enrichment_for_hits(
                 media_type="show",
                 target_keys=target_keys,
                 instances=instances,
                 display_status=None,
                 poster_url=poster,
             )
+            if primary_s is not None:
+                enrich["arr_title"] = str(primary_s.title or "") or None
+                enrich["arr_year"] = int(primary_s.year) if primary_s.year else None
+            out[rid] = enrich
     return out
 
 

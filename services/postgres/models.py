@@ -771,6 +771,7 @@ class PlexWatchlistItem(Base):
     last_seen_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
     first_seen_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
     added_at = Column(DateTime(timezone=True), nullable=True)
+    excluded_at = Column(DateTime(timezone=True), nullable=True)
     arr_instance_key = Column(String(128), nullable=True)
     extra = Column(JSON, nullable=True)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)

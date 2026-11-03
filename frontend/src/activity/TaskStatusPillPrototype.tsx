@@ -16,6 +16,8 @@ function MinimizedTaskPill(props: {
   model: TaskLiveProgressModel;
   isStudioGlass: boolean;
   onClick: () => void;
+  /** Icon-only rail for a collapsed sidebar. */
+  compact?: boolean;
 }) {
   const glass = props.isStudioGlass;
   const track = glass ? "bg-[#2a3340]" : "bg-slate-200";
@@ -32,6 +34,51 @@ function MinimizedTaskPill(props: {
       ? `0% · 0/${props.model.unitsTotal}`
       : "Waiting for a worker"
     : `${props.model.overallPct}% · ${props.model.unitsDone}/${props.model.unitsTotal}`;
+  const title = queued
+    ? `${props.model.label}: queued`
+    : `${props.model.label}: ${props.model.overallPct}%`;
+
+  if (props.compact) {
+    const ring = `conic-gradient(${queued ? (glass ? "#64748b" : "#94a3b8") : pct >= 100 ? (glass ? "#34d399" : "#059669") : glass ? "#38bdf8" : "#0284c7"} ${queued ? 0 : pct * 3.6}deg, ${glass ? "#2a3340" : "#e2e8f0"} 0deg)`;
+    return (
+      <button
+        type="button"
+        onClick={props.onClick}
+        aria-expanded={false}
+        title={title}
+        className={`mx-auto flex h-11 w-11 items-center justify-center rounded-xl border transition-colors ${
+          glass
+            ? "border-[#424753]/55 bg-[#1e2430]/90 text-slate-200 hover:border-sky-500/40 hover:bg-[#252e3a]"
+            : "border-[#c5d0de] bg-white/90 text-slate-700 hover:border-sky-500/50 hover:bg-white"
+        }`}
+      >
+        <span
+          className="relative flex h-8 w-8 items-center justify-center rounded-full"
+          style={{ background: ring }}
+          aria-hidden
+        >
+          <span
+            className={`flex h-6 w-6 items-center justify-center rounded-full ${
+              glass ? "bg-[#1e2430]" : "bg-white"
+            }`}
+          >
+            <span
+              className={`material-symbols-outlined ${
+                queued
+                  ? glass
+                    ? "text-slate-400"
+                    : "text-slate-500"
+                  : `animate-spin ${glass ? "text-sky-400" : "text-sky-600"}`
+              }`}
+              style={{ fontSize: 16 }}
+            >
+              {queued ? "schedule" : "progress_activity"}
+            </span>
+          </span>
+        </span>
+      </button>
+    );
+  }
 
   return (
     <button
@@ -87,6 +134,8 @@ export function TaskStatusPillPrototype(props: {
   /** Working task runs; live model from the first WORKING run with ``live``. */
   taskRuns?: TaskRunRow[];
   onStopRun: (runId: number) => Promise<void> | void;
+  /** Collapsed sidebar rail: icon ring only until expanded detail is opened. */
+  compact?: boolean;
 }) {
   const glass = props.isStudioGlass;
   const navigate = useNavigate();
@@ -139,14 +188,23 @@ export function TaskStatusPillPrototype(props: {
     navigate("/activity/tasks");
   };
 
+  const compact = Boolean(props.compact);
+
   return (
-    <div className="relative w-full shrink-0 px-4 pb-2">
+    <div className={`relative w-full shrink-0 pb-2 ${compact ? "px-2" : "px-4"}`}>
       {!expanded ? (
-        <MinimizedTaskPill model={liveModel} isStudioGlass={glass} onClick={() => setExpanded(true)} />
+        <MinimizedTaskPill
+          model={liveModel}
+          isStudioGlass={glass}
+          compact={compact}
+          onClick={() => setExpanded(true)}
+        />
       ) : (
         <div
           id={panelId}
-          className={`min-w-0 overflow-hidden rounded-xl border p-3 transition-all duration-300 ease-out ${panelShell}`}
+          className={`min-w-0 overflow-hidden rounded-xl border p-3 transition-all duration-300 ease-out ${
+            compact ? "absolute bottom-2 left-2 z-40 w-64 shadow-2xl" : ""
+          } ${panelShell}`}
         >
           <div className="mb-2.5 flex items-start justify-between gap-2">
             <p className="text-[10px] font-headline uppercase tracking-widest opacity-50">

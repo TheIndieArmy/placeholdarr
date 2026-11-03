@@ -10,9 +10,11 @@ import {
   postWatchlistExclude,
   postWatchlistRosterRefresh,
   postWatchlistSync,
+  type WatchlistArrRemap,
   type WatchlistItem,
   type WatchlistItemUser,
   type WatchlistLibrary,
+  type WatchlistLibraryInstance,
   type WatchlistSummary,
   type WatchlistUser,
 } from "../api/watchlist";
@@ -32,6 +34,71 @@ const ARR_BEHAVIOR_OPTIONS = [
 type StripAccent = { hex: string; text: string; icon: string; hoverHex: string };
 type WatchlistTab = "accepted" | "queue" | "blocklist" | "people";
 type AcceptIntensity = "add_and_search" | "monitor_only" | "add_only";
+type ItemSortKey = "title" | "synced" | "accepted" | "rejected";
+
+const DEFAULT_SORT_BY_TAB: Record<Exclude<WatchlistTab, "people">, { key: ItemSortKey; dir: "asc" | "desc" }> = {
+  queue: { key: "synced", dir: "desc" },
+  accepted: { key: "accepted", dir: "desc" },
+  blocklist: { key: "rejected", dir: "desc" },
+};
+
+const FILTER_GROUP_ORDER = ["owner", "home", "friend", "friend_only", "server_only", "unknown"] as const;
+
+function filterGroupKey(u: WatchlistUser): string {
+  const r = String(u.relationship || u.kind || "").trim().toLowerCase();
+  if (r === "managed") return "home";
+  if ((FILTER_GROUP_ORDER as readonly string[]).includes(r)) return r;
+  return r || "unknown";
+}
+
+function groupUsersForFilter(users: WatchlistUser[]): Array<{ key: string; label: string; users: WatchlistUser[] }> {
+  const buckets = new Map<string, WatchlistUser[]>();
+  for (const u of users) {
+    const key = filterGroupKey(u);
+    const list = buckets.get(key);
+    if (list) list.push(u);
+    else buckets.set(key, [u]);
+  }
+  const orderedKeys = [
+    ...FILTER_GROUP_ORDER.filter((k) => buckets.has(k)),
+    ...[...buckets.keys()].filter((k) => !(FILTER_GROUP_ORDER as readonly string[]).includes(k)).sort(),
+  ];
+  return orderedKeys.map((key) => {
+    const groupUsers = buckets.get(key) || [];
+    groupUsers.sort((a, b) =>
+      userDisplayName(a).localeCompare(userDisplayName(b), undefined, { sensitivity: "base" }),
+    );
+    const sample = groupUsers[0];
+    return {
+      key,
+      label: relationshipLabel(key, sample?.kind),
+      users: groupUsers,
+    };
+  });
+}
+
+function isoTime(iso: string | null | undefined): number {
+  if (!iso) return 0;
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? t : 0;
+}
+
+function compareItems(a: WatchlistItem, b: WatchlistItem, key: ItemSortKey, dir: "asc" | "desc"): number {
+  let cmp = 0;
+  if (key === "title") {
+    cmp = String(a.title || "").localeCompare(String(b.title || ""), undefined, { sensitivity: "base" });
+  } else if (key === "synced") {
+    cmp = isoTime(a.last_seen_at) - isoTime(b.last_seen_at);
+  } else if (key === "accepted") {
+    cmp = isoTime(a.added_at) - isoTime(b.added_at);
+  } else if (key === "rejected") {
+    cmp = isoTime(a.excluded_at) - isoTime(b.excluded_at);
+  }
+  if (cmp === 0) {
+    cmp = String(a.title || "").localeCompare(String(b.title || ""), undefined, { sensitivity: "base" });
+  }
+  return dir === "asc" ? cmp : -cmp;
+}
 
 const ACCEPT_OPTIONS: Array<{ value: AcceptIntensity; label: string; hint: string }> = [
   {
@@ -63,8 +130,56 @@ function statusLabel(status: string): string {
 function presenceLabel(state: string | undefined | null): string {
   if (state === "file") return "Real files";
   if (state === "placeholder") return "Placeholders";
+  if (state === "future") return "Future";
   if (state === "missing") return "Missing";
   return "Not in library";
+}
+
+/** Collections-previewer aligned presence colors. */
+const PRESENCE_TONE = {
+  files: { text: "#34d399", label: "Real" },
+  placeholders: { text: "#22d3ee", label: "PH" },
+  missing: { text: "#fb7185", label: "Miss" },
+  future: { text: "#a78bfa", label: "Future" },
+} as const;
+
+type PresenceCounts = { files: number; placeholders: number; missing: number; future: number };
+
+function presenceCountsFromLibrary(lib: WatchlistLibrary | null | undefined): PresenceCounts {
+  const stats = lib?.stats;
+  if (stats) {
+    return {
+      files: Number(stats.files ?? 0) || 0,
+      placeholders: Number(stats.placeholders ?? 0) || 0,
+      missing: Number(stats.missing ?? 0) || 0,
+      future: Number(stats.future ?? 0) || 0,
+    };
+  }
+  const state = String(lib?.state || "");
+  return {
+    files: state === "file" ? 1 : 0,
+    placeholders: state === "placeholder" ? 1 : 0,
+    missing: state === "missing" ? 1 : 0,
+    future: state === "future" ? 1 : 0,
+  };
+}
+
+function presenceCountsFromInstance(inst: WatchlistLibraryInstance): PresenceCounts {
+  const stats = inst.stats;
+  if (stats) {
+    return {
+      files: Number(stats.files ?? 0) || 0,
+      placeholders: Number(stats.placeholders ?? 0) || 0,
+      missing: Number(stats.missing ?? 0) || 0,
+      future: Number(stats.future ?? 0) || 0,
+    };
+  }
+  return {
+    files: inst.has_file ? 1 : 0,
+    placeholders: inst.has_placeholder ? 1 : 0,
+    missing: inst.state === "missing" || inst.has_missing ? 1 : 0,
+    future: inst.state === "future" || inst.has_future ? 1 : 0,
+  };
 }
 
 function tabForItem(row: WatchlistItem): WatchlistTab {
@@ -83,15 +198,45 @@ function libraryPath(lib: WatchlistLibrary | null | undefined): string | null {
   return `/library/${kind}/${lib.item_id}`;
 }
 
+function remapLabel(remap: WatchlistArrRemap | null | undefined, lib?: WatchlistLibrary | null): string | null {
+  if (remap?.remapped && remap.arr_title) {
+    const year = remap.arr_year ? ` (${remap.arr_year})` : "";
+    return `${remap.arr_title}${year}`;
+  }
+  if (lib?.arr_title) {
+    const year = lib.arr_year ? ` (${lib.arr_year})` : "";
+    return `${lib.arr_title}${year}`;
+  }
+  return null;
+}
+
+function formatArrTargetLabel(title: string, year?: number | null): string {
+  return year ? `${title} (${year})` : title;
+}
+
 function formatWhen(iso: string | null): string {
   if (!iso) return "—";
   const t = Date.parse(iso);
   if (!Number.isFinite(t)) return "—";
   try {
-    return new Date(t).toLocaleString();
+    // Compact enough for fixed table columns; full ISO stays on title/tooltip.
+    return new Date(t).toLocaleString(undefined, {
+      month: "numeric",
+      day: "numeric",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
   } catch {
     return iso;
   }
+}
+
+function tableMinWidthForTab(tab: Exclude<WatchlistTab, "people">): string {
+  // Library column is wider for the Real / PH / Miss / Future breakdown.
+  if (tab === "queue") return "70rem";
+  if (tab === "blocklist") return "64rem";
+  return "68rem";
 }
 
 function userDisplayName(u: { title?: string | null; username?: string | null; plex_user_id: string }): string {
@@ -204,6 +349,8 @@ export function WatchlistPanel(props: {
   onRefreshTasks?: () => void;
   /** Navigate to Settings → Media Integrations (Plex). */
   onOpenPlexSettings?: () => void;
+  /** Navigate to Settings → Watchlist. */
+  onOpenWatchlistSettings?: () => void;
   /**
    * Optional App hint once settings are loaded:
    * - true: Plex enable + connection details look complete
@@ -227,6 +374,8 @@ export function WatchlistPanel(props: {
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<WatchlistTab>("queue");
   const [query, setQuery] = useState("");
+  const [sortKey, setSortKey] = useState<ItemSortKey>(DEFAULT_SORT_BY_TAB.queue.key);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">(DEFAULT_SORT_BY_TAB.queue.dir);
   const [selected, setSelected] = useState<Record<number, boolean>>({});
   /** Local gap between click and the first poll that reports syncRunning. */
   const [syncStarting, setSyncStarting] = useState(false);
@@ -263,6 +412,13 @@ export function WatchlistPanel(props: {
     setSelected({});
     setAcceptMenuFor(null);
   }, [tab, selectedUserIds]);
+
+  useEffect(() => {
+    if (tab === "people") return;
+    const defaults = DEFAULT_SORT_BY_TAB[tab];
+    setSortKey(defaults.key);
+    setSortDir(defaults.dir);
+  }, [tab]);
 
   useEffect(() => {
     if (props.syncRunning) {
@@ -321,10 +477,26 @@ export function WatchlistPanel(props: {
     return { accepted, queue, blocklist };
   }, [searched]);
 
-  const filtered = useMemo(
-    () => searched.filter((row) => tabForItem(row) === tab),
-    [searched, tab],
-  );
+  const filtered = useMemo(() => {
+    const rows = searched.filter((row) => tabForItem(row) === tab);
+    if (tab === "people") return rows;
+    return [...rows].sort((a, b) => compareItems(a, b, sortKey, sortDir));
+  }, [searched, tab, sortKey, sortDir]);
+
+  const syncEnabled = summary ? Boolean(summary.enabled) : true;
+  const hasWatchlistHistory =
+    items.length > 0 || Boolean(summary?.last_poll_at) || (summary?.counts?.total ?? 0) > 0;
+
+  const onSortHeader = (key: ItemSortKey) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setSortKey(key);
+    setSortDir(key === "title" ? "asc" : "desc");
+  };
+
+  const filterGroups = useMemo(() => groupUsersForFilter(users), [users]);
 
   const selectedIds = useMemo(
     () => filtered.filter((row) => selected[row.id]).map((row) => row.id),
@@ -394,14 +566,57 @@ export function WatchlistPanel(props: {
     setError(null);
     setAcceptMenuFor(null);
     const { search, monitored } = intensityToFlags(intensity);
+    const remappedRows = items.filter((row) => ids.includes(row.id) && row.arr_remap?.remapped && row.arr_remap.arr_title);
+    if (remappedRows.length) {
+      const lines = remappedRows.slice(0, 5).map((row) => {
+        const arr = formatArrTargetLabel(String(row.arr_remap?.arr_title), row.arr_remap?.arr_year);
+        return `${row.title} adds as ${arr}`;
+      });
+      const extra =
+        remappedRows.length > 5 ? `\n…and ${remappedRows.length - 5} more.` : "";
+      const ok = window.confirm(
+        `Arr maps ${remappedRows.length} watchlisted title${remappedRows.length === 1 ? "" : "s"} to a different series/movie.\n\n${lines.join("\n")}${extra}\n\nAccept the Arr title${remappedRows.length === 1 ? "" : "s"}?`,
+      );
+      if (!ok) {
+        setBusy(false);
+        return;
+      }
+    }
     try {
       const result = await postWatchlistAdd({
         item_ids: ids,
         search,
         monitored,
         tv_scope: summary?.tv_request_scope || undefined,
+        confirm_remap: remappedRows.length > 0,
       });
-      if (result.failed && result.failed > 0 && !result.added) {
+      const pending = result.needs_remap_confirm || [];
+      if (pending.length && !(result.added || 0)) {
+        const lines = pending.slice(0, 5).map((row) => {
+          const arr = row.arr_title
+            ? formatArrTargetLabel(String(row.arr_title), row.arr_year)
+            : "Arr title";
+          return `${row.watchlist_title || "Title"} adds as ${arr}`;
+        });
+        const extra = pending.length > 5 ? `\n…and ${pending.length - 5} more.` : "";
+        const ok = window.confirm(
+          `Arr maps ${pending.length} watchlisted title${pending.length === 1 ? "" : "s"} to a different series/movie.\n\n${lines.join("\n")}${extra}\n\nAccept the Arr title${pending.length === 1 ? "" : "s"}?`,
+        );
+        if (ok) {
+          const confirmed = await postWatchlistAdd({
+            item_ids: pending.map((p) => p.id),
+            search,
+            monitored,
+            tv_scope: summary?.tv_request_scope || undefined,
+            confirm_remap: true,
+          });
+          if (confirmed.failed && confirmed.failed > 0 && !confirmed.added) {
+            setError(
+              `Accept failed for ${confirmed.failed} title${confirmed.failed === 1 ? "" : "s"}. Check Watchlist Arr targets (profile and root are required).`,
+            );
+          }
+        }
+      } else if (result.failed && result.failed > 0 && !result.added) {
         setError(
           `Accept failed for ${result.failed} title${result.failed === 1 ? "" : "s"}. Check Watchlist Arr targets (profile and root are required).`,
         );
@@ -538,6 +753,55 @@ export function WatchlistPanel(props: {
     );
   }
 
+  // Plex is connected but Watchlist sync is off and nothing has been synced yet.
+  if (plexReady === true && !loading && summary && !syncEnabled && !hasWatchlistHistory) {
+    return (
+      <div>
+        <div className="flex items-center gap-2 mb-1">
+          <div className="w-2 h-2 rounded-full bg-green-500" />
+          <span className="text-[12px] font-headline uppercase tracking-widest text-slate-500">
+            Plex Watchlist
+          </span>
+        </div>
+        <h1
+          className={`mb-6 text-[32px] font-black tracking-tight font-headline ${
+            isLight ? "text-slate-900" : "text-white"
+          }`}
+        >
+          Watchlist
+        </h1>
+        <div className={`${UI_SECTION_FRAME_CLASS} overflow-hidden`}>
+          <div className="p-12 text-center">
+            <span className="material-symbols-outlined text-slate-500" style={{ fontSize: 44 }}>
+              sync_disabled
+            </span>
+            <p className={`mt-3 text-[18px] font-headline ${isLight ? "text-slate-900" : "text-white"}`}>
+              Watchlist sync is off
+            </p>
+            <p className="mt-2 text-[14px] max-w-lg mx-auto leading-relaxed text-slate-500">
+              Turn on Watchlist sync under Settings → Watchlist to pull roster lists into the Queue. Accept and Reject
+              stay available here after the first sync.
+            </p>
+            {props.onOpenWatchlistSettings ? (
+              <button
+                type="button"
+                onClick={props.onOpenWatchlistSettings}
+                className={`mt-5 inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS}`}
+                style={accentFilledStyle(props.accent.hex)}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
+                  settings
+                </span>
+                Open Watchlist settings
+              </button>
+            ) : null}
+            {error ? <p className="mt-4 text-[12px] max-w-md mx-auto text-slate-500">{error}</p> : null}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div>
       <div className="rounded-xl border overflow-hidden mb-6" style={{ borderColor: panelBorder, backgroundColor: panelBg }}>
@@ -554,7 +818,8 @@ export function WatchlistPanel(props: {
             </div>
             <button
               type="button"
-              disabled={syncBusy}
+              disabled={syncBusy || !syncEnabled}
+              title={!syncEnabled ? "Enable Watchlist sync in Settings to refresh" : undefined}
               onClick={() => void onRefresh()}
               className="px-3 py-1.5 rounded-lg text-[12px] uppercase tracking-wider disabled:opacity-50"
               style={{ backgroundColor: props.accent.hex, color: semantic.fgOnAccent }}
@@ -568,15 +833,46 @@ export function WatchlistPanel(props: {
               <strong style={{ color: semantic.fg }}>{summary?.enabled ? "Enabled" : "Disabled"}</strong>
             </span>
             <span>
-              Token:{" "}
-              <strong style={{ color: semantic.fg }}>{summary?.has_token ? "Present" : "Missing"}</strong>
-            </span>
-            <span>
               Default Arr behavior:{" "}
               <strong style={{ color: semantic.fg }}>{summary?.on_new || "manual"}</strong>
             </span>
             <span>Last poll: {formatWhen(summary?.last_poll_at ?? null)}</span>
           </div>
+          {!syncEnabled && hasWatchlistHistory ? (
+            <div
+              className="mt-3 flex flex-wrap items-start gap-3 rounded-lg border px-3 py-2.5"
+              style={{
+                borderColor: `${props.accent.hex}55`,
+                backgroundColor: `${props.accent.hex}14`,
+              }}
+            >
+              <span
+                className="material-symbols-outlined mt-0.5 shrink-0"
+                style={{ fontSize: 18, color: props.accent.hex }}
+              >
+                info
+              </span>
+              <div className="min-w-0 flex-1 text-[13px]" style={{ color: semantic.fgMuted }}>
+                <p style={{ color: semantic.fg }}>
+                  Watchlist sync is off. Scheduled sync will not run until you re-enable it in Settings → Watchlist.
+                </p>
+                <p className="mt-1">
+                  Titles already here stay available for Accept and Reject. Refresh now stays off while sync is
+                  disabled.
+                </p>
+              </div>
+              {props.onOpenWatchlistSettings ? (
+                <button
+                  type="button"
+                  onClick={props.onOpenWatchlistSettings}
+                  className="shrink-0 px-2.5 py-1 rounded-lg border text-[11px] uppercase tracking-wider"
+                  style={{ borderColor: semantic.border, color: semantic.fg }}
+                >
+                  Settings
+                </button>
+              ) : null}
+            </div>
+          ) : null}
           {summary?.last_error ? (
             <p className="mt-2 text-[13px] text-red-400">Last error: {summary.last_error}</p>
           ) : null}
@@ -670,40 +966,62 @@ export function WatchlistPanel(props: {
                 </button>
               ) : null}
             </div>
-            <div className="flex gap-3 overflow-x-auto pb-3 overscroll-x-contain">
-              {users.map((u) => {
-                const on = selectedUserIds.includes(u.plex_user_id);
-                const name = userDisplayName(u);
-                const blocked = userIsBlocked(u);
-                const dimmed = blocked || !syncToggleChecked(u);
-                return (
-                  <button
-                    key={u.plex_user_id}
-                    type="button"
-                    onClick={() => toggleUserFilter(u.plex_user_id)}
-                    title={blockReasonCopy(u) || name}
-                    className="flex w-[4.5rem] shrink-0 flex-col items-center gap-1.5 rounded-xl border px-1.5 py-2 transition-colors"
-                    style={{
-                      borderColor: on ? props.accent.hex : semantic.border,
-                      backgroundColor: on ? `${props.accent.hex}22` : "transparent",
-                      opacity: dimmed && !on ? 0.55 : 1,
-                    }}
-                  >
+            <div className="flex gap-4 overflow-x-auto pb-3 overscroll-x-contain">
+              {filterGroups.map((group, groupIdx) => (
+                <div
+                  key={group.key}
+                  className="flex shrink-0 items-end gap-3"
+                  style={
+                    groupIdx > 0
+                      ? { borderLeft: `1px solid ${headBorder}`, paddingLeft: "0.75rem" }
+                      : undefined
+                  }
+                >
+                  <div className="flex flex-col gap-1.5">
                     <div
-                      className="rounded-full"
-                      style={on ? { boxShadow: `0 0 0 2px ${props.accent.hex}` } : undefined}
+                      className="px-1 text-[10px] font-headline uppercase tracking-widest"
+                      style={{ color: semantic.fgSubtle }}
                     >
-                      <UserAvatar thumbUrl={u.thumb_url} title={name} size={44} dimmed={dimmed} />
+                      {group.label}
                     </div>
-                    <span
-                      className="w-full truncate text-center text-[11px] leading-tight"
-                      style={{ color: on ? semantic.fg : semantic.fgMuted }}
-                    >
-                      {name}
-                    </span>
-                  </button>
-                );
-              })}
+                    <div className="flex gap-3">
+                      {group.users.map((u) => {
+                        const on = selectedUserIds.includes(u.plex_user_id);
+                        const name = userDisplayName(u);
+                        const blocked = userIsBlocked(u);
+                        const dimmed = blocked || !syncToggleChecked(u);
+                        return (
+                          <button
+                            key={u.plex_user_id}
+                            type="button"
+                            onClick={() => toggleUserFilter(u.plex_user_id)}
+                            title={`${relationshipLabel(u.relationship, u.kind)}: ${blockReasonCopy(u) || name}`}
+                            className="flex w-[4.5rem] shrink-0 flex-col items-center gap-1.5 rounded-xl border px-1.5 py-2 transition-colors"
+                            style={{
+                              borderColor: on ? props.accent.hex : semantic.border,
+                              backgroundColor: on ? `${props.accent.hex}22` : "transparent",
+                              opacity: dimmed && !on ? 0.55 : 1,
+                            }}
+                          >
+                            <div
+                              className="rounded-full"
+                              style={on ? { boxShadow: `0 0 0 2px ${props.accent.hex}` } : undefined}
+                            >
+                              <UserAvatar thumbUrl={u.thumb_url} title={name} size={44} dimmed={dimmed} />
+                            </div>
+                            <span
+                              className="w-full truncate text-center text-[11px] leading-tight"
+                              style={{ color: on ? semantic.fg : semantic.fgMuted }}
+                            >
+                              {name}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         ) : null}
@@ -913,39 +1231,44 @@ export function WatchlistPanel(props: {
 
         {error ? <div className="px-4 py-2 text-[13px] text-red-400">{error}</div> : null}
 
-        <div className="overflow-x-auto">
-          <table className="w-full table-fixed">
+        <div className="max-h-[min(70vh,52rem)] overflow-auto">
+          <table
+            className="w-full table-fixed"
+            style={{ minWidth: tableMinWidthForTab(tab) }}
+          >
             <colgroup>
-              <col className="w-10" />
+              <col style={{ width: "2.5rem" }} />
+              {/* Title absorbs leftover width; other cols stay rem-sized so they do not crush. */}
+              <col />
               {tab === "queue" ? (
                 <>
-                  <col className="w-[28%]" />
-                  <col className="w-[7.5rem]" />
-                  <col className="w-[8.5rem]" />
-                  <col className="w-[24%]" />
-                  <col className="w-[11.5rem]" />
+                  <col style={{ width: "7.5rem" }} />
+                  <col style={{ width: "13.5rem" }} />
+                  <col style={{ width: "10rem" }} />
+                  <col style={{ width: "11.5rem" }} />
+                  <col style={{ width: "11.5rem" }} />
                 </>
               ) : tab === "blocklist" ? (
                 <>
-                  <col className="w-[42%]" />
-                  <col className="w-[8rem]" />
-                  <col className="w-[10rem]" />
-                  <col className="w-[9rem]" />
-                  <col className="w-[8.5rem]" />
+                  <col style={{ width: "7.5rem" }} />
+                  <col style={{ width: "13.5rem" }} />
+                  <col style={{ width: "11.5rem" }} />
+                  <col style={{ width: "11.5rem" }} />
+                  <col style={{ width: "7.5rem" }} />
                 </>
               ) : (
                 <>
-                  {/* Accepted: give Title room; keep Status compact */}
-                  <col className="w-[46%]" />
-                  <col className="w-[8rem]" />
-                  <col className="w-[12rem]" />
-                  <col className="w-[14rem]" />
+                  <col style={{ width: "7.5rem" }} />
+                  <col style={{ width: "13.5rem" }} />
+                  <col style={{ width: "10rem" }} />
+                  <col style={{ width: "11.5rem" }} />
+                  <col style={{ width: "11.5rem" }} />
                 </>
               )}
             </colgroup>
-            <thead>
+            <thead className="sticky top-0 z-[1]" style={{ backgroundColor: panelBg }}>
               <tr className="border-b" style={{ borderColor: headBorder }}>
-                <th className="px-2 py-2 w-10">
+                <th className="px-2 py-2 w-10 overflow-hidden">
                   <BrandCheckbox
                     checked={filtered.length > 0 && filtered.every((r) => selected[r.id])}
                     onChange={(v) => toggleAll(v)}
@@ -953,32 +1276,92 @@ export function WatchlistPanel(props: {
                     ariaLabel="Select all"
                   />
                 </th>
-                {(tab === "queue"
-                  ? ["Title", "By", "Library", "Instances", ""]
-                  : tab === "blocklist"
-                    ? ["Title", "By", "Library", "Last seen", ""]
-                    : ["Title", "By", "Library", "Status"]
-                ).map((h, idx) => (
+                <SortableTh
+                  label="Title"
+                  sortKey="title"
+                  activeKey={sortKey}
+                  dir={sortDir}
+                  onSort={onSortHeader}
+                  color={semantic.fgSubtle}
+                  activeColor={props.accent.hex}
+                />
+                <th
+                  className="px-2 py-2 text-left text-[12px] font-headline uppercase tracking-widest font-normal overflow-hidden"
+                  style={{ color: semantic.fgSubtle }}
+                >
+                  By
+                </th>
+                <th
+                  className="px-2 py-2 text-left text-[12px] font-headline uppercase tracking-widest font-normal overflow-hidden"
+                  style={{ color: semantic.fgSubtle }}
+                >
+                  Library
+                </th>
+                {tab === "queue" ? (
                   <th
-                    key={`${h}-${idx}`}
-                    className="px-2 py-2 text-left text-[12px] font-headline uppercase tracking-widest font-normal"
+                    className="px-2 py-2 text-left text-[12px] font-headline uppercase tracking-widest font-normal overflow-hidden"
                     style={{ color: semantic.fgSubtle }}
                   >
-                    {h}
+                    Instances
                   </th>
-                ))}
+                ) : null}
+                {tab === "accepted" ? (
+                  <th
+                    className="px-2 py-2 text-left text-[12px] font-headline uppercase tracking-widest font-normal overflow-hidden"
+                    style={{ color: semantic.fgSubtle }}
+                  >
+                    Status
+                  </th>
+                ) : null}
+                <SortableTh
+                  label="Synced"
+                  sortKey="synced"
+                  activeKey={sortKey}
+                  dir={sortDir}
+                  onSort={onSortHeader}
+                  color={semantic.fgSubtle}
+                  activeColor={props.accent.hex}
+                />
+                {tab === "accepted" ? (
+                  <SortableTh
+                    label="Accepted"
+                    sortKey="accepted"
+                    activeKey={sortKey}
+                    dir={sortDir}
+                    onSort={onSortHeader}
+                    color={semantic.fgSubtle}
+                    activeColor={props.accent.hex}
+                  />
+                ) : null}
+                {tab === "blocklist" ? (
+                  <SortableTh
+                    label="Rejected"
+                    sortKey="rejected"
+                    activeKey={sortKey}
+                    dir={sortDir}
+                    onSort={onSortHeader}
+                    color={semantic.fgSubtle}
+                    activeColor={props.accent.hex}
+                  />
+                ) : null}
+                {tab === "queue" || tab === "blocklist" ? (
+                  <th
+                    className="px-2 py-2 text-left text-[12px] font-headline uppercase tracking-widest font-normal overflow-hidden"
+                    style={{ color: semantic.fgSubtle }}
+                  />
+                ) : null}
               </tr>
             </thead>
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={7} className="px-3 py-6 text-[14px]" style={{ color: semantic.fgMuted }}>
+                  <td colSpan={8} className="px-3 py-6 text-[14px]" style={{ color: semantic.fgMuted }}>
                     Loading…
                   </td>
                 </tr>
               ) : filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-3 py-6 text-[14px]" style={{ color: semantic.fgMuted }}>
+                  <td colSpan={8} className="px-3 py-6 text-[14px]" style={{ color: semantic.fgMuted }}>
                     {emptyCopy}
                   </td>
                 </tr>
@@ -991,9 +1374,11 @@ export function WatchlistPanel(props: {
                   const willAdd = lib?.will_add_keys || [];
                   const waitingLibrary =
                     row.status === "added" && (!lib || lib.state === "not_in_library" || lib.coverage !== "complete");
+                  const arrAs = remapLabel(row.arr_remap, lib);
+                  const remapped = Boolean(row.arr_remap?.remapped && arrAs);
                   return (
                     <tr key={row.id} className="border-b last:border-0" style={{ borderColor: rowBorder }}>
-                      <td className="px-2 py-3 align-middle">
+                      <td className="px-2 py-3 align-middle overflow-hidden">
                         <BrandCheckbox
                           checked={Boolean(selected[row.id])}
                           onChange={(v) => setSelected((prev) => ({ ...prev, [row.id]: v }))}
@@ -1001,7 +1386,7 @@ export function WatchlistPanel(props: {
                           ariaLabel={`Select ${row.title}`}
                         />
                       </td>
-                      <td className="px-2 py-3 align-middle">
+                      <td className="px-2 py-3 align-middle overflow-hidden">
                         <div className="flex items-center gap-2 min-w-0">
                           <div className="h-12 w-8 shrink-0 overflow-hidden rounded bg-[#1e2430] ring-1 ring-[#424753]/40">
                             {poster ? (
@@ -1037,7 +1422,7 @@ export function WatchlistPanel(props: {
                           </div>
                         </div>
                       </td>
-                      <td className="px-2 py-3 align-middle">
+                      <td className="px-1 py-2 align-middle overflow-hidden">
                         <WatchlistedByCell
                           users={row.users || []}
                           title={row.title}
@@ -1047,113 +1432,153 @@ export function WatchlistPanel(props: {
                           panelBg={panelBg}
                         />
                       </td>
-                      <td className="px-2 py-3 align-middle">
-                        <div className="text-[12px] truncate" style={{ color: semantic.fgMuted }}>
-                          {presenceLabel(lib?.state)}
-                        </div>
-                        {lib?.display_status ? (
-                          <div className="text-[11px] mt-0.5 truncate" style={{ color: semantic.fgSubtle }}>
-                            {lib.display_status}
-                          </div>
-                        ) : null}
-                        {lib?.stats ? (
-                          <div className="text-[11px] mt-0.5 tabular-nums truncate" style={{ color: semantic.fgSubtle }}>
-                            {lib.stats.files ?? 0}/{lib.stats.placeholders ?? 0}/{lib.stats.missing ?? 0}
-                          </div>
-                        ) : null}
+                      <td className="px-1 py-2 align-middle overflow-hidden">
+                        <LibraryPresenceCell
+                          library={lib}
+                          title={row.title}
+                          fg={semantic.fg}
+                          fgMuted={semantic.fgMuted}
+                          fgSubtle={semantic.fgSubtle}
+                          border={panelBorder}
+                          panelBg={panelBg}
+                        />
                       </td>
 
                       {tab === "queue" ? (
-                        <>
-                          <td className="px-2 py-3 text-[12px] align-middle" style={{ color: semantic.fgMuted }}>
-                            <div className="min-w-0">
-                              <span className="uppercase tracking-wider text-[10px]" style={{ color: semantic.fgSubtle }}>
-                                Already on
-                              </span>
-                              <div className="mt-0.5 truncate" title={alreadyOn.length ? alreadyOn.join(", ") : undefined}>
-                                {alreadyOn.length ? alreadyOn.join(", ") : "—"}
-                              </div>
+                        <td className="px-2 py-3 text-[12px] align-middle overflow-hidden" style={{ color: semantic.fgMuted }}>
+                          <div className="min-w-0">
+                            <span className="uppercase tracking-wider text-[10px]" style={{ color: semantic.fgSubtle }}>
+                              Already on
+                            </span>
+                            <div className="mt-0.5 truncate" title={alreadyOn.length ? alreadyOn.join(", ") : undefined}>
+                              {alreadyOn.length ? alreadyOn.join(", ") : "—"}
                             </div>
-                            <div className="mt-1.5 min-w-0">
-                              <span className="uppercase tracking-wider text-[10px]" style={{ color: semantic.fgSubtle }}>
-                                Will add
-                              </span>
-                              <div
-                                className="mt-0.5 truncate"
-                                style={{ color: semantic.fg }}
-                                title={willAdd.length ? willAdd.join(", ") : undefined}
-                              >
-                                {willAdd.length ? willAdd.join(", ") : "—"}
-                              </div>
-                            </div>
-                            {row.last_error ? (
-                              <div className="text-[11px] text-red-400 truncate mt-1.5" title={row.last_error}>
-                                {row.last_error}
-                              </div>
-                            ) : null}
-                          </td>
-                          <td className="px-2 py-3 align-middle">
-                            <div className="flex items-center justify-end gap-1.5 flex-wrap">
-                              <AcceptMenuButton
-                                open={acceptMenuFor === row.id}
-                                disabled={busy}
-                                label="Accept"
-                                onToggle={() => setAcceptMenuFor((v) => (v === row.id ? null : row.id))}
-                                onPick={(intensity) => void onAccept([row.id], intensity)}
-                                onClose={() => setAcceptMenuFor(null)}
-                                panelBg={panelBg}
-                                border={panelBorder}
-                                fg={semantic.fg}
-                                fgMuted={semantic.fgMuted}
-                              />
-                              <button
-                                type="button"
-                                disabled={busy}
-                                onClick={() => void onReject([row.id])}
-                                className="px-2.5 py-1.5 rounded-lg text-[11px] uppercase tracking-wider font-semibold disabled:opacity-40"
-                                style={{
-                                  backgroundColor: "rgba(239,68,68,0.2)",
-                                  color: "#fecaca",
-                                  border: "1px solid rgba(239,68,68,0.45)",
-                                }}
-                              >
-                                Reject
-                              </button>
-                            </div>
-                          </td>
-                        </>
-                      ) : null}
-
-                      {tab === "accepted" ? (
-                        <td className="px-2 py-3 text-[13px] align-middle" style={{ color: semantic.fgMuted }}>
-                          <div className="truncate">
-                            {waitingLibrary ? "Accepted · waiting for library" : statusLabel(row.status)}
                           </div>
-                          {alreadyOn.length ? (
-                            <div className="text-[11px] mt-1 truncate" style={{ color: semantic.fgSubtle }} title={alreadyOn.join(", ")}>
-                              On {alreadyOn.join(", ")}
+                          <div className="mt-1.5 min-w-0">
+                            <span className="uppercase tracking-wider text-[10px]" style={{ color: semantic.fgSubtle }}>
+                              Will add
+                            </span>
+                            <div
+                              className="mt-0.5 truncate"
+                              style={{ color: semantic.fg }}
+                              title={willAdd.length ? willAdd.join(", ") : undefined}
+                            >
+                              {willAdd.length ? willAdd.join(", ") : "—"}
+                            </div>
+                          </div>
+                          {remapped && arrAs ? (
+                            <div
+                              className="mt-1.5 text-[11px] truncate"
+                              style={{ color: "#fbbf24" }}
+                              title={`Arr maps this watchlist title to ${arrAs}`}
+                            >
+                              As {arrAs}
+                            </div>
+                          ) : null}
+                          {row.last_error ? (
+                            <div className="text-[11px] text-red-400 truncate mt-1.5" title={row.last_error}>
+                              {row.last_error}
                             </div>
                           ) : null}
                         </td>
                       ) : null}
 
+                      {tab === "accepted" ? (
+                        <td className="px-2 py-3 text-[13px] align-middle overflow-hidden" style={{ color: semantic.fgMuted }}>
+                          <div className="min-w-0">
+                            <div className="truncate" style={{ color: semantic.fg }}>
+                              {statusLabel(row.status)}
+                              {remapped && arrAs ? ` as ${arrAs}` : ""}
+                            </div>
+                            {waitingLibrary ? (
+                              <div className="text-[11px] mt-1 truncate" style={{ color: semantic.fgSubtle }}>
+                                Waiting for library
+                              </div>
+                            ) : alreadyOn.length ? (
+                              <div
+                                className="text-[11px] mt-1 truncate"
+                                style={{ color: semantic.fgSubtle }}
+                                title={alreadyOn.join(", ")}
+                              >
+                                On {alreadyOn.join(", ")}
+                              </div>
+                            ) : null}
+                          </div>
+                        </td>
+                      ) : null}
+
+                      <td
+                        className="px-2 py-3 text-[12px] align-middle overflow-hidden whitespace-nowrap truncate"
+                        style={{ color: semantic.fgSubtle }}
+                        title={row.last_seen_at ? formatWhen(row.last_seen_at) : undefined}
+                      >
+                        {formatWhen(row.last_seen_at)}
+                      </td>
+
+                      {tab === "accepted" ? (
+                        <td
+                          className="px-2 py-3 text-[12px] align-middle overflow-hidden whitespace-nowrap truncate"
+                          style={{ color: semantic.fgSubtle }}
+                          title={row.added_at ? formatWhen(row.added_at) : undefined}
+                        >
+                          {formatWhen(row.added_at)}
+                        </td>
+                      ) : null}
+
                       {tab === "blocklist" ? (
-                        <>
-                          <td className="px-2 py-3 text-[12px] align-middle truncate" style={{ color: semantic.fgSubtle }}>
-                            {formatWhen(row.last_seen_at)}
-                          </td>
-                          <td className="px-2 py-3 align-middle text-right">
+                        <td
+                          className="px-2 py-3 text-[12px] align-middle overflow-hidden whitespace-nowrap truncate"
+                          style={{ color: semantic.fgSubtle }}
+                          title={row.excluded_at ? formatWhen(row.excluded_at) : undefined}
+                        >
+                          {formatWhen(row.excluded_at ?? null)}
+                        </td>
+                      ) : null}
+
+                      {tab === "queue" ? (
+                        <td className="px-2 py-3 align-middle overflow-hidden">
+                          <div className="flex items-center justify-end gap-1.5 flex-nowrap">
+                            <AcceptMenuButton
+                              open={acceptMenuFor === row.id}
+                              disabled={busy}
+                              label="Accept"
+                              onToggle={() => setAcceptMenuFor((v) => (v === row.id ? null : row.id))}
+                              onPick={(intensity) => void onAccept([row.id], intensity)}
+                              onClose={() => setAcceptMenuFor(null)}
+                              panelBg={panelBg}
+                              border={panelBorder}
+                              fg={semantic.fg}
+                              fgMuted={semantic.fgMuted}
+                            />
                             <button
                               type="button"
                               disabled={busy}
-                              onClick={() => void onRestore([row.id])}
-                              className="px-2.5 py-1.5 rounded-lg border text-[11px] uppercase tracking-wider disabled:opacity-40"
-                              style={{ borderColor: semantic.border, color: semantic.fgMuted }}
+                              onClick={() => void onReject([row.id])}
+                              className="px-2.5 py-1.5 rounded-lg text-[11px] uppercase tracking-wider font-semibold disabled:opacity-40 shrink-0"
+                              style={{
+                                backgroundColor: "rgba(239,68,68,0.2)",
+                                color: "#fecaca",
+                                border: "1px solid rgba(239,68,68,0.45)",
+                              }}
                             >
-                              Restore
+                              Reject
                             </button>
-                          </td>
-                        </>
+                          </div>
+                        </td>
+                      ) : null}
+
+                      {tab === "blocklist" ? (
+                        <td className="px-2 py-3 align-middle text-right overflow-hidden">
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => void onRestore([row.id])}
+                            className="px-2.5 py-1.5 rounded-lg border text-[11px] uppercase tracking-wider disabled:opacity-40"
+                            style={{ borderColor: semantic.border, color: semantic.fgMuted }}
+                          >
+                            Restore
+                          </button>
+                        </td>
                       ) : null}
                     </tr>
                   );
@@ -1166,6 +1591,36 @@ export function WatchlistPanel(props: {
         )}
       </div>
     </div>
+  );
+}
+
+function SortableTh(props: {
+  label: string;
+  sortKey: ItemSortKey;
+  activeKey: ItemSortKey;
+  dir: "asc" | "desc";
+  onSort: (key: ItemSortKey) => void;
+  color: string;
+  activeColor: string;
+}) {
+  const active = props.activeKey === props.sortKey;
+  return (
+    <th
+      className="px-2 py-2 text-left text-[12px] font-headline uppercase tracking-widest font-normal overflow-hidden"
+      aria-sort={active ? (props.dir === "asc" ? "ascending" : "descending") : "none"}
+    >
+      <button
+        type="button"
+        onClick={() => props.onSort(props.sortKey)}
+        className="inline-flex items-center gap-1 max-w-full min-w-0 hover:opacity-90"
+        style={{ color: active ? props.activeColor : props.color }}
+      >
+        <span className="truncate">{props.label}</span>
+        <span className="material-symbols-outlined shrink-0" style={{ fontSize: 14 }} aria-hidden>
+          {active ? (props.dir === "asc" ? "arrow_upward" : "arrow_downward") : "unfold_more"}
+        </span>
+      </button>
+    </th>
   );
 }
 
@@ -1290,6 +1745,221 @@ function AcceptMenuButton(props: {
   );
 }
 
+function PresenceStatStack(props: {
+  counts: PresenceCounts;
+  size?: "sm" | "md";
+  showZero?: boolean;
+}) {
+  const size = props.size ?? "sm";
+  const showZero = props.showZero ?? true;
+  const items = (
+    [
+      ["files", props.counts.files],
+      ["placeholders", props.counts.placeholders],
+      ["missing", props.counts.missing],
+      ["future", props.counts.future],
+    ] as const
+  ).filter(([, n]) => showZero || n > 0);
+
+  if (!items.length) {
+    return (
+      <span className="text-[12px]" style={{ color: "#64748b" }}>
+        —
+      </span>
+    );
+  }
+
+  return (
+    <div className={`flex items-end ${size === "md" ? "gap-4" : "gap-2.5"}`}>
+      {items.map(([key, n]) => {
+        const tone = PRESENCE_TONE[key];
+        const muted = n <= 0;
+        return (
+          <div key={key} className="min-w-0 text-center">
+            <div
+              className={`font-headline font-bold tabular-nums leading-none ${
+                size === "md" ? "text-[22px]" : "text-[16px]"
+              }`}
+              style={{ color: muted ? "#64748b" : tone.text }}
+            >
+              {n}
+            </div>
+            <div
+              className={`mt-0.5 font-headline uppercase tracking-wider ${
+                size === "md" ? "text-[10px]" : "text-[9px]"
+              }`}
+              style={{ color: muted ? "#64748b" : tone.text }}
+            >
+              {tone.label}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function LibraryPresenceCell(props: {
+  library: WatchlistLibrary | null | undefined;
+  title: string;
+  fg: string;
+  fgMuted: string;
+  fgSubtle: string;
+  border: string;
+  panelBg: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const lib = props.library;
+  const counts = presenceCountsFromLibrary(lib);
+  const instances = lib?.instances || [];
+  const missingTargets = lib?.missing_target_keys || [];
+  const clickable = Boolean(lib) && (instances.length > 0 || missingTargets.length > 0 || lib?.state !== "not_in_library");
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  const empty = !lib || lib.state === "not_in_library";
+
+  const body = empty ? (
+    <div className="text-[12px]" style={{ color: props.fgMuted }}>
+      Not in library
+    </div>
+  ) : (
+    <PresenceStatStack counts={counts} size="sm" showZero />
+  );
+
+  return (
+    <>
+      <button
+        type="button"
+        disabled={!clickable}
+        onClick={() => {
+          if (clickable) setOpen(true);
+        }}
+        aria-label={`Library presence for ${props.title}`}
+        title={clickable ? "View per-library breakdown" : undefined}
+        className={`w-full min-h-[3.25rem] rounded-lg px-1.5 py-1 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[#424753] ${
+          clickable ? "hover:bg-white/5 cursor-pointer" : "cursor-default opacity-80"
+        }`}
+      >
+        {body}
+      </button>
+
+      {open ? (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/70"
+            aria-label="Close"
+            onClick={() => setOpen(false)}
+          />
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Library presence for ${props.title}`}
+            className="relative z-10 w-full max-w-md rounded-xl border shadow-xl overflow-hidden"
+            style={{ borderColor: props.border, backgroundColor: props.panelBg }}
+          >
+            <div
+              className="flex items-center justify-between gap-3 px-4 py-3 border-b"
+              style={{ borderColor: props.border }}
+            >
+              <div className="min-w-0">
+                <div className="text-[12px] font-headline uppercase tracking-widest" style={{ color: props.fgMuted }}>
+                  Library presence
+                </div>
+                <div className="text-[14px] font-medium truncate mt-0.5" style={{ color: props.fg }}>
+                  {props.title}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="text-[12px] uppercase tracking-wider shrink-0"
+                style={{ color: props.fgMuted }}
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="px-4 py-3 border-b" style={{ borderColor: props.border }}>
+              <div className="text-[11px] font-headline uppercase tracking-widest mb-2" style={{ color: props.fgSubtle }}>
+                Combined
+              </div>
+              <PresenceStatStack counts={counts} size="md" showZero />
+              <p className="mt-2 text-[12px]" style={{ color: props.fgMuted }}>
+                {presenceLabel(lib?.state)}
+                {lib?.coverage ? ` · Coverage ${lib.coverage}` : ""}
+              </p>
+            </div>
+
+            <ul className="max-h-[min(60vh,22rem)] overflow-y-auto py-1">
+              {instances.map((inst) => {
+                const instCounts = presenceCountsFromInstance(inst);
+                return (
+                  <li
+                    key={`${inst.instance_key}-${inst.item_id}`}
+                    className="px-4 py-3 border-b last:border-0"
+                    style={{ borderColor: props.border }}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-[14px] font-medium truncate" style={{ color: props.fg }}>
+                          {inst.instance_key}
+                        </div>
+                        <div className="text-[11px] mt-0.5" style={{ color: props.fgSubtle }}>
+                          {inst.is_watchlist_target ? "Watchlist target" : "Other instance"}
+                          {" · "}
+                          {presenceLabel(inst.state)}
+                        </div>
+                      </div>
+                      <PresenceStatStack counts={instCounts} size="sm" showZero />
+                    </div>
+                  </li>
+                );
+              })}
+              {missingTargets.map((key) => (
+                <li
+                  key={`missing-${key}`}
+                  className="px-4 py-3 border-b last:border-0"
+                  style={{ borderColor: props.border }}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-[14px] font-medium truncate" style={{ color: props.fg }}>
+                        {key}
+                      </div>
+                      <div className="text-[11px] mt-0.5" style={{ color: props.fgSubtle }}>
+                        Watchlist target · Not in library
+                      </div>
+                    </div>
+                    <PresenceStatStack
+                      counts={{ files: 0, placeholders: 0, missing: 0, future: 0 }}
+                      size="sm"
+                      showZero
+                    />
+                  </div>
+                </li>
+              ))}
+              {!instances.length && !missingTargets.length ? (
+                <li className="px-4 py-6 text-[13px]" style={{ color: props.fgMuted }}>
+                  No Arr instances matched for this title.
+                </li>
+              ) : null}
+            </ul>
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 function WatchlistedByCell(props: {
   users: WatchlistItemUser[];
   title: string;
@@ -1311,7 +1981,7 @@ function WatchlistedByCell(props: {
 
   if (!props.users.length) {
     return (
-      <span className="text-[13px]" style={{ color: props.fgMuted }}>
+      <span className="text-[13px] px-1.5" style={{ color: props.fgMuted }}>
         —
       </span>
     );
@@ -1320,7 +1990,6 @@ function WatchlistedByCell(props: {
   const max = 5;
   const shown = props.users.slice(0, max);
   const extra = props.users.length - shown.length;
-  const label = `${props.users.length} watchlisted by`;
 
   return (
     <>
@@ -1328,8 +1997,8 @@ function WatchlistedByCell(props: {
         type="button"
         onClick={() => setOpen(true)}
         aria-label={`Watchlisted by: ${props.users.map(userDisplayName).join(", ")}`}
-        title={label}
-        className="flex items-center gap-1.5 min-w-0 rounded-lg -mx-1 px-1 py-0.5 transition-colors hover:bg-white/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#424753]"
+        title={props.users.map(userDisplayName).join(", ")}
+        className="flex w-full min-h-[3.25rem] items-center gap-1.5 min-w-0 rounded-lg px-1.5 py-1 text-left transition-colors hover:bg-white/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#424753]"
       >
         <div className="flex -space-x-2">
           {shown.map((u) => (

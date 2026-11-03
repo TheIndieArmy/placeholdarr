@@ -31,13 +31,14 @@ export interface WatchlistLibraryInstance {
   has_file: boolean;
   has_placeholder: boolean;
   has_missing?: boolean;
+  has_future?: boolean;
   monitored?: boolean;
   state?: string;
   stats?: { files?: number; placeholders?: number; missing?: number; future?: number; total?: number };
 }
 
 export interface WatchlistLibrary {
-  state: "not_in_library" | "missing" | "placeholder" | "file" | string;
+  state: "not_in_library" | "missing" | "future" | "placeholder" | "file" | string;
   coverage: "none" | "partial" | "complete" | string;
   target_keys: string[];
   matched_target_keys: string[];
@@ -50,7 +51,23 @@ export interface WatchlistLibrary {
   item_type: "movie" | "series" | string;
   display_status?: string | null;
   poster_url?: string | null;
-  stats?: { files?: number; placeholders?: number; missing?: number } | null;
+  stats?: { files?: number; placeholders?: number; missing?: number; future?: number } | null;
+  /** Arr catalog title when presence is for a remapped / parent series-movie. */
+  arr_title?: string | null;
+  arr_year?: number | null;
+}
+
+export interface WatchlistArrRemap {
+  remapped?: boolean;
+  matched_via_alternate?: boolean;
+  lookup_miss?: boolean;
+  watchlist_title?: string | null;
+  arr_title?: string | null;
+  arr_year?: number | null;
+  tvdb_id?: number | null;
+  tmdb_id?: number | null;
+  imdb_id?: string | null;
+  resolved_at?: string | null;
 }
 
 export interface WatchlistUser {
@@ -128,10 +145,12 @@ export interface WatchlistItem {
   last_seen_at: string | null;
   first_seen_at: string | null;
   added_at: string | null;
+  excluded_at?: string | null;
   arr_instance_key: string | null;
   thumb?: string | null;
   users?: WatchlistItemUser[];
   library?: WatchlistLibrary | null;
+  arr_remap?: WatchlistArrRemap | null;
 }
 
 export function getWatchlist(opts?: { status?: string; limit?: number; userIds?: string[] }) {
@@ -186,15 +205,25 @@ export function postWatchlistAdd(body: {
   instance_key?: string;
   quality_profile_id?: number;
   root_folder_path?: string;
+  confirm_remap?: boolean;
 }) {
-  return fetchJson<{ ok: boolean; skipped?: number; failed?: number; added?: number }>(
-    "/api/watchlist/add",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    },
-  );
+  return fetchJson<{
+    ok: boolean;
+    skipped?: number;
+    failed?: number;
+    added?: number;
+    needs_remap_confirm?: Array<{
+      id: number;
+      watchlist_title?: string | null;
+      arr_title?: string | null;
+      arr_year?: number | null;
+      media_type?: string | null;
+    }>;
+  }>("/api/watchlist/add", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 export function postWatchlistExclude(itemIds: number[], excluded: boolean) {

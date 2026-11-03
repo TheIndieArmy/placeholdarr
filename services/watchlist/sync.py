@@ -490,11 +490,22 @@ def add_watchlist_items_to_arr(
     instance_key: str | None = None,
     quality_profile_id: int | None = None,
     root_folder_path: str | None = None,
+    confirm_remap: bool = False,
 ) -> dict[str, Any]:
-    """Add selected watchlist rows to Arr (fan-out to every enabled target). Returns summary counts."""
+    """Add selected watchlist rows to Arr (fan-out to every enabled target). Returns summary counts.
+
+    When Arr resolves a title to a different primary name (alias remap), auto callers must
+    leave ``confirm_remap=False`` so those rows stay in Queue. Manual Accept passes
+    ``confirm_remap=True`` after the UI confirms the Arr series/movie.
+    """
     from types import SimpleNamespace
 
     from services.source_of_truth import arr_api
+    from services.watchlist.remap import (
+        ensure_arr_remap_cached,
+        get_cached_arr_remap,
+        set_cached_arr_remap,
+    )
 
     ids = [int(i) for i in item_ids]
     tag_labels = []
@@ -512,12 +523,28 @@ def add_watchlist_items_to_arr(
     scope = (tv_scope or default_tv_request_scope()).strip().lower()
     sonarr_monitor = tv_scope_to_sonarr_monitor(scope)
     added = skipped = failed = 0
+    needs_remap_confirm: list[dict[str, Any]] = []
     session = get_session()
     try:
         rows = session.query(PlexWatchlistItem).filter(PlexWatchlistItem.id.in_(ids)).all()
+        ensure_arr_remap_cached(session, rows)
+
         by_media: dict[str, list[PlexWatchlistItem]] = {"movie": [], "show": []}
         for row in rows:
             if row.excluded:
+                continue
+            remap = get_cached_arr_remap(row.extra)
+            if isinstance(remap, dict) and remap.get("remapped") and not confirm_remap:
+                needs_remap_confirm.append(
+                    {
+                        "id": int(row.id),
+                        "watchlist_title": row.title,
+                        "arr_title": remap.get("arr_title"),
+                        "arr_year": remap.get("arr_year"),
+                        "media_type": row.media_type,
+                    }
+                )
+                skipped += 1
                 continue
             by_media.setdefault(str(row.media_type), []).append(row)
 
@@ -535,7 +562,8 @@ def add_watchlist_items_to_arr(
 
         from services.watchlist.catalog import enrich_watchlist_items
 
-        enrichments = enrich_watchlist_items(session, rows) if override_targets is None else {}
+        enrichable = [r for media_rows in by_media.values() for r in media_rows]
+        enrichments = enrich_watchlist_items(session, enrichable) if override_targets is None else {}
 
         for media_type, media_rows in by_media.items():
             if not media_rows:
@@ -580,17 +608,27 @@ def add_watchlist_items_to_arr(
             row_had_new: dict[int, bool] = {int(r.id): False for r in media_rows}
             row_keys: dict[int, list[str]] = {int(r.id): [] for r in media_rows}
             row_errors: dict[int, list[str]] = {int(r.id): [] for r in media_rows}
+            row_remap: dict[int, dict[str, Any] | None] = {int(r.id): get_cached_arr_remap(r.extra) for r in media_rows}
 
-            items = [
-                SimpleNamespace(
-                    title=r.title,
-                    year=r.year,
-                    tmdb_id=r.tmdb_id,
-                    tvdb_id=r.tvdb_id,
-                    imdb_id=r.imdb_id,
+            items = []
+            for r in media_rows:
+                remap = row_remap.get(int(r.id))
+                tmdb_id = r.tmdb_id
+                tvdb_id = r.tvdb_id
+                imdb_id = r.imdb_id
+                if isinstance(remap, dict) and remap.get("remapped"):
+                    tmdb_id = remap.get("tmdb_id") or tmdb_id
+                    tvdb_id = remap.get("tvdb_id") or tvdb_id
+                    imdb_id = remap.get("imdb_id") or imdb_id
+                items.append(
+                    SimpleNamespace(
+                        title=r.title,
+                        year=r.year,
+                        tmdb_id=tmdb_id,
+                        tvdb_id=tvdb_id,
+                        imdb_id=imdb_id,
+                    )
                 )
-                for r in media_rows
-            ]
 
             for target in media_targets:
                 key = str(target.get("instance_key") or "").strip()
@@ -647,6 +685,9 @@ def add_watchlist_items_to_arr(
                 for row, result in zip(media_rows, results):
                     rid = int(row.id)
                     status = str(result.get("status") or "")
+                    result_remap = result.get("arr_remap")
+                    if isinstance(result_remap, dict):
+                        row_remap[rid] = result_remap
                     if status in {"ok", "skipped"}:
                         row_ok[rid] = True
                         if key not in row_keys[rid]:
@@ -680,6 +721,9 @@ def add_watchlist_items_to_arr(
             now = _utcnow()
             for row in media_rows:
                 rid = int(row.id)
+                meta = row_remap.get(rid)
+                if isinstance(meta, dict):
+                    row.extra = set_cached_arr_remap(row.extra, meta)
                 if row_ok[rid]:
                     row.status = "added"
                     row.added_at = now
@@ -697,7 +741,12 @@ def add_watchlist_items_to_arr(
         session.commit()
     finally:
         session.close()
-    return {"added": added, "skipped": skipped, "failed": failed}
+    return {
+        "added": added,
+        "skipped": skipped,
+        "failed": failed,
+        "needs_remap_confirm": needs_remap_confirm,
+    }
 
 
 def _user_counts_for_on_new(user: PlexWatchlistUser) -> bool:
@@ -779,12 +828,16 @@ def set_excluded(item_ids: Iterable[int], excluded: bool) -> int:
     session = get_session()
     try:
         rows = session.query(PlexWatchlistItem).filter(PlexWatchlistItem.id.in_(ids)).all()
+        now = _utcnow()
         for row in rows:
             row.excluded = bool(excluded)
-            row.updated_at = _utcnow()
+            row.updated_at = now
             if excluded:
                 row.status = "excluded"
                 row.last_error = None
+                row.excluded_at = now
+            else:
+                row.excluded_at = None
         if not excluded:
             _apply_coverage_statuses(session, rows)
         session.commit()
@@ -834,6 +887,14 @@ def list_watchlist_items(
             else:
                 q = q.filter(PlexWatchlistItem.status == status, PlexWatchlistItem.excluded.is_(False))
         rows = q.limit(max(1, min(int(limit or 500), 2000))).all()
+        from services.watchlist.remap import ensure_arr_remap_cached
+
+        # Cache Arr remaps for queue/accepted rows so UI can show Will add as / Library link.
+        try:
+            ensure_arr_remap_cached(session, rows)
+            session.commit()
+        except Exception:
+            session.rollback()
         item_ids = [int(r.id) for r in rows]
         mems_by_item: dict[int, list[PlexWatchlistMembership]] = {i: [] for i in item_ids}
         if item_ids:
@@ -979,6 +1040,8 @@ def _serialize_item(
             }
         )
     users_out.sort(key=lambda u: (0 if u.get("is_admin") else 1, str(u.get("title") or "").lower()))
+    from services.watchlist.remap import get_cached_arr_remap, normalize_title
+
     thumb = None
     if isinstance(r.extra, dict):
         thumb = r.extra.get("thumb") or None
@@ -986,6 +1049,21 @@ def _serialize_item(
     if status == "in_arr":
         status = "new"
     lib = library if isinstance(library, dict) else None
+    arr_remap = get_cached_arr_remap(r.extra)
+    # Prefer catalog Arr title when present so Accepted shows the library identity.
+    if isinstance(lib, dict) and lib.get("arr_title"):
+        catalog_title = str(lib.get("arr_title") or "").strip()
+        if catalog_title and normalize_title(catalog_title) != normalize_title(r.title):
+            if not isinstance(arr_remap, dict) or not arr_remap.get("remapped"):
+                arr_remap = {
+                    "remapped": True,
+                    "watchlist_title": r.title,
+                    "arr_title": catalog_title,
+                    "arr_year": lib.get("arr_year"),
+                    "matched_via_alternate": True,
+                }
+            elif not arr_remap.get("arr_title"):
+                arr_remap = {**arr_remap, "arr_title": catalog_title, "arr_year": lib.get("arr_year")}
     return {
         "id": r.id,
         "identity_key": r.identity_key,
@@ -1003,10 +1081,12 @@ def _serialize_item(
         "last_seen_at": r.last_seen_at.isoformat() if r.last_seen_at else None,
         "first_seen_at": r.first_seen_at.isoformat() if r.first_seen_at else None,
         "added_at": r.added_at.isoformat() if r.added_at else None,
+        "excluded_at": r.excluded_at.isoformat() if getattr(r, "excluded_at", None) else None,
         "arr_instance_key": r.arr_instance_key,
         "thumb": thumb,
         "users": users_out,
         "library": lib,
+        "arr_remap": arr_remap,
     }
 
 
