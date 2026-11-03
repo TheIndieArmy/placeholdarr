@@ -36,6 +36,7 @@ import { fetchJson, postJson, setUnauthorizedHandler, getCsrfToken } from "./api
 import { changePassword, getAuthStatus, getWebhookApiKey, logoutAuth, regenerateWebhookApiKey, type AuthStatus } from "./api/auth";
 import { dismissWhatsNew, getWhatsNew, groupWhatsNewByVersion, type WhatsNewNotice } from "./api/whatsNew";
 import { AuthGate } from "./auth/AuthGate";
+import { useViewportMode } from "./viewport/useViewportMode";
 import {
   ONBOARDING_STEP_GUIDES,
   ONBOARDING_WIZARD_STEPS,
@@ -810,13 +811,16 @@ export function App() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const contentScrollRef = useRef<HTMLElement | null>(null);
+  const { mode: viewportMode, isMobile, isDesktop } = useViewportMode();
+  const viewportClass = viewportMode === "mobile" ? "viewport-mobile" : "viewport-desktop";
 
   const brand = BRAND;
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readStoredThemeMode());
   const [sidebarPinned, setSidebarPinned] = useState<boolean>(() => readStoredSidebarPinned());
   const [sidebarHover, setSidebarHover] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const sidebarHoverLeaveTimer = useRef<number | null>(null);
-  const sidebarExpanded = sidebarPinned || sidebarHover;
+  const sidebarExpanded = sidebarPinned || sidebarHover || mobileNavOpen;
 
   const [logLevel, setLogLevel] = useState<"all" | "debug" | "info" | "warn" | "error" | "critical">("all");
   const [logFilter, setLogFilter] = useState("");
@@ -1783,6 +1787,7 @@ export function App() {
       return false;
     }
     navigate(path);
+    setMobileNavOpen(false);
     return true;
   }
 
@@ -2427,6 +2432,23 @@ export function App() {
   }, [sidebarPinned]);
 
   useEffect(() => {
+    setMobileNavOpen(false);
+  }, [location.pathname]);
+
+  useEffect(() => {
+    if (isDesktop) setMobileNavOpen(false);
+  }, [isDesktop]);
+
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileNavOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [mobileNavOpen]);
+
+  useEffect(() => {
     return () => {
       if (sidebarHoverLeaveTimer.current != null) {
         window.clearTimeout(sidebarHoverLeaveTimer.current);
@@ -2469,7 +2491,7 @@ export function App() {
     };
   }, []);
 
-  const authShellClass = `brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} min-h-screen flex items-center justify-center font-brand-body text-[16px] font-headline tracking-wide ${themeMode === "light" ? "text-slate-700" : "text-slate-300"}`;
+  const authShellClass = `brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} ${viewportClass} min-h-screen flex items-center justify-center font-brand-body text-[16px] font-headline tracking-wide ${themeMode === "light" ? "text-slate-700" : "text-slate-300"}`;
 
   if (authStatus == null) {
     return (
@@ -2504,7 +2526,7 @@ export function App() {
 
   const setupRouteActive = location.pathname === "/setup" || location.pathname.startsWith("/setup/");
   if (setupRouteActive) {
-    const setupShellClass = `brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} min-h-screen flex items-center justify-center font-brand-body text-[16px] font-headline tracking-wide ${themeMode === "light" ? "text-slate-700" : "text-slate-300"}`;
+    const setupShellClass = `brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} ${viewportClass} min-h-screen flex items-center justify-center font-brand-body text-[16px] font-headline tracking-wide ${themeMode === "light" ? "text-slate-700" : "text-slate-300"}`;
     if (setupStatus?.setup_complete && !onboardingTourRoute) {
       return <Navigate to={HOME_PATH} replace />;
     }
@@ -2613,7 +2635,8 @@ export function App() {
   return (
     <LibraryReconcileProvider>
       <div
-        className={`brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} flex h-screen overflow-hidden font-brand-body ${isStudioGlass ? "text-slate-100" : "text-slate-900"}`}
+        data-viewport={viewportMode}
+        className={`brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} ${viewportClass} flex h-screen overflow-hidden font-brand-body ${isStudioGlass ? "text-slate-100" : "text-slate-900"}`}
         style={{
           ...brandVarStyle,
           ...(isStudioGlass ? {
@@ -2621,17 +2644,28 @@ export function App() {
           } : { backgroundColor: studioLightChrome.page }),
         }}
       >
-        {/* Sidebar: collapsed icon rail reserves width; hover/pin expands over content. */}
+        {/* Mobile nav scrim (below header so the menu button stays usable). */}
+        {mobileNavOpen ? (
+          <button
+            type="button"
+            className="fixed bottom-0 left-0 right-0 top-16 z-40 bg-black/50 md:hidden"
+            aria-label="Close navigation menu"
+            onClick={() => setMobileNavOpen(false)}
+          />
+        ) : null}
+
+        {/* Sidebar: mobile drawer under the header; desktop icon rail with hover/pin expand. */}
         <div
-          className={`relative hidden h-full shrink-0 md:block transition-[width] duration-200 ease-out ${
-            sidebarPinned ? "w-64" : "w-16"
-          }`}
+          className={`fixed bottom-0 left-0 top-16 z-50 w-64 shrink-0 transition-[transform,width] duration-200 ease-out md:relative md:inset-auto md:top-auto md:z-auto md:h-full md:translate-x-0 ${
+            mobileNavOpen ? "translate-x-0 pointer-events-auto" : "-translate-x-full pointer-events-none"
+          } md:pointer-events-auto ${sidebarPinned ? "md:w-64" : "md:w-16"}`}
         >
           <aside
-            className={`absolute inset-y-0 left-0 z-30 flex h-full flex-col overflow-hidden pb-0 pt-0 transition-[width,box-shadow] duration-200 ease-out ${
-              sidebarExpanded ? "w-64" : "w-16"
+            id="placeholdarr-sidebar-nav"
+            className={`absolute inset-y-0 left-0 z-30 flex h-full w-64 flex-col overflow-hidden pb-0 pt-0 transition-[width,box-shadow] duration-200 ease-out ${
+              sidebarExpanded ? "md:w-64" : "md:w-16"
             } ${
-              !sidebarPinned && sidebarExpanded
+              (!sidebarPinned && sidebarExpanded) || (isMobile && mobileNavOpen)
                 ? isStudioGlass
                   ? "shadow-[16px_0_40px_rgba(0,0,0,0.45)]"
                   : "shadow-[16px_0_40px_rgba(40,42,48,0.18)]"
@@ -2652,6 +2686,7 @@ export function App() {
                   }
             }
             onMouseEnter={() => {
+              if (isMobile) return;
               if (sidebarHoverLeaveTimer.current != null) {
                 window.clearTimeout(sidebarHoverLeaveTimer.current);
                 sidebarHoverLeaveTimer.current = null;
@@ -2659,7 +2694,7 @@ export function App() {
               if (!sidebarPinned) setSidebarHover(true);
             }}
             onMouseLeave={() => {
-              if (sidebarPinned) return;
+              if (isMobile || sidebarPinned) return;
               if (sidebarHoverLeaveTimer.current != null) {
                 window.clearTimeout(sidebarHoverLeaveTimer.current);
               }
@@ -3056,7 +3091,7 @@ export function App() {
                     }}
                     title={sidebarPinned ? "Collapse sidebar" : "Pin sidebar open"}
                     aria-pressed={sidebarPinned}
-                    className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full border transition-colors ${
+                    className={`hidden h-8 w-8 shrink-0 items-center justify-center rounded-full border transition-colors md:flex ${
                       isStudioGlass
                         ? "border-[#424753]/55 bg-[#1e2430]/80 text-slate-300 hover:border-[#424753]/80 hover:text-white"
                         : "border-[#c5d0de] bg-white/80 text-slate-600 hover:text-slate-900"
@@ -3068,7 +3103,10 @@ export function App() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => void openWhatsNewCatalog()}
+                    onClick={() => {
+                      setMobileNavOpen(false);
+                      void openWhatsNewCatalog();
+                    }}
                     title="What's new"
                     className={`flex min-w-0 flex-1 items-center justify-center rounded-full border px-3 py-1.5 font-headline text-[12px] uppercase tracking-widest transition-colors ${
                       isStudioGlass
@@ -3088,10 +3126,27 @@ export function App() {
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
           {/* Topbar */}
           <header
-            className="flex justify-between items-center w-full px-6 py-3 h-16 z-10 flex-shrink-0 border-b"
+            className="relative z-[60] flex h-16 w-full flex-shrink-0 items-center justify-between border-b px-4 py-3 sm:px-6"
             style={{ backgroundImage: studioHeaderBackground, borderBottomColor: topBarDivider }}
           >
-            <div className="flex items-center flex-1 max-w-xl">
+            <div className="flex max-w-xl flex-1 items-center gap-2">
+              <button
+                type="button"
+                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border outline-none transition-colors md:hidden ${
+                  isStudioGlass
+                    ? `border-[#2a3444] bg-[#1e2430] text-slate-100 hover:bg-[#252e3a] ${getBrandFocusClass(brand, themeMode)}`
+                    : `border-transparent text-slate-900 hover:brightness-[0.97] ${getBrandFocusClass(brand, themeMode)}`
+                }`}
+                style={!isStudioGlass ? { backgroundColor: brandSemantic.topBarBand } : undefined}
+                aria-label={mobileNavOpen ? "Close navigation menu" : "Open navigation menu"}
+                aria-expanded={mobileNavOpen}
+                aria-controls="placeholdarr-sidebar-nav"
+                onClick={() => setMobileNavOpen((open) => !open)}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: 22 }}>
+                  {mobileNavOpen ? "close" : "menu"}
+                </span>
+              </button>
               <div
                 className="relative w-full max-w-lg"
                 onBlur={() => {

@@ -17,6 +17,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ### Summary
 
+- **Mobile viewport mode**: Framework for mobile-only UI at Tailwind md without changing desktop.
 - **Watchlist Arr remaps**: Alias titles need Accept confirm; auto-add leaves them in Queue.
 - **Watchlist Library identity**: Presence and links follow the Arr catalog title.
 - **Library Watchlist section**: Detail pages show members and alias titles.
@@ -28,6 +29,11 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Watchlist By cell**: Full cell opens the watchlisted-by dialog.
 - **Watchlist Activity table scroll**: Horizontal scrollbar stays on the visible table panel.
 - **Collapsible sidebar**: Icon rail, hover expand, pin.
+
+### Added
+
+- **Mobile viewport mode**: Shared `useViewportMode` / `data-viewport` at 768px so mobile chrome can diverge from desktop.
+- **Mobile navigation**: Header menu opens the sidebar as a drawer below md.
 
 ### Fixed
 
