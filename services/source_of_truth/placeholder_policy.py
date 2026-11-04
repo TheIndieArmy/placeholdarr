@@ -215,6 +215,7 @@ def _schedule_media_refresh_for_policy_action(
     action: str,
     path: str | None,
     refresh_paths: list[str] | None = None,
+    deferred_folder_deletes: list[str] | None = None,
     has_movies: bool = False,
     has_episodes: bool = False,
 ) -> None:
@@ -224,6 +225,7 @@ def _schedule_media_refresh_for_policy_action(
     action_key = str(action or "").strip().lower()
     created_paths: list[str] = []
     delete_paths: list[str] = []
+    deferred: list[str] = []
     if action_key in {"created_or_exists", "created", "create", "materialized"}:
         p = str(path or "").strip()
         if p:
@@ -233,15 +235,20 @@ def _schedule_media_refresh_for_policy_action(
             p = str(item or "").strip()
             if p:
                 delete_paths.append(p)
+        for item in deferred_folder_deletes or []:
+            p = str(item or "").strip()
+            if p:
+                deferred.append(p)
         if not delete_paths:
             p = str(path or "").strip()
             if p:
                 delete_paths.append(os.path.dirname(p) or p)
-    if not created_paths and not delete_paths:
+    if not created_paths and not delete_paths and not deferred:
         return
     schedule_scoped_placeholder_media_refresh(
         created_paths=created_paths,
         delete_paths=delete_paths,
+        deferred_folder_deletes=deferred,
         has_movies=has_movies,
         has_episodes=has_episodes,
     )
@@ -275,6 +282,7 @@ def apply_movie_placeholder_policy_fast(movie_id: int) -> dict[str, Any]:
             int(movie_id),
             session=session,
             activity_reason=_ACTIVITY_REASON,
+            defer_empty_folder_delete=True,
         )
         if not out.get("ok", True):
             session.rollback()
@@ -294,6 +302,7 @@ def apply_movie_placeholder_policy_fast(movie_id: int) -> dict[str, Any]:
             action=action,
             path=out.get("path"),
             refresh_paths=list(out.get("refresh_paths") or []),
+            deferred_folder_deletes=list(out.get("deferred_folder_deletes") or []),
             has_movies=True,
             has_episodes=False,
         )

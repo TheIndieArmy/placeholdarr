@@ -1038,6 +1038,7 @@ def refresh_plex_paths(paths: set[str], *, update_type: str = "Created") -> dict
 
     refreshed = 0
     failed = 0
+    touched_sections: set[int] = set()
 
     normalized_folders = []
     for path in sorted(paths):
@@ -1077,6 +1078,7 @@ def refresh_plex_paths(paths: set[str], *, update_type: str = "Created") -> dict
                 response = requests.get(url, headers={"X-Plex-Token": plex_token}, timeout=15)
                 response.raise_for_status()
                 refreshed += 1
+                touched_sections.add(int(section_id))
             except Exception as e:
                 failed += 1
                 logger.warning(
@@ -1084,7 +1086,11 @@ def refresh_plex_paths(paths: set[str], *, update_type: str = "Created") -> dict
                     extra={"emoji_type": "warning"},
                 )
 
-    return {"refreshed": refreshed, "failed": failed}
+    return {
+        "refreshed": refreshed,
+        "failed": failed,
+        "section_ids": sorted(touched_sections),
+    }
 
 
 def refresh_plex_sections(

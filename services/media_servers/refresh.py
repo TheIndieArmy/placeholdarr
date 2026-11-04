@@ -264,29 +264,66 @@ def refresh_all_paths(
     include_jellyfin: bool = True,
     include_emby: bool = True,
     bypass_suppression: bool = False,
-) -> dict[str, int]:
-    """Fan out path-scoped refresh to all enabled media servers."""
+    empty_trash: bool = False,
+) -> dict[str, Any]:
+    """Fan out path-scoped refresh to all enabled media servers.
+
+    When ``empty_trash`` is set for a Deleted refresh, wait for touched Plex
+    sections to finish scanning then empty trash (needed after movie placeholder
+    folders are removed — path refresh alone leaves ghost entries).
+    """
     if not bypass_suppression and getattr(settings, "REFRESH_TRIGGER_SUPPRESSED", False):
         logger.debug("Media server path refresh suppressed by global sync flag.")
-        return {"refreshed": 0, "failed": 0}
+        return {"refreshed": 0, "failed": 0, "trash": {}}
 
     total_refreshed = 0
     total_failed = 0
+    trash_stats: dict[str, Any] = {}
+    before_scanned: dict[int, int | None] = {}
+    want_plex = include_plex and bool(getattr(settings, "plex_enabled", False))
+    want_trash = bool(empty_trash) and str(update_type or "").strip().lower() == "deleted"
 
-    refreshers = []
-    if include_plex:
-        refreshers.append(refresh_plex_paths)
-    if include_jellyfin:
-        refreshers.append(refresh_jellyfin_paths)
-    if include_emby:
-        refreshers.append(refresh_emby_paths)
+    if want_plex and want_trash:
+        try:
+            before_scanned = {
+                sid: (meta.get("scanned_at") if isinstance(meta, dict) else None)
+                for sid, meta in fetch_plex_section_scan_meta().items()
+            }
+        except Exception as exc:
+            logger.debug(
+                f"Placeholder path refresh: could not snapshot Plex scannedAt before refresh: {exc}",
+                extra={"emoji_type": "debug"},
+            )
 
-    for fn in refreshers:
-        result = fn(folders, update_type=update_type)
-        total_refreshed += result.get("refreshed", 0)
-        total_failed += result.get("failed", 0)
+    plex_section_ids: list[int] = []
+    if want_plex:
+        plex_stats = refresh_plex_paths(folders, update_type=update_type)
+        total_refreshed += int(plex_stats.get("refreshed", 0) or 0)
+        total_failed += int(plex_stats.get("failed", 0) or 0)
+        plex_section_ids = list(plex_stats.get("section_ids") or [])
 
-    return {"refreshed": total_refreshed, "failed": total_failed}
+    if include_jellyfin and bool(getattr(settings, "jellyfin_enabled", False)):
+        jf_stats = refresh_jellyfin_paths(folders, update_type=update_type)
+        total_refreshed += int(jf_stats.get("refreshed", 0) or 0)
+        total_failed += int(jf_stats.get("failed", 0) or 0)
+
+    if include_emby and bool(getattr(settings, "emby_enabled", False)):
+        emby_stats = refresh_emby_paths(folders, update_type=update_type)
+        total_refreshed += int(emby_stats.get("refreshed", 0) or 0)
+        total_failed += int(emby_stats.get("failed", 0) or 0)
+
+    if want_plex and want_trash and plex_section_ids:
+        trash_stats = empty_plex_section_trash(
+            plex_section_ids,
+            before_scanned_at=before_scanned,
+        )
+
+    return {
+        "refreshed": total_refreshed,
+        "failed": total_failed,
+        "trash": trash_stats,
+        "section_ids": plex_section_ids,
+    }
 
 
 def refresh_all_sections(
@@ -350,8 +387,13 @@ def refresh_all_path_batches_with_section_fallback(
     include_plex: bool = True,
     include_jellyfin: bool = True,
     include_emby: bool = True,
+    empty_trash_on_delete: bool = False,
 ) -> dict[str, int | bool]:
-    """Run one or more path-refresh batches, then optionally issue one section fallback."""
+    """Run one or more path-refresh batches, then optionally issue one section fallback.
+
+    ``empty_trash_on_delete`` empties Plex trash after Deleted batches so removed
+    movie placeholder folders do not leave ghost library entries.
+    """
     stats: dict[str, int | bool] = {
         "refreshed": 0,
         "failed": 0,
@@ -360,6 +402,7 @@ def refresh_all_path_batches_with_section_fallback(
         "section_refreshed": 0,
         "section_failed": 0,
         "section_fallback_used": False,
+        "trash_emptied": 0,
     }
 
     any_paths = False
@@ -368,19 +411,23 @@ def refresh_all_path_batches_with_section_fallback(
         if not folders:
             continue
         any_paths = True
+        is_deleted = str(update_type or "").strip().lower() == "deleted"
         path_stats = refresh_all_paths(
             folders,
             update_type=update_type,
             include_plex=include_plex,
             include_jellyfin=include_jellyfin,
             include_emby=include_emby,
+            empty_trash=bool(empty_trash_on_delete) and is_deleted,
         )
         refreshed = int(path_stats.get("refreshed", 0) or 0)
         failed = int(path_stats.get("failed", 0) or 0)
+        trash = path_stats.get("trash") if isinstance(path_stats.get("trash"), dict) else {}
         stats["refreshed"] = int(stats["refreshed"] or 0) + refreshed
         stats["failed"] = int(stats["failed"] or 0) + failed
         stats["path_refreshed"] = int(stats["path_refreshed"] or 0) + refreshed
         stats["path_failed"] = int(stats["path_failed"] or 0) + failed
+        stats["trash_emptied"] = int(stats["trash_emptied"] or 0) + int(trash.get("emptied", 0) or 0)
         if failed > 0:
             any_path_failed = True
 
