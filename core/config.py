@@ -298,6 +298,9 @@ class Settings(BaseSettings):
     # Optional JSON array: Arr instance + root folder → Placeholdarr dest + Plex section.
     # Empty = all titles use LIBRARY_ROOT-derived movies/tv and primary Plex section IDs.
     LIBRARY_DESTINATION_MAP_JSON: str = ""
+    # Media-server path → Placeholdarr path (Windows Plex / remote mounts). JSON array of
+    # { "remote": "K:/Seeding/.../media", "local": "/media" }.
+    MEDIA_SERVER_PATH_MAPPINGS_JSON: str = ""
 
     # Queue monitor /queue poll cadence (seconds between Radarr/Sonarr queue API polls).
     #
@@ -477,7 +480,7 @@ class Settings(BaseSettings):
     ENABLE_IMPORT_GRACE_ACCELERATED: bool = os.getenv("ENABLE_IMPORT_GRACE_ACCELERATED", "false").split('#')[0].strip().lower() == "true"
     IMPORT_GRACE_STEP_SECONDS: int = int(os.getenv("IMPORT_GRACE_STEP_SECONDS", "60").split('#')[0].strip())
     IMPORT_GRACE_ACCELERATED_STEP_SECONDS: int = int(os.getenv("IMPORT_GRACE_ACCELERATED_STEP_SECONDS", "5").split('#')[0].strip())
-    STATUS_JOB_BATCH_SIZE: int = int(os.getenv("STATUS_JOB_BATCH_SIZE", "250").split('#')[0].strip())
+    STATUS_JOB_BATCH_SIZE: int = int(os.getenv("STATUS_JOB_BATCH_SIZE", "100").split('#')[0].strip())
     STATUS_JOB_DEBOUNCE_SECONDS: float = float(os.getenv("STATUS_JOB_DEBOUNCE_SECONDS", "0.5").split('#')[0].strip())
     MEDIA_REFRESH_SECTION_FALLBACK_ENABLED: bool = os.getenv("MEDIA_REFRESH_SECTION_FALLBACK_ENABLED", "true").split('#')[0].strip().lower() == "true"
     MATERIALIZATION_OVERLAP_ENABLED: bool = True

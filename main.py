@@ -482,7 +482,19 @@ async def lifespan(app: FastAPI):
                     except Exception:
                         pass
                 else:
-                    logger.debug('Startup source-of-truth disabled by config flags', extra={'emoji_type': 'debug'})
+                    reason = startup_result.get('reason') or 'unknown'
+                    mode = startup_result.get('startup_sync_mode')
+                    if reason == 'boot_chose_off':
+                        # Informative skip line already logged in run_startup_source_of_truth.
+                        logger.debug(
+                            f"Startup source-of-truth skipped reason={reason} mode={mode}",
+                            extra={'emoji_type': 'debug'},
+                        )
+                    else:
+                        logger.info(
+                            f"Startup source-of-truth skipped reason={reason} mode={mode}",
+                            extra={'emoji_type': 'info'},
+                        )
             except Exception as e:
                 logger.error(f'Startup source-of-truth failed: {e}', extra={'emoji_type': 'error'})
             finally:
@@ -548,7 +560,7 @@ async def lifespan(app: FastAPI):
         logger.debug("No integration connection checker available; skipping", extra={"emoji_type": "debug"})
     logger.info(
         'Lifespan startup complete — HTTP and /api routes are ready. '
-        '(Worker threads may still log "holding: waiting for startup sync" until the background sync thread finishes; '
+        '(Workers may briefly wait on the startup gate for boot sync or a schedule skip; '
         'that does not block the dashboard.)',
         extra={'emoji_type': 'success'},
     )

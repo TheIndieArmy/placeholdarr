@@ -30,6 +30,7 @@ import {
 } from "./api/dashboard";
 import { getCollectionPlexSections } from "./api/collections";
 import { DestinationMapEditor } from "./settings/DestinationMapEditor";
+import { PathMappingsEditor } from "./settings/PathMappingsEditor";
 import type { IntegrationsStatusResponse, PlexSectionOption } from "./types/api";
 import { postTaskAbandon, postTaskRun } from "./api/tasks";
 import { fetchJson, postJson, setUnauthorizedHandler, getCsrfToken } from "./api/client";
@@ -508,6 +509,7 @@ const ONBOARDING_HERO_LIGHT_CENTER_SLOTS_WIDE = [3, 4, 11, 12] as const;
 
 const PATH_LIBRARY_ROOT_KEY = "LIBRARY_ROOT";
 const PATH_DESTINATION_MAP_KEY = "LIBRARY_DESTINATION_MAP_JSON";
+const PATH_MEDIA_PATH_MAPPINGS_KEY = "MEDIA_SERVER_PATH_MAPPINGS_JSON";
 const PATH_PLEX_DEFAULT_SECTION_KEYS = ["PLEX_MOVIE_SECTION_ID", "PLEX_TV_SECTION_ID"] as const;
 const PATH_PROFILE_KEYS = [] as const;
 const PATH_PER_LIBRARY_OVERRIDE_KEYS = [] as const;
@@ -609,6 +611,7 @@ function partitionLibraryPathFields(fields: SettingsField[]) {
   const byKey = new Map(fields.map((f) => [f.key, f]));
   const root = byKey.get(PATH_LIBRARY_ROOT_KEY);
   const destinationMap = byKey.get(PATH_DESTINATION_MAP_KEY);
+  const pathMappings = byKey.get(PATH_MEDIA_PATH_MAPPINGS_KEY);
   const plexDefaults = PATH_PLEX_DEFAULT_SECTION_KEYS.map((k) => byKey.get(k)).filter(Boolean) as SettingsField[];
   const profiles = PATH_PROFILE_KEYS.map((k) => byKey.get(k)).filter(Boolean) as SettingsField[];
   const overrides = PATH_PER_LIBRARY_OVERRIDE_KEYS.map((k) => byKey.get(k)).filter(Boolean) as SettingsField[];
@@ -616,11 +619,12 @@ function partitionLibraryPathFields(fields: SettingsField[]) {
     (f) =>
       f.key !== PATH_LIBRARY_ROOT_KEY &&
       f.key !== PATH_DESTINATION_MAP_KEY &&
+      f.key !== PATH_MEDIA_PATH_MAPPINGS_KEY &&
       !plexDefaultSet.has(f.key) &&
       !profileSet.has(f.key) &&
       !overrideSet.has(f.key)
   );
-  return { root, plexDefaults, destinationMap, profiles, overrides, rest };
+  return { root, plexDefaults, destinationMap, pathMappings, profiles, overrides, rest };
 }
 
 const URL_TEST_TARGET: Record<string, { service: "plex" | "jellyfin" | "emby" | "radarr" | "sonarr"; credentialKey: string }> = {
@@ -2557,6 +2561,14 @@ export function App() {
         themeMode={themeMode}
         onBack={() => setOnboardingStepIndex((i) => Math.max(0, i - 1))}
         onNext={() => setOnboardingStepIndex((i) => Math.min(wizardSteps.length - 1, i + 1))}
+        onGoToStep={(index) =>
+          setOnboardingStepIndex((i) => {
+            const max = wizardSteps.length - 1;
+            const target = Math.max(0, Math.min(max, index));
+            // Only allow revisiting completed steps (not skipping ahead).
+            return target < i ? target : i;
+          })
+        }
         onPartialSave={handlePartialSave}
         onChange={(key, value) => setFieldValues((prev) => ({ ...prev, [key]: value }))}
         onTestConnection={
@@ -6862,7 +6874,7 @@ function LibraryPathsForm(props: {
   runTest?: (field: SettingsField) => void;
   testResults?: Record<string, { ok: boolean; message: string }>;
 }) {
-  const { root, plexDefaults, destinationMap, profiles, overrides, rest } = useMemo(
+  const { root, plexDefaults, destinationMap, pathMappings, profiles, overrides, rest } = useMemo(
     () => partitionLibraryPathFields(props.fields),
     [props.fields],
   );
@@ -7260,6 +7272,20 @@ function LibraryPathsForm(props: {
     </div>
   ) : null;
 
+  const pathMappingsBlock = pathMappings ? (
+    <div className={props.layout === "settings" ? `${UI_SECTION_FRAME_CLASS} px-4 py-4` : undefined}>
+      <label className="block text-[16px] font-semibold text-white font-headline mb-1">
+        Media server path mappings
+      </label>
+      <PathMappingsEditor
+        value={String(props.values[pathMappings.key] ?? "")}
+        onChange={(json) => props.onValueChange(pathMappings.key, json)}
+        focusClass={focus}
+        layout={props.layout}
+      />
+    </div>
+  ) : null;
+
   const profileBlock = profiles.length ? (
     <div className={`${UI_SECTION_FRAME_CLASS} px-4 py-4`}>
       <div className={`${SETTINGS_DENSITY_LEGEND_CLASS} mb-2`}>Folder Profiles</div>
@@ -7321,6 +7347,7 @@ function LibraryPathsForm(props: {
             {rootBlock}
             {plexDefaultsBlock}
             {destinationMapBlock}
+            {pathMappingsBlock}
             {profileBlock}
             {overridesBlock}
             {rest.map((field) => (
@@ -7341,6 +7368,7 @@ function LibraryPathsForm(props: {
       {root ? rootBlock : null}
       {plexDefaults.length ? plexDefaultsBlock : null}
       {destinationMap ? destinationMapBlock : null}
+      {pathMappings ? pathMappingsBlock : null}
       {profiles.length ? profileBlock : null}
       {overrides.length ? overridesBlock : null}
       {rest.length ? (
@@ -11391,6 +11419,10 @@ function clearMediaCardConnection(
       onValueChange(key, "");
     }
     onValueChange("PLEX_WATCHLIST_TOKEN", "");
+    // Folders pickers; clear so a later Plex reconnect does not keep stale libraries.
+    for (const key of PATH_PLEX_DEFAULT_SECTION_KEYS) {
+      onValueChange(key, "");
+    }
   }
 }
 
@@ -11837,6 +11869,8 @@ function OnboardingWizard(props: {
   themeMode: ThemeMode;
   onBack: () => void;
   onNext: () => void;
+  /** Jump back to a completed step (stepper). Ignored for current/future steps. */
+  onGoToStep?: (index: number) => void;
   onChange: (key: string, value: unknown) => void;
   onSave?: () => Promise<void>;
   onExitPreview?: () => void;
@@ -11878,6 +11912,13 @@ function OnboardingWizard(props: {
   );
   const canUseAnySecondaryBehavior = canUseRadarrSecondaryBehavior || canUseSonarrSecondaryBehavior;
   const hasLibraryRoot = String(props.values.LIBRARY_ROOT ?? "").trim().length > 0;
+  const plexEnabled = Boolean(props.values.ENABLE_PLEX);
+  const hasPlexLibraryIds = PATH_PLEX_DEFAULT_SECTION_KEYS.every((key) => {
+    const raw = props.values[key];
+    if (raw === null || raw === undefined || String(raw).trim() === "") return false;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0;
+  });
   const allSettingsFieldsByKey = useMemo(() => {
     const m = new Map<string, SettingsField>();
     for (const section of props.payload.sections) {
@@ -11916,7 +11957,8 @@ function OnboardingWizard(props: {
     ? true
     : (() => {
         if (step.key === "welcome" || step.key === "density_search" || step.key === "arr_routing") return true;
-        if (step.key === "paths") return hasLibraryRoot;
+        // Folders collects Plex library IDs after Players connects URL/token.
+        if (step.key === "paths") return hasLibraryRoot && (!plexEnabled || hasPlexLibraryIds);
         if (step.key === "media") return hasConfirmedMediaConnection;
         if (step.key === "arr") return hasConfirmedArrConnection;
         return true;
@@ -12306,12 +12348,17 @@ function OnboardingWizard(props: {
             {wizardSteps.map((s, i) => {
               const done = i < props.stepIndex;
               const active = i === props.stepIndex;
+              const canJumpBack = done && Boolean(props.onGoToStep);
               return (
                 <div key={s.key} className="flex min-w-0 flex-1 items-center">
-                  <div
-                    className={`flex w-full min-w-0 flex-col items-center gap-1 ${
+                  <button
+                    type="button"
+                    disabled={!canJumpBack}
+                    onClick={() => props.onGoToStep?.(i)}
+                    title={canJumpBack ? `Go back to ${s.name}` : undefined}
+                    className={`flex w-full min-w-0 flex-col items-center gap-1 bg-transparent p-0 ${
                       active ? "text-slate-200" : done ? "text-slate-400" : "text-slate-600"
-                    }`}
+                    } ${canJumpBack ? "cursor-pointer hover:text-slate-200" : "cursor-default"}`}
                   >
                     <div
                       className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-[13px] font-bold font-headline transition-colors sm:h-8 sm:w-8 sm:text-[14px] ${
@@ -12320,7 +12367,7 @@ function OnboardingWizard(props: {
                           : done
                             ? "border-[#424753]/70 bg-[#252e3a] text-slate-300"
                             : "border-[#424753]/40 bg-[#1a2030] text-slate-600"
-                      }`}
+                      } ${canJumpBack ? "hover:border-slate-400" : ""}`}
                       style={
                         active
                           ? {
@@ -12342,7 +12389,7 @@ function OnboardingWizard(props: {
                     <span className="w-full px-0.5 text-center text-[10px] font-headline uppercase leading-tight tracking-wide sm:text-[11px]">
                       {s.name}
                     </span>
-                  </div>
+                  </button>
                   {i < wizardSteps.length - 1 ? (
                     <div
                       className={`mx-1 mb-5 h-px min-w-[0.35rem] flex-1 rounded-full transition-colors sm:mx-2 ${

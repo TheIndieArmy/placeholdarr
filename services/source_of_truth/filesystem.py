@@ -61,6 +61,18 @@ def configured_roots() -> list[str]:
         return [root for root in dict.fromkeys(roots) if root]
 
 
+def _translate_media_server_path(path: str | None) -> str | None:
+    """Apply media-server remote→local mappings before root checks."""
+    if not path:
+        return path
+    try:
+        from services.media_path_mappings import apply_media_server_path_mappings
+
+        return apply_media_server_path_mappings(path)
+    except Exception:
+        return path
+
+
 def _is_path_under_roots(path: str, roots: list[str]) -> bool:
     if not path:
         return False
@@ -83,6 +95,7 @@ def is_path_under_configured_roots(path: str | None) -> bool:
     """True when ``path`` lies under any configured movie/TV library root."""
     if not path:
         return False
+    path = _translate_media_server_path(path) or path
     roots = [os.path.abspath(r) for r in configured_roots() if r]
     return _is_path_under_roots(path, roots)
 
@@ -91,6 +104,7 @@ def is_path_under_tv_library_roots(path: str | None) -> bool:
     """True when ``path`` lies under configured TV library folder(s)."""
     if not path:
         return False
+    path = _translate_media_server_path(path) or path
     try:
         from services.library_destinations import all_tv_dest_roots
 
@@ -109,6 +123,7 @@ def is_path_under_movie_library_roots(path: str | None) -> bool:
     """True when ``path`` lies under configured movie library folder(s)."""
     if not path:
         return False
+    path = _translate_media_server_path(path) or path
     try:
         from services.library_destinations import all_movie_dest_roots
 
