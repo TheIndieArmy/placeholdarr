@@ -1144,6 +1144,18 @@ def _resolve_startup_sync_mode(
     return mode
 
 
+def _log_boot_placeholder_disk_guidance(*, lead: str) -> None:
+    """Info tip when boot did not run a full sync (stubs on disk are not healed)."""
+    logger.info(
+        f"{lead} "
+        "Missing placeholder files on disk are not recreated unless a full sync runs "
+        "(full sync was not overdue, so it did not run on this boot). "
+        "For a few titles, use Library → refresh that movie/series; "
+        "for a large wipe, use Activity → Tasks → Run full sync.",
+        extra={"emoji_type": "info"},
+    )
+
+
 def _enqueue_startup_request_nfo_backfill() -> dict[str, object]:
     """One-time REQUEST status NFO backfill after boot sync (non-fatal)."""
     try:
@@ -1223,6 +1235,9 @@ def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
         phases = None
 
         if selected_mode == "off":
+            _log_boot_placeholder_disk_guidance(
+                lead="Boot sync skipped: no overdue full/lite/calendar.",
+            )
             return {
                 "ran": False,
                 "startup_sync_mode": "off",
@@ -1289,6 +1304,13 @@ def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
                 ran = not bool(lite_out.get("skipped") or lite_out.get("cancelled"))
             else:
                 ran = not bool(calendar_out.get("skipped"))
+            if selected_mode == "lite" and boot_decision.get("also_run_calendar"):
+                guidance_lead = "Boot completed lite + calendar sync (full sync did not run)."
+            elif selected_mode == "lite":
+                guidance_lead = "Boot completed lite sync (full sync did not run)."
+            else:
+                guidance_lead = "Boot completed calendar sync (full sync did not run)."
+            _log_boot_placeholder_disk_guidance(lead=guidance_lead)
             return {
                 "ran": ran,
                 "startup_sync_mode": selected_mode,
