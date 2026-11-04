@@ -330,6 +330,24 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         cta_path="/settings/watchlist",
         requires_ack=True,
     ),
+    WhatsNewNotice(
+        id="path-mappings-playback-0-12-2",
+        since_version="0.12.2",
+        title="Path mappings and playback fixes",
+        body=(
+            "If Plex (or another player) sees library paths that Placeholdarr does not — "
+            "common with Windows Plex and Docker — you can now add media-server path mappings "
+            "under Settings → Paths. Placeholdarr translates those paths before deciding whether "
+            "playback is a placeholder or a real file, so search can start correctly.\n\n"
+            "This release also improves movie placeholder cleanup in Plex after import, "
+            "keeps import-grace and playback jobs ahead of large NFO/art batches, "
+            "relaxes onboarding so Plex can connect before library section IDs are filled in, "
+            "and clarifies boot logs when a full sync does not run on restart."
+        ),
+        cta_label="Open Paths settings",
+        cta_path="/settings/paths",
+        requires_ack=True,
+    ),
 )
 
 

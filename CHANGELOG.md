@@ -13,6 +13,31 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## Released
 
+## [0.12.2] - 2026-11-04
+
+### Summary
+
+- **Media-server path mappings**: Map remote Plex/player paths to Placeholdarr paths so playback search works across Docker/Windows mounts (#113).
+- **Onboarding Plex connect**: Library section IDs are no longer required before connecting Plex on the Players step (#112).
+- **Movie placeholder Plex cleanup**: Retiring a movie placeholder clears Plex like series (refresh + empty trash) (#114).
+- **Job priority / batches**: Import grace matches interactive priority; smaller NFO/art batches so playback is less starved (#115).
+- **Boot sync logging**: Clearer startup-gate messages and guidance when full sync does not run on boot (#116).
+
+### Added
+
+- **Media-server path mappings**: Settings → Paths mappings (Radarr-style remote→local) applied before placeholder-root checks on playback and related paths (#113).
+
+### Fixed
+
+- **Onboarding Plex connect**: Players step can save/connect without Plex library section IDs that only appear on Folders (#112).
+- **Movie placeholder leave Plex**: After Arr import retires a movie placeholder folder, Plex is refreshed and empty-trashed like the series path (#114).
+- **Playback vs bulk NFO/art**: Import grace jobs use interactive priority; default `STATUS_JOB_BATCH_SIZE` is 100 so workers free sooner for playback (#115).
+- **Boot sync messaging**: Quiet boots no longer look like a stuck sync; logs explain missing stub files need Library refresh or a manual full sync (#116).
+
+### Changed
+
+- **Worker startup gate logs**: “Waiting for startup gate” / “gate open” instead of implying a long sync is always running (#116).
+
 ## [0.12.1] - 2026-11-03
 
 ### Summary
