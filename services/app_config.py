@@ -3394,9 +3394,19 @@ def save_settings(
             plex_required = {
                 "PLEX_URL": "is required when Plex is enabled",
                 "PLEX_TOKEN": "is required when Plex is enabled",
-                "PLEX_MOVIE_SECTION_ID": "is required when Plex is enabled",
-                "PLEX_TV_SECTION_ID": "is required when Plex is enabled",
             }
+            # Library pickers live on Folders (paths). Players + Sign in with Plex only
+            # persist connection details first; require section IDs once that step (or a
+            # full save) collects them.
+            ctx = context if isinstance(context, dict) else {}
+            step_key = str(ctx.get("stepKey") or "").strip().lower()
+            touching_sections = any(
+                key in values for key in ("PLEX_MOVIE_SECTION_ID", "PLEX_TV_SECTION_ID")
+            )
+            require_plex_sections = (not partial) or touching_sections or step_key == "paths"
+            if require_plex_sections:
+                plex_required["PLEX_MOVIE_SECTION_ID"] = "is required when Plex is enabled"
+                plex_required["PLEX_TV_SECTION_ID"] = "is required when Plex is enabled"
             for required_key, message in plex_required.items():
                 value = validated.get(required_key, getattr(settings, required_key, None))
                 if _is_blank(value):

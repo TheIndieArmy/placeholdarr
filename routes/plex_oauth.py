@@ -166,7 +166,12 @@ async def plex_oauth_complete(body: PlexOAuthCompleteRequest):
     if client_id:
         values["PLEX_OAUTH_CLIENT_ID"] = client_id
 
-    save_result = save_settings(values, partial=True)
+    # Connection-only: section IDs are collected on Folders / Paths, not here.
+    save_result = save_settings(
+        values,
+        partial=True,
+        context={"source": "plex_oauth", "stepKey": "media", "stepName": "Players"},
+    )
     if not save_result.get("ok"):
         raise HTTPException(
             status_code=500,

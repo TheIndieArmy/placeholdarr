@@ -2557,6 +2557,14 @@ export function App() {
         themeMode={themeMode}
         onBack={() => setOnboardingStepIndex((i) => Math.max(0, i - 1))}
         onNext={() => setOnboardingStepIndex((i) => Math.min(wizardSteps.length - 1, i + 1))}
+        onGoToStep={(index) =>
+          setOnboardingStepIndex((i) => {
+            const max = wizardSteps.length - 1;
+            const target = Math.max(0, Math.min(max, index));
+            // Only allow revisiting completed steps (not skipping ahead).
+            return target < i ? target : i;
+          })
+        }
         onPartialSave={handlePartialSave}
         onChange={(key, value) => setFieldValues((prev) => ({ ...prev, [key]: value }))}
         onTestConnection={
@@ -11391,6 +11399,10 @@ function clearMediaCardConnection(
       onValueChange(key, "");
     }
     onValueChange("PLEX_WATCHLIST_TOKEN", "");
+    // Folders pickers; clear so a later Plex reconnect does not keep stale libraries.
+    for (const key of PATH_PLEX_DEFAULT_SECTION_KEYS) {
+      onValueChange(key, "");
+    }
   }
 }
 
@@ -11837,6 +11849,8 @@ function OnboardingWizard(props: {
   themeMode: ThemeMode;
   onBack: () => void;
   onNext: () => void;
+  /** Jump back to a completed step (stepper). Ignored for current/future steps. */
+  onGoToStep?: (index: number) => void;
   onChange: (key: string, value: unknown) => void;
   onSave?: () => Promise<void>;
   onExitPreview?: () => void;
@@ -11878,6 +11892,13 @@ function OnboardingWizard(props: {
   );
   const canUseAnySecondaryBehavior = canUseRadarrSecondaryBehavior || canUseSonarrSecondaryBehavior;
   const hasLibraryRoot = String(props.values.LIBRARY_ROOT ?? "").trim().length > 0;
+  const plexEnabled = Boolean(props.values.ENABLE_PLEX);
+  const hasPlexLibraryIds = PATH_PLEX_DEFAULT_SECTION_KEYS.every((key) => {
+    const raw = props.values[key];
+    if (raw === null || raw === undefined || String(raw).trim() === "") return false;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0;
+  });
   const allSettingsFieldsByKey = useMemo(() => {
     const m = new Map<string, SettingsField>();
     for (const section of props.payload.sections) {
@@ -11916,7 +11937,8 @@ function OnboardingWizard(props: {
     ? true
     : (() => {
         if (step.key === "welcome" || step.key === "density_search" || step.key === "arr_routing") return true;
-        if (step.key === "paths") return hasLibraryRoot;
+        // Folders collects Plex library IDs after Players connects URL/token.
+        if (step.key === "paths") return hasLibraryRoot && (!plexEnabled || hasPlexLibraryIds);
         if (step.key === "media") return hasConfirmedMediaConnection;
         if (step.key === "arr") return hasConfirmedArrConnection;
         return true;
@@ -12306,12 +12328,17 @@ function OnboardingWizard(props: {
             {wizardSteps.map((s, i) => {
               const done = i < props.stepIndex;
               const active = i === props.stepIndex;
+              const canJumpBack = done && Boolean(props.onGoToStep);
               return (
                 <div key={s.key} className="flex min-w-0 flex-1 items-center">
-                  <div
-                    className={`flex w-full min-w-0 flex-col items-center gap-1 ${
+                  <button
+                    type="button"
+                    disabled={!canJumpBack}
+                    onClick={() => props.onGoToStep?.(i)}
+                    title={canJumpBack ? `Go back to ${s.name}` : undefined}
+                    className={`flex w-full min-w-0 flex-col items-center gap-1 bg-transparent p-0 ${
                       active ? "text-slate-200" : done ? "text-slate-400" : "text-slate-600"
-                    }`}
+                    } ${canJumpBack ? "cursor-pointer hover:text-slate-200" : "cursor-default"}`}
                   >
                     <div
                       className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-[13px] font-bold font-headline transition-colors sm:h-8 sm:w-8 sm:text-[14px] ${
@@ -12320,7 +12347,7 @@ function OnboardingWizard(props: {
                           : done
                             ? "border-[#424753]/70 bg-[#252e3a] text-slate-300"
                             : "border-[#424753]/40 bg-[#1a2030] text-slate-600"
-                      }`}
+                      } ${canJumpBack ? "hover:border-slate-400" : ""}`}
                       style={
                         active
                           ? {
@@ -12342,7 +12369,7 @@ function OnboardingWizard(props: {
                     <span className="w-full px-0.5 text-center text-[10px] font-headline uppercase leading-tight tracking-wide sm:text-[11px]">
                       {s.name}
                     </span>
-                  </div>
+                  </button>
                   {i < wizardSteps.length - 1 ? (
                     <div
                       className={`mx-1 mb-5 h-px min-w-[0.35rem] flex-1 rounded-full transition-colors sm:mx-2 ${

@@ -103,3 +103,6 @@ frontend/dist/
 .nvmrc
 bin/
 env.sh
+
+# Local settings export/restore for test instances (may contain secrets)
+.settings-backups/
