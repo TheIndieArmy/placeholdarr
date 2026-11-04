@@ -298,6 +298,9 @@ class Settings(BaseSettings):
     # Optional JSON array: Arr instance + root folder → Placeholdarr dest + Plex section.
     # Empty = all titles use LIBRARY_ROOT-derived movies/tv and primary Plex section IDs.
     LIBRARY_DESTINATION_MAP_JSON: str = ""
+    # Media-server path → Placeholdarr path (Windows Plex / remote mounts). JSON array of
+    # { "remote": "K:/Seeding/.../media", "local": "/media" }.
+    MEDIA_SERVER_PATH_MAPPINGS_JSON: str = ""
 
     # Queue monitor /queue poll cadence (seconds between Radarr/Sonarr queue API polls).
     #
