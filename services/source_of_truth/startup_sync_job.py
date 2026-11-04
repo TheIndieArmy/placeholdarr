@@ -346,7 +346,19 @@ def process_startup_sync_runner_job(session, job: Job) -> dict[str, Any]:
                 extra={"emoji_type": "info"},
             )
         else:
-            logger.debug("Startup source-of-truth disabled by config flags", extra={"emoji_type": "debug"})
+            skip_reason = startup_result.get("reason") or "unknown"
+            skip_mode = startup_result.get("startup_sync_mode")
+            if skip_reason == "boot_chose_off":
+                # Informative skip line already logged in run_startup_source_of_truth.
+                logger.debug(
+                    f"Startup source-of-truth skipped reason={skip_reason} mode={skip_mode}",
+                    extra={"emoji_type": "debug"},
+                )
+            else:
+                logger.info(
+                    f"Startup source-of-truth skipped reason={skip_reason} mode={skip_mode}",
+                    extra={"emoji_type": "info"},
+                )
         return {"ok": True, "reason": reason, "result": startup_result}
 
     finally:

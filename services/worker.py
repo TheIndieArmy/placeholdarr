@@ -1189,10 +1189,20 @@ def _executor_loop():
 
     if not startup_sync_complete.is_set():
         logger.info(
-            'Worker holding: waiting for startup sync to complete...',
-            extra={'emoji_type': 'info'},
+            "Worker holding: waiting for startup gate to open…",
+            extra={"emoji_type": "info"},
         )
         startup_sync_complete.wait(timeout=1800)
+        if startup_sync_complete.is_set():
+            logger.info(
+                "Worker startup gate open; beginning job drain",
+                extra={"emoji_type": "info"},
+            )
+        else:
+            logger.warning(
+                "Worker startup gate still closed after wait timeout; draining anyway",
+                extra={"emoji_type": "warning"},
+            )
 
     notify_on = _notify_enabled()
     if notify_on:
