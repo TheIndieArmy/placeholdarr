@@ -12,7 +12,7 @@ from services.postgres.models import Job
 
 
 def job_batch_size() -> int:
-    return max(1, int(getattr(settings, "STATUS_JOB_BATCH_SIZE", 250) or 250))
+    return max(1, int(getattr(settings, "STATUS_JOB_BATCH_SIZE", 100) or 100))
 
 
 def job_debounce_seconds() -> float:

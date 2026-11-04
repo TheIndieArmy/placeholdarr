@@ -7,9 +7,9 @@ and order claims by ``priority DESC, run_after ASC, id ASC``. Higher
 numbers come first.
 
 Defaults (see ``default_priority_for``):
-- 100 — webhook events, playback start (operator-visible latency)
+- 100 — webhook events, playback start, import grace (operator-visible latency)
 - 50  — NFO refresh, queue monitor (semi-interactive)
-- 10  — entity materialization, import grace (background, but cheap)
+- 10  — entity materialization (background, but cheap)
 - 0   — full sync, calendar phase, media refresh batch (true background)
 """
 
@@ -28,11 +28,12 @@ _PRIORITY_BY_TYPE: dict[str, int] = {
     "webhook_event": PRIORITY_INTERACTIVE,
     "playback_fallback": PRIORITY_INTERACTIVE,
     "entity_reconcile": PRIORITY_INTERACTIVE,
+    # Same tier as playback so countdown ticks aren't stuck behind NFO/art batches.
+    "import_grace": PRIORITY_INTERACTIVE,
     "nfo_refresh": PRIORITY_SEMI_INTERACTIVE,
     "placeholder_art_refresh": PRIORITY_SEMI_INTERACTIVE,
     "queue_monitor": PRIORITY_SEMI_INTERACTIVE,
     "entity_materialization": PRIORITY_BACKGROUND_LIGHT,
-    "import_grace": PRIORITY_BACKGROUND_LIGHT,
     "poster_language_resolve": PRIORITY_BACKGROUND_LIGHT,
     "media_refresh": PRIORITY_BACKGROUND,
     "startup_sync_runner": PRIORITY_BACKGROUND,
