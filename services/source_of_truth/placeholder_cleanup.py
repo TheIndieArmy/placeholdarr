@@ -122,11 +122,43 @@ def _derive_series_folder(series: Any, season: Any, candidate_paths: list[str]) 
 	return None
 
 
-def cleanup_movie_placeholder_files(*, candidate_paths: list[str]) -> dict[str, Any]:
+def finalize_deferred_movie_folder_deletes(folders: list[str] | set[str] | tuple[str, ...] | None) -> int:
+	"""Remove empty movie title folders after Plex has refreshed + emptied trash."""
+	deleted = 0
+	seen: set[str] = set()
+	for folder in folders or []:
+		text = str(folder or "").strip()
+		if not text:
+			continue
+		abs_folder = os.path.abspath(text)
+		if abs_folder in seen:
+			continue
+		seen.add(abs_folder)
+		if _remove_dir_if_empty(abs_folder):
+			deleted += 1
+	return deleted
+
+
+def cleanup_movie_placeholder_files(
+	*,
+	candidate_paths: list[str],
+	defer_empty_folder_delete: bool = False,
+) -> dict[str, Any]:
+	"""Remove movie placeholder media files.
+
+	When ``defer_empty_folder_delete`` is True (event-scoped retire), keep the
+	title folder so Plex can path-refresh it (same pattern as series), empty
+	trash, then callers remove the folder via
+	:func:`finalize_deferred_movie_folder_deletes`.
+
+	When False (e.g. full sync), remove empty title folders immediately and
+	refresh the nearest still-existing ancestor.
+	"""
 	deleted_any = False
 	nfo_deleted_any = False
 	directories_deleted = 0
 	refresh_paths: set[str] = set()
+	deferred_folder_deletes: set[str] = set()
 	paths = _unique_paths(candidate_paths)
 
 	for path in paths:
@@ -136,9 +168,23 @@ def cleanup_movie_placeholder_files(*, candidate_paths: list[str]) -> dict[str, 
 
 	for path in paths:
 		movie_folder = os.path.dirname(path)
-		if _remove_dir_if_empty(movie_folder):
+		if not movie_folder:
+			continue
+		abs_folder = os.path.abspath(movie_folder)
+		if defer_empty_folder_delete:
+			# Keep the title folder for path-scoped Plex refresh (series-style).
+			if os.path.isdir(abs_folder):
+				refresh_paths.add(abs_folder)
+				deferred_folder_deletes.add(abs_folder)
+			else:
+				refresh_path = _nearest_existing_dir(abs_folder)
+				if refresh_path:
+					refresh_paths.add(refresh_path)
+			continue
+
+		if _remove_dir_if_empty(abs_folder):
 			directories_deleted += 1
-		refresh_path = _nearest_existing_dir(movie_folder)
+		refresh_path = _nearest_existing_dir(abs_folder)
 		if refresh_path:
 			refresh_paths.add(refresh_path)
 
@@ -148,6 +194,7 @@ def cleanup_movie_placeholder_files(*, candidate_paths: list[str]) -> dict[str, 
 		"directories_deleted": directories_deleted,
 		"series_nfo_deleted": False,
 		"refresh_paths": sorted(refresh_paths),
+		"deferred_folder_deletes": sorted(deferred_folder_deletes),
 	}
 
 

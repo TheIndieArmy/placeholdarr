@@ -71,7 +71,7 @@ def _coalesce_group_id(kind: str) -> str:
 
 def _merge_path_payload(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
     merged = dict(existing)
-    for key in ("created_paths", "delete_paths"):
+    for key in ("created_paths", "delete_paths", "deferred_folder_deletes"):
         old_paths = merged.get(key) or []
         new_paths = incoming.get(key) or []
         if not isinstance(old_paths, list):
@@ -411,6 +411,11 @@ def process_media_refresh_job(session, job: Job) -> dict[str, Any]:
         if kind == KIND_DELAYED_FINAL:
             created_paths = list(payload.get("created_paths") or [])
             delete_paths = list(payload.get("delete_paths") or [])
+            deferred_folders = list(payload.get("deferred_folder_deletes") or [])
+            empty_trash_on_delete = _coerce_bool(
+                payload.get("empty_trash"),
+                default=bool(delete_paths or deferred_folders),
+            ) and bool(delete_paths or deferred_folders)
             stats = refresh_all_path_batches_with_section_fallback(
                 [
                     (set(created_paths), "Created"),
@@ -421,10 +426,21 @@ def process_media_refresh_job(session, job: Job) -> dict[str, Any]:
                 enable_section_fallback=False,
                 fallback_wait_seconds=0,
                 include_plex=include_plex,
+                empty_trash_on_delete=empty_trash_on_delete,
             )
+            folders_removed = 0
+            if deferred_folders:
+                from services.source_of_truth.placeholder_cleanup import (
+                    finalize_deferred_movie_folder_deletes,
+                )
+
+                folders_removed = finalize_deferred_movie_folder_deletes(deferred_folders)
+            stats["deferred_folders_removed"] = folders_removed
             logger.info(
                 f"{log_prefix} completed delayed final media server refresh: "
-                f"refreshed={stats.get('refreshed', 0)} failed={stats.get('failed', 0)}",
+                f"refreshed={stats.get('refreshed', 0)} failed={stats.get('failed', 0)} "
+                f"trash_emptied={stats.get('trash_emptied', 0)} empty_trash={empty_trash_on_delete} "
+                f"deferred_folders_removed={folders_removed}",
                 extra={"emoji_type": "success"},
             )
             return {"ok": True, "kind": kind, "stats": stats}

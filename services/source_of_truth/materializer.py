@@ -43,6 +43,7 @@ from services.source_of_truth.placeholder_cleanup import (
     cleanup_deleted_series_placeholder_files,
     cleanup_episode_placeholder_files,
     cleanup_movie_placeholder_files,
+    finalize_deferred_movie_folder_deletes,
 )
 from services.source_of_truth.media_refresh_handler import (
     KIND_BULK_INITIAL,
@@ -139,9 +140,10 @@ def schedule_scoped_placeholder_media_refresh(
     *,
     created_paths: list[str] | None = None,
     delete_paths: list[str] | None = None,
+    deferred_folder_deletes: list[str] | None = None,
     has_movies: bool = False,
     has_episodes: bool = False,
-    delay_seconds: float = 20.0,
+    delay_seconds: float = 2.0,
 ) -> None:
     """Schedule the same delayed Created/Deleted path refresh as scoped materialization.
 
@@ -150,8 +152,10 @@ def schedule_scoped_placeholder_media_refresh(
     """
     created = sorted({str(p).strip() for p in (created_paths or []) if str(p or "").strip()})
     deleted = sorted({str(p).strip() for p in (delete_paths or []) if str(p or "").strip()})
-    if not created and not deleted:
+    deferred = sorted({str(p).strip() for p in (deferred_folder_deletes or []) if str(p or "").strip()})
+    if not created and not deleted and not deferred:
         return
+    empty_trash_on_delete = bool(deleted or deferred)
 
     def _trigger_delayed_final_refresh() -> None:
         refresh_stats = refresh_all_path_batches_with_section_fallback(
@@ -164,11 +168,16 @@ def schedule_scoped_placeholder_media_refresh(
             enable_section_fallback=False,
             fallback_wait_seconds=0,
             include_plex=True,
+            empty_trash_on_delete=empty_trash_on_delete,
         )
+        folders_removed = finalize_deferred_movie_folder_deletes(deferred)
         logger.info(
-            "Completed delayed final media server refresh: refreshed=%s failed=%s",
+            "Completed delayed final media server refresh: refreshed=%s failed=%s "
+            "trash_emptied=%s deferred_folders_removed=%s",
             refresh_stats.get("refreshed", 0),
             refresh_stats.get("failed", 0),
+            refresh_stats.get("trash_emptied", 0),
+            folders_removed,
             extra={"emoji_type": "success"},
         )
 
@@ -182,8 +191,10 @@ def schedule_scoped_placeholder_media_refresh(
             "include_plex": True,
             "created_paths": created,
             "delete_paths": deleted,
+            "deferred_folder_deletes": deferred,
+            "empty_trash": empty_trash_on_delete,
         },
-        log_message="Media server refreshes were scheduled to run asynchronously in 20 seconds.",
+        log_message="Media server refreshes were scheduled to run asynchronously in 2 seconds.",
     )
 
 
@@ -672,7 +683,13 @@ def _record_series_bulk_delete_history(
     )
 
 
-def apply_movie_materialization(movie_id: int, session=None, activity_reason: str | None = None) -> dict[str, Any]:
+def apply_movie_materialization(
+    movie_id: int,
+    session=None,
+    activity_reason: str | None = None,
+    *,
+    defer_empty_folder_delete: bool = False,
+) -> dict[str, Any]:
     owns_session = session is None
     session = session or get_session()
     try:
@@ -777,7 +794,10 @@ def apply_movie_materialization(movie_id: int, session=None, activity_reason: st
                     "action": "noop_stale_obsolete",
                     "movie_id": movie.id,
                 }
-            cleanup_result = cleanup_movie_placeholder_files(candidate_paths=disk_paths)
+            cleanup_result = cleanup_movie_placeholder_files(
+                candidate_paths=disk_paths,
+                defer_empty_folder_delete=bool(defer_empty_folder_delete),
+            )
 
             movie.has_placeholder = False
             movie.placeholder_filepath = None
@@ -797,6 +817,7 @@ def apply_movie_materialization(movie_id: int, session=None, activity_reason: st
                 "directories_deleted": cleanup_result.get("directories_deleted", 0),
                 "series_nfo_deleted": cleanup_result.get("series_nfo_deleted", False),
                 "refresh_paths": cleanup_result.get("refresh_paths", []),
+                "deferred_folder_deletes": cleanup_result.get("deferred_folder_deletes", []),
                 "path": first_path,
                 "movie_id": movie.id,
             }
@@ -1036,6 +1057,7 @@ def _run_materialization_for_ids(
     }
     changed_paths: set[str] = set()
     delete_refresh_paths: set[str] = set()
+    deferred_movie_folder_deletes: set[str] = set()
     stats["movies_considered"] = len(movie_ids)
     stats["episodes_considered"] = len(episode_ids)
     activity_reason = _activity_reason_from_observation_source(observation_source)
@@ -1214,8 +1236,14 @@ def _run_materialization_for_ids(
         return obsolete_ids, needs_ids
 
     def _process_single_movie_materialization(movie_id: int) -> None:
-        nonlocal stats, changed_paths, delete_refresh_paths, movie_phase_start_mono, last_movie_periodic_refresh_mono
-        result = apply_movie_materialization(movie_id, session=session, activity_reason=activity_reason)
+        nonlocal stats, changed_paths, delete_refresh_paths, deferred_movie_folder_deletes
+        nonlocal movie_phase_start_mono, last_movie_periodic_refresh_mono
+        result = apply_movie_materialization(
+            movie_id,
+            session=session,
+            activity_reason=activity_reason,
+            defer_empty_folder_delete=not is_full_sync,
+        )
         if not result.get("ok"):
             stats["errors"] += 1
             logger.error(
@@ -1271,6 +1299,9 @@ def _run_materialization_for_ids(
             for refresh_path in result.get("refresh_paths", []) or []:
                 delete_refresh_paths.add(refresh_path)
                 overlap_state["pending_delete_paths"].add(refresh_path)
+            for folder in result.get("deferred_folder_deletes", []) or []:
+                if folder:
+                    deferred_movie_folder_deletes.add(str(folder))
         else:
             stats["noop"] += 1
 
@@ -1735,6 +1766,9 @@ def _run_materialization_for_ids(
         density_touched_tv = bool(changed_paths or delete_refresh_paths)
         has_episodes_refresh = bool(episode_ids) or density_touched_tv
 
+        empty_trash_on_delete = bool(delete_refresh_paths or deferred_movie_folder_deletes)
+        deferred_folders = sorted(set(deferred_movie_folder_deletes))
+
         def _trigger_delayed_final_refresh():
             refresh_stats = refresh_all_path_batches_with_section_fallback(
                 [
@@ -1746,16 +1780,20 @@ def _run_materialization_for_ids(
                 enable_section_fallback=False,
                 fallback_wait_seconds=0,
                 include_plex=True,
+                empty_trash_on_delete=empty_trash_on_delete,
             )
+            folders_removed = finalize_deferred_movie_folder_deletes(deferred_folders)
             logger.info(
                 f"Completed delayed final media server refresh: refreshed={refresh_stats.get('refreshed', 0)} "
-                f"failed={refresh_stats.get('failed', 0)}",
+                f"failed={refresh_stats.get('failed', 0)} "
+                f"trash_emptied={refresh_stats.get('trash_emptied', 0)} "
+                f"deferred_folders_removed={folders_removed}",
                 extra={"emoji_type": "success"},
             )
 
         _schedule_media_refresh(
             _trigger_delayed_final_refresh,
-            delay_seconds=20.0,
+            delay_seconds=2.0,
             kind=KIND_DELAYED_FINAL,
             payload={
                 "has_movies": bool(movie_ids),
@@ -1763,8 +1801,10 @@ def _run_materialization_for_ids(
                 "include_plex": True,
                 "created_paths": sorted(set(changed_paths)),
                 "delete_paths": sorted(set(delete_refresh_paths)),
+                "deferred_folder_deletes": deferred_folders,
+                "empty_trash": empty_trash_on_delete,
             },
-            log_message="Media server refreshes were scheduled to run asynchronously in 20 seconds.",
+            log_message="Media server refreshes were scheduled to run asynchronously in 2 seconds.",
         )
 
     _scoped_phase("materialization core returning (next step is session.commit in caller)")
