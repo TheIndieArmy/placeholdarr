@@ -512,6 +512,23 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "MEDIA_SERVER_PATH_MAPPINGS_JSON",
+            {
+                "section": "Paths",
+                "label": "Media server path mappings",
+                "description": (
+                    "Optional remote→local path prefixes when your media player reports different paths than "
+                    "Placeholdarr sees (for example Windows Plex K:\\...\\media vs Docker /media). "
+                    "Like Radarr remote path mappings: longest matching remote prefix wins. "
+                    "Needed so playback can recognize placeholders and start a search."
+                ),
+                "type": "string",
+                "required": False,
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
             "REFRESH_REAL_LIBRARIES_ON_ARR_EVENTS",
             {
                 "section": "Paths",
@@ -3485,6 +3502,34 @@ def save_settings(
                             )
                 except Exception as exc:
                     errors["LIBRARY_DESTINATION_MAP_JSON"] = f"invalid JSON: {exc}"
+
+        if "MEDIA_SERVER_PATH_MAPPINGS_JSON" in validated:
+            raw_maps = str(validated.get("MEDIA_SERVER_PATH_MAPPINGS_JSON") or "").strip()
+            if raw_maps:
+                try:
+                    from services.media_path_mappings import (
+                        parse_media_server_path_mappings,
+                        validate_media_server_path_mappings,
+                    )
+                    import json as _json
+
+                    payload = _json.loads(raw_maps)
+                    if not isinstance(payload, list):
+                        errors["MEDIA_SERVER_PATH_MAPPINGS_JSON"] = "must be a JSON array"
+                    else:
+                        map_err = validate_media_server_path_mappings(payload)
+                        if map_err:
+                            errors["MEDIA_SERVER_PATH_MAPPINGS_JSON"] = map_err
+                        else:
+                            normalized_maps = parse_media_server_path_mappings(raw_maps)
+                            validated["MEDIA_SERVER_PATH_MAPPINGS_JSON"] = _json.dumps(
+                                normalized_maps,
+                                separators=(",", ":"),
+                            )
+                except Exception as exc:
+                    errors["MEDIA_SERVER_PATH_MAPPINGS_JSON"] = f"invalid JSON: {exc}"
+            else:
+                validated["MEDIA_SERVER_PATH_MAPPINGS_JSON"] = ""
 
         if "ARR_INSTANCES_JSON" in validated:
             prev_row = _get_row(session, "ARR_INSTANCES_JSON")

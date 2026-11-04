@@ -30,6 +30,7 @@ import {
 } from "./api/dashboard";
 import { getCollectionPlexSections } from "./api/collections";
 import { DestinationMapEditor } from "./settings/DestinationMapEditor";
+import { PathMappingsEditor } from "./settings/PathMappingsEditor";
 import type { IntegrationsStatusResponse, PlexSectionOption } from "./types/api";
 import { postTaskAbandon, postTaskRun } from "./api/tasks";
 import { fetchJson, postJson, setUnauthorizedHandler, getCsrfToken } from "./api/client";
@@ -508,6 +509,7 @@ const ONBOARDING_HERO_LIGHT_CENTER_SLOTS_WIDE = [3, 4, 11, 12] as const;
 
 const PATH_LIBRARY_ROOT_KEY = "LIBRARY_ROOT";
 const PATH_DESTINATION_MAP_KEY = "LIBRARY_DESTINATION_MAP_JSON";
+const PATH_MEDIA_PATH_MAPPINGS_KEY = "MEDIA_SERVER_PATH_MAPPINGS_JSON";
 const PATH_PLEX_DEFAULT_SECTION_KEYS = ["PLEX_MOVIE_SECTION_ID", "PLEX_TV_SECTION_ID"] as const;
 const PATH_PROFILE_KEYS = [] as const;
 const PATH_PER_LIBRARY_OVERRIDE_KEYS = [] as const;
@@ -609,6 +611,7 @@ function partitionLibraryPathFields(fields: SettingsField[]) {
   const byKey = new Map(fields.map((f) => [f.key, f]));
   const root = byKey.get(PATH_LIBRARY_ROOT_KEY);
   const destinationMap = byKey.get(PATH_DESTINATION_MAP_KEY);
+  const pathMappings = byKey.get(PATH_MEDIA_PATH_MAPPINGS_KEY);
   const plexDefaults = PATH_PLEX_DEFAULT_SECTION_KEYS.map((k) => byKey.get(k)).filter(Boolean) as SettingsField[];
   const profiles = PATH_PROFILE_KEYS.map((k) => byKey.get(k)).filter(Boolean) as SettingsField[];
   const overrides = PATH_PER_LIBRARY_OVERRIDE_KEYS.map((k) => byKey.get(k)).filter(Boolean) as SettingsField[];
@@ -616,11 +619,12 @@ function partitionLibraryPathFields(fields: SettingsField[]) {
     (f) =>
       f.key !== PATH_LIBRARY_ROOT_KEY &&
       f.key !== PATH_DESTINATION_MAP_KEY &&
+      f.key !== PATH_MEDIA_PATH_MAPPINGS_KEY &&
       !plexDefaultSet.has(f.key) &&
       !profileSet.has(f.key) &&
       !overrideSet.has(f.key)
   );
-  return { root, plexDefaults, destinationMap, profiles, overrides, rest };
+  return { root, plexDefaults, destinationMap, pathMappings, profiles, overrides, rest };
 }
 
 const URL_TEST_TARGET: Record<string, { service: "plex" | "jellyfin" | "emby" | "radarr" | "sonarr"; credentialKey: string }> = {
@@ -6870,7 +6874,7 @@ function LibraryPathsForm(props: {
   runTest?: (field: SettingsField) => void;
   testResults?: Record<string, { ok: boolean; message: string }>;
 }) {
-  const { root, plexDefaults, destinationMap, profiles, overrides, rest } = useMemo(
+  const { root, plexDefaults, destinationMap, pathMappings, profiles, overrides, rest } = useMemo(
     () => partitionLibraryPathFields(props.fields),
     [props.fields],
   );
@@ -7268,6 +7272,20 @@ function LibraryPathsForm(props: {
     </div>
   ) : null;
 
+  const pathMappingsBlock = pathMappings ? (
+    <div className={props.layout === "settings" ? `${UI_SECTION_FRAME_CLASS} px-4 py-4` : undefined}>
+      <label className="block text-[16px] font-semibold text-white font-headline mb-1">
+        Media server path mappings
+      </label>
+      <PathMappingsEditor
+        value={String(props.values[pathMappings.key] ?? "")}
+        onChange={(json) => props.onValueChange(pathMappings.key, json)}
+        focusClass={focus}
+        layout={props.layout}
+      />
+    </div>
+  ) : null;
+
   const profileBlock = profiles.length ? (
     <div className={`${UI_SECTION_FRAME_CLASS} px-4 py-4`}>
       <div className={`${SETTINGS_DENSITY_LEGEND_CLASS} mb-2`}>Folder Profiles</div>
@@ -7329,6 +7347,7 @@ function LibraryPathsForm(props: {
             {rootBlock}
             {plexDefaultsBlock}
             {destinationMapBlock}
+            {pathMappingsBlock}
             {profileBlock}
             {overridesBlock}
             {rest.map((field) => (
@@ -7349,6 +7368,7 @@ function LibraryPathsForm(props: {
       {root ? rootBlock : null}
       {plexDefaults.length ? plexDefaultsBlock : null}
       {destinationMap ? destinationMapBlock : null}
+      {pathMappings ? pathMappingsBlock : null}
       {profiles.length ? profileBlock : null}
       {overrides.length ? overridesBlock : null}
       {rest.length ? (
