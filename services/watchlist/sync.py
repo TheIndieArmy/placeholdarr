@@ -213,9 +213,11 @@ def upsert_watchlist_from_home(payload: dict[str, Any]) -> dict[str, Any]:
     active_ids = {str(uid).strip() for uid in by_user.keys() if str(uid or "").strip()}
     prune_stale_home = not bool(getattr(settings, "WATCHLIST_SYNC_HOME_USERS", False))
 
-    created = updated = memberships_upserted = memberships_removed = 0
+    created = updated = memberships_upserted = memberships_removed = items_removed = 0
     session = get_session()
     try:
+        from sqlalchemy import exists
+
         existing_items = {r.identity_key: r for r in session.query(PlexWatchlistItem).all()}
         existing_users = {u.plex_user_id: u for u in session.query(PlexWatchlistUser).all()}
 
@@ -350,6 +352,21 @@ def upsert_watchlist_from_home(payload: dict[str, Any]) -> dict[str, Any]:
                 user.updated_at = now
 
         session.flush()
+        # Titles with no remaining memberships leave the watchlist table.
+        # Arr catalog / placeholders stay; Arr is SoT after Accept.
+        orphans = (
+            session.query(PlexWatchlistItem)
+            .filter(
+                ~exists().where(PlexWatchlistMembership.watchlist_item_id == PlexWatchlistItem.id)
+            )
+            .all()
+        )
+        for row in orphans:
+            existing_items.pop(str(row.identity_key or ""), None)
+            session.delete(row)
+            items_removed += 1
+        if orphans:
+            session.flush()
         _apply_coverage_statuses(session, list(existing_items.values()))
         session.commit()
     finally:
@@ -363,6 +380,7 @@ def upsert_watchlist_from_home(payload: dict[str, Any]) -> dict[str, Any]:
         "updated": updated,
         "memberships_upserted": memberships_upserted,
         "memberships_removed": memberships_removed,
+        "items_removed": items_removed,
         "user_errors": {str(k): str(v) for k, v in errors.items()},
     }
 
@@ -994,6 +1012,15 @@ def _serialize_user(u: PlexWatchlistUser) -> dict[str, Any]:
             is_protected=bool(u.is_protected),
         )
     on_new = on_new_override_for_user(u)
+    not_found = str(block or "").strip() == "not_found"
+    sole_titles = None
+    if not_found:
+        try:
+            from services.watchlist.roster import sole_title_count_for_user
+
+            sole_titles = sole_title_count_for_user(str(u.plex_user_id))
+        except Exception:
+            sole_titles = None
     return {
         "plex_user_id": u.plex_user_id,
         "plex_uuid": u.plex_uuid,
@@ -1004,6 +1031,8 @@ def _serialize_user(u: PlexWatchlistUser) -> dict[str, Any]:
         "relationship": rel,
         "fetch_method": getattr(u, "fetch_method", None),
         "block_reason": block,
+        "not_found": not_found,
+        "sole_title_count": sole_titles,
         "on_plex_home": bool(on_home),
         "home_profile": str(home_profile) if home_profile else None,
         "is_admin": bool(u.is_admin),

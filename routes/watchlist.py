@@ -85,6 +85,22 @@ async def watchlist_user_patch(plex_user_id: str, body: WatchlistUserPatchReques
     return {"ok": True, "user": updated}
 
 
+@router.delete("/api/watchlist/users/{plex_user_id}")
+async def watchlist_user_delete(plex_user_id: str):
+    """Remove a roster person (e.g. unfriended). Drops their memberships and sole titles."""
+    from services.watchlist.roster import remove_watchlist_user
+
+    result = remove_watchlist_user(plex_user_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Watchlist user not found")
+    if not result.get("ok"):
+        detail = result.get("error") or "Could not remove watchlist user"
+        if detail == "owner_cannot_remove":
+            raise HTTPException(status_code=400, detail="The owner cannot be removed from the roster")
+        raise HTTPException(status_code=400, detail=str(detail))
+    return result
+
+
 @router.post("/api/watchlist/roster/refresh")
 async def watchlist_roster_refresh():
     """Reclassify friends ∩ server shares ∩ Home without a full title sync."""

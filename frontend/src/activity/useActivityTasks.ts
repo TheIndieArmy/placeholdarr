@@ -51,7 +51,7 @@ export function useActivityTasks(opts: {
     }
 
     try {
-      const [payload, sched, hist] = await Promise.all([getStats(), getTasksScheduled(), getTasksHistory(50)]);
+      const [payload, sched, hist] = await Promise.all([getStats(), getTasksScheduled(), getTasksHistory(30)]);
       setStats(payload);
       setScheduledTasks(sched.tasks || []);
       setTaskHistory(hist || []);

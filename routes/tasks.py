@@ -25,11 +25,14 @@ from services.source_of_truth.placeholder_refresh import (
     run_placeholder_refresh_task,
 )
 from services.task_run_history import (
+    DEFAULT_HISTORY_PER_TASK,
+    MAX_HISTORY_PER_TASK,
     abandon_orphaned_working_task_runs,
     abandon_task_run,
     get_working_run,
     latest_finished_run,
     list_recent_runs,
+    maybe_prune_old_task_runs,
 )
 from services.task_run_phases import reconcile_stuck_art_backfill_tasks
 
@@ -204,10 +207,31 @@ def _interval_label(hours: int) -> str:
 
 
 @router.get("/api/tasks/history")
-async def tasks_history(limit: int = Query(50, ge=1, le=200)):
+async def tasks_history(
+    per_task: int = Query(
+        DEFAULT_HISTORY_PER_TASK,
+        ge=1,
+        le=MAX_HISTORY_PER_TASK,
+        description="Last N runs per task_key (fair history; default).",
+    ),
+    task_keys: str | None = Query(
+        None,
+        description="Optional comma-separated task_key filter (e.g. full_sync,watchlist_sync).",
+    ),
+):
+    """Task run history for Activity → Tasks.
+
+    Default is last ``per_task`` rows per task type so a 5-minute Watchlist poll
+    cannot push Full/Lite/Calendar out of the loaded window. Finished runs older
+    than 30 days are pruned opportunistically.
+    """
     reconcile_stuck_art_backfill_tasks()
     reconcile_stuck_placeholder_refresh_tasks()
-    runs = list_recent_runs(limit=limit)
+    maybe_prune_old_task_runs()
+    keys = None
+    if task_keys is not None and str(task_keys).strip():
+        keys = [p.strip() for p in str(task_keys).split(",") if p.strip()]
+    runs = list_recent_runs(per_task=per_task, task_keys=keys)
     return [_serialize_run(r) for r in runs]
 
 

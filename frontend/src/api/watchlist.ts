@@ -82,8 +82,12 @@ export interface WatchlistUser {
   relationship?: string | null;
   /** discover | graphql | home_switch | none */
   fetch_method?: string | null;
-  /** needs_friend_or_token | needs_pin_or_token | home_switch_disabled | friends_sync_disabled | friend_only_disabled | sync_disabled */
+  /** needs_friend_or_token | needs_pin_or_token | home_switch_disabled | friends_sync_disabled | friend_only_disabled | sync_disabled | not_found */
   block_reason?: string | null;
+  /** True when roster refresh no longer finds this person on Plex. */
+  not_found?: boolean;
+  /** Titles where this person is the only roster member (set when not_found). */
+  sole_title_count?: number | null;
   /** True when this identity appears on the Plex Home quick-switch list. */
   on_plex_home?: boolean;
   /** pin | managed | unlocked when on Home (mainly for relationship=home). */
@@ -180,6 +184,19 @@ export function patchWatchlistUser(
       body: JSON.stringify(body),
     },
   );
+}
+
+export function deleteWatchlistUser(plexUserId: string) {
+  return fetchJson<{
+    ok: boolean;
+    plex_user_id: string;
+    title?: string;
+    memberships_removed?: number;
+    sole_titles_removed?: number;
+    items_removed?: number;
+  }>(`/api/watchlist/users/${encodeURIComponent(plexUserId)}`, {
+    method: "DELETE",
+  });
 }
 
 export function postWatchlistRosterRefresh() {
