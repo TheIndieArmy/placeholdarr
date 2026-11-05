@@ -196,10 +196,31 @@ def effective_sync_enabled(
     return True
 
 
-def fetch_method_for(relationship: str, *, is_protected: bool = False) -> str:
+def fetch_method_for(
+    relationship: str,
+    *,
+    is_protected: bool = False,
+    on_plex_home: bool = False,
+    plex_numeric_id: str | None = None,
+) -> str:
+    """Pick title-fetch path. Relationship label stays friend / home; method may differ.
+
+    Friend+Home (unlocked, Home sync on, numeric Home id) prefers ``home_switch``
+    for speed; otherwise friends stay on GraphQL (including PIN Home).
+    """
+    home_switch_ready = (
+        bool(getattr(settings, "WATCHLIST_SYNC_HOME_USERS", False))
+        and bool(on_plex_home)
+        and not bool(is_protected)
+        and str(plex_numeric_id or "").strip().isdigit()
+    )
     if relationship == REL_OWNER:
         return "discover"
-    if relationship in {REL_FRIEND, REL_FRIEND_ONLY}:
+    if relationship == REL_FRIEND:
+        if home_switch_ready:
+            return "home_switch"
+        return "graphql"
+    if relationship == REL_FRIEND_ONLY:
         return "graphql"
     if relationship == REL_HOME and not is_protected:
         return "home_switch"
@@ -471,6 +492,11 @@ def discover_roster(*, token: str | None = None) -> list[dict[str, Any]]:
             is_restricted=is_restricted,
             is_protected=is_protected,
         )
+        plex_numeric_id = _uid_key(
+            (home or {}).get("plex_user_id") if home and _is_numeric_id(str(home.get("plex_user_id") or "")) else None,
+            (server or {}).get("plex_numeric_id"),
+            (server or {}).get("plex_user_id") if server and _is_numeric_id(str(server.get("plex_user_id") or "")) else None,
+        )
         title = (
             str((home or {}).get("title") or "").strip()
             or str((friend or {}).get("title") or "").strip()
@@ -482,11 +508,7 @@ def discover_roster(*, token: str | None = None) -> list[dict[str, Any]]:
             {
                 "plex_user_id": plex_user_id,
                 "plex_uuid": plex_uuid,
-                "plex_numeric_id": _uid_key(
-                    (home or {}).get("plex_user_id") if home and _is_numeric_id(str(home.get("plex_user_id") or "")) else None,
-                    (server or {}).get("plex_numeric_id"),
-                    (server or {}).get("plex_user_id") if server and _is_numeric_id(str(server.get("plex_user_id") or "")) else None,
-                ),
+                "plex_numeric_id": plex_numeric_id,
                 "username": (
                     str((friend or {}).get("username") or "").strip()
                     or str((home or {}).get("username") or "").strip()
@@ -502,7 +524,12 @@ def discover_roster(*, token: str | None = None) -> list[dict[str, Any]]:
                 ),
                 "kind": kind,
                 "relationship": relationship,
-                "fetch_method": fetch_method_for(relationship, is_protected=is_protected),
+                "fetch_method": fetch_method_for(
+                    relationship,
+                    is_protected=is_protected,
+                    on_plex_home=in_home,
+                    plex_numeric_id=plex_numeric_id,
+                ),
                 "block_reason": block,
                 "on_plex_home": in_home,
                 "home_profile": profile_detail,
@@ -652,6 +679,11 @@ def persist_roster(rows: list[dict[str, Any]], *, preserve_sync_toggles: bool = 
             meta = dict(user.settings_override) if isinstance(user.settings_override, dict) else {}
             preserved_on_new = meta.get("on_new")
             meta["on_plex_home"] = bool(raw.get("on_plex_home"))
+            numeric = str(raw.get("plex_numeric_id") or "").strip()
+            if numeric.isdigit():
+                meta["plex_numeric_id"] = numeric
+            else:
+                meta.pop("plex_numeric_id", None)
             hp = raw.get("home_profile")
             if hp:
                 meta["home_profile"] = str(hp)
