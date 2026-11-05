@@ -9,6 +9,10 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Added
+
+- **Remember Home switch tokens**: Optional Settings → Watchlist toggle (under Home sync) stores each Home user's switch token and reuses it until Plex rejects it, then switches again (#128).
+
 ## Pre-release
 
 ## Released

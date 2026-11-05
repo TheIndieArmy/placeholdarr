@@ -1047,6 +1047,19 @@ def fetch_watchlists_for_account(
         include_home_switch = bool(getattr(settings, "WATCHLIST_SYNC_HOME_USERS", False))
     include_friend_only = bool(getattr(settings, "WATCHLIST_SYNC_FRIEND_ONLY", True))
 
+    from services.watchlist.home_tokens import (
+        cache_home_switch_tokens_enabled,
+        clear_all_cached_home_tokens,
+        clear_cached_home_token,
+        get_cached_home_token,
+        set_cached_home_token,
+    )
+
+    cache_home_tokens = cache_home_switch_tokens_enabled()
+    if not cache_home_tokens:
+        # Setting off (or Home sync off): drop any leftovers so tokens do not linger.
+        clear_all_cached_home_tokens()
+
     users: list[dict[str, Any]]
     if roster_users is not None:
         users = [dict(u) for u in roster_users if isinstance(u, dict)]
@@ -1145,9 +1158,34 @@ def fetch_watchlists_for_account(
                         "Home switch needs a numeric Plex Home user id "
                         f"(got plex_user_id={uid!r})"
                     )
-                user_token = switch_home_user(switch_id, token=tok)
-                switched += 1
-                by_user[uid] = fetch_owner_watchlist(token=user_token, limit=limit_per_user)
+
+                def _home_watchlist_with_token(user_token: str) -> list[dict[str, Any]]:
+                    return fetch_owner_watchlist(token=user_token, limit=limit_per_user)
+
+                used_cached = False
+                if cache_home_tokens:
+                    cached = get_cached_home_token(uid)
+                    if cached:
+                        try:
+                            by_user[uid] = _home_watchlist_with_token(cached)
+                            used_cached = True
+                        except Exception as cache_exc:
+                            msg = str(cache_exc).lower()
+                            if "unauthorized" in msg or "401" in msg:
+                                clear_cached_home_token(uid)
+                                logger.info(
+                                    f"Cached Home token rejected for {user.get('title')!r}; "
+                                    "switching again",
+                                    extra={"emoji_type": "info"},
+                                )
+                            else:
+                                raise
+                if not used_cached:
+                    user_token = switch_home_user(switch_id, token=tok)
+                    switched += 1
+                    by_user[uid] = _home_watchlist_with_token(user_token)
+                    if cache_home_tokens:
+                        set_cached_home_token(uid, user_token)
             elif relationship in {"friend", "friend_only"} or fetch_method == "graphql":
                 friend_key = str(user.get("plex_uuid") or uid).strip()
                 by_user[uid] = fetch_friend_watchlist(friend_key, token=tok, limit=limit_per_user)
