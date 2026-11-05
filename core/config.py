@@ -194,6 +194,8 @@ class Settings(BaseSettings):
     # Friends who are not on this server (friend_only) still sync via GraphQL by default.
     WATCHLIST_SYNC_FRIEND_ONLY: bool = True
     WATCHLIST_SYNC_HOME_USERS: bool = False
+    # Reuse Home /switch auth tokens until Plex rejects them (opt-in).
+    WATCHLIST_CACHE_HOME_SWITCH_TOKENS: bool = False
     WATCHLIST_USE_RSS_HINT: bool = True
     WATCHLIST_FULL_RECONCILE_HOURS: float = 2.0
     # Auto-created RSS URLs / etags (Plex Pass); not user-facing.

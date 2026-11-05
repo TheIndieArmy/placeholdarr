@@ -925,6 +925,24 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "WATCHLIST_CACHE_HOME_SWITCH_TOKENS",
+            {
+                "section": "Watchlist",
+                "label": "Remember Home switch tokens",
+                "description": (
+                    "After switching into a Home user, keep their token and reuse it on later "
+                    "syncs until Plex rejects it. Avoids switching every poll (speeds up syncing "
+                    "and helps with rate limits). Tokens are stored in the database and never "
+                    "shown in the UI. Off by default."
+                ),
+                "type": "bool",
+                "depends_on": "WATCHLIST_SYNC_HOME_USERS",
+                "nested": True,
+                "restart_required": False,
+                "default": False,
+            },
+        ),
+        (
             "WATCHLIST_USE_RSS_HINT",
             {
                 "section": "Watchlist",
