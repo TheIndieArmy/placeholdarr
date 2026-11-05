@@ -562,9 +562,13 @@ const SETTINGS_UI_HIDDEN_FIELD_KEYS = new Set<string>([
   "WATCHLIST_RSS_FRIENDS_ETAG",
   "WATCHLIST_RSS_SELF_HASH",
   "WATCHLIST_RSS_FRIENDS_HASH",
+  "WATCHLIST_RSS_SELF_GUIDS",
+  "WATCHLIST_RSS_FRIENDS_GUIDS",
   "WATCHLIST_LAST_FULL_FETCH_AT",
   "WATCHLIST_LAST_POLL_AT",
   "WATCHLIST_LAST_ERROR",
+  // Retired: replaced by 10s RSS loop + reconcile hours.
+  "WATCHLIST_SYNC_SCHEDULE",
 ]);
 
 const POSTER_BADGE_POSITION_OPTIONS = [
@@ -3320,7 +3324,9 @@ export function App() {
             className={`min-h-0 min-w-0 flex-1 ${
               currentTab === "settings"
                 ? "flex flex-col overflow-hidden p-0"
-                : "overflow-auto p-6"
+                : currentTab === "activity" && activitySubPage === "watchlist"
+                  ? "flex flex-col overflow-hidden p-6"
+                  : "overflow-auto p-6"
             } ${isStudioGlass ? "bg-transparent" : ""}`}
             style={!isStudioGlass ? { backgroundColor: studioLightChrome.main } : undefined}
           >
@@ -8479,9 +8485,7 @@ function SettingsPanel(props: {
                   ? 12
                   : field.key === "CALENDAR_SYNC_SCHEDULE"
                     ? 12
-                    : field.key === "WATCHLIST_SYNC_SCHEDULE"
-                      ? 1
-                      : 24
+                    : 24
             }
             onChange={(next) => handleSettingsValueChange(field.key, next)}
           />

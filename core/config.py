@@ -186,6 +186,7 @@ class Settings(BaseSettings):
     PLEX_SERVER_NAME: str = ""
     PLEX_SERVER_MACHINE_ID: str = ""
     ENABLE_PLEX_WATCHLIST_SYNC: bool = False
+    # Legacy cron schedule (retired; RSS loop + reconcile hours). Kept for migration ignore.
     WATCHLIST_SYNC_SCHEDULE: Optional[dict] = None
     WATCHLIST_ON_NEW: str = "manual"
     WATCHLIST_TV_REQUEST_SCOPE: str = ""
@@ -194,6 +195,8 @@ class Settings(BaseSettings):
     # Friends who are not on this server (friend_only) still sync via GraphQL by default.
     WATCHLIST_SYNC_FRIEND_ONLY: bool = True
     WATCHLIST_SYNC_HOME_USERS: bool = False
+    # Reuse Home /switch auth tokens until Plex rejects them (opt-in).
+    WATCHLIST_CACHE_HOME_SWITCH_TOKENS: bool = False
     WATCHLIST_USE_RSS_HINT: bool = True
     WATCHLIST_FULL_RECONCILE_HOURS: float = 2.0
     # Auto-created RSS URLs / etags (Plex Pass); not user-facing.
@@ -203,6 +206,9 @@ class Settings(BaseSettings):
     WATCHLIST_RSS_FRIENDS_ETAG: str = ""
     WATCHLIST_RSS_SELF_HASH: str = ""
     WATCHLIST_RSS_FRIENDS_HASH: str = ""
+    # JSON lists of recent RSS item guids for author-targeted sync.
+    WATCHLIST_RSS_SELF_GUIDS: str = ""
+    WATCHLIST_RSS_FRIENDS_GUIDS: str = ""
     WATCHLIST_LAST_FULL_FETCH_AT: Optional[str] = None
     # JSON list of {instance_key, quality_profile_id, root_folder_path} for fan-out adds.
     WATCHLIST_RADARR_TARGETS_JSON: str = "[]"

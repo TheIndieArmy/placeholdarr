@@ -9,6 +9,15 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Added
+
+- **Remember Home switch tokens**: Optional Settings → Watchlist toggle (under Home sync) stores each Home user's switch token and reuses it until Plex rejects it, then switches again (#128).
+- **Watchlist RSS author targeting**: With Plex Pass, friends RSS `author` UUIDs drive a fetch for only those people (Home token/switch when usable, else GraphQL) instead of pulling every watchlist on a feed change.
+
+### Changed
+
+- **Watchlist poll cadence**: Replaces the every-5-minutes schedule with a dedicated ~10s RSS loop; full roster pulls stay on reconcile hours (default 2h), manual, and startup. Without Pass, falls back to a ~5-minute API poll. The Watchlist poll schedule setting is removed.
+
 ## Pre-release
 
 ## Released

@@ -13,6 +13,12 @@ from services.media_servers.plex_watchlist import (
     plex_watchlist_token,
     poll_watchlist_rss_feed,
 )
+
+# How often the dedicated RSS loop polls CDN feeds (seconds).
+WATCHLIST_RSS_POLL_SECONDS = 10
+# Without Plex Pass / RSS, fall back to a full API pull on this cadence.
+WATCHLIST_API_FALLBACK_SECONDS = 300
+_SEEN_GUID_CAP = 500
 from services.postgres.db import get_session
 from services.postgres.models import (
     PlexWatchlistItem,
@@ -1166,6 +1172,326 @@ def _hours_since_iso(raw: str | None) -> float | None:
         return None
 
 
+def watchlist_reconcile_hours() -> float:
+    try:
+        reconcile_h = float(getattr(settings, "WATCHLIST_FULL_RECONCILE_HOURS", 2.0) or 2.0)
+    except (TypeError, ValueError):
+        reconcile_h = 2.0
+    return max(0.25, reconcile_h)
+
+
+def watchlist_reconcile_due() -> bool:
+    since = _hours_since_iso(str(getattr(settings, "WATCHLIST_LAST_FULL_FETCH_AT", "") or "") or None)
+    return since is None or since >= watchlist_reconcile_hours()
+
+
+def next_watchlist_reconcile_at() -> datetime | None:
+    """UTC datetime when the next full reconcile is due (None if never synced)."""
+    raw = str(getattr(settings, "WATCHLIST_LAST_FULL_FETCH_AT", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        from datetime import timedelta
+
+        return ts.astimezone(timezone.utc) + timedelta(hours=watchlist_reconcile_hours())
+    except Exception:
+        return None
+
+
+def _load_seen_guids(key: str) -> set[str]:
+    import json
+
+    raw = str(getattr(settings, key, "") or "").strip()
+    if not raw:
+        return set()
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return set()
+    if not isinstance(data, list):
+        return set()
+    return {str(x).strip() for x in data if str(x or "").strip()}
+
+
+def _store_seen_guids(key: str, guids: set[str]) -> None:
+    import json
+
+    ordered = sorted(guids)
+    if len(ordered) > _SEEN_GUID_CAP:
+        ordered = ordered[-_SEEN_GUID_CAP:]
+    _persist_config_values({key: json.dumps(ordered)})
+
+
+def _roster_dicts_from_db() -> list[dict[str, Any]]:
+    """Build fetch-ready roster rows from the DB (no live discover)."""
+    session = get_session()
+    try:
+        rows = session.query(PlexWatchlistUser).all()
+        out: list[dict[str, Any]] = []
+        for u in rows:
+            meta = u.settings_override if isinstance(u.settings_override, dict) else {}
+            numeric = str(meta.get("plex_numeric_id") or "").strip()
+            out.append(
+                {
+                    "plex_user_id": str(u.plex_user_id or "").strip(),
+                    "plex_uuid": str(u.plex_uuid or "").strip() or None,
+                    "plex_numeric_id": numeric if numeric.isdigit() else None,
+                    "username": u.username,
+                    "title": u.title,
+                    "thumb_url": u.thumb_url,
+                    "kind": str(getattr(u, "kind", None) or "unknown"),
+                    "relationship": getattr(u, "relationship", None),
+                    "fetch_method": getattr(u, "fetch_method", None),
+                    "is_admin": bool(u.is_admin),
+                    "is_restricted": bool(u.is_restricted),
+                    "is_protected": bool(u.is_protected),
+                    "is_guest": bool(u.is_guest),
+                    "sync_enabled": bool(u.sync_enabled),
+                }
+            )
+        return out
+    finally:
+        session.close()
+
+
+def resolve_rss_authors_to_user_ids(authors: Iterable[str]) -> set[str]:
+    """Map RSS ``author`` UUIDs to roster ``plex_user_id`` values (case-insensitive)."""
+    wanted = {str(a or "").strip().lower() for a in authors if str(a or "").strip()}
+    if not wanted:
+        return set()
+    matched: set[str] = set()
+    session = get_session()
+    try:
+        for u in session.query(PlexWatchlistUser).all():
+            uid = str(u.plex_user_id or "").strip()
+            uuid = str(u.plex_uuid or "").strip()
+            if uid.lower() in wanted or (uuid and uuid.lower() in wanted):
+                matched.add(uid)
+    finally:
+        session.close()
+    return matched
+
+
+def owner_plex_user_id() -> str | None:
+    session = get_session()
+    try:
+        row = (
+            session.query(PlexWatchlistUser)
+            .filter(
+                (PlexWatchlistUser.kind == "owner")
+                | (PlexWatchlistUser.relationship == "owner")
+                | (PlexWatchlistUser.is_admin.is_(True))
+            )
+            .order_by(PlexWatchlistUser.is_admin.desc())
+            .first()
+        )
+        if row is None:
+            return None
+        return str(row.plex_user_id or "").strip() or None
+    finally:
+        session.close()
+
+
+def poll_rss_for_changed_authors() -> dict[str, Any]:
+    """Poll owner + friends RSS; return new authors and feed availability.
+
+    Updates etag/hash/seen-guid state when feeds change. Does not fetch watchlists.
+    """
+    result: dict[str, Any] = {
+        "rss_available": False,
+        "self_changed": False,
+        "friends_changed": False,
+        "author_ids": set(),
+        "owner_changed": False,
+    }
+    if not bool(getattr(settings, "WATCHLIST_USE_RSS_HINT", True)):
+        return result
+
+    feeds = ensure_watchlist_rss_feeds()
+    self_url = str(feeds.get("watchlist") or getattr(settings, "WATCHLIST_RSS_SELF_URL", "") or "").strip()
+    friends_url = str(
+        feeds.get("friendsWatchlist") or getattr(settings, "WATCHLIST_RSS_FRIENDS_URL", "") or ""
+    ).strip()
+    persist_urls: dict[str, str] = {}
+    if self_url:
+        persist_urls["WATCHLIST_RSS_SELF_URL"] = self_url
+    if friends_url:
+        persist_urls["WATCHLIST_RSS_FRIENDS_URL"] = friends_url
+    if persist_urls:
+        _persist_config_values(persist_urls)
+
+    if not self_url and not friends_url:
+        return result
+    result["rss_available"] = True
+
+    authors: set[str] = set()
+    rss_meta: dict[str, str] = {}
+
+    if self_url:
+        self_poll = poll_watchlist_rss_feed(
+            self_url,
+            etag=str(getattr(settings, "WATCHLIST_RSS_SELF_ETAG", "") or "") or None,
+            content_hash=str(getattr(settings, "WATCHLIST_RSS_SELF_HASH", "") or "") or None,
+        )
+        result["self_changed"] = bool(self_poll.get("changed"))
+        if self_poll.get("etag"):
+            rss_meta["WATCHLIST_RSS_SELF_ETAG"] = str(self_poll.get("etag"))
+        if self_poll.get("content_hash"):
+            rss_meta["WATCHLIST_RSS_SELF_HASH"] = str(self_poll.get("content_hash"))
+        if self_poll.get("changed"):
+            prev = _load_seen_guids("WATCHLIST_RSS_SELF_GUIDS")
+            items = self_poll.get("items") if isinstance(self_poll.get("items"), list) else []
+            new_guids: set[str] = set()
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                guid = str(item.get("guid") or "").strip()
+                if guid:
+                    new_guids.add(guid)
+                    if guid not in prev:
+                        author = str(item.get("author") or "").strip()
+                        if author:
+                            authors.add(author.lower())
+            if new_guids:
+                _store_seen_guids("WATCHLIST_RSS_SELF_GUIDS", prev | new_guids)
+            # Any owner-feed change means refresh the owner list (self RSS has no friend authors).
+            result["owner_changed"] = True
+            oid = owner_plex_user_id()
+            if oid:
+                authors.add(oid.lower())
+
+    if friends_url:
+        friends_poll = poll_watchlist_rss_feed(
+            friends_url,
+            etag=str(getattr(settings, "WATCHLIST_RSS_FRIENDS_ETAG", "") or "") or None,
+            content_hash=str(getattr(settings, "WATCHLIST_RSS_FRIENDS_HASH", "") or "") or None,
+        )
+        result["friends_changed"] = bool(friends_poll.get("changed"))
+        if friends_poll.get("etag"):
+            rss_meta["WATCHLIST_RSS_FRIENDS_ETAG"] = str(friends_poll.get("etag"))
+        if friends_poll.get("content_hash"):
+            rss_meta["WATCHLIST_RSS_FRIENDS_HASH"] = str(friends_poll.get("content_hash"))
+        if friends_poll.get("changed"):
+            prev = _load_seen_guids("WATCHLIST_RSS_FRIENDS_GUIDS")
+            items = friends_poll.get("items") if isinstance(friends_poll.get("items"), list) else []
+            new_guids: set[str] = set()
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                guid = str(item.get("guid") or "").strip()
+                author = str(item.get("author") or "").strip().lower()
+                if guid:
+                    new_guids.add(guid)
+                    if guid not in prev and author:
+                        authors.add(author)
+            if new_guids:
+                _store_seen_guids("WATCHLIST_RSS_FRIENDS_GUIDS", prev | new_guids)
+
+    if rss_meta:
+        _persist_config_values(rss_meta)
+
+    # Resolve authors to roster ids (owner id already a roster key when added above).
+    resolved = resolve_rss_authors_to_user_ids(authors)
+    # Keep unresolved author strings that already match a roster id casing.
+    for a in authors:
+        if a and a not in {x.lower() for x in resolved}:
+            # resolve_rss_authors only returns matched roster ids; drop orphans.
+            pass
+    result["author_ids"] = resolved
+    return result
+
+
+def run_watchlist_targeted_sync(
+    user_ids: Iterable[str],
+    *,
+    trigger: str = "rss",
+) -> dict[str, Any]:
+    """Fetch + upsert only the given roster users (RSS author targeting).
+
+    Does not advance ``WATCHLIST_LAST_FULL_FETCH_AT`` (reconcile still required for
+    removals and Home-only people). Records a task run only when at least one id
+    is requested.
+    """
+    targets = {str(u or "").strip() for u in user_ids if str(u or "").strip()}
+    summary: dict[str, Any] = {
+        "ok": False,
+        "trigger": trigger,
+        "targeted": True,
+        "targets": sorted(targets),
+    }
+    if not targets:
+        summary.update({"ok": True, "skipped": "no_targets"})
+        return summary
+    if not bool(getattr(settings, "ENABLE_PLEX_WATCHLIST_SYNC", False)):
+        summary["skipped"] = "disabled"
+        return summary
+    if not plex_watchlist_token():
+        raise RuntimeError("No Plex token for watchlist (configure PLEX_TOKEN or sign in with Plex)")
+
+    from services.task_run_history import get_working_run
+
+    if get_working_run("watchlist_sync"):
+        summary["skipped"] = "already_running"
+        return summary
+
+    task_run_id = None
+    try:
+        task_run_id = begin_task_run(task_key="watchlist_sync", trigger=trigger)
+    except Exception as exc:
+        logger.debug(f"watchlist targeted begin_task_run skipped: {exc}", extra={"emoji_type": "debug"})
+
+    try:
+        roster_users = _roster_dicts_from_db()
+        # Intersect with sync_enabled.
+        enabled_targets: set[str] = set()
+        for u in roster_users:
+            uid = str(u.get("plex_user_id") or "").strip()
+            if uid in targets and bool(u.get("sync_enabled", True)):
+                enabled_targets.add(uid)
+        if not enabled_targets:
+            summary.update({"ok": True, "skipped": "targets_disabled", "upsert": {"fetched": 0}})
+            _persist_poll_meta(at=_utcnow().isoformat(), error=None)
+            if task_run_id:
+                finish_task_run(task_run_id, status="done", summary=summary)
+            return summary
+
+        logger.info(
+            f"Watchlist targeted sync for {len(enabled_targets)} user(s) "
+            f"(trigger={trigger})",
+            extra={"emoji_type": "info"},
+        )
+        account_payload = fetch_watchlists_for_account(
+            limit_per_user=1000,
+            enabled_user_ids=enabled_targets,
+            roster_users=roster_users,
+        )
+        upsert = upsert_watchlist_from_home(account_payload)
+        auto = auto_add_new_items()
+        summary.update(
+            {
+                "ok": True,
+                "upsert": upsert,
+                "auto_add": auto,
+                "fetched_users": len(account_payload.get("by_user") or {}),
+                "source": "rss_targeted",
+            }
+        )
+        _persist_poll_meta(at=_utcnow().isoformat(), error=None)
+        if task_run_id:
+            finish_task_run(task_run_id, status="done", summary=summary)
+        return summary
+    except Exception as exc:
+        logger.error(f"Watchlist targeted sync failed: {exc}", extra={"emoji_type": "error"})
+        summary["error"] = str(exc)
+        _persist_poll_meta(at=_utcnow().isoformat(), error=str(exc))
+        if task_run_id:
+            finish_task_run(task_run_id, status="failed", summary=summary, error_message=str(exc))
+        return summary
+
+
 def _watchlist_rss_gate(*, force_full: bool) -> dict[str, Any]:
     """Ensure RSS feeds and decide whether a full fetch is needed."""
     result: dict[str, Any] = {
@@ -1235,22 +1561,20 @@ def _watchlist_rss_gate(*, force_full: bool) -> dict[str, Any]:
     if rss_meta:
         _persist_config_values(rss_meta)
 
-    try:
-        reconcile_h = float(getattr(settings, "WATCHLIST_FULL_RECONCILE_HOURS", 2.0) or 2.0)
-    except (TypeError, ValueError):
-        reconcile_h = 2.0
-    reconcile_h = max(0.25, reconcile_h)
-    since = _hours_since_iso(str(getattr(settings, "WATCHLIST_LAST_FULL_FETCH_AT", "") or "") or None)
-    reconcile_due = since is None or since >= reconcile_h
+    reconcile_due = watchlist_reconcile_due()
     result["reconcile_due"] = reconcile_due
-    result["need_full"] = bool(
-        reconcile_due or result["self_changed"] or result["friends_changed"] or not result["rss_available"]
-    )
+    # RSS change alone no longer forces a full roster pull (targeted loop handles that).
+    # Full pull when reconcile is due, RSS unavailable, or force_full.
+    result["need_full"] = bool(force_full or reconcile_due or not result["rss_available"])
     return result
 
 
 def run_watchlist_sync(*, trigger: str = "manual") -> dict[str, Any]:
-    """Owner + friends poll (+ optional auto-add). Records a scheduled task run when possible."""
+    """Full owner + friends poll (+ optional auto-add). Records a scheduled task run when possible.
+
+    Used for manual / startup / reconcile / no-RSS fallback. Light RSS author targeting
+    lives in ``run_watchlist_targeted_sync`` via the dedicated RSS loop.
+    """
     task_run_id = None
     try:
         task_run_id = begin_task_run(task_key="watchlist_sync", trigger=trigger)
@@ -1260,7 +1584,13 @@ def run_watchlist_sync(*, trigger: str = "manual") -> dict[str, Any]:
     summary: dict[str, Any] = {"ok": False, "trigger": trigger}
     phases = None
     try:
-        if not bool(getattr(settings, "ENABLE_PLEX_WATCHLIST_SYNC", False)) and trigger == "scheduled":
+        trig = str(trigger or "").lower()
+        if not bool(getattr(settings, "ENABLE_PLEX_WATCHLIST_SYNC", False)) and trig in {
+            "scheduled",
+            "reconcile",
+            "fallback",
+            "rss",
+        }:
             summary["skipped"] = "disabled"
             if task_run_id:
                 finish_task_run(task_run_id, status="skipped", summary=summary, skip_reason="disabled")
@@ -1286,7 +1616,7 @@ def run_watchlist_sync(*, trigger: str = "manual") -> dict[str, Any]:
                     extra={"emoji_type": "debug"},
                 )
 
-        force_full = str(trigger or "").lower() in {"manual", "startup"}
+        force_full = trig in {"manual", "startup", "reconcile", "fallback"}
 
         # Light roster refresh even when RSS skips a full title pull.
         roster_meta: dict[str, Any] = {}
