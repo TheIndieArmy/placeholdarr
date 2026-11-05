@@ -237,19 +237,101 @@ def ensure_watchlist_rss_feeds(token: str | None = None) -> dict[str, str | None
     }
 
 
+def parse_watchlist_rss_items(body: bytes | str | None) -> list[dict[str, Any]]:
+    """Parse Plex watchlist RSS JSON (or XML) into ``{guid, author, title}`` rows."""
+    raw = body if isinstance(body, (bytes, bytearray)) else (str(body or "").encode("utf-8") if body else b"")
+    if not raw:
+        return []
+    items: list[dict[str, Any]] = []
+
+    def _append(guid: str, author: str, title: str) -> None:
+        g = str(guid or "").strip()
+        a = str(author or "").strip().lower()
+        t = str(title or "").strip()
+        if not g and not a and not t:
+            return
+        items.append({"guid": g, "author": a, "title": t})
+
+    try:
+        data = json.loads(raw.decode("utf-8", errors="replace"))
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        # Plex ``format=json``: MediaContainer.Metadata or top-level items / MediaContainer.
+        rows: list[Any] = []
+        mc = data.get("MediaContainer") if isinstance(data.get("MediaContainer"), dict) else None
+        if isinstance(mc, dict):
+            meta = mc.get("Metadata") or mc.get("Directory") or mc.get("item") or []
+            if isinstance(meta, list):
+                rows = meta
+        for key in ("items", "item", "Metadata"):
+            if isinstance(data.get(key), list) and not rows:
+                rows = data.get(key)  # type: ignore[assignment]
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            guids = row.get("guids") if isinstance(row.get("guids"), list) else []
+            guid = ""
+            if guids:
+                first = guids[0]
+                if isinstance(first, dict):
+                    guid = str(first.get("id") or first.get("guid") or "").strip()
+                else:
+                    guid = str(first or "").strip()
+            if not guid:
+                guid = str(row.get("guid") or row.get("key") or row.get("ratingKey") or "").strip()
+            author = str(row.get("author") or row.get("userID") or row.get("userId") or "").strip()
+            title = str(row.get("title") or row.get("name") or "").strip()
+            _append(guid, author, title)
+        if items:
+            return items
+
+    # XML RSS fallback.
+    try:
+        root = ET.fromstring(raw)
+    except Exception:
+        return items
+    for node in root.iter():
+        tag = str(getattr(node, "tag", "") or "")
+        if tag.endswith("}item") or tag == "item":
+            guid = ""
+            author = ""
+            title = ""
+            for child in list(node):
+                ctag = str(getattr(child, "tag", "") or "")
+                text = str(child.text or "").strip()
+                if ctag.endswith("}guid") or ctag == "guid":
+                    guid = text or str(child.attrib.get("isPermaLink") or "")
+                    if not text:
+                        guid = str(child.attrib.get("id") or child.attrib.get("guid") or guid).strip()
+                elif ctag.endswith("}author") or ctag == "author" or ctag.endswith("}creator"):
+                    author = text
+                elif ctag.endswith("}title") or ctag == "title":
+                    title = text
+            _append(guid, author, title)
+    return items
+
+
 def poll_watchlist_rss_feed(
     url: str,
     *,
     etag: str | None = None,
     content_hash: str | None = None,
+    include_body: bool = False,
 ) -> dict[str, Any]:
-    """Poll an RSS URL for changes. Returns changed/etag/hash/status (hint only)."""
+    """Poll an RSS URL for changes.
+
+    Returns ``changed`` / ``etag`` / ``content_hash`` / ``status``. When the body
+    changed (or ``include_body``), also returns ``body`` and parsed ``items``.
+    """
     out: dict[str, Any] = {
         "changed": True,
         "etag": etag,
         "content_hash": content_hash,
         "status": 0,
         "available": False,
+        "body": None,
+        "items": [],
     }
     feed = str(url or "").strip()
     if not feed:
@@ -285,6 +367,9 @@ def poll_watchlist_rss_feed(
         out["changed"] = False
     else:
         out["changed"] = True
+    if out["changed"] or include_body:
+        out["body"] = body
+        out["items"] = parse_watchlist_rss_items(body)
     return out
 
 

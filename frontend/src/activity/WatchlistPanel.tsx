@@ -91,7 +91,8 @@ function compareItems(a: WatchlistItem, b: WatchlistItem, key: ItemSortKey, dir:
   if (key === "title") {
     cmp = String(a.title || "").localeCompare(String(b.title || ""), undefined, { sensitivity: "base" });
   } else if (key === "synced") {
-    cmp = isoTime(a.last_seen_at) - isoTime(b.last_seen_at);
+    // First time we saw the title (request time), not last re-poll.
+    cmp = isoTime(a.first_seen_at) - isoTime(b.first_seen_at);
   } else if (key === "accepted") {
     cmp = isoTime(a.added_at) - isoTime(b.added_at);
   } else if (key === "rejected") {
@@ -850,9 +851,12 @@ export function WatchlistPanel(props: {
   }
 
   return (
-    <div>
-      <div className="rounded-xl border overflow-hidden mb-6" style={{ borderColor: panelBorder, backgroundColor: panelBg }}>
-        <div className="px-4 py-3 border-b" style={{ borderColor: isLight ? semantic.border : "rgba(66,71,83,0.3)" }}>
+    <div className="flex h-full min-h-0 flex-col">
+      <div
+        className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border"
+        style={{ borderColor: panelBorder, backgroundColor: panelBg }}
+      >
+        <div className="shrink-0 px-4 py-3 border-b" style={{ borderColor: isLight ? semantic.border : "rgba(66,71,83,0.3)" }}>
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <h2 className="text-[20px] font-bold font-headline" style={{ color: isLight ? semantic.fg : "#fff" }}>
@@ -926,7 +930,7 @@ export function WatchlistPanel(props: {
         </div>
 
         <div
-          className="px-4 pt-3 flex flex-wrap items-end gap-1 border-b"
+          className="shrink-0 px-4 pt-3 flex flex-wrap items-end gap-1 border-b"
           style={{ borderColor: headBorder }}
           role="tablist"
           aria-label="Watchlist sections"
@@ -990,7 +994,7 @@ export function WatchlistPanel(props: {
         </div>
 
         {tab !== "people" && users.length > 0 ? (
-          <div className="px-4 pt-3 border-b" style={{ borderColor: headBorder }}>
+          <div className="shrink-0 px-4 pt-3 border-b" style={{ borderColor: headBorder }}>
             <div className="flex items-center justify-between gap-3 mb-2">
               <div className="text-[12px] font-headline uppercase tracking-widest" style={{ color: semantic.fgSubtle }}>
                 Filter
@@ -1076,7 +1080,7 @@ export function WatchlistPanel(props: {
         {tab === "people" ? (
           <>
             <div
-              className="px-4 py-3 border-b flex flex-wrap items-center gap-2"
+              className="shrink-0 px-4 py-3 border-b flex flex-wrap items-center gap-2"
               style={{ borderColor: headBorder }}
             >
               <div className="text-[13px]" style={{ color: semantic.fgMuted }}>
@@ -1095,8 +1099,8 @@ export function WatchlistPanel(props: {
                 {rosterBusy ? "Refreshing…" : "Refresh roster"}
               </button>
             </div>
-            {error ? <div className="px-4 py-2 text-[13px] text-red-400">{error}</div> : null}
-            <div className="overflow-x-auto">
+            {error ? <div className="shrink-0 px-4 py-2 text-[13px] text-red-400">{error}</div> : null}
+            <div className="min-h-0 flex-1 overflow-auto">
               <table className="w-full table-fixed">
                 <colgroup>
                   <col className="w-14" />
@@ -1239,7 +1243,7 @@ export function WatchlistPanel(props: {
         ) : (
           <>
         <div
-          className="px-4 py-3 border-b flex flex-wrap items-center gap-2"
+          className="shrink-0 px-4 py-3 border-b flex flex-wrap items-center gap-2"
           style={{ borderColor: headBorder }}
         >
           <input
@@ -1294,9 +1298,9 @@ export function WatchlistPanel(props: {
           </div>
         </div>
 
-        {error ? <div className="px-4 py-2 text-[13px] text-red-400">{error}</div> : null}
+        {error ? <div className="shrink-0 px-4 py-2 text-[13px] text-red-400">{error}</div> : null}
 
-        <div className="max-h-[min(70vh,52rem)] overflow-auto">
+        <div className="min-h-0 flex-1 overflow-auto">
           <table
             className="w-full table-fixed"
             style={{ minWidth: tableMinWidthForTab(tab) }}
@@ -1575,9 +1579,9 @@ export function WatchlistPanel(props: {
                       <td
                         className="px-2 py-3 text-[12px] align-middle overflow-hidden whitespace-nowrap truncate"
                         style={{ color: semantic.fgSubtle }}
-                        title={row.last_seen_at ? formatWhen(row.last_seen_at) : undefined}
+                        title={row.first_seen_at ? formatWhen(row.first_seen_at) : undefined}
                       >
-                        {formatWhen(row.last_seen_at)}
+                        {formatWhen(row.first_seen_at)}
                       </td>
 
                       {tab === "accepted" ? (

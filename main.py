@@ -572,6 +572,13 @@ async def lifespan(app: FastAPI):
         logger.warning(f'Failed to stop queue monitor producer cleanly: {e}', extra={'emoji_type': 'warning'})
 
     try:
+        from services.watchlist.rss_loop import stop_watchlist_rss_loop
+
+        stop_watchlist_rss_loop()
+    except Exception as e:
+        logger.warning(f'Failed to stop watchlist RSS loop cleanly: {e}', extra={'emoji_type': 'warning'})
+
+    try:
         from services.worker import stop_worker_runtime
         stop_worker_runtime()
     except Exception as e:
