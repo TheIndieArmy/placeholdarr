@@ -2,14 +2,34 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, Callable
+import time
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Iterable
 
 from sqlalchemy.orm.attributes import flag_modified
 
 from core.logger import logger
 from services.postgres.db import get_session
 from services.postgres.models import Job, ScheduledTaskRun
+
+# UI history: last N runs per task_key (high-cadence jobs must not starve others).
+DEFAULT_HISTORY_PER_TASK = 30
+MAX_HISTORY_PER_TASK = 100
+# Storage: drop finished runs older than this (working rows are never pruned).
+TASK_RUN_RETENTION_DAYS = 30
+# Opportunistic prune at most this often (finish_task_run / history fetch).
+_PRUNE_MIN_INTERVAL_SEC = 3600.0
+_last_prune_monotonic = 0.0
+
+_KNOWN_TASK_KEYS = (
+    "full_sync",
+    "lite_sync",
+    "calendar_sync",
+    "calendar_only",
+    "collections_sync",
+    "watchlist_sync",
+    "placeholder_refresh",
+)
 
 
 def _utc_now() -> datetime:
@@ -152,6 +172,7 @@ def finish_task_run(
         except Exception:
             pass
         session.close()
+    maybe_prune_old_task_runs()
 
 
 def record_skipped_task_run(*, task_key: str, trigger: str, skip_reason: str) -> int:
@@ -381,14 +402,111 @@ def any_task_working() -> bool:
     return get_working_run() is not None
 
 
-def list_recent_runs(*, limit: int = 50) -> list[ScheduledTaskRun]:
+def _normalize_task_keys(task_keys: Iterable[str] | None) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in task_keys or ():
+        key = str(raw or "").strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
+def prune_old_task_runs(*, older_than_days: int = TASK_RUN_RETENTION_DAYS) -> int:
+    """Delete finished task runs older than ``older_than_days``. Never deletes working."""
+    days = max(1, int(older_than_days or TASK_RUN_RETENTION_DAYS))
+    cutoff = _utc_now() - timedelta(days=days)
     session = get_session()
     try:
-        return (
+        deleted = (
             session.query(ScheduledTaskRun)
-            .order_by(ScheduledTaskRun.started_at.desc())
-            .limit(max(1, min(int(limit), 200)))
-            .all()
+            .filter(
+                ScheduledTaskRun.status != "working",
+                ScheduledTaskRun.started_at < cutoff,
+            )
+            .delete(synchronize_session=False)
+        )
+        session.commit()
+        removed = int(deleted or 0)
+        if removed:
+            logger.info(
+                f"Pruned {removed} scheduled_task_run row(s) older than {days} day(s)",
+                extra={"emoji_type": "info"},
+            )
+        return removed
+    except Exception as exc:
+        session.rollback()
+        logger.warning(f"scheduled_task_run prune failed: {exc}", extra={"emoji_type": "warning"})
+        return 0
+    finally:
+        session.close()
+
+
+def maybe_prune_old_task_runs(*, force: bool = False) -> int:
+    """Throttled wrapper so frequent watchlist finishes do not hammer DELETE."""
+    global _last_prune_monotonic
+    now = time.monotonic()
+    if not force and (now - _last_prune_monotonic) < _PRUNE_MIN_INTERVAL_SEC:
+        return 0
+    _last_prune_monotonic = now
+    return prune_old_task_runs()
+
+
+def list_recent_runs(
+    *,
+    limit: int | None = None,
+    per_task: int | None = DEFAULT_HISTORY_PER_TASK,
+    task_keys: Iterable[str] | None = None,
+) -> list[ScheduledTaskRun]:
+    """Return recent runs for the Tasks UI.
+
+    Prefer ``per_task`` (last N per ``task_key``) so high-cadence jobs cannot
+    exhaust a global top-N window. Pass ``limit`` alone for legacy global mode.
+    """
+    keys = _normalize_task_keys(task_keys)
+    session = get_session()
+    try:
+        if per_task is None and limit is not None:
+            q = session.query(ScheduledTaskRun)
+            if keys:
+                q = q.filter(ScheduledTaskRun.task_key.in_(keys))
+            return (
+                q.order_by(ScheduledTaskRun.started_at.desc())
+                .limit(max(1, min(int(limit), 200)))
+                .all()
+            )
+
+        n = max(1, min(int(per_task or DEFAULT_HISTORY_PER_TASK), MAX_HISTORY_PER_TASK))
+        if not keys:
+            keys = list(_KNOWN_TASK_KEYS)
+            # Include any other keys that still have recent rows.
+            extra = [
+                str(k)
+                for (k,) in session.query(ScheduledTaskRun.task_key).distinct().all()
+                if str(k or "").strip()
+            ]
+            for k in extra:
+                kl = k.strip().lower()
+                if kl and kl not in keys:
+                    keys.append(kl)
+
+        by_id: dict[int, ScheduledTaskRun] = {}
+        for key in keys:
+            rows = (
+                session.query(ScheduledTaskRun)
+                .filter(ScheduledTaskRun.task_key == key)
+                .order_by(ScheduledTaskRun.started_at.desc())
+                .limit(n)
+                .all()
+            )
+            for row in rows:
+                by_id[int(row.id)] = row
+        return sorted(
+            by_id.values(),
+            key=lambda r: r.started_at or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
         )
     finally:
         session.close()

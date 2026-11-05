@@ -1012,6 +1012,15 @@ def _serialize_user(u: PlexWatchlistUser) -> dict[str, Any]:
             is_protected=bool(u.is_protected),
         )
     on_new = on_new_override_for_user(u)
+    not_found = str(block or "").strip() == "not_found"
+    sole_titles = None
+    if not_found:
+        try:
+            from services.watchlist.roster import sole_title_count_for_user
+
+            sole_titles = sole_title_count_for_user(str(u.plex_user_id))
+        except Exception:
+            sole_titles = None
     return {
         "plex_user_id": u.plex_user_id,
         "plex_uuid": u.plex_uuid,
@@ -1022,6 +1031,8 @@ def _serialize_user(u: PlexWatchlistUser) -> dict[str, Any]:
         "relationship": rel,
         "fetch_method": getattr(u, "fetch_method", None),
         "block_reason": block,
+        "not_found": not_found,
+        "sole_title_count": sole_titles,
         "on_plex_home": bool(on_home),
         "home_profile": str(home_profile) if home_profile else None,
         "is_admin": bool(u.is_admin),

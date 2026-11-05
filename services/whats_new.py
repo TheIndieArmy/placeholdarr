@@ -331,6 +331,40 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         requires_ack=True,
     ),
     WhatsNewNotice(
+        id="friend-home-watchlist-sync-0-12-3",
+        since_version="0.12.3",
+        title="Faster Friend+Home watchlist sync",
+        body=(
+            "When the setting to sync Home users is enabled, Friend+Home users sync through Plex Home "
+            "instead of the slower friend path. We utilize switching users at a rate-limit-safe pace "
+            "to accomplish this."
+        ),
+        cta_label="Open Watchlist settings",
+        cta_path="/settings/watchlist",
+    ),
+    WhatsNewNotice(
+        id="watchlist-roster-not-found-0-12-3",
+        since_version="0.12.3",
+        title="Remove people who left Plex",
+        body=(
+            "Unfriended users, or users no longer part of your Plex Home, show as not found. "
+            "Remove them from the roster to clear them and any titles only they had on a watchlist."
+        ),
+        cta_label="Open Watchlist",
+        cta_path="/activity/watchlist",
+    ),
+    WhatsNewNotice(
+        id="tasks-history-fair-0-12-3",
+        since_version="0.12.3",
+        title="Tasks history that stays useful",
+        body=(
+            "Filter by task type so watchlists don't bury other task types; each task keeps its own "
+            "recent runs; finished runs older than 30 days are pruned."
+        ),
+        cta_label="Open Tasks",
+        cta_path="/activity/tasks",
+    ),
+    WhatsNewNotice(
         id="path-mappings-playback-0-12-2",
         since_version="0.12.2",
         title="Path mappings and playback fixes",

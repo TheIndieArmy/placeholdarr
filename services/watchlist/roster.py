@@ -32,6 +32,7 @@ BLOCK_SYNC_DISABLED = "sync_disabled"
 BLOCK_HOME_SWITCH_OFF = "home_switch_disabled"
 BLOCK_FRIENDS_SYNC_OFF = "friends_sync_disabled"
 BLOCK_FRIEND_ONLY_OFF = "friend_only_disabled"
+BLOCK_NOT_FOUND = "not_found"
 
 # Blocks where the People toggle must not look "on" (policy or no fetch path).
 POLICY_OR_HARD_BLOCKS = frozenset(
@@ -41,6 +42,7 @@ POLICY_OR_HARD_BLOCKS = frozenset(
         BLOCK_HOME_SWITCH_OFF,
         BLOCK_FRIENDS_SYNC_OFF,
         BLOCK_FRIEND_ONLY_OFF,
+        BLOCK_NOT_FOUND,
     }
 )
 
@@ -51,6 +53,7 @@ BLOCK_REASON_MESSAGES = {
     BLOCK_FRIENDS_SYNC_OFF: "Not syncing: friends sync is off in Settings → Watchlist",
     BLOCK_FRIEND_ONLY_OFF: "Not syncing: friends without server access is off in Settings → Watchlist",
     BLOCK_SYNC_DISABLED: "Sync disabled for this user",
+    BLOCK_NOT_FOUND: "Not found on Plex (unfriended or removed from Home)",
 }
 
 _HEX_UUID_RE = re.compile(r"^[0-9a-fA-F]{16,40}$")
@@ -155,8 +158,11 @@ def block_reason_for(
     *,
     is_protected: bool = False,
     sync_enabled: bool = True,
+    not_found: bool = False,
 ) -> str | None:
     """Return why this roster member cannot sync right now (policy or hard block first)."""
+    if not_found:
+        return BLOCK_NOT_FOUND
     if relationship == REL_SERVER_ONLY:
         return BLOCK_NEEDS_FRIEND_OR_TOKEN
     if relationship == REL_HOME and is_protected:
@@ -720,6 +726,21 @@ def persist_roster(rows: list[dict[str, Any]], *, preserve_sync_toggles: bool = 
                 alias_ids=[str(a).strip() for a in alias_ids if str(a or "").strip()],
             )
 
+        # People no longer returned by Plex discovery stay on the roster as not_found
+        # until the admin removes them (memberships are not pruned without a fetch).
+        marked_missing = 0
+        for uid, user in existing.items():
+            if uid in seen:
+                continue
+            rel = str(getattr(user, "relationship", None) or getattr(user, "kind", None) or "")
+            if rel == REL_OWNER or str(getattr(user, "kind", "") or "").lower() == REL_OWNER:
+                continue
+            user.block_reason = BLOCK_NOT_FOUND
+            user.last_sync_error = BLOCK_REASON_MESSAGES[BLOCK_NOT_FOUND]
+            user.fetch_method = "none"
+            user.updated_at = now
+            marked_missing += 1
+
         session.commit()
     finally:
         session.close()
@@ -728,6 +749,7 @@ def persist_roster(rows: list[dict[str, Any]], *, preserve_sync_toggles: bool = 
         "created": created,
         "updated": updated,
         "seen": len(seen),
+        "marked_missing": marked_missing,
         "aliases_merged": aliases_merged,
     }
 
@@ -763,7 +785,13 @@ def patch_watchlist_user(
         if sync_enabled is not None:
             # Policy / hard blocks cannot be enabled while the gate is closed.
             rel = str(getattr(user, "relationship", None) or REL_UNKNOWN)
-            hard = block_reason_for(rel, is_protected=bool(user.is_protected), sync_enabled=True)
+            not_found = str(getattr(user, "block_reason", "") or "") == BLOCK_NOT_FOUND
+            hard = block_reason_for(
+                rel,
+                is_protected=bool(user.is_protected),
+                sync_enabled=True,
+                not_found=not_found,
+            )
             if sync_enabled and hard in POLICY_OR_HARD_BLOCKS:
                 user.sync_enabled = False
                 user.block_reason = hard
@@ -773,6 +801,7 @@ def patch_watchlist_user(
                     rel,
                     is_protected=bool(user.is_protected),
                     sync_enabled=bool(user.sync_enabled),
+                    not_found=not_found,
                 )
             if user.block_reason:
                 user.last_sync_error = BLOCK_REASON_MESSAGES.get(user.block_reason, user.last_sync_error)
@@ -800,3 +829,104 @@ def patch_watchlist_user(
 def set_user_sync_enabled(plex_user_id: str, enabled: bool) -> dict[str, Any] | None:
     """Backward-compatible wrapper for sync toggle only."""
     return patch_watchlist_user(plex_user_id, sync_enabled=bool(enabled))
+
+
+def _sole_title_count(session, plex_user_id: str) -> int:
+    """Titles where this person is the only roster member with a membership row."""
+    from sqlalchemy import func
+
+    uid = str(plex_user_id or "").strip()
+    if not uid:
+        return 0
+    my_item_ids = [
+        int(row[0])
+        for row in session.query(PlexWatchlistMembership.watchlist_item_id)
+        .filter(PlexWatchlistMembership.plex_user_id == uid)
+        .all()
+    ]
+    if not my_item_ids:
+        return 0
+    counts = (
+        session.query(
+            PlexWatchlistMembership.watchlist_item_id,
+            func.count(PlexWatchlistMembership.id),
+        )
+        .filter(PlexWatchlistMembership.watchlist_item_id.in_(my_item_ids))
+        .group_by(PlexWatchlistMembership.watchlist_item_id)
+        .all()
+    )
+    return sum(1 for _item_id, n in counts if int(n or 0) == 1)
+
+
+def remove_watchlist_user(plex_user_id: str) -> dict[str, Any] | None:
+    """Delete a roster person, their memberships, and titles only they held.
+
+    Owner cannot be removed. Arr catalog / placeholders are unchanged.
+    """
+    from sqlalchemy import exists
+
+    from services.postgres.models import PlexWatchlistItem
+
+    uid = str(plex_user_id or "").strip()
+    if not uid:
+        return None
+    session = get_session()
+    try:
+        user = session.query(PlexWatchlistUser).filter(PlexWatchlistUser.plex_user_id == uid).first()
+        if user is None:
+            return None
+        rel = str(getattr(user, "relationship", None) or getattr(user, "kind", None) or "").lower()
+        if rel == REL_OWNER or str(getattr(user, "kind", "") or "").lower() == REL_OWNER:
+            return {"ok": False, "error": "owner_cannot_remove"}
+
+        title = str(user.title or user.username or uid)
+        sole_before = _sole_title_count(session, uid)
+        memberships = (
+            session.query(PlexWatchlistMembership)
+            .filter(PlexWatchlistMembership.plex_user_id == uid)
+            .all()
+        )
+        memberships_removed = len(memberships)
+        for mem in memberships:
+            session.delete(mem)
+        session.flush()
+
+        orphans = (
+            session.query(PlexWatchlistItem)
+            .filter(
+                ~exists().where(PlexWatchlistMembership.watchlist_item_id == PlexWatchlistItem.id)
+            )
+            .all()
+        )
+        items_removed = 0
+        for row in orphans:
+            session.delete(row)
+            items_removed += 1
+        session.delete(user)
+        session.commit()
+        logger.info(
+            f"Removed watchlist roster user {title!r} id={uid} "
+            f"memberships={memberships_removed} sole_titles={sole_before} items_removed={items_removed}",
+            extra={"emoji_type": "info"},
+        )
+        return {
+            "ok": True,
+            "plex_user_id": uid,
+            "title": title,
+            "memberships_removed": memberships_removed,
+            "sole_titles_removed": sole_before,
+            "items_removed": items_removed,
+        }
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def sole_title_count_for_user(plex_user_id: str) -> int:
+    session = get_session()
+    try:
+        return _sole_title_count(session, plex_user_id)
+    finally:
+        session.close()
