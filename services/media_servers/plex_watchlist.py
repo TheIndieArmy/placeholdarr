@@ -19,6 +19,7 @@ import json
 import re
 import time
 import xml.etree.ElementTree as ET
+from collections import deque
 from typing import Any
 from urllib.parse import quote
 
@@ -33,10 +34,64 @@ _WATCHLIST_PAGE_SIZE = 100
 _HOME_USERS_URL = "https://plex.tv/api/v2/home/users"
 # Switch still lives on the legacy home API (v2 /switch returns 404).
 _HOME_USERS_SWITCH_BASE = "https://plex.tv/api/home/users"
-_HOME_SWITCH_GAP_SEC = 0.75
-_HOME_SWITCH_429_RETRIES = 4
+# plex.tv Home switch: ~10 successes per ~60s rolling window (measured). Plex Home
+# caps at 15 members including the admin, so at most 14 switches per sync. Pace
+# switches ~8s apart (under 10/60s) and keep the rolling budget as a backstop.
+# On 429, wait until 60s after the oldest success in that window.
+_HOME_SWITCH_WINDOW_SEC = 60.0
+_HOME_SWITCH_WINDOW_BUDGET = 10
+_HOME_SWITCH_MIN_GAP_SEC = 8.0
+_HOME_SWITCH_429_RETRIES = 2
+_HOME_SWITCH_TIMES: deque[float] = deque()
 _COMMUNITY_GRAPHQL_URL = "https://community.plex.tv/api"
 _PLEX_USER_URL = "https://plex.tv/api/v2/user"
+
+
+def _home_switch_prune(now: float | None = None) -> None:
+    cutoff = (now if now is not None else time.monotonic()) - _HOME_SWITCH_WINDOW_SEC
+    while _HOME_SWITCH_TIMES and _HOME_SWITCH_TIMES[0] <= cutoff:
+        _HOME_SWITCH_TIMES.popleft()
+
+
+def _home_switch_wait_for_slot() -> None:
+    """Pace switches: min gap since last success, then rolling-window budget."""
+    while True:
+        now = time.monotonic()
+        _home_switch_prune(now)
+        wait = 0.0
+        if _HOME_SWITCH_TIMES:
+            since_last = now - _HOME_SWITCH_TIMES[-1]
+            if since_last < _HOME_SWITCH_MIN_GAP_SEC:
+                wait = max(wait, _HOME_SWITCH_MIN_GAP_SEC - since_last)
+        if len(_HOME_SWITCH_TIMES) >= _HOME_SWITCH_WINDOW_BUDGET:
+            wait = max(wait, _HOME_SWITCH_TIMES[0] + _HOME_SWITCH_WINDOW_SEC - now)
+        if wait <= 0:
+            return
+        logger.info(
+            f"Plex Home switch pacing {wait:.1f}s "
+            f"(gap>={_HOME_SWITCH_MIN_GAP_SEC:.0f}s, "
+            f"budget {_HOME_SWITCH_WINDOW_BUDGET}/{_HOME_SWITCH_WINDOW_SEC:.0f}s)",
+            extra={"emoji_type": "info"},
+        )
+        time.sleep(wait + 0.05)
+
+
+def _home_switch_wait_after_429() -> float:
+    """Seconds to sleep so the oldest recorded switch ages out of the window."""
+    now = time.monotonic()
+    _home_switch_prune(now)
+    if _HOME_SWITCH_TIMES:
+        wait = _HOME_SWITCH_TIMES[0] + _HOME_SWITCH_WINDOW_SEC - now
+    else:
+        # No local history (other client, or cold); assume a full window.
+        wait = _HOME_SWITCH_WINDOW_SEC
+    return max(0.5, wait)
+
+
+def _home_switch_record_success() -> None:
+    now = time.monotonic()
+    _home_switch_prune(now)
+    _HOME_SWITCH_TIMES.append(now)
 
 
 def plex_watchlist_token() -> str | None:
@@ -890,6 +945,7 @@ def switch_home_user(
     last_status = 0
     last_body = ""
     for attempt in range(_HOME_SWITCH_429_RETRIES + 1):
+        _home_switch_wait_for_slot()
         resp = requests.post(
             url,
             headers=headers,
@@ -899,31 +955,40 @@ def switch_home_user(
         last_status = resp.status_code
         last_body = (resp.text or "")[:180]
         if resp.status_code == 429:
-            # plex.tv rate-limits rapid home switches; back off and retry.
-            delay = min(8.0, 1.5 * (2 ** attempt))
-            time.sleep(delay)
+            if attempt >= _HOME_SWITCH_429_RETRIES:
+                break
+            wait = _home_switch_wait_after_429()
+            logger.warning(
+                f"Plex Home switch rate-limited (HTTP 429) for user {uid}; "
+                f"waiting {wait:.1f}s until oldest switch leaves the "
+                f"{_HOME_SWITCH_WINDOW_SEC:.0f}s window "
+                f"({attempt + 1}/{_HOME_SWITCH_429_RETRIES})",
+                extra={"emoji_type": "warning"},
+            )
+            time.sleep(wait)
             continue
         if resp.status_code >= 400:
             raise RuntimeError(f"Plex home user switch failed HTTP {resp.status_code}: {last_body}")
         ctype = (resp.headers.get("Content-Type") or "").lower()
+        auth = None
         if "json" in ctype and resp.content:
             data = resp.json()
             if isinstance(data, dict):
                 auth = data.get("authToken") or data.get("authenticationToken") or data.get("auth_token")
-                if auth:
-                    return str(auth)
-        try:
-            root = ET.fromstring(resp.content or b"<root/>")
-            auth = root.attrib.get("authToken") or root.attrib.get("authenticationToken")
-            if not auth:
-                for node in root.iter():
-                    auth = node.attrib.get("authToken") or node.attrib.get("authenticationToken")
-                    if auth:
-                        break
-            if auth:
-                return str(auth)
-        except ET.ParseError:
-            pass
+        if not auth:
+            try:
+                root = ET.fromstring(resp.content or b"<root/>")
+                auth = root.attrib.get("authToken") or root.attrib.get("authenticationToken")
+                if not auth:
+                    for node in root.iter():
+                        auth = node.attrib.get("authToken") or node.attrib.get("authenticationToken")
+                        if auth:
+                            break
+            except ET.ParseError:
+                auth = None
+        if auth:
+            _home_switch_record_success()
+            return str(auth)
         raise RuntimeError(f"Plex home user switch returned no auth token for {uid}")
 
     raise RuntimeError(f"Plex home user switch failed HTTP {last_status}: {last_body}")
@@ -994,6 +1059,23 @@ def fetch_watchlists_for_account(
             logger.warning(f"Roster discover failed, falling back to owner: {exc}", extra={"emoji_type": "warning"})
             users = [fetch_account_user(token=tok)]
 
+    def _fetch_order_key(user: dict[str, Any]) -> tuple[int, str]:
+        """Friend+Home switches, then Friend GraphQL (window reset), then Home switches."""
+        rel = str(user.get("relationship") or user.get("kind") or "").strip().lower()
+        fm = str(user.get("fetch_method") or "").strip().lower()
+        title = str(user.get("title") or user.get("username") or "").lower()
+        if rel == "owner" or fm == "discover":
+            return (0, title)
+        if fm == "home_switch" and rel == "friend":
+            return (1, title)
+        if rel in {"friend", "friend_only"} or fm == "graphql":
+            return (2, title)
+        if fm == "home_switch" or rel == "home":
+            return (3, title)
+        return (4, title)
+
+    users.sort(key=_fetch_order_key)
+
     by_user: dict[str, list[dict[str, Any]]] = {}
     errors: dict[str, str] = {}
     switched = 0
@@ -1009,6 +1091,12 @@ def fetch_watchlists_for_account(
             user["relationship"] = relationship
         fetch_method = str(user.get("fetch_method") or "").strip().lower()
         is_protected = bool(user.get("is_protected"))
+
+        # Friend+Home falls back to GraphQL when Home switch is off or unusable.
+        if fetch_method == "home_switch" and relationship == "friend":
+            if not include_home_switch or is_protected:
+                fetch_method = "graphql"
+                user["fetch_method"] = fetch_method
 
         # Hard blocks (Phase 1).
         if relationship == "server_only":
@@ -1036,16 +1124,34 @@ def fetch_watchlists_for_account(
         try:
             if relationship == "owner" or fetch_method == "discover":
                 by_user[uid] = fetch_owner_watchlist(token=tok, limit=limit_per_user)
+            elif fetch_method == "home_switch" or (
+                relationship == "home" and fetch_method != "graphql"
+            ):
+                # Switch API requires the Home numeric id; roster plex_user_id is often
+                # the hex uuid used for identity merge / GraphQL.
+                switch_id = str(user.get("plex_numeric_id") or "").strip()
+                if not switch_id.isdigit():
+                    switch_id = uid if uid.isdigit() else ""
+                if not switch_id and relationship == "friend":
+                    # Prefer GraphQL over failing the friend row.
+                    friend_key = str(user.get("plex_uuid") or uid).strip()
+                    by_user[uid] = fetch_friend_watchlist(
+                        friend_key, token=tok, limit=limit_per_user
+                    )
+                    time.sleep(0.15)
+                    continue
+                if not switch_id:
+                    raise RuntimeError(
+                        "Home switch needs a numeric Plex Home user id "
+                        f"(got plex_user_id={uid!r})"
+                    )
+                user_token = switch_home_user(switch_id, token=tok)
+                switched += 1
+                by_user[uid] = fetch_owner_watchlist(token=user_token, limit=limit_per_user)
             elif relationship in {"friend", "friend_only"} or fetch_method == "graphql":
                 friend_key = str(user.get("plex_uuid") or uid).strip()
                 by_user[uid] = fetch_friend_watchlist(friend_key, token=tok, limit=limit_per_user)
                 time.sleep(0.15)
-            elif relationship == "home" or fetch_method == "home_switch":
-                if switched:
-                    time.sleep(_HOME_SWITCH_GAP_SEC)
-                user_token = switch_home_user(uid, token=tok)
-                switched += 1
-                by_user[uid] = fetch_owner_watchlist(token=user_token, limit=limit_per_user)
             else:
                 errors[uid] = "No sync method available for this relationship"
         except Exception as exc:

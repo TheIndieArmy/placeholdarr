@@ -9,8 +9,16 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Changed
+
+- **Home watchlist setting copy**: Shorter copy; speed vs GraphQL, Home members need not be friends, Pass only to invite regular accounts into Home; still off by default.
+- **Home switch rate limit**: Pace Home switches ~8s apart (under the ~10-per-60s window) so a full 15-member Home fits; on HTTP 429 wait until 60s after the oldest switch in that window.
+- **Friend+Home fetch**: Unlocked Friend+Home uses Home switch when that setting is on (GraphQL fallback if off, PIN, or no numeric id).
+- **Watchlist fetch order**: Friend+Home switches, then Friend GraphQL, then Home switches so GraphQL time refreshes the switch window.
+
 ### Fixed
 
+- **Home switch id**: Account switch uses the numeric Plex Home user id, not the hex uuid roster key (fixes HTTP 404 “could not be found in your home” for managed profiles like VBKids).
 - **Arr title lookup year**: Movie/series title search no longer appends the release year to the query (year still prefers among exact/alias matches).
 - **Series alias lookup (Skyhook)**: When Sonarr title search has no exact/alias hit, Skyhook title search confirms TVDB alternativeTitles (e.g. Physical: Asia → Physical: 100) before falling back to the first Sonarr result.
 - **Watchlist orphan titles**: Titles with no remaining watchlist memberships are removed from the watchlist table on sync; Arr catalog and placeholders are unchanged.

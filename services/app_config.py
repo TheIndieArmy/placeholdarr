@@ -909,12 +909,14 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "WATCHLIST_SYNC_HOME_USERS",
             {
                 "section": "Watchlist",
-                "label": "Also sync Plex Home managed users",
+                "label": "Also sync Plex Home profiles (account switch)",
                 "description": (
-                    "Optional. Switch into unlocked Home managed profiles to read their watchlist. "
-                    "PIN-protected profiles stay on the roster but are not synced until a later "
-                    "release. Off by default (rate limits on large Homes). Per-person toggles: "
-                    "Activity → Watchlist."
+                    "Off by default. Syncs unlocked Plex Home profiles via your owner token and "
+                    "Plex's account switcher (faster than GraphQL; Home members need not be "
+                    "friends). Managed users work without Plex Pass; inviting regular accounts "
+                    "into Home needs Pass on the admin. PIN profiles are listed, not switched "
+                    "into. Friends still use GraphQL. Plex rate-limits rapid switches. "
+                    "Per-person: Activity → Watchlist."
                 ),
                 "type": "bool",
                 "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",

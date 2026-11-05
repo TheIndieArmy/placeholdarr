@@ -42,7 +42,8 @@ const DEFAULT_SORT_BY_TAB: Record<Exclude<WatchlistTab, "people">, { key: ItemSo
   blocklist: { key: "rejected", dir: "desc" },
 };
 
-const FILTER_GROUP_ORDER = ["owner", "home", "friend", "friend_only", "server_only", "unknown"] as const;
+// Friend+Home, Friend, then Home (matches fetch order: switches, GraphQL reset, switches).
+const FILTER_GROUP_ORDER = ["owner", "friend", "friend_only", "home", "server_only", "unknown"] as const;
 
 function filterGroupKey(u: WatchlistUser): string {
   const r = String(u.relationship || u.kind || "").trim().toLowerCase();
