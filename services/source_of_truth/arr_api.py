@@ -969,8 +969,18 @@ def _lookup_year(row: dict) -> Optional[int]:
     return parsed if parsed > 0 else None
 
 
-def _pick_title_lookup(result: Any, *, title: str, year: Optional[int]) -> Optional[dict]:
-    """Prefer an exact primary or alternate title (and year when known); else first hit."""
+def _pick_title_lookup(
+    result: Any,
+    *,
+    title: str,
+    year: Optional[int],
+    allow_fallback: bool = True,
+) -> Optional[dict]:
+    """Prefer an exact primary or alternate title (and year when known).
+
+    When ``allow_fallback`` is true and nothing exact/alias-matches, return the
+    first search hit (legacy loose behavior).
+    """
     from services.watchlist.remap import alternate_titles_from_lookup, normalize_title
 
     rows = result if isinstance(result, list) else [result] if isinstance(result, dict) else []
@@ -1002,7 +1012,53 @@ def _pick_title_lookup(result: Any, *, title: str, year: Optional[int]) -> Optio
             return year_alias[0]
     if alias:
         return alias[0]
-    return dicts[0]
+    return dicts[0] if allow_fallback else None
+
+
+def _merge_skyhook_alternate_titles(sonarr_row: dict, skyhook_row: dict) -> dict:
+    """Copy Skyhook alternativeTitles onto a Sonarr lookup row when Sonarr omitted them."""
+    from services.source_of_truth.skyhook import skyhook_titles_as_sonarr_alts
+    from services.watchlist.remap import alternate_titles_from_lookup, normalize_title
+
+    merged = dict(sonarr_row)
+    existing = alternate_titles_from_lookup(merged)
+    existing_keys = {normalize_title(t) for t in existing}
+    sky_alts = skyhook_titles_as_sonarr_alts(skyhook_row)
+    if not sky_alts:
+        return merged
+    combined = list(merged.get("alternateTitles") or []) if isinstance(merged.get("alternateTitles"), list) else []
+    for alt in sky_alts:
+        title = str(alt.get("title") or "").strip()
+        key = normalize_title(title)
+        if not key or key in existing_keys:
+            continue
+        existing_keys.add(key)
+        combined.append({"title": title})
+    if combined:
+        merged["alternateTitles"] = combined
+    return merged
+
+
+def _resolve_series_via_skyhook(
+    *,
+    url: str,
+    api_key: str,
+    title: str,
+    year: Optional[int],
+) -> Optional[dict]:
+    """Confident Skyhook primary/alias match, then Sonarr lookup by tvdb id."""
+    from services.source_of_truth.skyhook import match_skyhook_series
+
+    sky = match_skyhook_series(title, year=year)
+    if not isinstance(sky, dict):
+        return None
+    tvdb = _coerce_lookup_int(sky.get("tvdbId") if sky.get("tvdbId") is not None else sky.get("tvdb_id"))
+    if not tvdb:
+        return None
+    sonarr = _first_lookup_row(_arr_lookup(url, api_key, "series/lookup", f"tvdb:{tvdb}"))
+    if not isinstance(sonarr, dict):
+        return None
+    return _merge_skyhook_alternate_titles(sonarr, sky)
 
 
 def _arr_lookup(url: str, api_key: str, resource: str, term: str) -> Any:
@@ -1036,8 +1092,10 @@ def lookup_movie(
     name = str(title or "").strip()
     if not name:
         return None
-    query = f"{name} {int(year)}" if _coerce_lookup_int(year) else name
-    return _pick_title_lookup(_arr_lookup(url, api_key, "movie/lookup", query), title=name, year=year)
+    # Search by title only. Do not append year unless it is already in the title
+    # string; appending year (e.g. "Physical: Asia 2025") can rank unrelated
+    # same-year hits first. Year still prefers among exact/alias matches.
+    return _pick_title_lookup(_arr_lookup(url, api_key, "movie/lookup", name), title=name, year=year)
 
 
 def lookup_series(
@@ -1070,8 +1128,19 @@ def lookup_series(
     name = str(title or "").strip()
     if not name:
         return None
-    query = f"{name} {int(year)}" if _coerce_lookup_int(year) else name
-    return _pick_title_lookup(_arr_lookup(url, api_key, "series/lookup", query), title=name, year=year)
+    # Search by title only. Do not append year unless it is already in the title
+    # string; appending year (e.g. "Physical: Asia 2025") can rank unrelated
+    # same-year hits first. Year still prefers among exact/alias matches.
+    sonarr_rows = _arr_lookup(url, api_key, "series/lookup", name)
+    exact = _pick_title_lookup(sonarr_rows, title=name, year=year, allow_fallback=False)
+    if exact:
+        return exact
+    # Sonarr lookup often omits TVDB aliases. Skyhook search includes them
+    # (Physical: Asia → Physical: 100, Horizons → Pokémon).
+    skyhook_hit = _resolve_series_via_skyhook(url=url, api_key=api_key, title=name, year=year)
+    if skyhook_hit:
+        return skyhook_hit
+    return _pick_title_lookup(sonarr_rows, title=name, year=year, allow_fallback=True)
 
 
 def normalize_arr_tag_label(label: str) -> str:
