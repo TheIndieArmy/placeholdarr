@@ -9,6 +9,11 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Fixed
+
+- **Arr title lookup year**: Movie/series title search no longer appends the release year to the query (year still prefers among exact/alias matches).
+- **Series alias lookup (Skyhook)**: When Sonarr title search has no exact/alias hit, Skyhook title search confirms TVDB alternativeTitles (e.g. Physical: Asia → Physical: 100) before falling back to the first Sonarr result.
+
 ## Pre-release
 
 ## Released
