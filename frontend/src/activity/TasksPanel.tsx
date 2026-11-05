@@ -14,6 +14,59 @@ import { detailSectionPhaseKey, hydratePhaseMetrics, taskLiveFromApi } from "./t
 import { formatNextRunClock, formatTaskDuration, formatTaskTrigger, timeAgo, timeUntil } from "./formatActivityTime";
 import { TASK_KEYS_WITH_STOP_SUPPORT, TASK_STOP_CONFIRM_MESSAGE } from "./taskStopConfirm";
 
+/** JSON string[] of visible task_keys, or omitted/`all` for every known task. */
+const HISTORY_TASK_FILTER_STORAGE_KEY = "placeholdarr:tasks-history-filter";
+
+const HISTORY_TASK_LABELS: Record<string, string> = {
+  full_sync: "Full ARR sync",
+  lite_sync: "Lite sync",
+  calendar_sync: "Calendar sync",
+  calendar_only: "Calendar only",
+  collections_sync: "Collections sync",
+  watchlist_sync: "Watchlist sync",
+  placeholder_refresh: "Placeholder refresh",
+};
+
+const HISTORY_TASK_FILTER_PREFERRED = [
+  "full_sync",
+  "lite_sync",
+  "calendar_sync",
+  "collections_sync",
+  "watchlist_sync",
+  "placeholder_refresh",
+] as const;
+
+/** null = show all known tasks (default). */
+function readHistoryVisibleKeys(): string[] | null {
+  try {
+    const raw = String(localStorage.getItem(HISTORY_TASK_FILTER_STORAGE_KEY) || "").trim();
+    if (!raw || raw === "all") return null;
+    const parsed = JSON.parse(raw) as unknown;
+    if (Array.isArray(parsed)) {
+      const keys = parsed.map((v) => String(v || "").trim()).filter(Boolean);
+      if (!keys.length || keys.includes("all")) return null;
+      return keys;
+    }
+    // Migrate prior single-select value.
+    if (raw && raw !== "all") return [raw];
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+function writeHistoryVisibleKeys(keys: string[] | null): void {
+  try {
+    if (keys == null) {
+      localStorage.setItem(HISTORY_TASK_FILTER_STORAGE_KEY, "all");
+      return;
+    }
+    localStorage.setItem(HISTORY_TASK_FILTER_STORAGE_KEY, JSON.stringify(keys));
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
+
 type StripAccent = { hex: string; text: string; icon: string; hoverHex: string };
 
 function taskRunProgressSections(progress: ActivityRow["progress"] | undefined): Array<any> {
@@ -204,16 +257,71 @@ export function TasksPanel(props: {
   const semantic = getBrandSemanticTokens(props.brand, props.themeMode, props.accent);
   const isLight = props.themeMode === "light";
   const [historyExpanded, setHistoryExpanded] = useState<Record<string, boolean>>({});
+  /** null = all tasks visible; otherwise only listed task_keys. */
+  const [historyVisibleKeys, setHistoryVisibleKeys] = useState<string[] | null>(() => readHistoryVisibleKeys());
   const [stopConfirmRunId, setStopConfirmRunId] = useState<number | null>(null);
   const [stopPending, setStopPending] = useState(false);
   const [stopError, setStopError] = useState<string | null>(null);
   const panelBorder = isLight ? semantic.border : "rgba(66,71,83,0.4)";
   const panelBg = isLight ? semantic.surfacePanel : "#171c22";
 
+  const historyFilterByKey = new Map<string, string>();
+  for (const task of props.scheduled) {
+    const key = String(task.task_key || "").trim();
+    if (!key) continue;
+    historyFilterByKey.set(key, String(task.label || HISTORY_TASK_LABELS[key] || key));
+  }
+  for (const run of props.history) {
+    const key = String(run.task_key || "").trim();
+    if (!key || historyFilterByKey.has(key)) continue;
+    historyFilterByKey.set(key, String(run.task_label || HISTORY_TASK_LABELS[key] || key));
+  }
+  const historyFilterKeys = [
+    ...HISTORY_TASK_FILTER_PREFERRED.filter((k) => historyFilterByKey.has(k)),
+    ...[...historyFilterByKey.keys()].filter((k) => !(HISTORY_TASK_FILTER_PREFERRED as readonly string[]).includes(k)).sort(),
+  ];
+  const historyVisibleSet =
+    historyVisibleKeys == null ? null : new Set(historyVisibleKeys.map((k) => k.toLowerCase()));
+  const filteredHistory =
+    historyVisibleSet == null
+      ? props.history
+      : props.history.filter((run) =>
+          historyVisibleSet.has(String(run.task_key || "").trim().toLowerCase()),
+        );
+  const allHistoryFiltersOn =
+    historyVisibleSet == null || historyFilterKeys.every((k) => historyVisibleSet.has(k.toLowerCase()));
+
+  const toggleHistoryTask = (taskKey: string) => {
+    const key = String(taskKey || "").trim();
+    if (!key) return;
+    setHistoryVisibleKeys((prev) => {
+      const known = historyFilterKeys;
+      if (prev == null) {
+        // Turning one off from "all": keep every other known task.
+        return known.filter((k) => k !== key);
+      }
+      const set = new Set(prev);
+      if (set.has(key)) set.delete(key);
+      else set.add(key);
+      const next = known.filter((k) => set.has(k));
+      // Collapse back to "all" when every known task is on.
+      if (next.length === known.length) return null;
+      return next;
+    });
+  };
+
+  const setAllHistoryTasks = (on: boolean) => {
+    setHistoryVisibleKeys(on ? null : []);
+  };
+
+  useEffect(() => {
+    writeHistoryVisibleKeys(historyVisibleKeys);
+  }, [historyVisibleKeys]);
+
   useEffect(() => {
     setHistoryExpanded((prev) => {
       const next = { ...prev };
-      for (const run of props.history) {
+      for (const run of filteredHistory) {
         const key = `task-run-${run.id}`;
         const live = taskLiveFromApi(run.live);
         const leftover = sectionsNotCoveredByLive(taskRunProgressSections(run.progress), live);
@@ -225,7 +333,7 @@ export function TasksPanel(props: {
       }
       return next;
     });
-  }, [props.history]);
+  }, [filteredHistory]);
 
   return (
     <div>
@@ -381,18 +489,76 @@ export function TasksPanel(props: {
         </div>
       </div>
 
-      <div className="rounded-xl border overflow-hidden mb-6" style={{ borderColor: panelBorder, backgroundColor: panelBg }}>
-        <div className="px-4 py-3 border-b" style={{ borderColor: isLight ? semantic.border : "rgba(66,71,83,0.3)" }}>
-          <h2 className="text-[20px] font-bold font-headline" style={{ color: isLight ? semantic.fg : "#fff" }}>
-            Maintenance runs
-          </h2>
-          <p className="text-[13px] mt-0.5" style={{ color: semantic.fgMuted }}>
-            Scheduled, manual, and startup. Expand a row for phase detail.
-          </p>
+      <div className="rounded-xl border mb-6 overflow-hidden" style={{ borderColor: panelBorder, backgroundColor: panelBg }}>
+        <div className="px-4 py-3 border-b space-y-3" style={{ borderColor: isLight ? semantic.border : "rgba(66,71,83,0.3)" }}>
+          <div className="min-w-0">
+            <h2 className="text-[20px] font-bold font-headline" style={{ color: isLight ? semantic.fg : "#fff" }}>
+              Maintenance runs
+            </h2>
+            <p className="text-[13px] mt-0.5" style={{ color: semantic.fgMuted }}>
+              Scheduled, manual, and startup. Expand a row for phase detail.
+            </p>
+          </div>
+          {historyFilterKeys.length ? (
+            <div className="flex flex-wrap gap-2" role="group" aria-label="Show maintenance run types">
+              <button
+                type="button"
+                onClick={() => setAllHistoryTasks(!allHistoryFiltersOn)}
+                className="px-2.5 py-1 rounded-lg border text-[12px] font-headline uppercase tracking-wider"
+                style={
+                  allHistoryFiltersOn
+                    ? {
+                        borderColor: props.accent.hex,
+                        backgroundColor: `${props.accent.hex}22`,
+                        color: isLight ? semantic.fg : "#fff",
+                      }
+                    : {
+                        borderColor: semantic.border,
+                        color: semantic.fgMuted,
+                      }
+                }
+                aria-pressed={allHistoryFiltersOn}
+              >
+                All
+              </button>
+              {historyFilterKeys.map((key) => {
+                const on =
+                  historyVisibleSet == null || historyVisibleSet.has(key.toLowerCase());
+                const label = historyFilterByKey.get(key) || HISTORY_TASK_LABELS[key] || key;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => toggleHistoryTask(key)}
+                    className="px-2.5 py-1 rounded-lg border text-[12px]"
+                    style={
+                      on
+                        ? {
+                            borderColor: props.accent.hex,
+                            backgroundColor: `${props.accent.hex}22`,
+                            color: isLight ? semantic.fg : "#fff",
+                          }
+                        : {
+                            borderColor: semantic.border,
+                            color: semantic.fgMuted,
+                          }
+                    }
+                    aria-pressed={on}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
         </div>
         {!props.history.length ? (
           <div className="p-10 text-center" style={{ color: semantic.fgSubtle }}>
             No task history yet.
+          </div>
+        ) : !filteredHistory.length ? (
+          <div className="p-10 text-center" style={{ color: semantic.fgSubtle }}>
+            No runs for the selected tasks in the loaded history.
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -411,7 +577,7 @@ export function TasksPanel(props: {
                 </tr>
               </thead>
               <tbody>
-                {props.history.map((run) => {
+                {filteredHistory.map((run) => {
                   const rowKey = `task-run-${run.id}`;
                   const sections = taskRunProgressSections(run.progress);
                   const rawLive = taskLiveFromApi(run.live);

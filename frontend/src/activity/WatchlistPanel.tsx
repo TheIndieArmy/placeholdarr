@@ -4,6 +4,7 @@ import type { Brand, ThemeMode } from "../brandTypes";
 import { getBrandSemanticTokens } from "../brandSemanticTheme";
 import { BrandCheckbox } from "../BrandCheckbox";
 import {
+  deleteWatchlistUser,
   getWatchlist,
   patchWatchlistUser,
   postWatchlistAdd,
@@ -20,6 +21,7 @@ import {
 } from "../api/watchlist";
 import { BrandSelect } from "../BrandSelect";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
+import { ConfirmModal } from "../ConfirmModal";
 import { ToggleSwitch } from "../ToggleSwitch";
 import { UI_SECTION_FRAME_CLASS } from "../uiSectionFrame";
 
@@ -272,10 +274,18 @@ const POLICY_OR_HARD_BLOCKS = new Set([
   "home_switch_disabled",
   "friends_sync_disabled",
   "friend_only_disabled",
+  "not_found",
 ]);
+
+function userIsNotFound(u: WatchlistUser): boolean {
+  return Boolean(u.not_found) || String(u.block_reason || "").trim() === "not_found";
+}
 
 function blockReasonCopy(u: WatchlistUser): string | null {
   const code = String(u.block_reason || "").trim();
+  if (code === "not_found" || u.not_found) {
+    return "Not found on Plex (unfriended or removed from Home)";
+  }
   if (code === "needs_friend_or_token") return "Needs friend access or a user token";
   if (code === "needs_pin_or_token") return "Needs Home PIN or a user token";
   if (code === "home_switch_disabled") {
@@ -382,6 +392,7 @@ export function WatchlistPanel(props: {
   const [syncStarting, setSyncStarting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [rosterBusy, setRosterBusy] = useState(false);
+  const [removeConfirmUser, setRemoveConfirmUser] = useState<WatchlistUser | null>(null);
   const [acceptMenuFor, setAcceptMenuFor] = useState<"bulk" | number | null>(null);
   const wasSyncRunningRef = useRef(false);
   const syncBusy = Boolean(props.syncRunning) || syncStarting;
@@ -686,6 +697,41 @@ export function WatchlistPanel(props: {
         prev.map((row) => (row.plex_user_id === u.plex_user_id ? { ...row, on_new: u.on_new } : row)),
       );
       setError(e instanceof Error ? e.message : "Could not update Arr behavior");
+    }
+  };
+
+  const soleTitleRemoveCopy = (u: WatchlistUser): string => {
+    const sole = typeof u.sole_title_count === "number" ? u.sole_title_count : null;
+    if (sole == null) {
+      return "Titles where they are the only person with it on their watchlist will be removed from Placeholdarr.";
+    }
+    if (sole === 0) return "No titles are held only by them on a watchlist.";
+    if (sole === 1) {
+      return "1 title where they are the only person with it on their watchlist will be removed from Placeholdarr.";
+    }
+    return `${sole} titles where they are the only person with it on their watchlist will be removed from Placeholdarr.`;
+  };
+
+  const onRemoveUser = (u: WatchlistUser) => {
+    if (!userIsNotFound(u) || rosterBusy) return;
+    setRemoveConfirmUser(u);
+  };
+
+  const confirmRemoveUser = async () => {
+    const u = removeConfirmUser;
+    if (!u || rosterBusy) return;
+    setRosterBusy(true);
+    setError(null);
+    try {
+      await deleteWatchlistUser(u.plex_user_id);
+      setRemoveConfirmUser(null);
+      setUsers((prev) => prev.filter((row) => row.plex_user_id !== u.plex_user_id));
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not remove person");
+      setRemoveConfirmUser(null);
+    } finally {
+      setRosterBusy(false);
     }
   };
 
@@ -1036,7 +1082,8 @@ export function WatchlistPanel(props: {
               <div className="text-[13px]" style={{ color: semantic.fgMuted }}>
                 Per-person sync and Arr behavior. Greyed sync toggles mean Settings → Watchlist (or a missing
                 path) blocks fetch. Arr behavior Default uses Settings → Watchlist; any other choice overrides
-                only that person.
+                only that person. People no longer on Plex friends/Home are marked not found so you can remove
+                them.
               </div>
               <button
                 type="button"
@@ -1057,7 +1104,7 @@ export function WatchlistPanel(props: {
                   <col className="w-[8.5rem]" />
                   <col className="w-[12.5rem]" />
                   <col className="w-[11rem]" />
-                  <col className="w-16" />
+                  <col className="w-[4.75rem]" />
                 </colgroup>
                 <thead>
                   <tr className="border-b" style={{ borderColor: headBorder }}>
@@ -1092,6 +1139,7 @@ export function WatchlistPanel(props: {
                       const reason = blockReasonCopy(u);
                       const locked = syncToggleLocked(u);
                       const checked = syncToggleChecked(u);
+                      const missing = userIsNotFound(u);
                       return (
                         <tr key={`roster-${u.plex_user_id}`} className="border-b last:border-0" style={{ borderColor: rowBorder }}>
                           <td className="px-2 py-3 align-middle">
@@ -1099,7 +1147,7 @@ export function WatchlistPanel(props: {
                               thumbUrl={u.thumb_url}
                               title={name}
                               size={36}
-                              dimmed={blocked || !checked}
+                              dimmed={blocked || !checked || missing}
                             />
                           </td>
                           <td className="px-2 py-3 align-middle min-w-0">
@@ -1109,7 +1157,7 @@ export function WatchlistPanel(props: {
                             {reason ? (
                               <p
                                 className="mt-0.5 text-[12px] leading-snug"
-                                style={{ color: blocked ? "#f87171" : semantic.fgSubtle }}
+                                style={{ color: blocked || missing ? "#f87171" : semantic.fgSubtle }}
                               >
                                 {reason}
                               </p>
@@ -1144,7 +1192,7 @@ export function WatchlistPanel(props: {
                           <td className="px-2 py-3 align-middle">
                             <BrandSelect
                               fullWidth
-                              disabled={rosterBusy}
+                              disabled={rosterBusy || missing}
                               value={u.on_new || ""}
                               options={[...ARR_BEHAVIOR_OPTIONS]}
                               onChange={(value) => void onChangeUserArrBehavior(u, value)}
@@ -1155,14 +1203,30 @@ export function WatchlistPanel(props: {
                             {formatWhen(u.last_synced_at ?? null)}
                           </td>
                           <td className="px-2 py-3 align-middle">
-                            <ToggleSwitch
-                              size="sm"
-                              checked={checked}
-                              disabled={locked || rosterBusy}
-                              accentHex={props.accent.hex}
-                              ariaLabel={`Sync watchlist for ${name}`}
-                              onChange={(next) => void onToggleUserSync(u, next)}
-                            />
+                            {missing ? (
+                              <button
+                                type="button"
+                                disabled={rosterBusy}
+                                onClick={() => onRemoveUser(u)}
+                                className="px-2 py-1 rounded-md text-[11px] uppercase tracking-wider disabled:opacity-50"
+                                style={{
+                                  backgroundColor: "rgba(239,68,68,0.18)",
+                                  color: "#fca5a5",
+                                  border: "1px solid rgba(239,68,68,0.35)",
+                                }}
+                              >
+                                Remove
+                              </button>
+                            ) : (
+                              <ToggleSwitch
+                                size="sm"
+                                checked={checked}
+                                disabled={locked || rosterBusy}
+                                accentHex={props.accent.hex}
+                                ariaLabel={`Sync watchlist for ${name}`}
+                                onChange={(next) => void onToggleUserSync(u, next)}
+                              />
+                            )}
                           </td>
                         </tr>
                       );
@@ -1591,6 +1655,29 @@ export function WatchlistPanel(props: {
           </>
         )}
       </div>
+
+      {removeConfirmUser ? (
+        <ConfirmModal
+          title={`Remove ${userDisplayName(removeConfirmUser)}?`}
+          message={soleTitleRemoveCopy(removeConfirmUser)}
+          confirmLabel={rosterBusy ? "Removing…" : "Remove"}
+          cancelLabel="Cancel"
+          accentHex={props.accent.hex}
+          themeMode={props.themeMode}
+          onCancel={() => {
+            if (rosterBusy) return;
+            setRemoveConfirmUser(null);
+          }}
+          onConfirm={() => {
+            if (rosterBusy) return;
+            void confirmRemoveUser();
+          }}
+        >
+          <p className={`text-[14px] leading-relaxed ${isLight ? "text-slate-500" : "text-slate-400"}`}>
+            Arr catalog and placeholders are unchanged.
+          </p>
+        </ConfirmModal>
+      ) : null}
     </div>
   );
 }

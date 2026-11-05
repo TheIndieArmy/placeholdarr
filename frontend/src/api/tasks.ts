@@ -5,8 +5,9 @@ export function getTasksScheduled() {
   return fetchJson<{ tasks: ScheduledTaskRow[] }>("/api/tasks/scheduled");
 }
 
-export function getTasksHistory(limit = 50) {
-  return fetchJson<TaskRunRow[]>(`/api/tasks/history?limit=${limit}`);
+/** Last N runs per task type (default 30). High-cadence jobs cannot starve others. */
+export function getTasksHistory(perTask = 30) {
+  return fetchJson<TaskRunRow[]>(`/api/tasks/history?per_task=${perTask}`);
 }
 
 export function getTasksStatus() {
