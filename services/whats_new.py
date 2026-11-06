@@ -331,6 +331,16 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         requires_ack=True,
     ),
     WhatsNewNotice(
+        id="series-stats-lock-stall-0-12-6",
+        since_version="0.12.6",
+        title="ARR sync lock stall fixed",
+        body=(
+            "A bug could leave full ARR sync and episode-delete handling stuck for a long time after "
+            "series were added. Series episode-stats refresh was re-queueing itself and pinning "
+            "Postgres locks. That loop is fixed so sync and webhooks can finish."
+        ),
+    ),
+    WhatsNewNotice(
         id="premiere-date-override-0-12-5",
         since_version="0.12.5",
         title="Premiere date override",

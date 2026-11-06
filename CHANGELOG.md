@@ -13,6 +13,16 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## Released
 
+## [0.12.6] - 2026-11-06
+
+### Summary
+
+- **Series stats lock stall**: Episode-stats refresh no longer re-triggers itself after commit (was pinning Postgres locks and blocking ARR sync) (#138).
+
+### Fixed
+
+- **Series stats refresh loop**: Updating materialized episode counters no longer re-queues itself via ORM after_commit (that loop held locks on `series` / `library_catalog_version` and stalled ARR sync and episode-delete materialization) (#138).
+
 ## [0.12.5] - 2026-11-06
 
 ### Summary
