@@ -341,6 +341,7 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         ),
         cta_label="Open Watchlist settings",
         cta_path="/settings/watchlist",
+        requires_ack=True,
     ),
     WhatsNewNotice(
         id="home-switch-token-cache-0-12-4",
@@ -349,10 +350,11 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         body=(
             "Optional Settings → Watchlist toggle (under Home sync) stores each Home user's switch "
             "token and reuses it until Plex rejects it, then switches again. Speeds up syncing and "
-            "helps with rate limits."
+            "helps with rate limits. Off by default."
         ),
         cta_label="Open Watchlist settings",
         cta_path="/settings/watchlist",
+        requires_ack=True,
     ),
     WhatsNewNotice(
         id="watchlist-task-changes-0-12-4",
@@ -364,6 +366,7 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         ),
         cta_label="Open Tasks",
         cta_path="/activity/tasks",
+        requires_ack=True,
     ),
     WhatsNewNotice(
         id="friend-home-watchlist-sync-0-12-3",
