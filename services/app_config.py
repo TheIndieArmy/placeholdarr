@@ -139,6 +139,8 @@ REMOVED_SETTINGS_KEYS_IGNORED_ON_SAVE = frozenset(
         "COLLECTIONS_SYNC_INTERVAL_HOURS",
         "CALENDAR_SYNC_INTERVAL_HOURS",
         "STARTUP_SYNC_MODE",
+        # Replaced by dedicated 10s RSS loop + reconcile hours.
+        "WATCHLIST_SYNC_SCHEDULE",
     }
 )
 
@@ -850,28 +852,15 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "description": (
                     "Sync the Plex Universal Watchlist roster (owner, friends, optional Home) into "
                     "Activity → Watchlist. Requires Plex connected under Media Integrations "
-                    "(Sign in with Plex preferred). With Plex Pass, RSS change hints skip full "
-                    "fetches when nothing changed. Per-person sync lives on the Watchlist People list."
+                    "(Sign in with Plex preferred). When RSS feeds are available, they are polled "
+                    "about every 10 seconds and only people who changed are fetched. If friends "
+                    "RSS is missing, a slower ~5-minute API poll still updates everyone else. "
+                    "Full reconcile (removals and Home-only) follows the interval below. "
+                    "Per-person sync lives on the Watchlist People list."
                 ),
                 "type": "bool",
                 "restart_required": False,
                 "default": False,
-            },
-        ),
-        (
-            "WATCHLIST_SYNC_SCHEDULE",
-            {
-                "section": "Watchlist",
-                "label": "Watchlist poll schedule",
-                "description": (
-                    "How often to check for watchlist changes. Default every 5 minutes. "
-                    "With RSS hints, unchanged polls stay cheap. Disable here or turn off "
-                    "Enable Plex Watchlist sync to stop polling."
-                ),
-                "type": "task_schedule",
-                "default_task": "watchlist_sync",
-                "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
-                "restart_required": False,
             },
         ),
         (
@@ -925,13 +914,34 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "WATCHLIST_CACHE_HOME_SWITCH_TOKENS",
+            {
+                "section": "Watchlist",
+                "label": "Remember Home switch tokens",
+                "description": (
+                    "After switching into a Home user, keep their token and reuse it on later "
+                    "syncs until Plex rejects it. Avoids switching every poll (speeds up syncing "
+                    "and helps with rate limits). Tokens are stored in the database and never "
+                    "shown in the UI. Off by default."
+                ),
+                "type": "bool",
+                "depends_on": "WATCHLIST_SYNC_HOME_USERS",
+                "nested": True,
+                "restart_required": False,
+                "default": False,
+            },
+        ),
+        (
             "WATCHLIST_USE_RSS_HINT",
             {
                 "section": "Watchlist",
                 "label": "Use RSS change hints (Plex Pass)",
                 "description": (
-                    "Automatically create owner and friends RSS feeds when Plex Pass allows it. "
-                    "Unchanged feeds skip a full API/GraphQL pull until the reconcile interval."
+                    "Automatically create owner and friends RSS feeds when Plex allows it "
+                    "(friends feed usually needs Pass). Feeds are polled about every 10 seconds; "
+                    "new item authors trigger a targeted fetch for those people only. If the "
+                    "friends feed is unavailable, a ~5-minute API poll still covers friends and "
+                    "Home. Turn off to use only the slower API poll."
                 ),
                 "type": "bool",
                 "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
@@ -945,8 +955,8 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "section": "Watchlist",
                 "label": "Full watchlist reconcile hours",
                 "description": (
-                    "Force a full owner/friends pull at least this often so removals are noticed "
-                    "even if RSS is quiet. Default 2 hours."
+                    "Force a full owner/friends/Home pull at least this often so removals and "
+                    "Home-only profiles (not on friends RSS) are noticed. Default 2 hours."
                 ),
                 "type": "float",
                 "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
@@ -1187,6 +1197,28 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "section": "Watchlist",
                 "label": "Watchlist RSS friends hash",
                 "description": "Content hash for friendsWatchlist RSS change detection.",
+                "type": "string",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "WATCHLIST_RSS_SELF_GUIDS",
+            {
+                "section": "Watchlist",
+                "label": "Watchlist RSS self seen guids",
+                "description": "JSON list of recent owner RSS item guids (author targeting).",
+                "type": "string",
+                "restart_required": False,
+                "default": "",
+            },
+        ),
+        (
+            "WATCHLIST_RSS_FRIENDS_GUIDS",
+            {
+                "section": "Watchlist",
+                "label": "Watchlist RSS friends seen guids",
+                "description": "JSON list of recent friendsWatchlist RSS item guids (author targeting).",
                 "type": "string",
                 "restart_required": False,
                 "default": "",
@@ -3719,7 +3751,6 @@ def save_settings(
             "LITE_SYNC_SCHEDULE",
             "COLLECTIONS_SYNC_SCHEDULE",
             "CALENDAR_SYNC_SCHEDULE",
-            "WATCHLIST_SYNC_SCHEDULE",
         }
         schedule_keys_changed: set[str] = set()
         watchlist_enable_changed = False
@@ -3850,17 +3881,15 @@ def save_settings(
                     "LITE_SYNC_SCHEDULE": "lite_sync",
                     "COLLECTIONS_SYNC_SCHEDULE": "collections_sync",
                     "CALENDAR_SYNC_SCHEDULE": "calendar_sync",
-                    "WATCHLIST_SYNC_SCHEDULE": "watchlist_sync",
                 }
                 # Rebuild jobs; clear persisted next-run only for schedules
                 # whose JSON actually changed so the new cadence applies immediately.
+                # Watchlist enable toggles the RSS loop (started from refresh_all_schedules).
                 reset_keys = {
                     task_by_key[config_key]
                     for config_key in schedule_keys_changed
                     if config_key in task_by_key
                 }
-                if watchlist_enable_changed:
-                    reset_keys.add("watchlist_sync")
                 refresh_all_schedules(reset_next_run_for=reset_keys)
                 logger.info(
                     "Refreshed APScheduler jobs after schedule settings save "

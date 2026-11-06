@@ -802,7 +802,7 @@ class PlexWatchlistUser(Base):
     username = Column(String(256), nullable=True)
     title = Column(String(256), nullable=False, default="")
     thumb_url = Column(String(1024), nullable=True)
-    # Fetch channel: owner | friend | home | unknown (token reserved for Phase 2)
+    # Fetch channel: owner | friend | home | unknown
     kind = Column(String(16), nullable=False, default="unknown")
     # Roster relationship: owner | friend (∩ Home/server) | friend_only | server_only
     # (share, not Home) | home (on Home list, not friend) | unknown
@@ -817,6 +817,8 @@ class PlexWatchlistUser(Base):
     is_guest = Column(Boolean, nullable=False, default=False)
     # Future: {"on_new": "...", "radarr_targets": [...], "sonarr_targets": [...]}
     settings_override = Column(JSON, nullable=True)
+    # Auth token from Plex Home /switch (never expose via API). Opt-in via settings.
+    cached_home_token = Column(String(512), nullable=True)
     sync_enabled = Column(Boolean, nullable=False, default=True)
     last_synced_at = Column(DateTime(timezone=True), nullable=True)
     last_sync_error = Column(String, nullable=True)
