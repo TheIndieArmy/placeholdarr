@@ -9,6 +9,14 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Summary
+
+- **Series stats lock stall**: Episode-stats refresh no longer re-triggers itself after commit (was pinning Postgres locks and blocking ARR sync).
+
+### Fixed
+
+- **Series stats refresh loop**: Updating materialized episode counters no longer re-queues itself via ORM after_commit (that loop held locks on `series` / `library_catalog_version` and stalled ARR sync and episode-delete materialization).
+
 ## Pre-release
 
 ## Released
