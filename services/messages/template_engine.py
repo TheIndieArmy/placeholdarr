@@ -335,6 +335,42 @@ def apply_wrapper(inner: str, *, preset: str | None = None, open_text: str | Non
 # ----- Convenience: render lists of media tokens ---------------------------
 
 
+def _token_date(value: Any) -> str:
+    """Format a date-like value as YYYY-MM-DD for template tokens; empty when missing."""
+    if value is None or value == "":
+        return ""
+    iso = getattr(value, "isoformat", None)
+    if callable(iso):
+        try:
+            text = str(iso())
+            return text[:10] if text else ""
+        except Exception:
+            return ""
+    text = str(value).strip()
+    return text[:10] if text else ""
+
+
+def _season_premiere_from_episodes(season: Any) -> str:
+    """Earliest episode air date on a Season row when the episode collection is available."""
+    if season is None:
+        return ""
+    try:
+        eps = getattr(season, "episode", None)
+    except Exception:
+        return ""
+    if not eps:
+        return ""
+    dates: list[str] = []
+    try:
+        for ep in eps:
+            text = _token_date(getattr(ep, "air_date", None))
+            if text:
+                dates.append(text)
+    except Exception:
+        return ""
+    return min(dates) if dates else ""
+
+
 def media_tokens_for_movie(movie: Any) -> dict[str, Any]:
     """Map a Movie ORM row to the standard media token namespace."""
     if movie is None:
@@ -363,6 +399,9 @@ def media_tokens_for_movie(movie: Any) -> dict[str, Any]:
         "RuntimeMinutes": str(int(runtime_min)) if isinstance(runtime_min, (int, float)) and int(runtime_min) > 0 else "",
         "Hours": str(hours) if hours else "",
         "Minutes": str(minutes) if minutes else "",
+        "TheatricalDate": _token_date(getattr(movie, "theater_release_date", None)),
+        "DigitalDate": _token_date(getattr(movie, "digital_release_date", None)),
+        "PhysicalDate": _token_date(getattr(movie, "physical_release_date", None)),
     }
 
 
@@ -399,6 +438,9 @@ def media_tokens_for_series(series: Any) -> dict[str, Any]:
         "RuntimeMinutes": str(int(runtime_min)) if isinstance(runtime_min, (int, float)) and int(runtime_min) > 0 else "",
         "Hours": str(hours) if hours else "",
         "Minutes": str(minutes) if minutes else "",
+        "SeriesPremiereDate": _token_date(getattr(series, "sonarr_first_aired", None)),
+        "SeasonPremiereDate": "",
+        "AirDate": "",
     }
 
 
@@ -442,6 +484,11 @@ def media_tokens_for_season(season: Any, series: Any = None) -> dict[str, Any]:
         "RuntimeMinutes": str(int(runtime_min)) if isinstance(runtime_min, (int, float)) and int(runtime_min) > 0 else "",
         "Hours": str(hours) if hours else "",
         "Minutes": str(minutes) if minutes else "",
+        "SeriesPremiereDate": _token_date(
+            getattr(series, "sonarr_first_aired", None) if series is not None else None
+        ),
+        "SeasonPremiereDate": _season_premiere_from_episodes(season),
+        "AirDate": "",
     }
 
 
@@ -494,6 +541,11 @@ def media_tokens_for_episode(episode: Any, season: Any = None, series: Any = Non
         "RuntimeMinutes": str(int(runtime_min)) if isinstance(runtime_min, (int, float)) and int(runtime_min) > 0 else "",
         "Hours": str(hours) if hours else "",
         "Minutes": str(minutes) if minutes else "",
+        "SeriesPremiereDate": _token_date(
+            getattr(series, "sonarr_first_aired", None) if series is not None else None
+        ),
+        "SeasonPremiereDate": _season_premiere_from_episodes(season),
+        "AirDate": _token_date(getattr(episode, "air_date", None)),
     }
 
 

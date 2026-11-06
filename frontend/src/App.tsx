@@ -2298,7 +2298,7 @@ export function App() {
                       ? {
                           title: "Apply status & poster changes",
                           description:
-                            "Choose when updates to placeholder status visibility, projection targets, or poster overlays should affect existing placeholders.",
+                            "Choose when updates to placeholder status visibility, projection targets, poster overlays, or NFO premiere date should affect existing placeholders.",
                         }
                       : destinationChanged
                         ? {
@@ -9420,6 +9420,7 @@ type StatusMessageTokenSpec = {
   name: string;
   label: string;
   group: string;
+  subgroup?: string | null;
   description: string;
   sample: string;
   placeholder: string;
@@ -9457,6 +9458,7 @@ const NFO_BACKFILL_SETTING_KEYS = [
   "ENABLE_PREFERRED_POSTER_LANGUAGE",
   "PREFERRED_POSTER_LANGUAGE",
   "PREFER_ORIGINAL_POSTER_LANGUAGE",
+  "MOVIE_PREMIERE_DATE_OVERRIDE",
 ] as const;
 
 const POSTER_LANGUAGE_SETTING_KEYS = [
@@ -9653,7 +9655,8 @@ type LineRequestPreviewResp = {
 };
 
 function LineRequestLivePreview(props: {
-  synopsisTemplate: string;
+  movieSynopsisTemplate: string;
+  tvSynopsisTemplate: string;
   projectionDraft?: StatusProjectionDraft;
   brand: Brand;
   themeMode: ThemeMode;
@@ -9667,17 +9670,25 @@ function LineRequestLivePreview(props: {
 
   useEffect(() => {
     let cancelled = false;
-    const syn = props.synopsisTemplate ?? "";
+    const movieSyn = props.movieSynopsisTemplate ?? "";
+    const tvSyn = props.tvSynopsisTemplate ?? "";
     void (async () => {
       try {
         const base = {
-          template_synopsis: syn,
           projection_mode: String(props.projectionDraft?.projection_mode ?? "both"),
           placeholder_status_updates: scope,
         };
         const [m, e] = await Promise.all([
-          postJson<LineRequestPreviewResp>("/api/messages/preview", { ...base, media: "movie" }),
-          postJson<LineRequestPreviewResp>("/api/messages/preview", { ...base, media: "episode" }),
+          postJson<LineRequestPreviewResp>("/api/messages/preview", {
+            ...base,
+            media: "movie",
+            template_synopsis: movieSyn,
+          }),
+          postJson<LineRequestPreviewResp>("/api/messages/preview", {
+            ...base,
+            media: "episode",
+            template_synopsis: tvSyn,
+          }),
         ]);
         if (!cancelled) {
           setMovie(m);
@@ -9693,7 +9704,7 @@ function LineRequestLivePreview(props: {
     return () => {
       cancelled = true;
     };
-  }, [props.synopsisTemplate, draftTitle, draftSummary, scope]);
+  }, [props.movieSynopsisTemplate, props.tvSynopsisTemplate, draftTitle, draftSummary, scope]);
 
   function renderSampleColumn(label: string, data: LineRequestPreviewResp | null) {
     return (
@@ -9734,7 +9745,7 @@ function LineRequestLivePreview(props: {
       <p className={SETTINGS_DENSITY_LEGEND_CLASS}>Live preview (sample data)</p>
       <p className="text-[14px] leading-relaxed text-slate-300">
         Reflects projection targets and status-update scope from the section above (including unsaved changes). REQUEST
-        text comes from Request line (synopsis); movie and TV episode samples use Movie / Episode title suffix templates.
+        text comes from the Movie / TV request lines; samples also use Movie / Episode title suffix templates.
       </p>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-[13px]">
         {renderSampleColumn("Movie", movie)}
@@ -10043,7 +10054,8 @@ function StatusMessagesPanel(props: {
   const panelInner = (
     <div className={props.embedded ? "min-h-[40vh] space-y-6" : "min-h-[40vh] px-6 py-5 space-y-6"}>
       <LineRequestLivePreview
-        synopsisTemplate={values["line.request"] ?? ""}
+        movieSynopsisTemplate={values["line.request.movie"] ?? ""}
+        tvSynopsisTemplate={values["line.request.tv"] ?? ""}
         projectionDraft={props.projectionDraft}
         brand={props.brand}
         themeMode={props.themeMode}
@@ -10197,7 +10209,7 @@ function StatusMessagesPanel(props: {
                           : clientRenderStatusMessage(value || row.default, sampleCtx, separator, caseMode, tokenSamplesByName);
                       // Rows whose final Plex/NFO line is wrapped by the global preset show the wrapped form here too.
                       const isWrappedSituation =
-                        row.key === "line.request" ||
+                        row.key.startsWith("line.request") ||
                         row.key.startsWith("queue.") ||
                         row.key.startsWith("calendar.") ||
                         row.key.startsWith("import_grace.");
@@ -10337,18 +10349,12 @@ function StatusMessagesPanel(props: {
 
   if (props.embedded) {
     return (
-      <details className="mt-2 group rounded-lg border border-[#424753]/40 bg-[#0b111b]/40">
-        <summary className="cursor-pointer select-none list-none px-4 py-3 text-[14px] font-headline uppercase tracking-wider text-slate-300 flex items-center gap-2">
-          <span
-            className="material-symbols-outlined text-slate-500 transition-transform group-open:rotate-90"
-            style={{ fontSize: 18 }}
-          >
-            chevron_right
-          </span>
+      <div className="mt-2 space-y-3 rounded-lg border border-[#424753]/50 bg-[#0b111b]/60 px-0 pb-2 pt-3">
+        <p className="px-4 text-[14px] font-headline uppercase tracking-wider text-slate-200">
           Advanced: message templates
-        </summary>
-        <div className="px-0 pb-2 border-t border-[#424753]/30">{panelInner}</div>
-      </details>
+        </p>
+        {panelInner}
+      </div>
     );
   }
 
@@ -10466,8 +10472,13 @@ const STATUS_MESSAGE_TOKEN_GROUP_ORDER = [
   "Queue",
   "Import Grace",
   "Media",
-  "Episode",
+  "Movie",
+  "TV",
 ];
+
+const STATUS_MESSAGE_TOKEN_SUBGROUP_ORDER: Record<string, string[]> = {
+  TV: ["Series", "Season", "Episode"],
+};
 
 function StatusMessagesTokenModal(props: {
   payload: StatusMessagePayload;
@@ -10588,32 +10599,70 @@ function StatusMessagesTokenModal(props: {
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
           {orderedTokenGroups.map((groupName) => {
             const tokens = groupedTokens.get(groupName) ?? [];
+            const bySubgroup = new Map<string, StatusMessageTokenSpec[]>();
+            let hasSubgroups = false;
+            for (const token of tokens) {
+              const sub = String(token.subgroup || "").trim();
+              if (sub) hasSubgroups = true;
+              const key = sub || "";
+              const arr = bySubgroup.get(key) ?? [];
+              arr.push(token);
+              bySubgroup.set(key, arr);
+            }
+            const preferredSubs = STATUS_MESSAGE_TOKEN_SUBGROUP_ORDER[groupName] ?? [];
+            const orderedSubs = hasSubgroups
+              ? [
+                  ...preferredSubs.filter((s) => bySubgroup.has(s)),
+                  ...Array.from(bySubgroup.keys()).filter((s) => s && !preferredSubs.includes(s)),
+                  ...(bySubgroup.has("") ? [""] : []),
+                ]
+              : [""];
+
+            const renderTokenChip = (token: StatusMessageTokenSpec) => {
+              const isAllowed = allowed.has(token.name);
+              const tooltip = isAllowed ? token.description : `${token.description}\n\nNot available for this message.`;
+              return (
+                <button
+                  key={token.name}
+                  type="button"
+                  title={tooltip}
+                  disabled={!isAllowed}
+                  onClick={() => isAllowed && insert(token.placeholder)}
+                  className={`flex flex-col items-start gap-0.5 rounded-lg border px-3 py-1.5 text-left transition-colors ${
+                    isAllowed
+                      ? "border-[#424753]/60 bg-[#1e2430] hover:bg-[#252e3a] text-slate-100"
+                      : "border-[#424753]/30 bg-transparent text-slate-600 cursor-not-allowed"
+                  }`}
+                >
+                  <span className="font-mono text-[13px]">{token.placeholder}</span>
+                  <span className="text-[11px] text-slate-500">{token.label} · {token.sample}</span>
+                </button>
+              );
+            };
+
             return (
               <div key={groupName}>
                 <h4 className="text-[12px] font-headline uppercase tracking-widest text-slate-400 mb-2">{groupName}</h4>
-                <div className="flex flex-wrap gap-2">
-                  {tokens.map((token) => {
-                    const isAllowed = allowed.has(token.name);
-                    const tooltip = isAllowed ? token.description : `${token.description}\n\nNot available for this message.`;
-                    return (
-                      <button
-                        key={token.name}
-                        type="button"
-                        title={tooltip}
-                        disabled={!isAllowed}
-                        onClick={() => isAllowed && insert(token.placeholder)}
-                        className={`flex flex-col items-start gap-0.5 rounded-lg border px-3 py-1.5 text-left transition-colors ${
-                          isAllowed
-                            ? "border-[#424753]/60 bg-[#1e2430] hover:bg-[#252e3a] text-slate-100"
-                            : "border-[#424753]/30 bg-transparent text-slate-600 cursor-not-allowed"
-                        }`}
-                      >
-                        <span className="font-mono text-[13px]">{token.placeholder}</span>
-                        <span className="text-[11px] text-slate-500">{token.label} · {token.sample}</span>
-                      </button>
-                    );
-                  })}
-                </div>
+                {hasSubgroups ? (
+                  <div className="space-y-3">
+                    {orderedSubs.map((sub) => {
+                      const subTokens = bySubgroup.get(sub) ?? [];
+                      if (!subTokens.length) return null;
+                      return (
+                        <div key={sub || "_"}>
+                          {sub ? (
+                            <h5 className="mb-1.5 text-[11px] font-headline uppercase tracking-wider text-slate-500">
+                              {sub}
+                            </h5>
+                          ) : null}
+                          <div className="flex flex-wrap gap-2">{subTokens.map(renderTokenChip)}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap gap-2">{tokens.map(renderTokenChip)}</div>
+                )}
               </div>
             );
           })}

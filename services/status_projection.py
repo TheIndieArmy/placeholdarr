@@ -177,7 +177,7 @@ def _summary_status_bracket(
 ) -> str:
     """Build the wrapped status bracket for synopsis or title surfaces.
 
-    REQUEST placeholders use ``line.request`` for both synopsis and title surfaces.
+    REQUEST placeholders use ``line.request.movie`` / ``line.request.tv`` for synopsis surfaces.
 
     Pipeline (situation-first): render an inner line per situation, then apply the
     global wrapper preset (``[ ]`` by default) post-render.

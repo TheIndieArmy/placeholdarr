@@ -1,7 +1,8 @@
 """Build unified template context for placeholder status projection (NFO + players).
 
 Merges media tokens from Movie / Episode rows with optional runtime overlay so
-``line.request`` and related templates receive the same fields everywhere.
+``line.request.movie`` / ``line.request.tv`` and related templates receive the
+same fields everywhere.
 """
 
 from __future__ import annotations
@@ -14,6 +15,9 @@ from services.messages.template_engine import (
     media_tokens_for_season,
     media_tokens_for_series,
 )
+
+# Internal marker for REQUEST line key selection (not a user {Token}).
+MEDIA_KIND_KEY = "_media_kind"
 
 
 def _rounded_minutes(value: int | float | str | None) -> int:
@@ -68,18 +72,42 @@ def build_projection_context(
     series: Any = None,
     runtime_minutes: int | None = None,
 ) -> dict[str, Any]:
-    """Merge media tokens with runtime for ``line.request`` / bracket rendering."""
+    """Merge media tokens with runtime for REQUEST / bracket rendering."""
     if movie is not None:
         base = media_tokens_for_movie(movie)
+        base[MEDIA_KIND_KEY] = "movie"
     elif episode is not None:
         base = media_tokens_for_episode(episode, season, series)
+        base[MEDIA_KIND_KEY] = "tv"
     elif season is not None:
         base = media_tokens_for_season(season, series)
+        base[MEDIA_KIND_KEY] = "tv"
     elif series is not None:
         base = media_tokens_for_series(series)
+        base[MEDIA_KIND_KEY] = "tv"
     else:
         base = {}
     return augment_context_with_runtime(base, runtime_minutes)
+
+
+def _season_premiere_from_session(session: Any, season_id: int | None) -> str:
+    """Earliest episode air date for a season (YYYY-MM-DD), or empty."""
+    if session is None or season_id is None:
+        return ""
+    try:
+        from sqlalchemy import func
+
+        from services.messages.template_engine import _token_date
+        from services.postgres.models import Episode
+
+        raw = (
+            session.query(func.min(Episode.air_date))
+            .filter(Episode.season_id == int(season_id))
+            .scalar()
+        )
+        return _token_date(raw)
+    except Exception:
+        return ""
 
 
 def build_projection_context_from_session(
@@ -109,7 +137,10 @@ def build_projection_context_from_session(
         rm = runtime_minutes
         if rm is None:
             rm = _runtime_minutes_from_episode(ep, series)
-        return build_projection_context(episode=ep, season=season, series=series, runtime_minutes=rm)
+        ctx = build_projection_context(episode=ep, season=season, series=series, runtime_minutes=rm)
+        if season is not None and not str(ctx.get("SeasonPremiereDate") or "").strip():
+            ctx["SeasonPremiereDate"] = _season_premiere_from_session(session, getattr(season, "id", None))
+        return ctx
     return {}
 
 
@@ -153,6 +184,10 @@ def sample_projection_context(media: str, *, runtime_minutes: int = 121) -> dict
             "SeasonNumber": "01",
             "EpisodeNumber": "02",
             "SXXEYY": "S01E02",
+            "SeriesPremiereDate": "2008-01-20",
+            "SeasonPremiereDate": "2008-01-20",
+            "AirDate": "2008-01-27",
+            MEDIA_KIND_KEY: "tv",
         }
     else:
         base = {
@@ -162,5 +197,9 @@ def sample_projection_context(media: str, *, runtime_minutes: int = 121) -> dict
             "Genres": "Action, Sci-Fi",
             "Certification": "PG-13",
             "Studio": "Warner Bros.",
+            "TheatricalDate": "2010-07-16",
+            "DigitalDate": "2010-12-07",
+            "PhysicalDate": "2010-12-07",
+            MEDIA_KIND_KEY: "movie",
         }
     return augment_context_with_runtime(base, runtime_minutes)
