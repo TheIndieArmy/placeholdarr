@@ -1624,6 +1624,8 @@ def poll_rss_for_changed_authors() -> dict[str, Any]:
     """
     result: dict[str, Any] = {
         "rss_available": False,
+        "self_rss_available": False,
+        "friends_rss_available": False,
         "self_changed": False,
         "friends_changed": False,
         "author_ids": set(),
@@ -1642,9 +1644,14 @@ def poll_rss_for_changed_authors() -> dict[str, Any]:
         persist_urls["WATCHLIST_RSS_SELF_URL"] = self_url
     if friends_url:
         persist_urls["WATCHLIST_RSS_FRIENDS_URL"] = friends_url
+    # Clear a stale friends URL when Plex no longer returns that feed.
+    if not friends_url and str(getattr(settings, "WATCHLIST_RSS_FRIENDS_URL", "") or "").strip():
+        persist_urls["WATCHLIST_RSS_FRIENDS_URL"] = ""
     if persist_urls:
         _persist_config_values(persist_urls)
 
+    result["self_rss_available"] = bool(self_url)
+    result["friends_rss_available"] = bool(friends_url)
     if not self_url and not friends_url:
         return result
     result["rss_available"] = True

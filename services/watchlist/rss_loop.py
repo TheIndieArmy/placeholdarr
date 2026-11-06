@@ -3,7 +3,10 @@
 Replaces the old every-5-minutes APScheduler watchlist job. Cheap CDN polls look
 for feed changes; only changed authors are fetched (Home token/switch or GraphQL).
 Full roster pulls still run on the reconcile-hours interval (and on manual/startup).
-Without Plex Pass / RSS, falls back to a slower full API poll (~5 minutes).
+
+When friendsWatchlist RSS is missing (no Pass, or feed create failed) but owner
+RSS works, owner still uses the 10s path and a ~5-minute full API fallback keeps
+friends / Home updating sooner than reconcile alone.
 """
 
 from __future__ import annotations
@@ -130,11 +133,20 @@ def _tick() -> None:
             return
 
         use_rss = bool(getattr(settings, "WATCHLIST_USE_RSS_HINT", True))
-        rss_meta: dict[str, Any] = {"rss_available": False, "author_ids": set()}
+        rss_meta: dict[str, Any] = {
+            "rss_available": False,
+            "self_rss_available": False,
+            "friends_rss_available": False,
+            "author_ids": set(),
+        }
         if use_rss:
             rss_meta = poll_rss_for_changed_authors()
 
-        if rss_meta.get("rss_available"):
+        friends_rss = bool(rss_meta.get("friends_rss_available"))
+        self_rss = bool(rss_meta.get("self_rss_available"))
+        any_rss = bool(rss_meta.get("rss_available")) or self_rss or friends_rss
+
+        if any_rss:
             authors = rss_meta.get("author_ids") or set()
             self_ch = bool(rss_meta.get("self_changed"))
             friends_ch = bool(rss_meta.get("friends_changed"))
@@ -146,6 +158,9 @@ def _tick() -> None:
                     extra={"emoji_type": "info"},
                 )
                 run_watchlist_targeted_sync(authors, trigger="rss")
+                # Targeted sync may still be marked working briefly; skip fallback this tick.
+                if get_working_run("watchlist_sync"):
+                    return
             elif self_ch or friends_ch:
                 logger.info(
                     "Watchlist RSS feed hash changed but no new item authors to sync",
@@ -156,12 +171,25 @@ def _tick() -> None:
                     "Watchlist RSS unchanged",
                     extra={"emoji_type": "debug"},
                 )
-            return
 
-        # No RSS (no Pass / feeds unavailable): slower full API fallback.
-        if now - _last_fallback_mono >= float(WATCHLIST_API_FALLBACK_SECONDS):
+        # Friends RSS covers friend author targeting. Without it (or with RSS off),
+        # fall back to a slower full API pull so friends / Home are not stuck on
+        # reconcile-only (~2h) when only owner RSS is available.
+        need_api_fallback = (not use_rss) or (not friends_rss)
+        if need_api_fallback and now - _last_fallback_mono >= float(WATCHLIST_API_FALLBACK_SECONDS):
+            if get_working_run("watchlist_sync"):
+                return
+            reason = (
+                "RSS disabled"
+                if not use_rss
+                else (
+                    "friends RSS unavailable (owner RSS only)"
+                    if self_rss
+                    else "RSS unavailable"
+                )
+            )
             logger.info(
-                "Watchlist RSS unavailable; running API fallback pull",
+                f"Watchlist API fallback pull ({reason})",
                 extra={"emoji_type": "info"},
             )
             run_watchlist_sync(trigger="fallback")
@@ -174,6 +202,8 @@ def watchlist_loop_status() -> dict[str, Any]:
     """Metadata for Tasks UI (enabled, label, next reconcile)."""
     enabled = bool(getattr(settings, "ENABLE_PLEX_WATCHLIST_SYNC", False))
     use_rss = bool(getattr(settings, "WATCHLIST_USE_RSS_HINT", True))
+    self_url = str(getattr(settings, "WATCHLIST_RSS_SELF_URL", "") or "").strip()
+    friends_url = str(getattr(settings, "WATCHLIST_RSS_FRIENDS_URL", "") or "").strip()
     from services.watchlist.sync import (
         WATCHLIST_API_FALLBACK_SECONDS,
         WATCHLIST_RSS_POLL_SECONDS,
@@ -181,15 +211,21 @@ def watchlist_loop_status() -> dict[str, Any]:
         watchlist_reconcile_hours,
     )
 
+    fallback_m = max(1, int(WATCHLIST_API_FALLBACK_SECONDS // 60))
+    reconcile_h = watchlist_reconcile_hours()
     if not enabled:
         label = "Disabled"
-    elif use_rss:
-        label = f"RSS every {int(WATCHLIST_RSS_POLL_SECONDS)}s; full every {watchlist_reconcile_hours():g}h"
-    else:
+    elif use_rss and friends_url:
+        label = f"RSS every {int(WATCHLIST_RSS_POLL_SECONDS)}s; full every {reconcile_h:g}h"
+    elif use_rss and self_url:
         label = (
-            f"API every {int(WATCHLIST_API_FALLBACK_SECONDS // 60)} min; "
-            f"full every {watchlist_reconcile_hours():g}h"
+            f"Owner RSS every {int(WATCHLIST_RSS_POLL_SECONDS)}s; "
+            f"API every {fallback_m} min; full every {reconcile_h:g}h"
         )
+    elif use_rss:
+        label = f"API every {fallback_m} min; full every {reconcile_h:g}h"
+    else:
+        label = f"API every {fallback_m} min; full every {reconcile_h:g}h"
     nxt = next_watchlist_reconcile_at()
     return {
         "enabled": enabled,
@@ -198,4 +234,6 @@ def watchlist_loop_status() -> dict[str, Any]:
         "next_reconcile": nxt.isoformat() if nxt is not None else None,
         "poll_seconds": int(WATCHLIST_RSS_POLL_SECONDS),
         "fallback_seconds": int(WATCHLIST_API_FALLBACK_SECONDS),
+        "self_rss": bool(self_url),
+        "friends_rss": bool(friends_url),
     }
