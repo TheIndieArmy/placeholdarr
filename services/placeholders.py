@@ -656,6 +656,27 @@ def _append_people_as_tag(lines: list[str], tag_name: str, values: Any) -> None:
             lines.append(f"  <{tag_name}>{escape(text)}</{tag_name}>")
 
 
+def _resolve_movie_nfo_premiered(movie: Any) -> Any:
+    """Pick the date written to NFO ``<premiered>`` from premiere-date override.
+
+    Independent of ``PREFERRED_MOVIE_DATE_TYPE``. Default is theatrical
+    (``inCinemas`` / ``radarr_premiered``). Missing chosen dates fall back to theatrical.
+    """
+    theatrical = getattr(movie, "radarr_premiered", None) or getattr(movie, "theater_release_date", None)
+    override = str(getattr(settings, "MOVIE_PREMIERE_DATE_OVERRIDE", "inCinemas") or "inCinemas").strip()
+    mapping = {
+        "inCinemas": "theater_release_date",
+        "theatrical": "theater_release_date",
+        "digitalRelease": "digital_release_date",
+        "physicalRelease": "physical_release_date",
+    }
+    field = mapping.get(override, "theater_release_date")
+    if field == "theater_release_date":
+        return theatrical
+    candidate = getattr(movie, field, None)
+    return candidate if candidate else theatrical
+
+
 def _movie_nfo_xml(movie: Any) -> str:
     status = str(getattr(movie, "placeholder_status", "") or "REQUEST")
     raw_title = str(getattr(movie, "title", "") or "")
@@ -688,7 +709,7 @@ def _movie_nfo_xml(movie: Any) -> str:
     ratings = _ratings_entries(getattr(movie, "radarr_ratings", None))
     collection = getattr(movie, "radarr_collection", None)
     release_status = _status_text(getattr(movie, "radarr_release_status", None))
-    premiered = getattr(movie, "radarr_premiered", None)
+    premiered = _resolve_movie_nfo_premiered(movie)
     trailer = str(getattr(movie, "radarr_trailer", "") or "").strip()
     actors = getattr(movie, "radarr_actors", None)
     directors = getattr(movie, "radarr_directors", None)

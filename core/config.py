@@ -445,6 +445,8 @@ class Settings(BaseSettings):
     # Legacy calendar interval hours (migrated into CALENDAR_SYNC_SCHEDULE; 0 meant "piggyback on lite").
     CALENDAR_SYNC_INTERVAL_HOURS: int = 0
     PREFERRED_MOVIE_DATE_TYPE: str = "inCinemas"
+    # NFO <premiered> for movies (independent of PREFERRED_MOVIE_DATE_TYPE). Default theatrical.
+    MOVIE_PREMIERE_DATE_OVERRIDE: str = "inCinemas"
     ENABLE_COMING_SOON_COUNTDOWN: bool = True
     # Deprecated: always treated as "coming_soon" (Coming Soon dummy when set, else standard dummy). Retained for env/back-compat only.
     CALENDAR_LOOKAHEAD_DUMMY_MODE: str = "coming_soon"

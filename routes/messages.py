@@ -27,7 +27,14 @@ from services.messages import (
     validate_template_text,
 )
 from services.messages.context import sample_projection_context
-from services.messages.registry import CASE_OPTIONS, SEPARATOR_PRESETS, MessageKey, get_message_key, get_registry_for_settings_ui
+from services.messages.registry import (
+    CASE_OPTIONS,
+    SEPARATOR_PRESETS,
+    MessageKey,
+    get_message_key,
+    get_registry_for_settings_ui,
+    request_line_key_for_media,
+)
 from services.messages.template_engine import MAX_TEMPLATE_LENGTH
 from services.status_projection import projection_surfaces
 
@@ -71,6 +78,7 @@ def _serialize_token(token) -> dict[str, Any]:
         "name": token.name,
         "label": token.label,
         "group": token.group,
+        "subgroup": getattr(token, "subgroup", None),
         "description": token.description,
         "sample": token.sample,
         "placeholder": token.placeholder,
@@ -80,7 +88,7 @@ def _serialize_token(token) -> dict[str, Any]:
 def _muted_under_request_scope(msg: MessageKey) -> bool:
     """Dim in UI when Placeholder status updates = Request only (non-REQUEST templates inactive)."""
     g = str(msg.group or "")
-    if msg.key == "line.request" or g in ("Request", "Title Suffix"):
+    if str(msg.key or "").startswith("line.request") or g in ("Request", "Title Suffix"):
         return False
     return bool(
         g.startswith("Calendar")
@@ -166,23 +174,24 @@ def post_message_preview(body: dict[str, Any]) -> JSONResponse:
     media_raw = str(body.get("media") or "movie").strip().lower()
     is_episode = media_raw in ("episode", "tv", "show")
     media_key = "episode" if is_episode else "movie"
+    request_key = request_line_key_for_media("tv" if is_episode else "movie")
     ctx = sample_projection_context(media_key)
     overrides = dict(get_overrides() or {})
 
-    spec_syn = get_message_key("line.request")
+    spec_syn = get_message_key(request_key)
     if spec_syn is None:
-        raise HTTPException(status_code=500, detail="missing line.request registry")
+        raise HTTPException(status_code=500, detail=f"missing {request_key} registry")
 
     template_syn = body.get("template_synopsis")
     if template_syn is None:
         template_syn = body.get("template")
     tmpl_src_syn: str
     if isinstance(template_syn, str) and template_syn.strip():
-        syn_inner = render_template("line.request", template_syn.strip(), ctx)
+        syn_inner = render_template(request_key, template_syn.strip(), ctx)
         tmpl_src_syn = template_syn.strip()
     else:
-        syn_inner = render("line.request", ctx)
-        o = overrides.get("line.request")
+        syn_inner = render(request_key, ctx)
+        o = overrides.get(request_key)
         tmpl_src_syn = o if isinstance(o, str) and o.strip() else spec_syn.default
 
     syn_bracket = apply_wrapper(syn_inner)

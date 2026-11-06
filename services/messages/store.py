@@ -120,6 +120,13 @@ def _normalize(payload: Any) -> dict[str, Any]:
             for nk in _TITLE_SUFFIX_KEYS:
                 if nk not in migrated:
                     migrated[nk] = legacy
+        # Pre-split REQUEST line: copy the shared override onto movie + TV keys.
+        legacy_request = migrated.get("line.request")
+        if isinstance(legacy_request, str) and legacy_request.strip():
+            if "line.request.movie" not in migrated:
+                migrated["line.request.movie"] = legacy_request
+            if "line.request.tv" not in migrated:
+                migrated["line.request.tv"] = legacy_request
         clean: dict[str, str] = {}
         for k, v in migrated.items():
             if not isinstance(k, str):

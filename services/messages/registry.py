@@ -20,9 +20,10 @@ class TokenSpec:
 
     name: str  # The bare token name without braces, e.g. "Title"
     label: str  # Friendly label for the picker UI
-    group: str  # UI group: "Media", "Episode", "Status", "Calendar", "Queue", "Import Grace", "General"
+    group: str  # UI group: "Media", "Movie", "TV", "Calendar", "Queue", "Import Grace", "General"
     description: str  # Tooltip text shown in the picker
     sample: str  # Sample value shown in the picker chip and used for previews
+    subgroup: str | None = None  # Optional nested UI group (e.g. Series / Season / Episode under TV)
 
     @property
     def placeholder(self) -> str:
@@ -112,43 +113,98 @@ _TOKEN_SPECS: tuple[TokenSpec, ...] = (
         description="Minute component of the runtime (0-59).",
         sample="28",
     ),
-    # Episode
+    # Movie dates (available on any movie-facing template, not only Coming Soon)
+    TokenSpec(
+        name="TheatricalDate",
+        label="Theatrical date",
+        group="Movie",
+        description="Movie theatrical (in-cinemas) date from Radarr as YYYY-MM-DD. Empty when unknown.",
+        sample="2010-07-16",
+    ),
+    TokenSpec(
+        name="DigitalDate",
+        label="Digital date",
+        group="Movie",
+        description="Movie digital release date from Radarr as YYYY-MM-DD. Empty when unknown.",
+        sample="2010-12-07",
+    ),
+    TokenSpec(
+        name="PhysicalDate",
+        label="Physical date",
+        group="Movie",
+        description="Movie physical release date from Radarr as YYYY-MM-DD. Empty when unknown.",
+        sample="2010-12-07",
+    ),
+    # TV · Series
     TokenSpec(
         name="SeriesTitle",
-        label="Series Title",
-        group="Episode",
-        description="Title of the TV series this episode belongs to.",
+        label="Series title",
+        group="TV",
+        subgroup="Series",
+        description="Title of the TV series.",
         sample="Breaking Bad",
     ),
     TokenSpec(
+        name="SeriesPremiereDate",
+        label="Series premiere date",
+        group="TV",
+        subgroup="Series",
+        description="Series first-aired date from Sonarr as YYYY-MM-DD. Empty when unknown.",
+        sample="2008-01-20",
+    ),
+    # TV · Season
+    TokenSpec(
         name="SeasonNumber",
-        label="Season Number",
-        group="Episode",
+        label="Season number",
+        group="TV",
+        subgroup="Season",
         description="Two-digit season number, e.g. 02.",
         sample="02",
     ),
     TokenSpec(
+        name="SeasonPremiereDate",
+        label="Season premiere date",
+        group="TV",
+        subgroup="Season",
+        description=(
+            "Earliest episode air date in the season as YYYY-MM-DD. Empty when no episode dates are known."
+        ),
+        sample="2008-01-20",
+    ),
+    # TV · Episode
+    TokenSpec(
         name="EpisodeNumber",
-        label="Episode Number",
-        group="Episode",
+        label="Episode number",
+        group="TV",
+        subgroup="Episode",
         description="Two-digit episode number, e.g. 05.",
         sample="05",
     ),
     TokenSpec(
         name="EpisodeTitle",
-        label="Episode Title",
-        group="Episode",
+        label="Episode title",
+        group="TV",
+        subgroup="Episode",
         description="Title of the episode.",
         sample="Pilot",
     ),
     TokenSpec(
         name="SXXEYY",
         label="Season/Episode (SxxEyy)",
-        group="Episode",
+        group="TV",
+        subgroup="Episode",
         description="Combined season and episode code.",
         sample="S02E05",
     ),
-    # Calendar
+    TokenSpec(
+        name="AirDate",
+        label="Air date",
+        group="TV",
+        subgroup="Episode",
+        description="Episode air date as YYYY-MM-DD. Empty when unknown.",
+        sample="2008-01-20",
+    ),
+    # Calendar (countdown / preferred-date context)
     TokenSpec(
         name="DaysUntil",
         label="Days Until",
@@ -178,9 +234,13 @@ _TOKEN_SPECS: tuple[TokenSpec, ...] = (
     ),
     TokenSpec(
         name="ReleaseDate",
-        label="Release Date",
+        label="Preferred release date",
         group="Calendar",
-        description="Release or air date in YYYY-MM-DD form (the date Arr stored, not converted).",
+        description=(
+            "Coming Soon target date in YYYY-MM-DD form: preferred movie date type, or TV air date "
+            "for countdown messages. For fixed movie/TV dates on any status, use {TheatricalDate}, "
+            "{DigitalDate}, {PhysicalDate}, or {AirDate}."
+        ),
         sample="2026-12-25",
     ),
     # Queue
@@ -255,57 +315,119 @@ _MEDIA_TOKENS = (
     "Hours",
     "Minutes",
 )
-_EPISODE_TOKENS = (
+_MOVIE_DATE_TOKENS = (
+    "TheatricalDate",
+    "DigitalDate",
+    "PhysicalDate",
+)
+_TV_SERIES_TOKENS = (
     "SeriesTitle",
+    "SeriesPremiereDate",
+)
+_TV_SEASON_TOKENS = (
     "SeasonNumber",
+    "SeasonPremiereDate",
+)
+_TV_EPISODE_TOKENS = (
     "EpisodeNumber",
     "EpisodeTitle",
     "SXXEYY",
+    "AirDate",
 )
+_TV_TOKENS = _TV_SERIES_TOKENS + _TV_SEASON_TOKENS + _TV_EPISODE_TOKENS
+# Back-compat alias used by calendar TV templates.
+_EPISODE_TOKENS = _TV_TOKENS
+
+_REQUEST_MOVIE_TOKENS = (
+    "Sep",
+    "Runtime",
+    "RuntimeMinutes",
+    "Hours",
+    "Minutes",
+    "Title",
+    "Year",
+    "ReleaseYear",
+    "Genres",
+    "Certification",
+    "Studio",
+) + _MOVIE_DATE_TOKENS
+
+_REQUEST_TV_TOKENS = (
+    "Sep",
+    "Runtime",
+    "RuntimeMinutes",
+    "Hours",
+    "Minutes",
+    "Title",
+    "Year",
+    "ReleaseYear",
+    "Genres",
+    "Certification",
+    "Studio",
+) + _TV_TOKENS
+
+_REQUEST_LINE_DEFAULT = "{Runtime} {Sep} REQUEST"
 
 
-def _request_line_tokens() -> tuple[str, ...]:
-    """Tokens allowed inside the customizable Request line template (line.request).
-
-    Episode-only tokens resolve empty for movies; single-template UX with dual previews.
-    """
-    return (
-        "Sep",
-        "Runtime",
-        "RuntimeMinutes",
-        "Hours",
-        "Minutes",
-        "Title",
-        "Year",
-        "ReleaseYear",
-        "Genres",
-        "Certification",
-        "Studio",
-        "SeriesTitle",
-        "SeasonNumber",
-        "EpisodeNumber",
-        "EpisodeTitle",
-        "SXXEYY",
-    )
+def request_line_key_for_media(media_kind: str | None) -> str:
+    """Return ``line.request.movie`` or ``line.request.tv`` for a projection media kind."""
+    kind = str(media_kind or "").strip().lower()
+    if kind in ("tv", "episode", "show", "series", "season"):
+        return "line.request.tv"
+    return "line.request.movie"
 
 
 def _build_registry() -> tuple[MessageKey, ...]:
     keys: list[MessageKey] = []
 
-    # --- Request line (situation-first; the inner text wrapped by the global preset) ---
+    # --- Request lines (situation-first; inner text wrapped by the global preset) ---
     keys.append(
         MessageKey(
-            key="line.request",
-            label="Request line (synopsis)",
-            default="{Runtime} {Sep} REQUEST",
+            key="line.request.movie",
+            label="Movie request line (synopsis)",
+            default=_REQUEST_LINE_DEFAULT,
             group="Request",
-            subgroup=None,
+            subgroup="Movie",
             tooltip=(
                 "Inner text placed inside the global wrapper when showing REQUEST status at the "
-                "start of the synopsis/overview field (rich line: runtime + metadata tokens). Empty tokens collapse."
+                "start of a movie synopsis/overview. Empty tokens collapse. "
+                "Movie date tokens ({TheatricalDate}, {DigitalDate}, {PhysicalDate}) are available "
+                "even when the title is already released."
             ),
-            allowed_tokens=_request_line_tokens(),
-            sample_context={"Runtime": "1h 5m"},
+            allowed_tokens=_REQUEST_MOVIE_TOKENS,
+            sample_context={
+                "Runtime": "2h 28m",
+                "Title": "Inception",
+                "Year": "2010",
+                "TheatricalDate": "2010-07-16",
+                "DigitalDate": "2010-12-07",
+                "PhysicalDate": "2010-12-07",
+            },
+        )
+    )
+    keys.append(
+        MessageKey(
+            key="line.request.tv",
+            label="TV request line (synopsis)",
+            default=_REQUEST_LINE_DEFAULT,
+            group="Request",
+            subgroup="TV",
+            tooltip=(
+                "Inner text placed inside the global wrapper when showing REQUEST status at the "
+                "start of a TV synopsis/overview (episode, season, or series density). Empty tokens collapse. "
+                "{AirDate} is available even when the episode has already aired."
+            ),
+            allowed_tokens=_REQUEST_TV_TOKENS,
+            sample_context={
+                "Runtime": "47m",
+                "Title": "Breaking Bad",
+                "SeriesTitle": "Breaking Bad",
+                "EpisodeTitle": "Pilot",
+                "SXXEYY": "S01E01",
+                "SeriesPremiereDate": "2008-01-20",
+                "SeasonPremiereDate": "2008-01-20",
+                "AirDate": "2008-01-20",
+            },
         )
     )
 
@@ -415,13 +537,21 @@ def _build_registry() -> tuple[MessageKey, ...]:
         "DaysUntilPlusOne",
         "ReleaseLabel",
         "ReleaseDate",
-    ) + _MEDIA_TOKENS
-    cal_tv_tokens = ("Sep", "DaysUntil", "DaysUntilPlusOne", "ReleaseDate") + _MEDIA_TOKENS + _EPISODE_TOKENS
+    ) + _MEDIA_TOKENS + _MOVIE_DATE_TOKENS
+    cal_tv_tokens = (
+        "Sep",
+        "DaysUntil",
+        "DaysUntilPlusOne",
+        "ReleaseDate",
+    ) + _MEDIA_TOKENS + _TV_TOKENS
     _cal_movie_sample = {
         "ReleaseLabel": "Theatrical",
         "DaysUntil": "5",
         "DaysUntilPlusOne": "6",
         "ReleaseDate": "2026-12-25",
+        "TheatricalDate": "2010-07-16",
+        "DigitalDate": "2010-12-07",
+        "PhysicalDate": "2010-12-07",
         "Title": "Inception",
         "Year": "2010",
     }
@@ -429,6 +559,9 @@ def _build_registry() -> tuple[MessageKey, ...]:
         "DaysUntil": "5",
         "DaysUntilPlusOne": "6",
         "ReleaseDate": "2026-12-25",
+        "SeriesPremiereDate": "2008-01-20",
+        "SeasonPremiereDate": "2008-01-20",
+        "AirDate": "2008-01-20",
         "Title": "Breaking Bad",
         "SeriesTitle": "Breaking Bad",
         "EpisodeTitle": "Pilot",
