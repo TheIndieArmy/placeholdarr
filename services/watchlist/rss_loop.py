@@ -136,8 +136,26 @@ def _tick() -> None:
 
         if rss_meta.get("rss_available"):
             authors = rss_meta.get("author_ids") or set()
+            self_ch = bool(rss_meta.get("self_changed"))
+            friends_ch = bool(rss_meta.get("friends_changed"))
             if authors:
+                logger.info(
+                    f"Watchlist RSS change "
+                    f"(self={'yes' if self_ch else 'no'}, friends={'yes' if friends_ch else 'no'}): "
+                    f"syncing {len(authors)} author(s)",
+                    extra={"emoji_type": "info"},
+                )
                 run_watchlist_targeted_sync(authors, trigger="rss")
+            elif self_ch or friends_ch:
+                logger.info(
+                    "Watchlist RSS feed hash changed but no new item authors to sync",
+                    extra={"emoji_type": "info"},
+                )
+            else:
+                logger.debug(
+                    "Watchlist RSS unchanged",
+                    extra={"emoji_type": "debug"},
+                )
             return
 
         # No RSS (no Pass / feeds unavailable): slower full API fallback.

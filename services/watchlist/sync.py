@@ -157,6 +157,255 @@ def _apply_coverage_statuses(session, rows: list[PlexWatchlistItem]) -> None:
             row.last_error = None
 
 
+# Cap title lists stored on task runs / logged in detail (counts stay exact).
+_WATCHLIST_CHANGE_LIST_CAP = 40
+
+
+def _title_display(row: PlexWatchlistItem | dict[str, Any] | None) -> str:
+    if row is None:
+        return "Untitled"
+    if isinstance(row, dict):
+        title = str(row.get("title") or "").strip() or "Untitled"
+        year = row.get("year")
+        media = str(row.get("media_type") or "").strip().lower()
+    else:
+        title = str(getattr(row, "title", None) or "").strip() or "Untitled"
+        year = getattr(row, "year", None)
+        media = str(getattr(row, "media_type", None) or "").strip().lower()
+    bit = f"{title} ({year})" if year not in (None, "") else title
+    if media in {"show", "episode", "season"}:
+        return f"{bit} [TV]"
+    if media == "movie":
+        return f"{bit} [Movie]"
+    return bit
+
+
+def _user_display(user: PlexWatchlistUser | None, *, fallback: str = "?") -> str:
+    if user is None:
+        return fallback
+    return (
+        str(getattr(user, "title", None) or "").strip()
+        or str(getattr(user, "username", None) or "").strip()
+        or str(getattr(user, "plex_user_id", None) or "").strip()
+        or fallback
+    )
+
+
+def _cap_change_list(rows: list[dict[str, Any]], *, cap: int = _WATCHLIST_CHANGE_LIST_CAP) -> list[dict[str, Any]]:
+    if len(rows) <= cap:
+        return rows
+    return rows[:cap]
+
+
+def build_watchlist_task_progress(
+    upsert: dict[str, Any] | None,
+    auto: dict[str, Any] | None = None,
+    *,
+    trigger: str = "",
+    source: str = "",
+    targets: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build Tasks history ``progress.sections`` from an upsert (+ optional auto-add)."""
+    u = upsert if isinstance(upsert, dict) else {}
+    changes = u.get("changes") if isinstance(u.get("changes"), dict) else {}
+    added = changes.get("added") if isinstance(changes.get("added"), list) else []
+    removed = changes.get("removed") if isinstance(changes.get("removed"), list) else []
+    titles_removed = (
+        changes.get("titles_removed") if isinstance(changes.get("titles_removed"), list) else []
+    )
+    added_total = int(changes.get("added_total") or u.get("memberships_added") or 0)
+    removed_total = int(changes.get("removed_total") or u.get("memberships_removed") or 0)
+    created_total = int(changes.get("titles_created_total") or u.get("created") or 0)
+    orphan_total = int(changes.get("titles_removed_total") or u.get("items_removed") or 0)
+
+    summary_metrics: list[dict[str, Any]] = [
+        {"label": "Trigger", "value": str(trigger or "—").replace("_", " ")},
+    ]
+    if source:
+        summary_metrics.append({"label": "Source", "value": str(source)})
+    if targets:
+        summary_metrics.append(
+            {"label": "Targets", "value": ", ".join(str(t) for t in targets[:12]) + ("…" if len(targets) > 12 else "")}
+        )
+    summary_metrics.extend(
+        [
+            {"label": "Users fetched", "value": int(u.get("users_fetched") or 0)},
+            {"label": "Titles fetched", "value": int(u.get("fetched") or 0)},
+            {"label": "Memberships added", "value": added_total},
+            {"label": "Memberships removed", "value": removed_total},
+            {"label": "New titles", "value": created_total},
+            {"label": "Titles cleared", "value": orphan_total},
+        ]
+    )
+    auto_d = auto if isinstance(auto, dict) else {}
+    auto_attempted = int(auto_d.get("attempted") or 0)
+    if auto_attempted > 0 or str(auto_d.get("mode") or "").lower() not in {"", "manual"}:
+        summary_metrics.append(
+            {
+                "label": "Auto-add",
+                "value": (
+                    f"{int(auto_d.get('added') or 0)} added / "
+                    f"{int(auto_d.get('skipped') or 0)} skipped / "
+                    f"{int(auto_d.get('failed') or 0)} failed"
+                ),
+            }
+        )
+
+    sections: list[dict[str, Any]] = [
+        {
+            "key": "watchlist_summary",
+            "name": "Watchlist summary",
+            "status": "done",
+            "metrics": summary_metrics,
+        }
+    ]
+    if added_total:
+        sections.append(
+            {
+                "key": "watchlist_added",
+                "name": "Added" + (f" ({added_total})" if added_total else ""),
+                "status": "done",
+                "metrics": [
+                    {
+                        "label": str(ev.get("title") or "Title"),
+                        "value": str(ev.get("user") or ev.get("plex_user_id") or "—"),
+                    }
+                    for ev in added
+                ]
+                + (
+                    [{"label": f"…and {added_total - len(added)} more", "value": "—"}]
+                    if added_total > len(added)
+                    else []
+                ),
+            }
+        )
+    if removed_total:
+        sections.append(
+            {
+                "key": "watchlist_removed",
+                "name": "Removed" + (f" ({removed_total})" if removed_total else ""),
+                "status": "done",
+                "metrics": [
+                    {
+                        "label": str(ev.get("title") or "Title"),
+                        "value": str(ev.get("user") or ev.get("plex_user_id") or "—"),
+                    }
+                    for ev in removed
+                ]
+                + (
+                    [{"label": f"…and {removed_total - len(removed)} more", "value": "—"}]
+                    if removed_total > len(removed)
+                    else []
+                ),
+            }
+        )
+    if orphan_total:
+        sections.append(
+            {
+                "key": "watchlist_titles_cleared",
+                "name": f"Titles cleared ({orphan_total})",
+                "status": "done",
+                "metrics": [
+                    {"label": str(ev.get("title") or "Title"), "value": "no remaining members"}
+                    for ev in titles_removed
+                ]
+                + (
+                    [{"label": f"…and {orphan_total - len(titles_removed)} more", "value": "—"}]
+                    if orphan_total > len(titles_removed)
+                    else []
+                ),
+            }
+        )
+    return {"sections": sections, "running": False}
+
+
+def log_watchlist_upsert_result(
+    upsert: dict[str, Any] | None,
+    *,
+    context: str = "Watchlist sync",
+) -> None:
+    """Emit readable info/debug lines for membership and title deltas."""
+    u = upsert if isinstance(upsert, dict) else {}
+    changes = u.get("changes") if isinstance(u.get("changes"), dict) else {}
+    added_total = int(changes.get("added_total") or u.get("memberships_added") or 0)
+    removed_total = int(changes.get("removed_total") or u.get("memberships_removed") or 0)
+    created_total = int(changes.get("titles_created_total") or u.get("created") or 0)
+    orphan_total = int(changes.get("titles_removed_total") or u.get("items_removed") or 0)
+    users_fetched = int(u.get("users_fetched") or 0)
+    fetched = int(u.get("fetched") or 0)
+    errors = u.get("user_errors") if isinstance(u.get("user_errors"), dict) else {}
+
+    logger.info(
+        f"{context}: fetched {fetched} title(s) across {users_fetched} user(s); "
+        f"added {added_total}, removed {removed_total}, "
+        f"new titles {created_total}, cleared {orphan_total}"
+        + (f", user errors {len(errors)}" if errors else ""),
+        extra={"emoji_type": "info"},
+    )
+    for uid, err in list(errors.items())[:12]:
+        logger.warning(
+            f"{context}: user {uid} fetch error: {err}",
+            extra={"emoji_type": "warning"},
+        )
+
+    added = changes.get("added") if isinstance(changes.get("added"), list) else []
+    removed = changes.get("removed") if isinstance(changes.get("removed"), list) else []
+    for ev in added[:_WATCHLIST_CHANGE_LIST_CAP]:
+        logger.info(
+            f"{context}: + {ev.get('title')} ← {ev.get('user')}"
+            + (" (new title)" if ev.get("new_title") else ""),
+            extra={"emoji_type": "success"},
+        )
+    if added_total > len(added):
+        logger.info(
+            f"{context}: …and {added_total - len(added)} more addition(s)",
+            extra={"emoji_type": "info"},
+        )
+    for ev in removed[:_WATCHLIST_CHANGE_LIST_CAP]:
+        logger.info(
+            f"{context}: - {ev.get('title')} ← {ev.get('user')}",
+            extra={"emoji_type": "info"},
+        )
+    if removed_total > len(removed):
+        logger.info(
+            f"{context}: …and {removed_total - len(removed)} more removal(s)",
+            extra={"emoji_type": "info"},
+        )
+    titles_removed = (
+        changes.get("titles_removed") if isinstance(changes.get("titles_removed"), list) else []
+    )
+    for ev in titles_removed[:_WATCHLIST_CHANGE_LIST_CAP]:
+        logger.info(
+            f"{context}: cleared title {ev.get('title')} (no remaining members)",
+            extra={"emoji_type": "info"},
+        )
+
+
+def metrics_from_watchlist_upsert(upsert: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Count cards for the upsert live phase."""
+    u = upsert if isinstance(upsert, dict) else {}
+    changes = u.get("changes") if isinstance(u.get("changes"), dict) else {}
+    return [
+        {"label": "Titles fetched", "value": int(u.get("fetched") or 0)},
+        {
+            "label": "Memberships added",
+            "value": int(changes.get("added_total") or u.get("memberships_added") or 0),
+        },
+        {
+            "label": "Memberships removed",
+            "value": int(changes.get("removed_total") or u.get("memberships_removed") or 0),
+        },
+        {
+            "label": "New titles",
+            "value": int(changes.get("titles_created_total") or u.get("created") or 0),
+        },
+        {
+            "label": "Titles cleared",
+            "value": int(changes.get("titles_removed_total") or u.get("items_removed") or 0),
+        },
+    ]
+
+
 def _upsert_item_row(
     session,
     existing: dict[str, PlexWatchlistItem],
@@ -219,13 +468,20 @@ def upsert_watchlist_from_home(payload: dict[str, Any]) -> dict[str, Any]:
     active_ids = {str(uid).strip() for uid in by_user.keys() if str(uid or "").strip()}
     prune_stale_home = not bool(getattr(settings, "WATCHLIST_SYNC_HOME_USERS", False))
 
-    created = updated = memberships_upserted = memberships_removed = items_removed = 0
+    created = updated = memberships_upserted = memberships_added = memberships_removed = items_removed = 0
+    added_events: list[dict[str, Any]] = []
+    removed_events: list[dict[str, Any]] = []
+    titles_created_events: list[dict[str, Any]] = []
+    titles_removed_events: list[dict[str, Any]] = []
     session = get_session()
     try:
         from sqlalchemy import exists
 
         existing_items = {r.identity_key: r for r in session.query(PlexWatchlistItem).all()}
         existing_users = {u.plex_user_id: u for u in session.query(PlexWatchlistUser).all()}
+        items_by_id: dict[int, PlexWatchlistItem] = {
+            int(r.id): r for r in existing_items.values() if getattr(r, "id", None) is not None
+        }
 
         for raw in users_raw:
             if not isinstance(raw, dict):
@@ -290,12 +546,22 @@ def upsert_watchlist_from_home(payload: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(items, list):
                 items = []
             seen_item_ids: set[int] = set()
+            user_label = _user_display(user, fallback=uid_s)
             for item in items:
                 if not isinstance(item, dict):
                     continue
                 row, was_created = _upsert_item_row(session, existing_items, item, now=now)
+                items_by_id[int(row.id)] = row
                 if was_created:
                     created += 1
+                    titles_created_events.append(
+                        {
+                            "title": _title_display(row),
+                            "media_type": str(row.media_type or ""),
+                            "user": user_label,
+                            "plex_user_id": uid_s,
+                        }
+                    )
                 else:
                     updated += 1
                 seen_item_ids.add(int(row.id))
@@ -317,6 +583,16 @@ def upsert_watchlist_from_home(payload: dict[str, Any]) -> dict[str, Any]:
                         )
                     )
                     memberships_upserted += 1
+                    memberships_added += 1
+                    added_events.append(
+                        {
+                            "title": _title_display(row),
+                            "media_type": str(row.media_type or ""),
+                            "user": user_label,
+                            "plex_user_id": uid_s,
+                            "new_title": bool(was_created),
+                        }
+                    )
                 else:
                     mem.last_seen_at = now
                     memberships_upserted += 1
@@ -329,6 +605,15 @@ def upsert_watchlist_from_home(payload: dict[str, Any]) -> dict[str, Any]:
             )
             for mem in existing_mems:
                 if int(mem.watchlist_item_id) not in seen_item_ids:
+                    item_row = items_by_id.get(int(mem.watchlist_item_id))
+                    removed_events.append(
+                        {
+                            "title": _title_display(item_row),
+                            "media_type": str(getattr(item_row, "media_type", None) or ""),
+                            "user": user_label,
+                            "plex_user_id": uid_s,
+                        }
+                    )
                     session.delete(mem)
                     memberships_removed += 1
 
@@ -350,7 +635,18 @@ def upsert_watchlist_from_home(payload: dict[str, Any]) -> dict[str, Any]:
                     .filter(PlexWatchlistMembership.plex_user_id == uid)
                     .all()
                 )
+                user_label = _user_display(user, fallback=str(uid))
                 for mem in stale_mems:
+                    item_row = items_by_id.get(int(mem.watchlist_item_id))
+                    removed_events.append(
+                        {
+                            "title": _title_display(item_row),
+                            "media_type": str(getattr(item_row, "media_type", None) or ""),
+                            "user": user_label,
+                            "plex_user_id": str(uid),
+                            "reason": "home_switch_disabled",
+                        }
+                    )
                     session.delete(mem)
                     memberships_removed += 1
                 user.block_reason = "home_switch_disabled"
@@ -368,7 +664,14 @@ def upsert_watchlist_from_home(payload: dict[str, Any]) -> dict[str, Any]:
             .all()
         )
         for row in orphans:
+            titles_removed_events.append(
+                {
+                    "title": _title_display(row),
+                    "media_type": str(row.media_type or ""),
+                }
+            )
             existing_items.pop(str(row.identity_key or ""), None)
+            items_by_id.pop(int(row.id), None)
             session.delete(row)
             items_removed += 1
         if orphans:
@@ -379,15 +682,34 @@ def upsert_watchlist_from_home(payload: dict[str, Any]) -> dict[str, Any]:
         session.close()
 
     total_fetched = sum(len(v) for v in by_user.values() if isinstance(v, list))
+    users_fetched = len([k for k in by_user.keys() if str(k or "").strip()])
     return {
         "fetched": total_fetched,
         "users": len(users_raw),
+        "users_fetched": users_fetched,
         "created": created,
         "updated": updated,
         "memberships_upserted": memberships_upserted,
+        "memberships_added": memberships_added,
         "memberships_removed": memberships_removed,
         "items_removed": items_removed,
         "user_errors": {str(k): str(v) for k, v in errors.items()},
+        "changes": {
+            "added": _cap_change_list(added_events),
+            "removed": _cap_change_list(removed_events),
+            "titles_created": _cap_change_list(titles_created_events),
+            "titles_removed": _cap_change_list(titles_removed_events),
+            "added_total": memberships_added,
+            "removed_total": memberships_removed,
+            "titles_created_total": created,
+            "titles_removed_total": items_removed,
+            "truncated": bool(
+                len(added_events) > _WATCHLIST_CHANGE_LIST_CAP
+                or len(removed_events) > _WATCHLIST_CHANGE_LIST_CAP
+                or len(titles_created_events) > _WATCHLIST_CHANGE_LIST_CAP
+                or len(titles_removed_events) > _WATCHLIST_CHANGE_LIST_CAP
+            ),
+        },
     }
 
 
@@ -1458,9 +1780,16 @@ def run_watchlist_targeted_sync(
                 finish_task_run(task_run_id, status="done", summary=summary)
             return summary
 
+        target_labels = [
+            str(u.get("title") or u.get("username") or u.get("plex_user_id") or "").strip()
+            for u in roster_users
+            if str(u.get("plex_user_id") or "").strip() in enabled_targets
+        ]
+        target_labels = [t for t in target_labels if t]
         logger.info(
             f"Watchlist targeted sync for {len(enabled_targets)} user(s) "
-            f"(trigger={trigger})",
+            f"(trigger={trigger}): {', '.join(target_labels[:12])}"
+            + ("…" if len(target_labels) > 12 else ""),
             extra={"emoji_type": "info"},
         )
         account_payload = fetch_watchlists_for_account(
@@ -1468,8 +1797,37 @@ def run_watchlist_targeted_sync(
             enabled_user_ids=enabled_targets,
             roster_users=roster_users,
         )
+        by_user = account_payload.get("by_user") if isinstance(account_payload, dict) else {}
+        for uid, items in (by_user or {}).items():
+            label = next(
+                (
+                    str(u.get("title") or u.get("username") or uid)
+                    for u in roster_users
+                    if str(u.get("plex_user_id") or "").strip() == str(uid)
+                ),
+                str(uid),
+            )
+            count = len(items) if isinstance(items, list) else 0
+            logger.info(
+                f"Watchlist targeted fetch: {label} → {count} title(s)",
+                extra={"emoji_type": "info"},
+            )
         upsert = upsert_watchlist_from_home(account_payload)
+        log_watchlist_upsert_result(upsert, context="Watchlist targeted sync")
         auto = auto_add_new_items()
+        if isinstance(auto, dict) and int(auto.get("attempted") or 0) > 0:
+            logger.info(
+                f"Watchlist auto-add: added={auto.get('added')} skipped={auto.get('skipped')} "
+                f"failed={auto.get('failed')} mode={auto.get('mode')}",
+                extra={"emoji_type": "info"},
+            )
+        progress = build_watchlist_task_progress(
+            upsert,
+            auto,
+            trigger=trigger,
+            source="rss_targeted",
+            targets=target_labels,
+        )
         summary.update(
             {
                 "ok": True,
@@ -1477,6 +1835,7 @@ def run_watchlist_targeted_sync(
                 "auto_add": auto,
                 "fetched_users": len(account_payload.get("by_user") or {}),
                 "source": "rss_targeted",
+                "progress": progress,
             }
         )
         _persist_poll_meta(at=_utcnow().isoformat(), error=None)
@@ -1655,7 +2014,41 @@ def run_watchlist_sync(*, trigger: str = "manual") -> dict[str, Any]:
                 )
 
         if not rss_gate.get("need_full"):
-            summary.update({"ok": True, "skipped_full_fetch": True, "upsert": {"fetched": 0}, "auto_add": {}})
+            logger.info(
+                f"Watchlist sync skipped full fetch (trigger={trig}; "
+                f"rss available, unchanged, reconcile not due)",
+                extra={"emoji_type": "info"},
+            )
+            summary.update(
+                {
+                    "ok": True,
+                    "skipped_full_fetch": True,
+                    "upsert": {"fetched": 0},
+                    "auto_add": {},
+                    "progress": {
+                        "sections": [
+                            {
+                                "key": "watchlist_summary",
+                                "name": "Watchlist summary",
+                                "status": "done",
+                                "metrics": [
+                                    {"label": "Trigger", "value": trig or "—"},
+                                    {"label": "Result", "value": "Skipped (RSS unchanged)"},
+                                    {
+                                        "label": "Self RSS",
+                                        "value": "changed" if rss_gate.get("self_changed") else "unchanged",
+                                    },
+                                    {
+                                        "label": "Friends RSS",
+                                        "value": "changed" if rss_gate.get("friends_changed") else "unchanged",
+                                    },
+                                ],
+                            }
+                        ],
+                        "running": False,
+                    },
+                }
+            )
             if phases is not None:
                 phases.begin("fetch", "Watchlist fetch")
                 phases.end("fetch", status="skipped", done=0, total=0, unit_label="users")
@@ -1687,6 +2080,11 @@ def run_watchlist_sync(*, trigger: str = "manual") -> dict[str, Any]:
             phases.begin("fetch", "Watchlist fetch")
         # Empty enabled set means admin disabled everyone (skip pulls). None = no roster yet.
         enabled_arg: set[str] | None = enabled_ids if roster_count > 0 else None
+        logger.info(
+            f"Watchlist full sync starting (trigger={trig}, enabled_users="
+            f"{len(enabled_ids) if roster_count > 0 else 'all'})",
+            extra={"emoji_type": "info"},
+        )
         account_payload = fetch_watchlists_for_account(
             limit_per_user=1000,
             enabled_user_ids=enabled_arg,
@@ -1696,19 +2094,49 @@ def run_watchlist_sync(*, trigger: str = "manual") -> dict[str, Any]:
         fetched_users = (
             len(account_payload.get("by_user") or {}) if isinstance(account_payload, dict) else 0
         )
+        by_user = account_payload.get("by_user") if isinstance(account_payload, dict) else {}
+        title_total = sum(len(v) for v in (by_user or {}).values() if isinstance(v, list))
+        logger.info(
+            f"Watchlist fetch complete: {fetched_users}/{users_count} user(s), "
+            f"{title_total} title row(s)",
+            extra={"emoji_type": "info"},
+        )
         if phases is not None:
-            phases.end("fetch", done=fetched_users, total=users_count, unit_label="users")
+            phases.end(
+                "fetch",
+                done=fetched_users,
+                total=users_count,
+                unit_label="users",
+                metrics=[
+                    {"label": "Users fetched", "value": fetched_users},
+                    {"label": "Users in roster", "value": users_count},
+                    {"label": "Title rows", "value": title_total},
+                ],
+            )
 
         if phases is not None:
             phases.begin("upsert", "Catalog upsert")
         upsert = upsert_watchlist_from_home(account_payload)
+        log_watchlist_upsert_result(upsert, context=f"Watchlist sync ({trig})")
         fetched = int(upsert.get("fetched") or 0) if isinstance(upsert, dict) else 0
         if phases is not None:
-            phases.end("upsert", done=fetched, total=fetched, unit_label="titles")
+            phases.end(
+                "upsert",
+                done=fetched,
+                total=fetched,
+                unit_label="titles",
+                metrics=metrics_from_watchlist_upsert(upsert),
+            )
 
         if phases is not None:
             phases.begin("auto_add", "Auto-add to Arr")
         auto = auto_add_new_items()
+        if isinstance(auto, dict) and int(auto.get("attempted") or 0) > 0:
+            logger.info(
+                f"Watchlist auto-add: added={auto.get('added')} skipped={auto.get('skipped')} "
+                f"failed={auto.get('failed')} mode={auto.get('mode')}",
+                extra={"emoji_type": "info"},
+            )
         if phases is not None:
             mode = str((auto or {}).get("mode") or "")
             attempted = int((auto or {}).get("attempted") or 0)
@@ -1721,9 +2149,29 @@ def run_watchlist_sync(*, trigger: str = "manual") -> dict[str, Any]:
                     done=added,
                     total=attempted,
                     unit_label="titles",
+                    metrics=[
+                        {"label": "Added", "value": added},
+                        {"label": "Skipped", "value": int((auto or {}).get("skipped") or 0)},
+                        {"label": "Failed", "value": int((auto or {}).get("failed") or 0)},
+                        {"label": "Mode", "value": mode or "—"},
+                    ],
                 )
 
-        summary.update({"ok": True, "upsert": upsert, "auto_add": auto, "source": "roster"})
+        progress = build_watchlist_task_progress(
+            upsert,
+            auto if isinstance(auto, dict) else {},
+            trigger=trig,
+            source="roster",
+        )
+        summary.update(
+            {
+                "ok": True,
+                "upsert": upsert,
+                "auto_add": auto,
+                "source": "roster",
+                "progress": progress,
+            }
+        )
         _persist_poll_meta(at=_utcnow().isoformat(), error=None)
         _persist_config_values({"WATCHLIST_LAST_FULL_FETCH_AT": _utcnow().isoformat()})
         if task_run_id:
