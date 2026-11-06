@@ -331,6 +331,41 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         requires_ack=True,
     ),
     WhatsNewNotice(
+        id="watchlist-rss-targeted-0-12-4",
+        since_version="0.12.4",
+        title="Faster Plex watchlist sync",
+        body=(
+            "Placeholdarr now checks Plex watchlist RSS about every 10 seconds and only syncs the "
+            "people who changed. If friends RSS is missing, a ~5-minute API poll still updates "
+            "friends and Home. Full reconcile still catches removals and Home-only profiles."
+        ),
+        cta_label="Open Watchlist settings",
+        cta_path="/settings/watchlist",
+    ),
+    WhatsNewNotice(
+        id="home-switch-token-cache-0-12-4",
+        since_version="0.12.4",
+        title="Remember Home switch tokens",
+        body=(
+            "Optional Settings → Watchlist toggle (under Home sync) stores each Home user's switch "
+            "token and reuses it until Plex rejects it, then switches again. Speeds up syncing and "
+            "helps with rate limits."
+        ),
+        cta_label="Open Watchlist settings",
+        cta_path="/settings/watchlist",
+    ),
+    WhatsNewNotice(
+        id="watchlist-task-changes-0-12-4",
+        since_version="0.12.4",
+        title="Watchlist changes in Tasks",
+        body=(
+            "Expand a Watchlist sync run in Activity → Tasks to see which titles were added or "
+            "removed and for whom, plus summary counts."
+        ),
+        cta_label="Open Tasks",
+        cta_path="/activity/tasks",
+    ),
+    WhatsNewNotice(
         id="friend-home-watchlist-sync-0-12-3",
         since_version="0.12.3",
         title="Faster Friend+Home watchlist sync",
