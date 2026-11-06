@@ -34,6 +34,10 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Watchlist sync logging**: Logs RSS change authors, per-user fetch counts, and title-level add/remove lines instead of only coarse start/finish messages.
 - **Owner-only RSS fallback**: If owner RSS works but friends RSS does not, keep the 10s owner path and still run the ~5-minute API poll so friends and Home are not stuck waiting on reconcile.
 
+### Fixed
+
+- **Owner RSS false syncs**: Owner watchlist is only fetched when the RSS feed has new item ids, not when the feed file changes without new titles.
+
 ## [0.12.3] - 2026-11-05
 
 ### Summary

@@ -1671,9 +1671,12 @@ def poll_rss_for_changed_authors() -> dict[str, Any]:
         if self_poll.get("content_hash"):
             rss_meta["WATCHLIST_RSS_SELF_HASH"] = str(self_poll.get("content_hash"))
         if self_poll.get("changed"):
+            # Feed body can change without new titles (CDN/metadata noise). Only sync
+            # the owner when the feed has item guids we have not seen before.
             prev = _load_seen_guids("WATCHLIST_RSS_SELF_GUIDS")
             items = self_poll.get("items") if isinstance(self_poll.get("items"), list) else []
             new_guids: set[str] = set()
+            had_new_item = False
             for item in items:
                 if not isinstance(item, dict):
                     continue
@@ -1681,16 +1684,21 @@ def poll_rss_for_changed_authors() -> dict[str, Any]:
                 if guid:
                     new_guids.add(guid)
                     if guid not in prev:
+                        had_new_item = True
                         author = str(item.get("author") or "").strip()
                         if author:
                             authors.add(author.lower())
             if new_guids:
                 _store_seen_guids("WATCHLIST_RSS_SELF_GUIDS", prev | new_guids)
-            # Any owner-feed change means refresh the owner list (self RSS has no friend authors).
-            result["owner_changed"] = True
-            oid = owner_plex_user_id()
-            if oid:
-                authors.add(oid.lower())
+            if had_new_item:
+                result["owner_changed"] = True
+                result["self_changed"] = True
+                oid = owner_plex_user_id()
+                if oid:
+                    authors.add(oid.lower())
+            else:
+                # Hash flipped, same titles: do not treat as a watchlist change.
+                result["self_changed"] = False
 
     if friends_url:
         friends_poll = poll_watchlist_rss_feed(
