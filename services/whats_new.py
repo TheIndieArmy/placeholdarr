@@ -335,9 +335,9 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         since_version="0.12.4",
         title="Faster Plex watchlist sync",
         body=(
-            "Placeholdarr now checks Plex watchlist RSS about every 10 seconds and only syncs the "
-            "people who changed. If friends RSS is missing, a ~5-minute API poll still updates "
-            "friends and Home. Full reconcile still catches removals and Home-only profiles."
+            "With Plex Pass, Placeholdarr checks Plex watchlist RSS about every 10 seconds and only "
+            "syncs the people who changed. If friends RSS is missing, a ~5-minute API poll still "
+            "updates friends and Home. Full reconcile still catches removals and Home-only profiles."
         ),
         cta_label="Open Watchlist settings",
         cta_path="/settings/watchlist",
