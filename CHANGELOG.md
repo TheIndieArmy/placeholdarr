@@ -13,6 +13,25 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## Released
 
+## [0.12.5] - 2026-11-06
+
+### Summary
+
+- **Premiere date override**: Choose theatrical, digital, or physical for movie NFO `<premiered>` (theatrical default) (#131).
+- **Movie and TV request lines**: Separate Request status templates for movies and TV.
+- **Status date tokens**: Typed movie release dates and TV series / season / episode dates in the token picker.
+
+### Added
+
+- **Premiere date override**: Nested under Settings → Calendar → Movie release date type; theatrical / digital / physical for NFO `<premiered>`, independent of Coming Soon date type (#131).
+- **Movie and TV request lines**: Separate `line.request.movie` and `line.request.tv` templates; legacy shared overrides migrate to both.
+- **Status date tokens**: `{TheatricalDate}`, `{DigitalDate}`, `{PhysicalDate}`, `{SeriesPremiereDate}`, `{SeasonPremiereDate}`, and `{AirDate}` available outside Coming Soon-only templates.
+
+### Changed
+
+- **TV token picker**: Groups Series / Season / Episode under TV (series title and premiere, season number and premiere, episode fields plus air date).
+- **Advanced message templates**: Always visible on Status Updates (no expand/collapse).
+
 ## [0.12.4] - 2026-11-06
 
 ### Summary

@@ -27,6 +27,7 @@ from services.messages.registry import (
     get_token_specs,
     get_wrapper_presets,
     get_wrapper_preset_pair,
+    request_line_key_for_media,
 )
 from services.messages.template_engine import (
     InvalidTemplateError,
@@ -60,6 +61,7 @@ __all__ = [
     "get_token_specs",
     "get_wrapper_presets",
     "get_wrapper_preset_pair",
+    "request_line_key_for_media",
     "InvalidTemplateError",
     "UnknownTemplateKeyError",
     "apply_wrapper",

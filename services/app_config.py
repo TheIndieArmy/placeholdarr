@@ -54,6 +54,7 @@ NFO_BACKFILL_SETTING_KEYS = frozenset(
     {
         "PLACEHOLDER_STATUS_UPDATES",
         "PLACEHOLDER_STATUS_PROJECTION_MODE",
+        "MOVIE_PREMIERE_DATE_OVERRIDE",
     }
 )
 
@@ -705,6 +706,30 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 ),
                 "type": "choice",
                 "restart_required": False,
+                "options": [
+                    {"value": "inCinemas", "label": "Theatrical / in cinemas"},
+                    {"value": "digitalRelease", "label": "Digital release"},
+                    {"value": "physicalRelease", "label": "Physical / home release"},
+                ],
+            },
+        ),
+        (
+            "MOVIE_PREMIERE_DATE_OVERRIDE",
+            {
+                "section": "Calendar",
+                "label": "Premiere date override",
+                "description": (
+                    "Controls the movie date written to NFO as premiered (what some media clients use for "
+                    "originally available / premiere). Independent of Movie release date type above. "
+                    "Theatrical is the default so the film's release year stays correct. Falls back to "
+                    "theatrical when the chosen date is missing. Changing this rewrites existing movie "
+                    "placeholder NFOs (Apply now or next full sync)."
+                ),
+                "type": "choice",
+                "depends_on": "PREFERRED_MOVIE_DATE_TYPE",
+                "nested": True,
+                "restart_required": False,
+                "default": "inCinemas",
                 "options": [
                     {"value": "inCinemas", "label": "Theatrical / in cinemas"},
                     {"value": "digitalRelease", "label": "Digital release"},

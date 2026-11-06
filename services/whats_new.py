@@ -331,6 +331,30 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         requires_ack=True,
     ),
     WhatsNewNotice(
+        id="premiere-date-override-0-12-5",
+        since_version="0.12.5",
+        title="Premiere date override",
+        body=(
+            "Choose theatrical, digital, or physical for the movie date written to NFO as premiered. "
+            "Theatrical stays the default so the film's release year stays correct, independent of "
+            "Movie release date type."
+        ),
+        cta_label="Open Calendar",
+        cta_path="/settings/calendar",
+    ),
+    WhatsNewNotice(
+        id="request-templates-dates-0-12-5",
+        since_version="0.12.5",
+        title="Movie and TV request templates",
+        body=(
+            "Request status lines are now separate for movies and TV. Token picker includes "
+            "theatrical / digital / physical dates and TV series premiere, season premiere, and "
+            "episode air date."
+        ),
+        cta_label="Open Status Updates",
+        cta_path="/settings/status-updates",
+    ),
+    WhatsNewNotice(
         id="watchlist-rss-targeted-0-12-4",
         since_version="0.12.4",
         title="Faster Plex watchlist sync",
