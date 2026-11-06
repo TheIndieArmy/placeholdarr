@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterator
 
 from sqlalchemy import event, text
 from sqlalchemy.orm import Session, object_session
@@ -28,11 +29,41 @@ _DIRTY_SERIES_KEY = "series_episode_stats_dirty_ids"
 _DIRTY_SEASON_KEY = "series_episode_stats_dirty_season_ids"
 _BUMP_MOVIES_KEY = "library_catalog_bump_movies"
 _BUMP_SERIES_KEY = "library_catalog_bump_series"
+# Set while this code path writes Series.stats_* / catalog version so ORM
+# after_update → after_commit cannot enqueue another refresh of the same work
+# (that loop pinned series + library_catalog_version and stalled ARR sync).
+_APPLYING_STATS_KEY = "series_episode_stats_applying"
 _ADVISORY_LOCK_KEY = 8_729_0002
 _PENDING_LOCK = threading.Lock()
 _RETRY_WORKER_LOCK = threading.Lock()
 _retry_worker: threading.Thread | None = None
 _pending_refresh: "_RefreshBatch | None" = None
+
+
+def _is_applying_stats(session: Session) -> bool:
+    return bool(session.info.get(_APPLYING_STATS_KEY))
+
+
+@contextmanager
+def _applying_stats(session: Session) -> Iterator[None]:
+    """Reentrant flag: stats/version writes must not re-trigger these hooks."""
+    depth = int(session.info.get(_APPLYING_STATS_KEY, 0) or 0)
+    session.info[_APPLYING_STATS_KEY] = depth + 1
+    try:
+        yield
+    finally:
+        depth = int(session.info.get(_APPLYING_STATS_KEY, 0) or 0) - 1
+        if depth <= 0:
+            session.info.pop(_APPLYING_STATS_KEY, None)
+        else:
+            session.info[_APPLYING_STATS_KEY] = depth
+
+
+def _clear_dirty_flags(session: Session) -> None:
+    session.info.pop(_DIRTY_SERIES_KEY, None)
+    session.info.pop(_DIRTY_SEASON_KEY, None)
+    session.info.pop(_BUMP_MOVIES_KEY, None)
+    session.info.pop(_BUMP_SERIES_KEY, None)
 
 
 @dataclass
@@ -119,15 +150,16 @@ def _execute_refresh_batch(batch: _RefreshBatch) -> bool:
         except Exception:
             pass
 
-        if batch.full_series_refresh or (batch.series_ids and should_full_refresh(len(batch.series_ids))):
-            refresh_all_series_episode_stats(sess)
-        elif batch.series_ids:
-            refresh_series_episode_stats(sess, batch.series_ids)
-        if batch.bump_movies:
-            bump_movies_version(sess)
-        if batch.bump_series:
-            bump_series_version(sess)
-        sess.commit()
+        with _applying_stats(sess):
+            if batch.full_series_refresh or (batch.series_ids and should_full_refresh(len(batch.series_ids))):
+                refresh_all_series_episode_stats(sess)
+            elif batch.series_ids:
+                refresh_series_episode_stats(sess, batch.series_ids)
+            if batch.bump_movies:
+                bump_movies_version(sess)
+            if batch.bump_series:
+                bump_series_version(sess)
+            sess.commit()
         return True
     except Exception as exc:
         try:
@@ -150,11 +182,25 @@ def _execute_refresh_batch(batch: _RefreshBatch) -> bool:
     finally:
         if locked:
             try:
-                sess.execute(
+                # Session-level advisory locks survive rollback; always unlock on
+                # the same connection before returning it to the pool.
+                unlocked = sess.execute(
                     text("SELECT pg_advisory_unlock(:k)"),
                     {"k": _ADVISORY_LOCK_KEY},
-                )
-                sess.commit()
+                ).scalar()
+                if unlocked:
+                    try:
+                        sess.commit()
+                    except Exception:
+                        try:
+                            sess.rollback()
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        sess.rollback()
+                    except Exception:
+                        pass
             except Exception:
                 try:
                     sess.rollback()
@@ -249,7 +295,7 @@ def _after_season_change(_mapper, _connection, target: Season) -> None:
 
 def _after_series_change(_mapper, _connection, target: Series) -> None:
     session = object_session(target)
-    if session is None:
+    if session is None or _is_applying_stats(session):
         return
     _mark_series_id(session, getattr(target, "id", None))
     session.info[_BUMP_SERIES_KEY] = True
@@ -257,13 +303,15 @@ def _after_series_change(_mapper, _connection, target: Series) -> None:
 
 def _after_movie_change(_mapper, _connection, target: Movie) -> None:
     session = object_session(target)
-    if session is None:
+    if session is None or _is_applying_stats(session):
         return
     session.info[_BUMP_MOVIES_KEY] = True
 
 
 def _resolve_dirty_season_ids_before_commit(session: Session) -> None:
     """Map pending season ids to series ids while the transaction is still open."""
+    if _is_applying_stats(session):
+        return
     season_ids: set[int] = session.info.pop(_DIRTY_SEASON_KEY, set()) or set()
     if not season_ids:
         return
@@ -299,6 +347,9 @@ def _before_commit(session: Session) -> None:
 
 
 def _after_commit(session: Session) -> None:
+    if _is_applying_stats(session):
+        _clear_dirty_flags(session)
+        return
     series_ids = _collect_dirty_series_ids(session)
     bump_movies = bool(session.info.pop(_BUMP_MOVIES_KEY, False))
     bump_series = bool(session.info.pop(_BUMP_SERIES_KEY, False))
@@ -308,10 +359,7 @@ def _after_commit(session: Session) -> None:
 
 
 def _after_rollback(session: Session) -> None:
-    session.info.pop(_DIRTY_SERIES_KEY, None)
-    session.info.pop(_DIRTY_SEASON_KEY, None)
-    session.info.pop(_BUMP_MOVIES_KEY, None)
-    session.info.pop(_BUMP_SERIES_KEY, None)
+    _clear_dirty_flags(session)
 
 
 def register_series_episode_stats_hooks() -> None:
@@ -338,21 +386,23 @@ def register_series_episode_stats_hooks() -> None:
 
 def refresh_series_stats_after_bulk(session: Session, *, full: bool = False, series_ids: set[int] | None = None) -> None:
     """Explicit refresh for bulk SQL updates that bypass ORM listeners."""
-    if full:
-        refresh_all_series_episode_stats(session)
+    with _applying_stats(session):
+        if full:
+            refresh_all_series_episode_stats(session)
+            bump_series_version(session)
+            return
+        ids = series_ids or set()
+        if ids:
+            refresh_series_episode_stats(session, ids)
         bump_series_version(session)
-        return
-    ids = series_ids or set()
-    if ids:
-        refresh_series_episode_stats(session, ids)
-    bump_series_version(session)
 
 
 def bump_library_versions_after_bulk(session: Session, *, movies: bool = False, series: bool = False) -> None:
-    if movies:
-        bump_movies_version(session)
-    if series:
-        bump_series_version(session)
+    with _applying_stats(session):
+        if movies:
+            bump_movies_version(session)
+        if series:
+            bump_series_version(session)
 
 
 def ensure_series_stats_backfilled() -> None:
@@ -372,9 +422,10 @@ def ensure_series_stats_backfilled() -> None:
             extra={"emoji_type": "refresh"},
         )
         started = time.monotonic()
-        updated = refresh_all_series_episode_stats(sess, chunk_size=50, commit_each_chunk=True)
-        bump_series_version(sess)
-        sess.commit()
+        with _applying_stats(sess):
+            updated = refresh_all_series_episode_stats(sess, chunk_size=50, commit_each_chunk=True)
+            bump_series_version(sess)
+            sess.commit()
         logger.info(
             "Series episode stats backfill complete: updated=%s elapsed_s=%.1f",
             updated,
