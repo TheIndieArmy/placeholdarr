@@ -9,6 +9,19 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+## Pre-release
+
+## Released
+
+## [0.12.4] - 2026-11-06
+
+### Summary
+
+- **Faster watchlist updates**: RSS is polled about every 10 seconds; only people who changed are fetched (#129).
+- **Remember Home switch tokens**: Optional Settings toggle reuses Home switch tokens until Plex rejects them (#128).
+- **Watchlist task change detail**: Expand a Watchlist sync run to see titles added/removed and who (#130).
+- **Owner-only RSS fallback**: Without friends RSS, a ~5-minute API poll still updates friends and Home (#132).
+
 ### Added
 
 - **Remember Home switch tokens**: Optional Settings → Watchlist toggle (under Home sync) stores each Home user's switch token and reuses it until Plex rejects it, then switches again (#128).
@@ -20,10 +33,6 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Watchlist poll cadence**: Replaces the every-5-minutes schedule with a dedicated ~10s RSS loop; full roster pulls stay on reconcile hours (default 2h), manual, and startup. Without Pass, falls back to a ~5-minute API poll. The Watchlist poll schedule setting is removed.
 - **Watchlist sync logging**: Logs RSS change authors, per-user fetch counts, and title-level add/remove lines instead of only coarse start/finish messages.
 - **Owner-only RSS fallback**: If owner RSS works but friends RSS does not, keep the 10s owner path and still run the ~5-minute API poll so friends and Home are not stuck waiting on reconcile.
-
-## Pre-release
-
-## Released
 
 ## [0.12.3] - 2026-11-05
 
