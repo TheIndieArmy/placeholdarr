@@ -19,6 +19,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 - **Watchlist poll cadence**: Replaces the every-5-minutes schedule with a dedicated ~10s RSS loop; full roster pulls stay on reconcile hours (default 2h), manual, and startup. Without Pass, falls back to a ~5-minute API poll. The Watchlist poll schedule setting is removed.
 - **Watchlist sync logging**: Logs RSS change authors, per-user fetch counts, and title-level add/remove lines instead of only coarse start/finish messages.
+- **Owner-only RSS fallback**: If owner RSS works but friends RSS does not, keep the 10s owner path and still run the ~5-minute API poll so friends and Home are not stuck waiting on reconcile.
 
 ## Pre-release
 

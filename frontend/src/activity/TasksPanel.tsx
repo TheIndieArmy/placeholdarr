@@ -412,9 +412,9 @@ export function TasksPanel(props: {
                     ) : null}
                     {task.task_key === "watchlist_sync" ? (
                       <p className="text-[12px] font-normal mt-0.5 max-w-md" style={{ color: semantic.fgSubtle }}>
-                        With Plex Pass, RSS is checked about every 10 seconds and only people who changed are
-                        fetched. Full reconcile catches removals and Home-only profiles. Optionally auto-add new
-                        titles to Arr.
+                        RSS is checked about every 10 seconds and only people who changed are fetched. If friends
+                        RSS is missing, a ~5-minute API poll still updates everyone else. Full reconcile catches
+                        removals and Home-only profiles. Optionally auto-add new titles to Arr.
                       </p>
                     ) : null}
                   </td>

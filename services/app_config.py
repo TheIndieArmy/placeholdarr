@@ -852,10 +852,11 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "description": (
                     "Sync the Plex Universal Watchlist roster (owner, friends, optional Home) into "
                     "Activity → Watchlist. Requires Plex connected under Media Integrations "
-                    "(Sign in with Plex preferred). With Plex Pass, RSS is polled about every "
-                    "10 seconds and only people who changed are fetched. Full reconcile (removals "
-                    "and Home-only) follows the interval below. Without Pass, a slower API poll "
-                    "is used. Per-person sync lives on the Watchlist People list."
+                    "(Sign in with Plex preferred). When RSS feeds are available, they are polled "
+                    "about every 10 seconds and only people who changed are fetched. If friends "
+                    "RSS is missing, a slower ~5-minute API poll still updates everyone else. "
+                    "Full reconcile (removals and Home-only) follows the interval below. "
+                    "Per-person sync lives on the Watchlist People list."
                 ),
                 "type": "bool",
                 "restart_required": False,
@@ -936,9 +937,11 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "section": "Watchlist",
                 "label": "Use RSS change hints (Plex Pass)",
                 "description": (
-                    "Automatically create owner and friends RSS feeds when Plex Pass allows it. "
-                    "Feeds are polled about every 10 seconds; new item authors trigger a targeted "
-                    "fetch for those people only. Turn off to use the slower API fallback poll."
+                    "Automatically create owner and friends RSS feeds when Plex allows it "
+                    "(friends feed usually needs Pass). Feeds are polled about every 10 seconds; "
+                    "new item authors trigger a targeted fetch for those people only. If the "
+                    "friends feed is unavailable, a ~5-minute API poll still covers friends and "
+                    "Home. Turn off to use only the slower API poll."
                 ),
                 "type": "bool",
                 "depends_on": "ENABLE_PLEX_WATCHLIST_SYNC",
