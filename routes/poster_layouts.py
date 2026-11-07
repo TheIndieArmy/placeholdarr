@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -55,40 +56,46 @@ async def put_poster_layouts(request: Request):
     if apply_scope not in _VALID_APPLY_SCOPES:
         apply_scope = _DEFAULT_APPLY_SCOPE
 
-    prior = get_layout_doc()
-    prior_fp = layout_fingerprint(prior)
-    normalized = normalize_doc({"version": body.get("version"), "profiles": profiles_in}, seed_if_empty=False)
-    saved = save_layout_doc(normalized)
-    changed_keys = changed_profile_keys(prior, saved)
-    changed = bool(changed_keys) or layout_fingerprint(saved) != prior_fp
-
-    backfill: dict[str, Any] = {"ok": True, "enqueued": False, "scope": apply_scope}
-    if changed:
-        from services.source_of_truth.placeholder_refresh import execute_placeholder_refresh_apply_scope
-
-        # Still walks the library, but per-profile layout_hash only regenerates
-        # titles whose profile fingerprint changed.
-        out = execute_placeholder_refresh_apply_scope(
-            apply_scope=apply_scope,
-            metadata=False,
-            art=True,
-            templates=False,
-            art_scope="all",
-            source="poster_layouts_save",
-            task_run_trigger="settings_change" if apply_scope == "now" else None,
+    def _persist_and_apply() -> dict[str, Any]:
+        prior = get_layout_doc()
+        prior_fp = layout_fingerprint(prior)
+        normalized = normalize_doc(
+            {"version": body.get("version"), "profiles": profiles_in},
+            seed_if_empty=False,
         )
-        art = out.get("art_backfill") if isinstance(out.get("art_backfill"), dict) else {}
-        backfill = {
-            "ok": bool(out.get("ok", True)),
-            "enqueued": bool(out.get("enqueued")),
-            "scope": out.get("scope") or apply_scope,
-            "pending": bool(out.get("pending")),
-            "changed_profiles": changed_keys,
-            **({} if not art else {"art": art}),
-        }
+        saved = save_layout_doc(normalized)
+        changed_keys = changed_profile_keys(prior, saved)
+        changed = bool(changed_keys) or layout_fingerprint(saved) != prior_fp
 
-    return JSONResponse(
-        content={
+        backfill: dict[str, Any] = {"ok": True, "enqueued": False, "scope": apply_scope}
+        if changed:
+            from services.source_of_truth.placeholder_refresh import (
+                execute_placeholder_refresh_apply_scope,
+            )
+
+            # Use settings_save* so Apply now skips the multi-minute sidecar scan
+            # (same as overlay/language settings). Per-profile layout_hash still
+            # skips unchanged titles when workers bake.
+            out = execute_placeholder_refresh_apply_scope(
+                apply_scope=apply_scope,
+                metadata=False,
+                art=True,
+                templates=False,
+                art_scope="all",
+                source="settings_save:poster_layouts",
+                task_run_trigger="settings_change" if apply_scope == "now" else None,
+            )
+            art = out.get("art_backfill") if isinstance(out.get("art_backfill"), dict) else {}
+            backfill = {
+                "ok": bool(out.get("ok", True)),
+                "enqueued": bool(out.get("enqueued")),
+                "scope": out.get("scope") or apply_scope,
+                "pending": bool(out.get("pending")),
+                "changed_profiles": changed_keys,
+                **({} if not art else {"art": art}),
+            }
+
+        return {
             "ok": True,
             "changed": changed,
             "changed_profiles": changed_keys,
@@ -96,7 +103,10 @@ async def put_poster_layouts(request: Request):
             "backfill": backfill,
             **serialize_layout_catalog(),
         }
-    )
+
+    # Sync DB + enqueue must not block the uvicorn event loop (one worker).
+    payload = await asyncio.to_thread(_persist_and_apply)
+    return JSONResponse(content=payload)
 
 
 @router.get("/preview-art")
