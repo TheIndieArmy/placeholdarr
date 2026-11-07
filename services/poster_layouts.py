@@ -56,10 +56,12 @@ LANDSCAPE_COLS = 33
 LANDSCAPE_ROWS = 21
 
 # Prior grid sizes used when migrating saved label coordinates up to the current grid.
+# v4 introduced the current odd grids; v5 only added placeholder/real key segments.
 _LEGACY_GRID_BY_VERSION: dict[int, dict[str, tuple[int, int]]] = {
     1: {"portrait": (6, 9), "landscape": (8, 5)},
     2: {"portrait": (12, 18), "landscape": (16, 10)},
     3: {"portrait": (24, 36), "landscape": (32, 20)},
+    4: {"portrait": (PORTRAIT_COLS, PORTRAIT_ROWS), "landscape": (LANDSCAPE_COLS, LANDSCAPE_ROWS)},
 }
 
 # Tokens available in the designer (filtered per media kind in the UI).
@@ -789,10 +791,16 @@ def _scale_label_coords_from_version(
 def normalize_doc(payload: Any, *, seed_if_empty: bool = True) -> dict[str, Any]:
     if not isinstance(payload, dict) or not isinstance(payload.get("profiles"), dict):
         return seed_profiles_from_legacy_settings() if seed_if_empty else _empty_doc()
-    try:
-        prior_version = int(payload.get("version") or 1)
-    except (TypeError, ValueError):
-        prior_version = 1
+    # Missing version means "already on the current grid" (designer PUT often omits it).
+    # Defaulting to 1 used to remap every save as if labels lived on the 6×9 v1 grid.
+    raw_version = payload.get("version")
+    if raw_version is None or raw_version == "":
+        prior_version = LAYOUT_DOC_VERSION
+    else:
+        try:
+            prior_version = int(raw_version)
+        except (TypeError, ValueError):
+            prior_version = LAYOUT_DOC_VERSION
     profiles_raw = _rewrite_legacy_profile_keys(payload.get("profiles") or {})
     profiles: dict[str, Any] = {}
     any_labels = False
