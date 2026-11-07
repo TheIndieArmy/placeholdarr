@@ -26,6 +26,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Poster overlays**: Grayscale can be per profile; badge and banner toggles move into layout profiles (seeded from prior settings).
 - **Poster layout grid**: Odd snap grids (portrait 25×37, landscape 33×21) so a cell center sits at exact 50%.
 - **Art refresh**: Per-profile `layout_hash` / `layout_profile` so unrelated profiles keep their baked art.
+- **Layout doc version**: Collapsed to shipped version `1` (interim pre-release docs 2–5 migrate once).
 
 ### Fixed
 
