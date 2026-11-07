@@ -850,7 +850,7 @@ export default function PosterLayoutDesigner(props: Props) {
 
   const previewArtControls = useMemo(
     () => (
-      <div className="mt-3 space-y-1.5">
+      <div className="space-y-1.5">
         <label className="text-[12px] uppercase tracking-wider text-slate-500">Preview art</label>
         <div className="flex items-center gap-2">
           <input

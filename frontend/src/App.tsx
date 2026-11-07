@@ -7560,7 +7560,8 @@ function PosterOverlayControlsWithPreview(props: {
         {props.controls}
         {props.belowControls}
       </div>
-      <aside className="w-full shrink-0 lg:sticky lg:top-4 lg:w-[22.5rem]">
+      {/* Wider aside so the 2:3 poster + Preview art bottom roughly meets the designer Plex tip. */}
+      <aside className="w-full shrink-0 lg:sticky lg:top-4 lg:w-[28rem]">
         <div className={`mb-3 ${SETTINGS_DENSITY_LEGEND_CLASS}`}>Preview</div>
         <PosterOverlayLivePreview
           values={props.values}
@@ -7569,7 +7570,7 @@ function PosterOverlayControlsWithPreview(props: {
           accentHex={props.accentHex}
           layoutPreview={props.layoutPreview}
         />
-        {props.belowPreview}
+        {props.belowPreview ? <div className="mt-3">{props.belowPreview}</div> : null}
       </aside>
     </div>
   );
@@ -8047,7 +8048,8 @@ function PosterOverlayFocusPreview(props: {
     };
   }, []);
 
-  const widthClass = meta.kind === "episode" ? "w-full" : "w-full max-w-[20rem] mx-auto";
+  // Fill the sticky aside (28rem) so the poster scales with the designer column.
+  const widthClass = "w-full";
   const bakeSize = meta.kind === "episode" ? { bakeW: 1920, bakeH: 1080 } : { bakeW: 1000, bakeH: 1500 };
   const guide = props.layoutPreview.guide
     ? { ...props.layoutPreview.guide, accentHex: props.accentHex, ...bakeSize }
