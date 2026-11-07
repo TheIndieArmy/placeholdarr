@@ -628,6 +628,7 @@ def _empty_doc() -> dict[str, Any]:
     return {
         "version": LAYOUT_DOC_VERSION,
         "profiles": {key: {"labels": [], "grayscale": False} for key in PROFILE_KEYS},
+        "art_library_synced": False,
     }
 
 
@@ -779,7 +780,11 @@ def seed_profiles_from_legacy_settings() -> dict[str, Any]:
                 )
             )
         profiles[key] = normalize_profile(key, {"labels": labels, "grayscale": gs_on})
-    return {"version": LAYOUT_DOC_VERSION, "profiles": profiles}
+    return {
+        "version": LAYOUT_DOC_VERSION,
+        "profiles": profiles,
+        "art_library_synced": False,
+    }
 
 
 def _source_grid_for_prior_version(prior_version: int, *, landscape: bool) -> tuple[int, int] | None:
@@ -863,15 +868,82 @@ def normalize_doc(payload: Any, *, seed_if_empty: bool = True) -> dict[str, Any]
         isinstance(profiles_raw.get(k), dict) and "labels" in (profiles_raw.get(k) or {})
         for k in PROFILE_KEYS
     ):
-        return seed_profiles_from_legacy_settings()
-    return {"version": LAYOUT_DOC_VERSION, "profiles": profiles}
+        seeded = seed_profiles_from_legacy_settings()
+        seeded["art_library_synced"] = bool(payload.get("art_library_synced")) if isinstance(payload, dict) else False
+        return seeded
+    return {
+        "version": LAYOUT_DOC_VERSION,
+        "profiles": profiles,
+        # False until the first layout-driven art pass finishes enqueue (legacy JPEG migration).
+        "art_library_synced": bool(payload.get("art_library_synced")),
+    }
 
 
 def layout_fingerprint(doc: dict[str, Any] | None = None) -> str:
     """Stable hash of the full layout document (settings dirty / catalog)."""
     data = doc if isinstance(doc, dict) else get_layout_doc()
-    blob = json.dumps(data, sort_keys=True, separators=(",", ":"))
+    payload = {
+        "version": data.get("version"),
+        "profiles": data.get("profiles") or {},
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:24]
+
+
+def layout_art_library_synced(doc: dict[str, Any] | None = None) -> bool:
+    data = doc if isinstance(doc, dict) else get_layout_doc()
+    return bool(data.get("art_library_synced"))
+
+
+def mark_layout_art_library_synced(synced: bool = True) -> dict[str, Any]:
+    """Record that placeholder JPEGs have been through a layout-driven art pass."""
+    doc = get_layout_doc()
+    doc["art_library_synced"] = bool(synced)
+    return save_layout_doc(doc)
+
+
+def layout_art_targets_from_changed_profiles(
+    changed_keys: list[str] | tuple[str, ...] | None,
+    *,
+    doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Decide which placeholder art to enqueue after a layout save.
+
+    First library sync (``art_library_synced`` false) always targets the full
+    library so pre-designer overlay JPEGs migrate once. After that, only media
+    kinds / variants present in ``changed_keys`` are queued.
+    """
+    data = doc if isinstance(doc, dict) else get_layout_doc()
+    keys = [str(k).strip() for k in (changed_keys or []) if str(k).strip()]
+    if not layout_art_library_synced(data):
+        return {
+            "full": True,
+            "kinds": ["movie", "tv", "episode"],
+            "variants": ["default", "coming_soon"],
+            "reason": "first_layout_art_sync",
+            "changed_profiles": keys,
+        }
+    kinds: set[str] = set()
+    variants: set[str] = set()
+    for key in keys:
+        media, _availability, variant = parse_profile_key(key)
+        kinds.add(media)
+        variants.add(variant)
+    if not kinds:
+        return {
+            "full": False,
+            "kinds": [],
+            "variants": [],
+            "reason": "nothing_changed",
+            "changed_profiles": [],
+        }
+    return {
+        "full": False,
+        "kinds": sorted(kinds),
+        "variants": sorted(variants) if variants else ["default", "coming_soon"],
+        "reason": "changed_profiles",
+        "changed_profiles": keys,
+    }
 
 
 def profile_layout_fingerprint(profile_key: str, doc: dict[str, Any] | None = None) -> str:
@@ -1391,4 +1463,5 @@ def serialize_layout_catalog() -> dict[str, Any]:
         "arted_tokens": sorted(_ARTED_TOKENS),
         "rating_sources": list(_RATING_SOURCES),
         "fingerprint": layout_fingerprint(doc),
+        "art_library_synced": layout_art_library_synced(doc),
     }
