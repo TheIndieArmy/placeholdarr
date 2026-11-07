@@ -2662,13 +2662,13 @@ export function App() {
 
         {/* Sidebar: mobile drawer under the header; desktop icon rail with hover/pin expand. */}
         <div
-          className={`fixed bottom-0 left-0 top-16 z-50 w-64 shrink-0 transition-[transform,width] duration-200 ease-out md:relative md:inset-auto md:top-auto md:z-auto md:h-full md:translate-x-0 ${
+          className={`fixed bottom-0 left-0 top-16 z-50 w-64 shrink-0 transition-[transform,width] duration-200 ease-out md:relative md:inset-auto md:top-auto md:z-40 md:h-full md:translate-x-0 ${
             mobileNavOpen ? "translate-x-0 pointer-events-auto" : "-translate-x-full pointer-events-none"
           } md:pointer-events-auto ${sidebarPinned ? "md:w-64" : "md:w-16"}`}
         >
           <aside
             id="placeholdarr-sidebar-nav"
-            className={`absolute inset-y-0 left-0 z-30 flex h-full w-64 flex-col overflow-hidden pb-0 pt-0 transition-[width,box-shadow] duration-200 ease-out ${
+            className={`absolute inset-y-0 left-0 z-40 flex h-full w-64 flex-col overflow-hidden pb-0 pt-0 transition-[width,box-shadow] duration-200 ease-out ${
               sidebarExpanded ? "md:w-64" : "md:w-16"
             } ${
               (!sidebarPinned && sidebarExpanded) || (isMobile && mobileNavOpen)
@@ -3128,8 +3128,8 @@ export function App() {
           </aside>
         </div>
 
-        {/* Main area */}
-        <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        {/* Main area (z-0 so hover-expanded sidebar stays above range thumbs / controls). */}
+        <div className="relative z-0 flex-1 flex flex-col min-w-0 overflow-hidden">
           {/* Topbar */}
           <header
             className="relative z-[60] flex h-16 w-full flex-shrink-0 items-center justify-between border-b px-4 py-3 sm:px-6"
@@ -7548,7 +7548,7 @@ function PosterOverlayControlsWithPreview(props: {
     baseUrl?: string | null;
     sampleTokens?: Record<string, string> | null;
     sampleTokensJson?: string;
-    guide?: { x: number; y: number } | null;
+    guide?: LayoutPreviewGuide | null;
     markers?: Array<{ id: string; n: number; x: number; y: number }> | null;
     listHovering?: boolean;
     hoveredId?: string | null;
@@ -7581,6 +7581,25 @@ function PosterOverlayControlsWithPreview(props: {
   );
 }
 
+/** Sticky-preview placement guides from the layout designer. */
+type LayoutPreviewGuide =
+  | { kind: "chip"; x: number; y: number }
+  | {
+      kind: "banner";
+      xStart: number;
+      xEnd: number;
+      yStart: number;
+      yEnd: number;
+    };
+
+function layoutGuideKey(guide: LayoutPreviewGuide | null | undefined): string {
+  if (!guide) return "";
+  if (guide.kind === "banner") {
+    return `b:${guide.xStart}:${guide.xEnd}:${guide.yStart}:${guide.yEnd}`;
+  }
+  return `c:${guide.x}:${guide.y}`;
+}
+
 /** Layout designer with shared sticky preview (Settings + onboarding). */
 function PosterArtOverlaysBlock(props: {
   values: FieldValueMap;
@@ -7594,7 +7613,7 @@ function PosterArtOverlaysBlock(props: {
     baseUrl?: string | null;
     sampleTokens?: Record<string, string> | null;
     sampleTokensJson?: string;
-    guide?: { x: number; y: number } | null;
+    guide?: LayoutPreviewGuide | null;
     markers?: Array<{ id: string; n: number; x: number; y: number }> | null;
     listHovering?: boolean;
     hoveredId?: string | null;
@@ -7616,7 +7635,7 @@ function PosterArtOverlaysBlock(props: {
       grayscale: boolean;
       baseUrl?: string | null;
       sampleTokens?: Record<string, string> | null;
-      guide?: { x: number; y: number } | null;
+      guide?: LayoutPreviewGuide | null;
       markers?: Array<{ id: string; n: number; x: number; y: number }> | null;
       listHovering?: boolean;
       hoveredId?: string | null;
@@ -7628,7 +7647,7 @@ function PosterArtOverlaysBlock(props: {
       const sampleTokens = state.sampleTokens || null;
       const sampleTokensJson = JSON.stringify(sampleTokens || {});
       const guide = state.guide || null;
-      const guideKey = guide ? `${guide.x}:${guide.y}` : "";
+      const guideKey = layoutGuideKey(guide);
       const markers = state.markers || null;
       const markersKey = (markers || []).map((m) => `${m.id}:${m.n}:${m.x}:${m.y}`).join("|");
       const listHovering = Boolean(state.listHovering);
@@ -7636,7 +7655,7 @@ function PosterArtOverlaysBlock(props: {
       const selectedId = state.selectedId || null;
       const placementControlsHot = Boolean(state.placementControlsHot);
       setLayoutPreview((prev) => {
-        const prevGuideKey = prev?.guide ? `${prev.guide.x}:${prev.guide.y}` : "";
+        const prevGuideKey = layoutGuideKey(prev?.guide);
         const prevMarkersKey = (prev?.markers || []).map((m) => `${m.id}:${m.n}:${m.x}:${m.y}`).join("|");
         if (
           prev &&
@@ -7775,13 +7794,13 @@ function PosterOverlayPreviewTile(props: {
   aspect: string;
   /** Fixed width class (e.g. ``w-[14rem]``). Required so absolute-fit images do not collapse. */
   widthClass: string;
-  /** Optional center crosshairs for the layout designer selection. */
-  guide?: { x: number; y: number; accentHex?: string; bakeW?: number; bakeH?: number } | null;
+  /** Optional placement guides for the layout designer selection. */
+  guide?: (LayoutPreviewGuide & { accentHex?: string; bakeW?: number; bakeH?: number }) | null;
   /** Number badges while hovering the designer asset list. */
   markers?: Array<{ id: string; n: number; x: number; y: number }> | null;
   hoveredMarkerId?: string | null;
   accentHex?: string;
-  /** When set with a guide, the selected chip can be dragged on the bake preview. */
+  /** When set with a chip guide, the selected chip can be dragged on the bake preview. */
   onPlacementDrag?: (x: number, y: number) => void;
   /** Keep the drag handle visible while X/Y bake-px controls are in use. */
   placementControlsHot?: boolean;
@@ -7795,6 +7814,8 @@ function PosterOverlayPreviewTile(props: {
   const currentSrcRef = useRef(props.src);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const dragActiveRef = useRef(false);
+  /** Pointer minus banner center at grab (keeps strip from jumping under the cursor). */
+  const bannerGrabOffsetRef = useRef<{ dx: number; dy: number } | null>(null);
 
   useEffect(() => {
     currentSrcRef.current = currentSrc;
@@ -7841,13 +7862,21 @@ function PosterOverlayPreviewTile(props: {
   const accent = guide?.accentHex || props.accentHex || "#38bdf8";
   const bakeW = Math.max(1, guide?.bakeW || 1000);
   const bakeH = Math.max(1, guide?.bakeH || 1500);
+  const chipGuide = guide?.kind === "chip" ? guide : null;
+  const bannerGuide = guide?.kind === "banner" ? guide : null;
   // Glow only at the exact bake-canvas midpoint (e.g. 500/750 or 960/540).
-  const glowX = Boolean(guide && Math.round(guide.x * bakeW) === bakeW / 2);
-  const glowY = Boolean(guide && Math.round(guide.y * bakeH) === bakeH / 2);
-  const canDrag = Boolean(guide && props.onPlacementDrag);
+  const glowX = Boolean(chipGuide && Math.round(chipGuide.x * bakeW) === bakeW / 2);
+  const glowY = Boolean(chipGuide && Math.round(chipGuide.y * bakeH) === bakeH / 2);
+  const canDrag = Boolean((chipGuide || bannerGuide) && props.onPlacementDrag);
   const wantHandleVisible = Boolean(
     canDrag && (previewHovering || dragging || props.placementControlsHot),
   );
+  const bannerCenter = bannerGuide
+    ? {
+        x: (Math.max(0, Math.min(1, bannerGuide.xStart)) + Math.max(0, Math.min(1, bannerGuide.xEnd))) / 2,
+        y: (Math.max(0, Math.min(1, bannerGuide.yStart)) + Math.max(0, Math.min(1, bannerGuide.yEnd))) / 2,
+      }
+    : null;
 
   useEffect(() => {
     if (!canDrag) {
@@ -7878,10 +7907,16 @@ function PosterOverlayPreviewTile(props: {
       if (!dragActiveRef.current || !props.onPlacementDrag) return;
       const next = fracFromClient(event.clientX, event.clientY);
       if (!next) return;
-      props.onPlacementDrag(next.x, next.y);
+      const off = bannerGrabOffsetRef.current;
+      if (off) {
+        props.onPlacementDrag(next.x - off.dx, next.y - off.dy);
+      } else {
+        props.onPlacementDrag(next.x, next.y);
+      }
     };
     const onUp = () => {
       dragActiveRef.current = false;
+      bannerGrabOffsetRef.current = null;
       setDragging(false);
     };
     window.addEventListener("pointermove", onMove);
@@ -7901,7 +7936,13 @@ function PosterOverlayPreviewTile(props: {
     dragActiveRef.current = true;
     setDragging(true);
     const next = fracFromClient(event.clientX, event.clientY);
-    if (next) props.onPlacementDrag(next.x, next.y);
+    if (bannerGuide && bannerCenter && next) {
+      bannerGrabOffsetRef.current = { dx: next.x - bannerCenter.x, dy: next.y - bannerCenter.y };
+      props.onPlacementDrag(bannerCenter.x, bannerCenter.y);
+    } else {
+      bannerGrabOffsetRef.current = null;
+      if (next) props.onPlacementDrag(next.x, next.y);
+    }
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
     } catch {
@@ -7936,7 +7977,7 @@ function PosterOverlayPreviewTile(props: {
             }`}
           />
         ) : null}
-        {guide ? (
+        {chipGuide ? (
           <>
             {/* Poster midlines (glow when the chip sits on the bake midpoint). */}
             <div
@@ -7966,7 +8007,7 @@ function PosterOverlayPreviewTile(props: {
               aria-hidden
               className="pointer-events-none absolute inset-y-0 z-[5] w-px -translate-x-1/2"
               style={{
-                left: `${Math.max(0, Math.min(1, guide.x)) * 100}%`,
+                left: `${Math.max(0, Math.min(1, chipGuide.x)) * 100}%`,
                 backgroundColor: `${accent}66`,
               }}
             />
@@ -7974,7 +8015,7 @@ function PosterOverlayPreviewTile(props: {
               aria-hidden
               className="pointer-events-none absolute inset-x-0 z-[5] h-px -translate-y-1/2"
               style={{
-                top: `${Math.max(0, Math.min(1, guide.y)) * 100}%`,
+                top: `${Math.max(0, Math.min(1, chipGuide.y)) * 100}%`,
                 backgroundColor: `${accent}66`,
               }}
             />
@@ -7990,8 +8031,8 @@ function PosterOverlayPreviewTile(props: {
                   dragging ? "cursor-grabbing" : "cursor-grab"
                 } ${handleOpaque ? "opacity-100" : "pointer-events-none opacity-0"}`}
                 style={{
-                  left: `${Math.max(0, Math.min(1, guide.x)) * 100}%`,
-                  top: `${Math.max(0, Math.min(1, guide.y)) * 100}%`,
+                  left: `${Math.max(0, Math.min(1, chipGuide.x)) * 100}%`,
+                  top: `${Math.max(0, Math.min(1, chipGuide.y)) * 100}%`,
                   backgroundColor: accent,
                   boxShadow: `0 0 0 1px ${accent}, 0 0 12px ${accent}88`,
                 }}
@@ -8003,6 +8044,104 @@ function PosterOverlayPreviewTile(props: {
             ) : null}
           </>
         ) : null}
+        {bannerGuide
+          ? (() => {
+              const x0 = Math.max(0, Math.min(1, bannerGuide.xStart));
+              const x1 = Math.max(0, Math.min(1, bannerGuide.xEnd));
+              const y0 = Math.max(0, Math.min(1, bannerGuide.yStart));
+              const y1 = Math.max(0, Math.min(1, bannerGuide.yEnd));
+              const left = x0 * 100;
+              const top = y0 * 100;
+              const width = Math.max(0, (x1 - x0) * 100);
+              const height = Math.max(0, (y1 - y0) * 100);
+              const right = left + width;
+              const bottom = top + height;
+              const line = (style: CSSProperties, strong = false) => (
+                <div
+                  aria-hidden
+                  className="pointer-events-none absolute z-[5]"
+                  style={{
+                    ...style,
+                    backgroundColor: strong ? accent : `${accent}aa`,
+                    boxShadow: strong ? `0 0 0 1px ${accent}55, 0 0 8px ${accent}66` : undefined,
+                  }}
+                />
+              );
+              return (
+                <>
+                  <div
+                    role={canDrag ? "button" : undefined}
+                    aria-label={canDrag ? "Drag banner position" : undefined}
+                    tabIndex={canDrag && handleOpaque ? 0 : -1}
+                    onPointerDown={canDrag ? beginDrag : undefined}
+                    className={`absolute z-[4] ${
+                      canDrag
+                        ? `touch-none ${dragging ? "cursor-grabbing" : "cursor-grab"} ${
+                            handleOpaque ? "" : "pointer-events-none"
+                          }`
+                        : "pointer-events-none"
+                    }`}
+                    style={{
+                      left: `${left}%`,
+                      top: `${top}%`,
+                      width: `${width}%`,
+                      height: `${height}%`,
+                      backgroundColor: `${accent}22`,
+                    }}
+                  />
+                  {/* Four movement edges; end lines inset 1px so overflow:hidden does not clip them. */}
+                  {line({ left: `${left}%`, top: `${top}%`, width: 1, height: `${height}%` })}
+                  {line(
+                    {
+                      left: `${right}%`,
+                      top: `${top}%`,
+                      width: 1,
+                      height: `${height}%`,
+                      transform: "translateX(-100%)",
+                    },
+                    true,
+                  )}
+                  {line({ left: `${left}%`, top: `${top}%`, width: `${width}%`, height: 1 })}
+                  {line(
+                    {
+                      left: `${left}%`,
+                      top: `${bottom}%`,
+                      width: `${width}%`,
+                      height: 1,
+                      transform: "translateY(-100%)",
+                    },
+                    true,
+                  )}
+                  {canDrag && bannerCenter ? (
+                    <button
+                      type="button"
+                      title="Drag to place"
+                      aria-label="Drag banner position"
+                      tabIndex={handleOpaque ? undefined : -1}
+                      aria-hidden={!handleOpaque}
+                      onPointerDown={beginDrag}
+                      className={`absolute z-[9] flex h-7 w-7 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-[#0b111b] shadow-md touch-none transition-opacity duration-300 ease-out ${
+                        dragging ? "cursor-grabbing" : "cursor-grab"
+                      } ${handleOpaque ? "opacity-100" : "pointer-events-none opacity-0"}`}
+                      style={{
+                        left: `${bannerCenter.x * 100}%`,
+                        top: `${bannerCenter.y * 100}%`,
+                        backgroundColor: accent,
+                        boxShadow: `0 0 0 1px ${accent}, 0 0 12px ${accent}88`,
+                      }}
+                    >
+                      <span
+                        className="material-symbols-outlined leading-none text-[#0b111b]"
+                        style={{ fontSize: 16 }}
+                      >
+                        open_with
+                      </span>
+                    </button>
+                  ) : null}
+                </>
+              );
+            })()
+          : null}
         {props.markers && props.markers.length > 0
           ? [...props.markers]
               .sort((a, b) => {
@@ -8041,7 +8180,10 @@ function PosterOverlayPreviewTile(props: {
       </div>
       <figcaption className="px-2 py-1.5 text-[11px] text-slate-400 leading-snug">
         {props.label}
-        {canDrag ? <span className="text-slate-500"> · Drag handle to place</span> : null}
+        {chipGuide && canDrag ? <span className="text-slate-500"> · Drag handle to place</span> : null}
+        {bannerGuide && canDrag ? (
+          <span className="text-slate-500"> · Drag fill to slide (size stays fixed)</span>
+        ) : null}
       </figcaption>
     </figure>
   );
@@ -8091,8 +8233,8 @@ function labelsWithSelectedOnTop(labels: unknown[], selectedId: string | null | 
   if (!picked || typeof picked !== "object") return labels;
   const token = String((picked as { token?: unknown }).token || "").trim();
   const style = String((picked as { style?: unknown }).style || "").trim().toLowerCase();
-  // Banners always bake under chips; never promote a selected banner.
-  if (token === "Banner" || style === "banner") return labels;
+  // Fill rectangles always bake under chips; never promote a selected fill.
+  if (token === "FillRectangle" || token === "Banner" || style === "banner") return labels;
   const next = labels.slice();
   next.splice(idx, 1);
   next.push(picked);
@@ -8110,7 +8252,7 @@ function PosterOverlayFocusPreview(props: {
     baseUrl?: string | null;
     sampleTokens?: Record<string, string> | null;
     sampleTokensJson?: string;
-    guide?: { x: number; y: number } | null;
+    guide?: LayoutPreviewGuide | null;
     markers?: Array<{ id: string; n: number; x: number; y: number }> | null;
     listHovering?: boolean;
     hoveredId?: string | null;
@@ -8252,7 +8394,7 @@ function PosterOverlayLivePreview(props: {
     baseUrl?: string | null;
     sampleTokens?: Record<string, string> | null;
     sampleTokensJson?: string;
-    guide?: { x: number; y: number } | null;
+    guide?: LayoutPreviewGuide | null;
     markers?: Array<{ id: string; n: number; x: number; y: number }> | null;
     listHovering?: boolean;
     hoveredId?: string | null;

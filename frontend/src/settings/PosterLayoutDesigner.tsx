@@ -13,6 +13,7 @@ import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
 
 export type LabelSize = "small" | "medium" | "large";
 export type LabelStyle = "chip" | "banner";
+/** @deprecated Legacy edge; migrated to x/y ranges on load. */
 export type BannerEdge = "top" | "bottom" | "left" | "right";
 
 export type PosterLayoutLabel = {
@@ -22,7 +23,7 @@ export type PosterLayoutLabel = {
   x: number;
   /** Vertical center as a fraction of poster height (0..1). */
   y: number;
-  /** Legacy snap cell; kept for migration / banners. */
+  /** Legacy snap cell; kept for migration. */
   row?: number;
   col?: number;
   text_color: string;
@@ -31,14 +32,22 @@ export type PosterLayoutLabel = {
   fill_opacity: number;
   border_opacity: number;
   size: LabelSize;
-  /** Banner strip depth as a fraction of poster height (top/bottom) or width (left/right). */
+  /** Legacy single depth; prefer y_end - y_start. */
   thickness: number;
-  /** Along-edge coverage start (0..1). Top/bottom: left→right. Left/right: top→bottom. */
-  span_start: number;
-  /** Along-edge coverage end (0..1). */
-  span_end: number;
+  /** Horizontal coverage start/end (0..1). */
+  x_start: number;
+  x_end: number;
+  /** Vertical coverage start/end (0..1). */
+  y_start: number;
+  y_end: number;
   style: LabelStyle;
-  edge: BannerEdge;
+  /** Legacy fields kept optional for older drafts in memory. */
+  span_start?: number;
+  span_end?: number;
+  depth_start?: number;
+  depth_end?: number;
+  orientation?: "horizontal" | "vertical";
+  edge?: BannerEdge;
   arted: boolean;
   rating_source: string;
   /** User-entered copy for the Custom chip token. */
@@ -59,7 +68,6 @@ export type PosterLayoutCatalog = {
   fingerprint: string;
   sizes?: LabelSize[];
   styles?: LabelStyle[];
-  banner_edges?: BannerEdge[];
   arted_tokens?: string[];
   rating_sources?: string[];
   custom_template_tokens?: Record<string, string[]>;
@@ -67,7 +75,8 @@ export type PosterLayoutCatalog = {
 };
 
 const LABEL_SIZES: LabelSize[] = ["small", "medium", "large"];
-const BANNER_EDGES: BannerEdge[] = ["top", "bottom", "left", "right"];
+const FILL_RECTANGLE_TOKEN = "FillRectangle";
+const FILL_RECTANGLE_LABEL = "Fill rectangle";
 /** Invisible Custom chip used so the empty editor matches the tallest selected layout. */
 const EDITOR_HEIGHT_PROBE: PosterLayoutLabel = {
   id: "__editor_height__",
@@ -81,10 +90,11 @@ const EDITOR_HEIGHT_PROBE: PosterLayoutLabel = {
   border_opacity: 0,
   size: "medium",
   thickness: 0.12,
-  span_start: 0,
-  span_end: 1,
+  x_start: 0,
+  x_end: 1,
+  y_start: 0,
+  y_end: 0.12,
   style: "chip",
-  edge: "top",
   arted: true,
   rating_source: "imdb",
   custom_text: "{Title} {Sep} {Year}",
@@ -92,7 +102,7 @@ const EDITOR_HEIGHT_PROBE: PosterLayoutLabel = {
 const BANNER_SIZE_MULT: Record<LabelSize, number> = { small: 0.72, medium: 1, large: 1.35 };
 const BANNER_THICKNESS_MIN = 0.04;
 const BANNER_THICKNESS_MAX = 0.45;
-/** Minimum along-edge width so the strip stays visible; thumbs can nearly meet. */
+/** Minimum axis width so the fill stays visible; thumbs can nearly meet. */
 const BANNER_SPAN_MIN_GAP = 0.01;
 
 function normalizeBannerSpan(start: unknown, end: unknown): { start: number; end: number } {
@@ -113,20 +123,28 @@ function normalizeBannerSpan(start: unknown, end: unknown): { start: number; end
   return { start: a, end: b };
 }
 
-/** One track, two draggable thumbs for banner along-edge coverage. */
+/** One track, two draggable thumbs for an axis range (bake-px UI). */
 function BannerSpanSlider(props: {
   start: number;
   end: number;
+  /** Bake pixels for this axis. */
+  dim: number;
   accentHex: string;
   onChange: (start: number, end: number) => void;
+  onInteract?: () => void;
 }) {
+  const dim = Math.max(1, Math.round(props.dim));
   const trackRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<"start" | "end" | null>(null);
   const spanRef = useRef({ start: props.start, end: props.end });
   const onChangeRef = useRef(props.onChange);
+  const onInteractRef = useRef(props.onInteract);
   const span = normalizeBannerSpan(props.start, props.end);
   spanRef.current = span;
   onChangeRef.current = props.onChange;
+  onInteractRef.current = props.onInteract;
+  const startPx = Math.round(span.start * dim);
+  const endPx = Math.round(span.end * dim);
 
   const valueFromClientX = (clientX: number) => {
     const el = trackRef.current;
@@ -169,45 +187,57 @@ function BannerSpanSlider(props: {
   const beginThumb = (which: "start" | "end") => (e: ReactPointerEvent<HTMLButtonElement>) => {
     e.preventDefault();
     e.stopPropagation();
+    onInteractRef.current?.();
     dragRef.current = which;
     applyDrag(e.clientX);
   };
 
   return (
-    <div
-      ref={trackRef}
-      className="relative h-7 w-full touch-none select-none"
-      onPointerDown={(e) => {
-        const v = valueFromClientX(e.clientX);
-        const distStart = Math.abs(v - span.start);
-        const distEnd = Math.abs(v - span.end);
-        dragRef.current = distStart <= distEnd ? "start" : "end";
-        applyDrag(e.clientX);
-      }}
-    >
-      <div className="pointer-events-none absolute left-0 right-0 top-1/2 h-1.5 -translate-y-1/2 rounded-full border border-[#424753]/55 bg-[#0b111b]" />
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500">
+        <span>
+          Start <span className="font-mono text-slate-300">{startPx}</span> px
+        </span>
+        <span>
+          End <span className="font-mono text-slate-300">{endPx}</span> px
+        </span>
+      </div>
       <div
-        className="pointer-events-none absolute top-1/2 h-1.5 -translate-y-1/2 rounded-full"
-        style={{
-          left: `${span.start * 100}%`,
-          width: `${(span.end - span.start) * 100}%`,
-          backgroundColor: props.accentHex,
-          opacity: 0.75,
+        ref={trackRef}
+        className="relative h-7 w-full touch-none select-none"
+        onPointerDown={(e) => {
+          onInteractRef.current?.();
+          const v = valueFromClientX(e.clientX);
+          const distStart = Math.abs(v - span.start);
+          const distEnd = Math.abs(v - span.end);
+          dragRef.current = distStart <= distEnd ? "start" : "end";
+          applyDrag(e.clientX);
         }}
-      />
-      {(["start", "end"] as const).map((which) => {
-        const value = which === "start" ? span.start : span.end;
-        return (
-          <button
-            key={which}
-            type="button"
-            aria-label={which === "start" ? "Banner span start" : "Banner span end"}
-            className="absolute top-1/2 z-[2] h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[#0b111b] shadow-sm"
-            style={{ left: `${value * 100}%`, backgroundColor: props.accentHex }}
-            onPointerDown={beginThumb(which)}
-          />
-        );
-      })}
+      >
+        <div className="pointer-events-none absolute left-0 right-0 top-1/2 h-1.5 -translate-y-1/2 rounded-full border border-[#424753]/55 bg-[#0b111b]" />
+        <div
+          className="pointer-events-none absolute top-1/2 h-1.5 -translate-y-1/2 rounded-full"
+          style={{
+            left: `${span.start * 100}%`,
+            width: `${(span.end - span.start) * 100}%`,
+            backgroundColor: props.accentHex,
+            opacity: 0.75,
+          }}
+        />
+        {(["start", "end"] as const).map((which) => {
+          const value = which === "start" ? span.start : span.end;
+          return (
+            <button
+              key={which}
+              type="button"
+              aria-label={which === "start" ? "Range start" : "Range end"}
+              className="absolute top-1/2 z-[2] h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[#0b111b] shadow-sm"
+              style={{ left: `${value * 100}%`, backgroundColor: props.accentHex }}
+              onPointerDown={beginThumb(which)}
+            />
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -297,17 +327,26 @@ function solidHex(value: string, fallback: string): string {
 function normalizeLabelSize(raw: unknown, token: string): LabelSize {
   const text = String(raw || "").trim().toLowerCase();
   if (text === "small" || text === "medium" || text === "large") return text;
-  return token === "Badge" || token === "Banner" ? "medium" : "small";
+  return token === "Badge" || token === FILL_RECTANGLE_TOKEN || token === "Banner" ? "medium" : "small";
 }
 
 function normalizeLabelStyle(raw: unknown, token: string): LabelStyle {
-  if (token === "Banner" || String(raw || "").trim().toLowerCase() === "banner") return "banner";
+  if (
+    token === FILL_RECTANGLE_TOKEN ||
+    token === "Banner" ||
+    String(raw || "").trim().toLowerCase() === "banner"
+  ) {
+    return "banner";
+  }
   return "chip";
 }
 
-function isBannerLabel(label: Pick<PosterLayoutLabel, "token" | "style">): boolean {
+function isFillRectangleLabel(label: Pick<PosterLayoutLabel, "token" | "style">): boolean {
   return normalizeLabelStyle(label.style, label.token) === "banner";
 }
+
+/** @deprecated alias */
+const isBannerLabel = isFillRectangleLabel;
 
 function normalizeBannerEdge(raw: unknown): BannerEdge {
   const text = String(raw || "").trim().toLowerCase();
@@ -321,7 +360,7 @@ function bannerBaseFrac(edge: BannerEdge, landscape: boolean): number {
   return landscape ? 0.18 : 0.11;
 }
 
-/** Designer preview / migrate: fraction of board width (side) or height (top/bottom). */
+/** Legacy single-depth clamp (edge banners). */
 function normalizeBannerThickness(
   raw: unknown,
   edge: BannerEdge,
@@ -335,6 +374,103 @@ function normalizeBannerThickness(
   }
   const frac = bannerBaseFrac(edge, landscape) * (BANNER_SIZE_MULT[size] || 1);
   return Math.max(BANNER_THICKNESS_MIN, Math.min(BANNER_THICKNESS_MAX, frac));
+}
+
+type FillRectGeom = { xStart: number; xEnd: number; yStart: number; yEnd: number };
+
+/** Resolve x/y ranges (migrates legacy orientation/span/depth or edge+thickness). */
+function fillRectGeometryFromLabel(
+  label: Pick<
+    PosterLayoutLabel,
+    | "x_start"
+    | "x_end"
+    | "y_start"
+    | "y_end"
+    | "orientation"
+    | "edge"
+    | "thickness"
+    | "span_start"
+    | "span_end"
+    | "depth_start"
+    | "depth_end"
+    | "size"
+    | "token"
+  >,
+  landscape: boolean,
+): FillRectGeom {
+  const size = normalizeLabelSize(label.size, label.token);
+  const hasXy =
+    label.x_start != null || label.x_end != null || label.y_start != null || label.y_end != null;
+  if (hasXy) {
+    const x = normalizeBannerSpan(label.x_start, label.x_end);
+    const y = normalizeBannerSpan(label.y_start, label.y_end);
+    return { xStart: x.start, xEnd: x.end, yStart: y.start, yEnd: y.end };
+  }
+
+  const span = normalizeBannerSpan(label.span_start, label.span_end);
+  const hasDepth = label.depth_start != null || label.depth_end != null;
+  const orientRaw = String(label.orientation || "").trim().toLowerCase();
+  const hasOrient = orientRaw === "horizontal" || orientRaw === "vertical";
+  const hasLegacyEdge = label.edge != null && String(label.edge).trim() !== "";
+
+  if (hasDepth || (hasOrient && !hasLegacyEdge)) {
+    const orientation = hasOrient ? orientRaw : "horizontal";
+    const depth = hasDepth
+      ? normalizeBannerSpan(label.depth_start, label.depth_end)
+      : { start: 0, end: normalizeBannerThickness(label.thickness, "top", size, landscape) };
+    if (orientation === "vertical") {
+      return {
+        xStart: depth.start,
+        xEnd: depth.end,
+        yStart: span.start,
+        yEnd: span.end,
+      };
+    }
+    return {
+      xStart: span.start,
+      xEnd: span.end,
+      yStart: depth.start,
+      yEnd: depth.end,
+    };
+  }
+
+  const edge = normalizeBannerEdge(label.edge);
+  const thick = normalizeBannerThickness(label.thickness, edge, size, landscape);
+  if (edge === "bottom") {
+    return {
+      xStart: span.start,
+      xEnd: span.end,
+      yStart: Math.max(0, 1 - thick),
+      yEnd: 1,
+    };
+  }
+  if (edge === "left") {
+    return { xStart: 0, xEnd: thick, yStart: span.start, yEnd: span.end };
+  }
+  if (edge === "right") {
+    return {
+      xStart: Math.max(0, 1 - thick),
+      xEnd: 1,
+      yStart: span.start,
+      yEnd: span.end,
+    };
+  }
+  return { xStart: span.start, xEnd: span.end, yStart: 0, yEnd: thick };
+}
+
+function fillRectCenterXY(geom: FillRectGeom): { x: number; y: number } {
+  return { x: (geom.xStart + geom.xEnd) / 2, y: (geom.yStart + geom.yEnd) / 2 };
+}
+
+/** Translate a fill rect so its center sits at (cx, cy); keep widths fixed. */
+function translateFillRectToCenter(geom: FillRectGeom, cx: number, cy: number): FillRectGeom {
+  const w = Math.max(BANNER_SPAN_MIN_GAP, geom.xEnd - geom.xStart);
+  const h = Math.max(BANNER_SPAN_MIN_GAP, geom.yEnd - geom.yStart);
+  let xStart = clampFrac(cx, 0.5) - w / 2;
+  let yStart = clampFrac(cy, 0.5) - h / 2;
+  xStart = Math.max(0, Math.min(1 - w, xStart));
+  yStart = Math.max(0, Math.min(1 - h, yStart));
+  return { xStart, xEnd: xStart + w, yStart, yEnd: yStart + h };
 }
 
 function normalizeCustomText(raw: unknown, token: string, maxLen = CUSTOM_TEXT_MAX_LEN): string {
@@ -397,27 +533,12 @@ function normalizeLabelXY(
   return { x: (col + 0.5) / c, y: (row + 0.5) / r };
 }
 
-function edgeAnchorXY(edge: BannerEdge): { x: number; y: number } {
-  if (edge === "bottom") return { x: 0.5, y: 1 };
-  if (edge === "left") return { x: 0, y: 0.5 };
-  if (edge === "right") return { x: 1, y: 0.5 };
-  return { x: 0.5, y: 0 };
-}
-
-/** Preview number-badge anchor: banner strip center (edge x/y would clip off-canvas). */
+/** Preview number-badge anchor: banner strip center. */
 function markerAnchorXY(label: PosterLayoutLabel, landscape: boolean): { x: number; y: number } {
   if (!isBannerLabel(label)) {
     return { x: clampFrac(label.x, 0.5), y: clampFrac(label.y, 0.5) };
   }
-  const edge = normalizeBannerEdge(label.edge);
-  const size = normalizeLabelSize(label.size, label.token);
-  const thickness = normalizeBannerThickness(label.thickness, edge, size, landscape);
-  const span = normalizeBannerSpan(label.span_start, label.span_end);
-  const mid = (span.start + span.end) / 2;
-  if (edge === "top") return { x: mid, y: thickness / 2 };
-  if (edge === "bottom") return { x: mid, y: 1 - thickness / 2 };
-  if (edge === "left") return { x: thickness / 2, y: mid };
-  return { x: 1 - thickness / 2, y: mid };
+  return fillRectCenterXY(fillRectGeometryFromLabel(label, landscape));
 }
 
 /** Legacy snap cell nearest to a fraction (kept on labels for older bake fallbacks). */
@@ -449,16 +570,25 @@ function BakePxAxisControl(props: {
   label: string;
   frac: number;
   dim: number;
+  /** Inclusive bake-px floor (default 0). */
+  minFrac?: number;
+  /** Inclusive bake-px ceiling (default 1). */
+  maxFrac?: number;
+  /** Show snap-to-center (chip placement); off for banner depth. */
+  showCenter?: boolean;
   onChange: (frac: number) => void;
   /** Fired while the user is adjusting this control (keeps the preview drag handle visible). */
   onInteract?: () => void;
 }) {
-  const px = fracToBakePx(props.frac, props.dim);
+  const minPx = Math.round(Math.max(0, props.minFrac ?? 0) * props.dim);
+  const maxPx = Math.round(Math.min(1, props.maxFrac ?? 1) * props.dim);
+  const px = Math.max(minPx, Math.min(maxPx, fracToBakePx(props.frac, props.dim)));
   const midPx = Math.round(props.dim / 2);
   const atCenter = px === midPx;
+  const showCenter = props.showCenter !== false;
   const setPx = (raw: number) => {
     if (!Number.isFinite(raw)) return;
-    const next = Math.max(0, Math.min(props.dim, Math.round(raw)));
+    const next = Math.max(minPx, Math.min(maxPx, Math.round(raw)));
     props.onInteract?.();
     props.onChange(bakePxToFrac(next, props.dim));
   };
@@ -471,24 +601,26 @@ function BakePxAxisControl(props: {
       <div className="flex items-center gap-2">
         <span className="shrink-0">{props.label}</span>
         <div className="ml-auto flex items-center gap-1.5 shrink-0">
-          <button
-            type="button"
-            title={`Snap ${props.label} to center (${midPx} px)`}
-            aria-label={`Center ${props.label}`}
-            onClick={() => setPx(midPx)}
-            className={`rounded-md border px-1.5 py-0.5 text-[10px] font-headline uppercase tracking-wider ${
-              atCenter
-                ? "border-[var(--brand-accent)] text-slate-100 bg-[color:color-mix(in_srgb,var(--brand-accent)_18%,transparent)]"
-                : "border-[#424753]/55 text-slate-400 hover:border-[#424753] hover:text-slate-200"
-            }`}
-          >
-            Center
-          </button>
+          {showCenter ? (
+            <button
+              type="button"
+              title={`Snap ${props.label} to center (${midPx} px)`}
+              aria-label={`Center ${props.label}`}
+              onClick={() => setPx(midPx)}
+              className={`rounded-md border px-1.5 py-0.5 text-[10px] font-headline uppercase tracking-wider ${
+                atCenter
+                  ? "border-[var(--brand-accent)] text-slate-100 bg-[color:color-mix(in_srgb,var(--brand-accent)_18%,transparent)]"
+                  : "border-[#424753]/55 text-slate-400 hover:border-[#424753] hover:text-slate-200"
+              }`}
+            >
+              Center
+            </button>
+          ) : null}
           <input
             type="number"
             inputMode="numeric"
-            min={0}
-            max={props.dim}
+            min={minPx}
+            max={maxPx}
             step={1}
             value={px}
             aria-label={`${props.label} pixels`}
@@ -499,8 +631,8 @@ function BakePxAxisControl(props: {
       </div>
       <input
         type="range"
-        min={0}
-        max={props.dim}
+        min={minPx}
+        max={maxPx}
         step={1}
         value={px}
         aria-label={`${props.label} position`}
@@ -516,15 +648,6 @@ function normalizeLabelColors(label: PosterLayoutLabel, landscape = false): Post
   const border = hexOr(label.border_color, "#000000");
   const size = normalizeLabelSize(label.size, label.token);
   const style = normalizeLabelStyle(label.style, label.token);
-  const edge = style === "banner" ? normalizeBannerEdge(label.edge) : "top";
-  const thickness =
-    style === "banner"
-      ? normalizeBannerThickness(label.thickness, edge, size, landscape)
-      : bannerBaseFrac("top", landscape);
-  const span =
-    style === "banner"
-      ? normalizeBannerSpan(label.span_start, label.span_end)
-      : { start: 0, end: 1 };
   const arted = Boolean(label.arted) && label.token === "Rating" && style !== "banner";
   let ratingSource = String(label.rating_source || "auto").trim().toLowerCase() || "auto";
   if (arted && (ratingSource === "auto" || !ratingSource)) ratingSource = "imdb";
@@ -540,13 +663,29 @@ function normalizeLabelColors(label: PosterLayoutLabel, landscape = false): Post
           : 0;
   const cols = landscape ? 33 : 25;
   const rows = landscape ? 21 : 37;
-  const xy =
-    style === "banner"
-      ? edgeAnchorXY(edge)
-      : normalizeLabelXY(label, cols, rows);
+  let xStart = 0;
+  let xEnd = 1;
+  let yStart = 0;
+  let yEnd = bannerBaseFrac("top", landscape);
+  let thickness = yEnd;
+  let xy: { x: number; y: number };
+  let token = label.token === "Banner" ? FILL_RECTANGLE_TOKEN : label.token;
+  if (style === "banner") {
+    token = FILL_RECTANGLE_TOKEN;
+    const geom = fillRectGeometryFromLabel(label, landscape);
+    xStart = geom.xStart;
+    xEnd = geom.xEnd;
+    yStart = geom.yStart;
+    yEnd = geom.yEnd;
+    thickness = Math.max(BANNER_SPAN_MIN_GAP, yEnd - yStart);
+    xy = fillRectCenterXY(geom);
+  } else {
+    xy = normalizeLabelXY(label, cols, rows);
+  }
   const cell = cellFromXY(xy.x, xy.y, cols, rows);
   return {
     ...label,
+    token,
     x: xy.x,
     y: xy.y,
     row: cell.row,
@@ -556,10 +695,11 @@ function normalizeLabelColors(label: PosterLayoutLabel, landscape = false): Post
     fill_opacity: typeof label.fill_opacity === "number" ? label.fill_opacity : 0.65,
     size,
     thickness,
-    span_start: span.start,
-    span_end: span.end,
+    x_start: xStart,
+    x_end: xEnd,
+    y_start: yStart,
+    y_end: yEnd,
     style,
-    edge,
     arted,
     rating_source: ratingSource,
     custom_text: normalizeCustomText(label.custom_text, label.token),
@@ -676,8 +816,20 @@ type Props = {
     grayscale: boolean;
     baseUrl?: string | null;
     sampleTokens?: Record<string, string> | null;
-    /** Center guides for the selected chip (null for banners / no selection). */
-    guide?: { x: number; y: number } | null;
+    /**
+     * Sticky-preview movement guides for the selected label.
+     * Chips: center crosshairs. Banners: depth + span outline.
+     */
+    guide?:
+      | { kind: "chip"; x: number; y: number }
+      | {
+          kind: "banner";
+          xStart: number;
+          xEnd: number;
+          yStart: number;
+          yEnd: number;
+        }
+      | null;
     /** Number badges overlaid on the sticky preview while the asset list is hovered. */
     markers?: LayoutPreviewMarker[];
     listHovering?: boolean;
@@ -693,12 +845,20 @@ type Props = {
   onRegisterPlacementDrag?: (handler: ((x: number, y: number) => void) | null) => void;
 };
 
+function tokenDisplayLabel(
+  token: string,
+  tokenMeta: Array<{ name: string; label: string }> = [],
+): string {
+  if (token === FILL_RECTANGLE_TOKEN || token === "Banner") return FILL_RECTANGLE_LABEL;
+  return tokenMeta.find((t) => t.name === token)?.label || token;
+}
+
 function labelElementName(
   label: PosterLayoutLabel,
   tokenMeta: Array<{ name: string; label: string }>,
 ): string {
-  if (isBannerLabel(label)) return "Banner";
-  return tokenMeta.find((t) => t.name === label.token)?.label || label.token;
+  if (isFillRectangleLabel(label)) return FILL_RECTANGLE_LABEL;
+  return tokenDisplayLabel(label.token, tokenMeta);
 }
 
 export default function PosterLayoutDesigner(props: Props) {
@@ -763,8 +923,8 @@ export default function PosterLayoutDesigner(props: Props) {
   const profileGrayscale = Boolean(draft?.[activeKey]?.grayscale);
   const placeOptions = useMemo(() => {
     const tokens = catalog?.allowed_tokens?.[activeKey] || [];
-    const chips = tokens.filter((name) => name !== "Banner");
-    return ["Banner", ...chips];
+    const chips = tokens.filter((name) => name !== FILL_RECTANGLE_TOKEN && name !== "Banner");
+    return [FILL_RECTANGLE_TOKEN, ...chips];
   }, [activeKey, catalog?.allowed_tokens]);
   const tokenMeta = catalog?.tokens || [];
   const sampleTokens = useMemo(() => {
@@ -786,11 +946,29 @@ export default function PosterLayoutDesigner(props: Props) {
 
   const labelsKey = JSON.stringify(labels);
   const selectedForGuide = labels.find((l) => l.id === selectedId) || null;
-  const guide =
-    selectedForGuide && !isBannerLabel(selectedForGuide)
-      ? { x: clampFrac(selectedForGuide.x, 0.5), y: clampFrac(selectedForGuide.y, 0.5) }
-      : null;
-  const guideKey = guide ? `${guide.x}:${guide.y}` : "";
+  const guide = (() => {
+    if (!selectedForGuide) return null;
+    if (isFillRectangleLabel(selectedForGuide)) {
+      const geom = fillRectGeometryFromLabel(selectedForGuide, kind === "episode");
+      return {
+        kind: "banner" as const,
+        xStart: geom.xStart,
+        xEnd: geom.xEnd,
+        yStart: geom.yStart,
+        yEnd: geom.yEnd,
+      };
+    }
+    return {
+      kind: "chip" as const,
+      x: clampFrac(selectedForGuide.x, 0.5),
+      y: clampFrac(selectedForGuide.y, 0.5),
+    };
+  })();
+  const guideKey = guide
+    ? guide.kind === "banner"
+      ? `b:${guide.xStart}:${guide.xEnd}:${guide.yStart}:${guide.yEnd}`
+      : `c:${guide.x}:${guide.y}`
+    : "";
   const markers: LayoutPreviewMarker[] = labels.map((label, index) => {
     const anchor = markerAnchorXY(label, kind === "episode");
     return {
@@ -838,11 +1016,41 @@ export default function PosterLayoutDesigner(props: Props) {
         const current = prev[activeKey] || { labels: [], grayscale: false };
         const list = current.labels || [];
         const sel = list.find((l) => l.id === selectedId);
-        if (!sel || isBannerLabel(sel)) return prev;
-        const nx = clampFrac(x, 0.5);
-        const ny = clampFrac(y, 0.5);
+        if (!sel) return prev;
         const cols = kind === "episode" ? 33 : 25;
         const rows = kind === "episode" ? 21 : 37;
+        const landscape = kind === "episode";
+        if (isFillRectangleLabel(sel)) {
+          const geom = fillRectGeometryFromLabel(sel, landscape);
+          const moved = translateFillRectToCenter(geom, x, y);
+          const center = fillRectCenterXY(moved);
+          const cell = cellFromXY(center.x, center.y, cols, rows);
+          return {
+            ...prev,
+            [activeKey]: {
+              ...current,
+              labels: list.map((l) =>
+                l.id === selectedId
+                  ? {
+                      ...l,
+                      token: FILL_RECTANGLE_TOKEN,
+                      x_start: moved.xStart,
+                      x_end: moved.xEnd,
+                      y_start: moved.yStart,
+                      y_end: moved.yEnd,
+                      thickness: Math.max(BANNER_SPAN_MIN_GAP, moved.yEnd - moved.yStart),
+                      x: center.x,
+                      y: center.y,
+                      row: cell.row,
+                      col: cell.col,
+                    }
+                  : l,
+              ),
+            },
+          };
+        }
+        const nx = clampFrac(x, 0.5);
+        const ny = clampFrac(y, 0.5);
         const cell = cellFromXY(nx, ny, cols, rows);
         return {
           ...prev,
@@ -1005,38 +1213,25 @@ export default function PosterLayoutDesigner(props: Props) {
     });
   }
 
-  function bannerAtEdge(edge: BannerEdge): PosterLayoutLabel | undefined {
-    return labels.find((l) => isBannerLabel(l) && normalizeBannerEdge(l.edge) === edge);
-  }
-
-  function placeBanner(preferredEdge?: BannerEdge | null) {
-    const edge =
-      preferredEdge ||
-      BANNER_EDGES.find((e) => !bannerAtEdge(e)) ||
-      null;
-    if (!edge) return;
-    const existingBanner = bannerAtEdge(edge);
-    if (existingBanner) {
-      setSelectedId(existingBanner.id);
-      return;
-    }
-    const anchor = edgeAnchorXY(edge);
+  function placeBanner() {
+    const yEnd = bannerBaseFrac("top", kind === "episode");
     const next: PosterLayoutLabel = {
       id: newLabelId(),
-      token: "Banner",
-      x: anchor.x,
-      y: anchor.y,
+      token: FILL_RECTANGLE_TOKEN,
+      x: 0.5,
+      y: yEnd / 2,
       text_color: "#ffffff",
       fill_color: "#000000",
       border_color: "#ffffff",
       border_opacity: 0,
       fill_opacity: 0.65,
       size: "medium",
-      thickness: bannerBaseFrac(edge, kind === "episode"),
-      span_start: 0,
-      span_end: 1,
+      thickness: yEnd,
+      x_start: 0,
+      x_end: 1,
+      y_start: 0,
+      y_end: yEnd,
       style: "banner",
-      edge,
       arted: false,
       rating_source: "auto",
       custom_text: "",
@@ -1046,7 +1241,14 @@ export default function PosterLayoutDesigner(props: Props) {
   }
 
   function placeChip() {
-    if (!placeToken || placeToken === "Banner" || !placeOptions.includes(placeToken)) return;
+    if (
+      !placeToken ||
+      placeToken === FILL_RECTANGLE_TOKEN ||
+      placeToken === "Banner" ||
+      !placeOptions.includes(placeToken)
+    ) {
+      return;
+    }
     if (placeToken === "Badge") {
       const badge = labels.find((l) => l.token === "Badge");
       if (badge) {
@@ -1057,6 +1259,7 @@ export default function PosterLayoutDesigner(props: Props) {
         return;
       }
     }
+    const chipDepth = bannerBaseFrac("top", kind === "episode");
     const next: PosterLayoutLabel = {
       id: newLabelId(),
       token: placeToken,
@@ -1068,11 +1271,12 @@ export default function PosterLayoutDesigner(props: Props) {
       border_opacity: 0,
       fill_opacity: placeToken === "Badge" ? 1 : 0.65,
       size: placeToken === "Badge" ? "medium" : "small",
-      thickness: bannerBaseFrac("top", kind === "episode"),
-      span_start: 0,
-      span_end: 1,
+      thickness: chipDepth,
+      x_start: 0,
+      x_end: 1,
+      y_start: 0,
+      y_end: chipDepth,
       style: "chip",
-      edge: "top",
       arted: false,
       rating_source: "auto",
       custom_text: placeToken === "Custom" ? "{Title} {Sep} {Year}" : "",
@@ -1082,17 +1286,14 @@ export default function PosterLayoutDesigner(props: Props) {
   }
 
   function placeSelectedToken() {
-    if (placeToken === "Banner") {
+    if (placeToken === FILL_RECTANGLE_TOKEN || placeToken === "Banner") {
       placeBanner();
       return;
     }
     placeChip();
   }
 
-  const canPlaceSelected =
-    placeToken === "Banner"
-      ? BANNER_EDGES.some((e) => !bannerAtEdge(e))
-      : Boolean(placeToken && placeOptions.includes(placeToken));
+  const canPlaceSelected = Boolean(placeToken && placeOptions.includes(placeToken));
 
   function patchSelected(patch: Partial<PosterLayoutLabel>) {
     if (!selected) return;
@@ -1100,9 +1301,29 @@ export default function PosterLayoutDesigner(props: Props) {
       labels.map((l) => {
         if (l.id !== selected.id) return l;
         const next = { ...l, ...patch };
-        if (patch.x != null || patch.y != null) {
-          const cols = kind === "episode" ? 33 : 25;
-          const rows = kind === "episode" ? 21 : 37;
+        const cols = kind === "episode" ? 33 : 25;
+        const rows = kind === "episode" ? 21 : 37;
+        const fillGeomTouched =
+          isFillRectangleLabel(next) &&
+          (patch.x_start != null ||
+            patch.x_end != null ||
+            patch.y_start != null ||
+            patch.y_end != null);
+        if (fillGeomTouched) {
+          next.token = FILL_RECTANGLE_TOKEN;
+          const geom = fillRectGeometryFromLabel(next, kind === "episode");
+          next.x_start = geom.xStart;
+          next.x_end = geom.xEnd;
+          next.y_start = geom.yStart;
+          next.y_end = geom.yEnd;
+          next.thickness = Math.max(BANNER_SPAN_MIN_GAP, geom.yEnd - geom.yStart);
+          const center = fillRectCenterXY(geom);
+          next.x = center.x;
+          next.y = center.y;
+          const cell = cellFromXY(center.x, center.y, cols, rows);
+          next.row = cell.row;
+          next.col = cell.col;
+        } else if (patch.x != null || patch.y != null) {
           const cell = cellFromXY(clampFrac(next.x, 0.5), clampFrac(next.y, 0.5), cols, rows);
           next.row = cell.row;
           next.col = cell.col;
@@ -1165,7 +1386,7 @@ export default function PosterLayoutDesigner(props: Props) {
   }
 
   return (
-    <div className="space-y-4 min-w-0">
+    <div className="space-y-4 min-w-0 overflow-x-clip">
       <p className="ui-field-description leading-relaxed">
         Design posters as you please. Movie, TV, and Episode each have Default and Coming Soon layouts for placeholders.
       </p>
@@ -1371,18 +1592,15 @@ export default function PosterLayoutDesigner(props: Props) {
                 aria-label="Add label type"
                 className={`${SELECT_CLASS} flex-1 min-w-0`}
               >
-                {placeOptions.map((name) => {
-                  const meta = tokenMeta.find((t) => t.name === name);
-                  return (
-                    <option key={name} value={name} className="bg-[#0b111b] text-slate-100">
-                      {meta?.label || name}
-                    </option>
-                  );
-                })}
+                {placeOptions.map((name) => (
+                  <option key={name} value={name} className="bg-[#0b111b] text-slate-100">
+                    {tokenDisplayLabel(name, tokenMeta)}
+                  </option>
+                ))}
               </select>
               <button
                 type="button"
-                title={placeToken === "Banner" ? "Add banner" : `Add ${placeToken}`}
+                title={`Add ${tokenDisplayLabel(placeToken, tokenMeta)}`}
                 disabled={!canPlaceSelected}
                 onClick={() => placeSelectedToken()}
                 className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[#424753]/55 text-slate-300 hover:border-[#424753] hover:text-slate-100 disabled:opacity-40"
@@ -1418,96 +1636,42 @@ export default function PosterLayoutDesigner(props: Props) {
               {selected ? (
                 <div className="min-w-0 space-y-3">
                   <div className="text-[13px] font-semibold text-slate-200 truncate">
-                    {tokenMeta.find((t) => t.name === selected.token)?.label || selected.token}
+                    {labelElementName(selected, tokenMeta)}
                   </div>
-                  {isBannerLabel(selected) ? (
+                  {isFillRectangleLabel(selected) ? (
                     <>
-                      <div className="space-y-2">
-                        <div className="text-[12px] text-slate-400">Edge</div>
-                        <div className="flex flex-wrap gap-2">
-                          {(catalog?.banner_edges?.length ? catalog.banner_edges : BANNER_EDGES).map((opt) => {
-                            const active = normalizeBannerEdge(selected.edge) === opt;
-                            const taken = Boolean(bannerAtEdge(opt) && bannerAtEdge(opt)?.id !== selected.id);
-                            return (
-                              <button
-                                key={opt}
-                                type="button"
-                                disabled={taken}
-                                onClick={() => {
-                                  const anchor = edgeAnchorXY(opt);
-                                  patchSelected({
-                                    token: "Banner",
-                                    edge: opt,
-                                    x: anchor.x,
-                                    y: anchor.y,
-                                    style: "banner",
-                                  });
-                                }}
-                                className={`rounded-lg border px-3 py-1.5 text-[12px] font-headline uppercase tracking-wider disabled:opacity-35 ${
-                                  active
-                                    ? "border-[var(--brand-accent)] text-slate-100 bg-[color:color-mix(in_srgb,var(--brand-accent)_18%,transparent)]"
-                                    : "border-[#424753]/55 text-slate-400 hover:border-[#424753] hover:text-slate-200"
-                                }`}
-                              >
-                                {opt}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                      <label className="space-y-1 text-[12px] text-slate-400 min-w-0 block">
-                        <span>
-                          Depth (
-                          {Math.round(
-                            normalizeBannerThickness(
-                              selected.thickness,
-                              normalizeBannerEdge(selected.edge),
-                              normalizeLabelSize(selected.size, selected.token),
-                              kind === "episode",
-                            ) * 100,
-                          )}
-                          %)
-                        </span>
-                        <input
-                          type="range"
-                          min={Math.round(BANNER_THICKNESS_MIN * 100)}
-                          max={Math.round(BANNER_THICKNESS_MAX * 100)}
-                          step={1}
-                          value={Math.round(
-                            normalizeBannerThickness(
-                              selected.thickness,
-                              normalizeBannerEdge(selected.edge),
-                              normalizeLabelSize(selected.size, selected.token),
-                              kind === "episode",
-                            ) * 100,
-                          )}
-                          onChange={(e) =>
-                            patchSelected({
-                              thickness: Math.max(
-                                BANNER_THICKNESS_MIN,
-                                Math.min(BANNER_THICKNESS_MAX, Number(e.target.value) / 100),
-                              ),
-                            })
-                          }
-                          className="w-full accent-[var(--brand-accent)]"
-                        />
-                      </label>
                       {(() => {
-                        const span = normalizeBannerSpan(selected.span_start, selected.span_end);
-                        const startPct = Math.round(span.start * 100);
-                        const endPct = Math.round(span.end * 100);
+                        const geom = fillRectGeometryFromLabel(selected, kind === "episode");
+                        const bake = bakeSizeForKind(kind);
                         return (
-                          <div className="space-y-1 min-w-0">
-                            <div className="text-[12px] text-slate-400">
-                              Along edge ({startPct}% – {endPct}%)
+                          <>
+                            <div className="space-y-1 min-w-0">
+                              <div className="text-[12px] text-slate-400">Horizontal</div>
+                              <BannerSpanSlider
+                                start={geom.xStart}
+                                end={geom.xEnd}
+                                dim={bake.w}
+                                accentHex={props.accentHex}
+                                onInteract={bumpPlacementControlsHot}
+                                onChange={(start, end) =>
+                                  patchSelected({ x_start: start, x_end: end })
+                                }
+                              />
                             </div>
-                            <BannerSpanSlider
-                              start={span.start}
-                              end={span.end}
-                              accentHex={props.accentHex}
-                              onChange={(start, end) => patchSelected({ span_start: start, span_end: end })}
-                            />
-                          </div>
+                            <div className="space-y-1 min-w-0">
+                              <div className="text-[12px] text-slate-400">Vertical</div>
+                              <BannerSpanSlider
+                                start={geom.yStart}
+                                end={geom.yEnd}
+                                dim={bake.h}
+                                accentHex={props.accentHex}
+                                onInteract={bumpPlacementControlsHot}
+                                onChange={(start, end) =>
+                                  patchSelected({ y_start: start, y_end: end })
+                                }
+                              />
+                            </div>
+                          </>
                         );
                       })()}
                       <div className="grid grid-cols-1 gap-3 min-w-0 sm:grid-cols-2">
@@ -1810,8 +1974,8 @@ export default function PosterLayoutDesigner(props: Props) {
               Plex tip
             </p>
             <p>
-              On Plex, the unwatched count in the top right can cover badge and label text. Prefer bottom or left
-              placement for important labels.
+              On Plex, the unwatched count in the top right can cover badge and label text. Consider avoiding this
+              area.
             </p>
           </div>
         </div>

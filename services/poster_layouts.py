@@ -64,9 +64,9 @@ _PRERELEASE_GRID_BY_VERSION: dict[int, dict[str, tuple[int, int]]] = {
 }
 
 # Tokens available in the designer (filtered per media kind in the UI).
-# ``Banner`` is a textless full-edge fill strip; place chips on top for copy.
+# ``FillRectangle`` is a textless fill box; place chips on top for copy.
 LABEL_TOKENS: tuple[str, ...] = (
-    "Banner",
+    "FillRectangle",
     "PLACEHOLDER",
     "ComingSoonOrNewEp",
     "Custom",
@@ -88,7 +88,7 @@ LABEL_TOKENS: tuple[str, ...] = (
 
 MOVIE_TOKENS = frozenset(
     {
-        "Banner",
+        "FillRectangle",
         "PLACEHOLDER",
         "ComingSoonOrNewEp",
         "Custom",
@@ -106,7 +106,7 @@ MOVIE_TOKENS = frozenset(
 )
 TV_TOKENS = frozenset(
     {
-        "Banner",
+        "FillRectangle",
         "PLACEHOLDER",
         "ComingSoonOrNewEp",
         "Custom",
@@ -125,7 +125,7 @@ TV_TOKENS = frozenset(
 )
 EPISODE_TOKENS = frozenset(
     {
-        "Banner",
+        "FillRectangle",
         "PLACEHOLDER",
         "ComingSoonOrNewEp",
         "Custom",
@@ -178,10 +178,13 @@ _DEFAULT_BORDER_OPACITY = 0.0
 LABEL_SIZES: tuple[str, ...] = ("small", "medium", "large")
 # Relative to small. Placeholdarr badge defaults to medium (matches legacy corner size).
 _SIZE_MULT: dict[str, float] = {"small": 1.0, "medium": 1.5, "large": 2.0}
-# Chip = content-sized pill. Banner token = textless full-edge fill strip.
+# Chip = content-sized pill. FillRectangle = textless fill box (style still ``banner``).
 LABEL_STYLES: tuple[str, ...] = ("chip", "banner")
-BANNER_EDGES: tuple[str, ...] = ("top", "bottom", "left", "right")
-BANNER_TOKEN = "Banner"
+BANNER_EDGES: tuple[str, ...] = ("top", "bottom", "left", "right")  # legacy migrate only
+BANNER_ORIENTATIONS: tuple[str, ...] = ("horizontal", "vertical")  # legacy migrate only
+FILL_RECTANGLE_TOKEN = "FillRectangle"
+BANNER_TOKEN = FILL_RECTANGLE_TOKEN  # alias
+_LEGACY_BANNER_TOKEN = "Banner"
 _ARTED_TOKENS = frozenset({"Rating"})
 _RATING_SOURCES: tuple[str, ...] = ("imdb", "tmdb", "trakt", "rottentomatoes", "metacritic")
 _RATING_SOURCE_PRIORITY: tuple[str, ...] = (
@@ -342,7 +345,7 @@ def _normalize_size(raw: Any, *, token: str) -> str:
     text = str(raw or "").strip().lower()
     if text in LABEL_SIZES:
         return text
-    return "medium" if token in {"Badge", BANNER_TOKEN} else "small"
+    return "medium" if token in {"Badge", FILL_RECTANGLE_TOKEN, _LEGACY_BANNER_TOKEN} else "small"
 
 
 def _normalize_custom_text(raw: Any, *, token: str) -> str:
@@ -407,13 +410,13 @@ def render_custom_chip_text(
 
 # Banner strip depth as a fraction of poster height (top/bottom) or width (left/right).
 _BANNER_THICKNESS_MIN = 0.04
-_BANNER_THICKNESS_MAX = 0.45
+_BANNER_THICKNESS_MAX = 0.45  # legacy edge-thickness clamp only
 _BANNER_SIZE_MULT = {"small": 0.72, "medium": 1.0, "large": 1.35}
 _BANNER_SPAN_MIN_GAP = 0.01
 
 
 def _normalize_banner_span(start: Any, end: Any) -> tuple[float, float]:
-    """Along-edge coverage as fractions 0..1 (full edge is 0..1)."""
+    """Axis coverage as fractions 0..1 (full axis is 0..1)."""
 
     def _one(raw: Any, default: float) -> float:
         try:
@@ -434,10 +437,10 @@ def _normalize_banner_span(start: Any, end: Any) -> tuple[float, float]:
     return a, b
 
 
-def banner_base_frac(edge: str, *, landscape: bool) -> float:
-    """Medium-tier strip depth for an edge (matches legacy bake)."""
-    side = str(edge or "top").strip().lower() in {"left", "right"}
-    if side:
+def banner_base_frac(edge: str = "top", *, landscape: bool, orientation: str | None = None) -> float:
+    """Medium-tier default strip depth (legacy edge or orientation)."""
+    orient = str(orientation or "").strip().lower()
+    if orient == "vertical" or str(edge or "top").strip().lower() in {"left", "right"}:
         return 0.14 if landscape else 0.16
     return 0.18 if landscape else 0.11
 
@@ -446,10 +449,11 @@ def _normalize_banner_thickness(
     raw: Any,
     *,
     size: str,
-    edge: str,
+    edge: str = "top",
     landscape: bool,
+    orientation: str | None = None,
 ) -> float:
-    """Clamp continuous banner depth; migrate missing values from small/medium/large."""
+    """Legacy single-depth clamp (migration from edge banners)."""
     if raw is not None and str(raw).strip() != "":
         try:
             n = float(raw)
@@ -460,9 +464,90 @@ def _normalize_banner_thickness(
                 n = n / 100.0
             if n is not None:
                 return max(_BANNER_THICKNESS_MIN, min(_BANNER_THICKNESS_MAX, n))
-    base = banner_base_frac(edge, landscape=landscape)
+    base = banner_base_frac(edge, landscape=landscape, orientation=orientation)
     mult = float(_BANNER_SIZE_MULT.get(str(size or "medium").strip().lower(), 1.0))
     return max(_BANNER_THICKNESS_MIN, min(_BANNER_THICKNESS_MAX, base * mult))
+
+
+def _fill_rect_geometry_from_raw(
+    raw: dict[str, Any],
+    *,
+    size: str,
+    landscape: bool,
+    row: int,
+    col: int,
+    cols: int,
+    rows: int,
+) -> tuple[float, float, float, float]:
+    """Return x_start/end, y_start/end (migrate x/y, orientation+span/depth, or edge+thickness)."""
+    has_xy = (
+        raw.get("x_start") is not None
+        or raw.get("x_end") is not None
+        or raw.get("y_start") is not None
+        or raw.get("y_end") is not None
+    )
+    if has_xy:
+        x0, x1 = _normalize_banner_span(raw.get("x_start"), raw.get("x_end"))
+        y0, y1 = _normalize_banner_span(raw.get("y_start"), raw.get("y_end"))
+        return x0, x1, y0, y1
+
+    span_start, span_end = _normalize_banner_span(raw.get("span_start"), raw.get("span_end"))
+    has_depth = raw.get("depth_start") is not None or raw.get("depth_end") is not None
+    orient_raw = str(raw.get("orientation") or "").strip().lower()
+    has_orient = orient_raw in BANNER_ORIENTATIONS
+    edge_raw = raw.get("edge")
+    has_legacy_edge = edge_raw is not None and str(edge_raw).strip() != ""
+
+    if has_depth or (has_orient and not has_legacy_edge):
+        orientation = orient_raw if has_orient else "horizontal"
+        if has_depth:
+            depth_start, depth_end = _normalize_banner_span(raw.get("depth_start"), raw.get("depth_end"))
+        else:
+            thick = _normalize_banner_thickness(
+                raw.get("thickness"),
+                size=size,
+                edge="top",
+                landscape=landscape,
+                orientation=orientation,
+            )
+            depth_start, depth_end = 0.0, thick
+        if orientation == "vertical":
+            return depth_start, depth_end, span_start, span_end
+        return span_start, span_end, depth_start, depth_end
+
+    edge = (
+        _normalize_edge(edge_raw)
+        if has_legacy_edge
+        else infer_banner_edge(row, col, cols=cols, rows=rows)
+    )
+    thick = _normalize_banner_thickness(raw.get("thickness"), size=size, edge=edge, landscape=landscape)
+    if edge == "bottom":
+        return span_start, span_end, max(0.0, 1.0 - thick), 1.0
+    if edge == "left":
+        return 0.0, thick, span_start, span_end
+    if edge == "right":
+        return max(0.0, 1.0 - thick), 1.0, span_start, span_end
+    return span_start, span_end, 0.0, thick
+
+
+def _fill_rect_center_xy(x_start: float, x_end: float, y_start: float, y_end: float) -> tuple[float, float]:
+    return (x_start + x_end) / 2.0, (y_start + y_end) / 2.0
+
+
+# Back-compat alias for overlay callers that still import the old name.
+def _banner_geometry_from_raw(
+    raw: dict[str, Any],
+    *,
+    size: str,
+    landscape: bool,
+    row: int,
+    col: int,
+    cols: int,
+    rows: int,
+) -> tuple[float, float, float, float]:
+    return _fill_rect_geometry_from_raw(
+        raw, size=size, landscape=landscape, row=row, col=col, cols=cols, rows=rows
+    )
 
 
 def _normalize_rating_source(raw: Any) -> str:
@@ -488,9 +573,19 @@ def _rating_source_for_label(*, token: str, arted: bool, raw: Any) -> str:
     return source
 
 
+def _normalize_fill_rectangle_token(token: str) -> str:
+    """Map legacy ``Banner`` token to ``FillRectangle``."""
+    if token in {_LEGACY_BANNER_TOKEN, FILL_RECTANGLE_TOKEN, "Fill rectangle", "fill_rectangle"}:
+        return FILL_RECTANGLE_TOKEN
+    return token
+
+
 def _normalize_style(raw: Any, *, token: str) -> str:
-    """Banner token is always a fill strip; every other token is a chip."""
-    if token == BANNER_TOKEN:
+    """FillRectangle is always a fill box; every other token is a chip."""
+    if token == FILL_RECTANGLE_TOKEN or token == _LEGACY_BANNER_TOKEN:
+        return "banner"
+    text = str(raw or "").strip().lower()
+    if text in {"banner", "fill", "fill_rectangle", "fillrectangle"}:
         return "banner"
     return "chip"
 
@@ -536,7 +631,7 @@ def size_multiplier(size: str) -> float:
 def normalize_label(raw: Any, *, cols: int, rows: int, landscape: bool = False) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
-    token = str(raw.get("token") or "").strip()
+    token = _normalize_fill_rectangle_token(str(raw.get("token") or "").strip())
     if token not in LABEL_TOKENS:
         return None
     label_id = str(raw.get("id") or "").strip() or _new_label_id()
@@ -547,21 +642,18 @@ def normalize_label(raw: Any, *, cols: int, rows: int, landscape: bool = False) 
     x, y = _xy_from_raw(raw, cols=cols, rows=rows)
     row, col = _cell_from_xy(x, y, cols=cols, rows=rows)
     if style == "banner":
-        edge = _normalize_edge(raw.get("edge")) if raw.get("edge") is not None else infer_banner_edge(
-            row, col, cols=cols, rows=rows
-        )
-        row, col = _edge_anchor_cell(edge, cols=cols, rows=rows)
-        x, y = _edge_anchor_xy(edge)
         arted = False
         border_opacity = 0.0
-        thickness = _normalize_banner_thickness(
-            raw.get("thickness"), size=size, edge=edge, landscape=landscape
+        x_start, x_end, y_start, y_end = _fill_rect_geometry_from_raw(
+            raw, size=size, landscape=landscape, row=row, col=col, cols=cols, rows=rows
         )
-        span_start, span_end = _normalize_banner_span(raw.get("span_start"), raw.get("span_end"))
+        x, y = _fill_rect_center_xy(x_start, x_end, y_start, y_end)
+        row, col = _cell_from_xy(x, y, cols=cols, rows=rows)
+        thickness = max(_BANNER_SPAN_MIN_GAP, y_end - y_start)
     else:
-        edge = "top"
         thickness = banner_base_frac("top", landscape=landscape)
-        span_start, span_end = 0.0, 1.0
+        x_start, x_end = 0.0, 1.0
+        y_start, y_end = 0.0, thickness
     return {
         "id": label_id,
         "token": token,
@@ -576,10 +668,11 @@ def normalize_label(raw: Any, *, cols: int, rows: int, landscape: bool = False) 
         "fill_opacity": _opacity(raw.get("fill_opacity"), _DEFAULT_FILL_OPACITY),
         "size": size,
         "thickness": thickness,
-        "span_start": span_start,
-        "span_end": span_end,
+        "x_start": x_start,
+        "x_end": x_end,
+        "y_start": y_start,
+        "y_end": y_end,
         "style": style,
-        "edge": edge,
         "arted": arted,
         "rating_source": _rating_source_for_label(token=token, arted=arted, raw=raw.get("rating_source")),
         "custom_text": _normalize_custom_text(raw.get("custom_text"), token=token),
@@ -596,7 +689,7 @@ def _expand_legacy_text_banners(raw_labels: Any, *, cols: int, rows: int) -> lis
             continue
         token = str(item.get("token") or "").strip()
         style = str(item.get("style") or "").strip().lower()
-        if style == "banner" and token and token not in {BANNER_TOKEN, "Badge"}:
+        if style == "banner" and token and token not in {FILL_RECTANGLE_TOKEN, _LEGACY_BANNER_TOKEN, "Badge"}:
             row = _clamp_int(item.get("row"), 0, rows - 1, 0)
             col = _clamp_int(item.get("col"), 0, cols - 1, 0)
             edge = (
@@ -609,7 +702,7 @@ def _expand_legacy_text_banners(raw_labels: Any, *, cols: int, rows: int) -> lis
             banner = {
                 **item,
                 "id": _new_label_id(),
-                "token": BANNER_TOKEN,
+                "token": FILL_RECTANGLE_TOKEN,
                 "style": "banner",
                 "edge": edge,
                 "x": ax,
@@ -656,7 +749,6 @@ def normalize_profile(profile_key: str, raw: Any) -> dict[str, Any]:
     allowed = tokens_for_profile(profile_key)
     labels_in = raw.get("labels") if isinstance(raw, dict) else None
     labels: list[dict[str, Any]] = []
-    seen_banner_edges: set[str] = set()
     if isinstance(labels_in, list):
         for item in _expand_legacy_text_banners(labels_in, cols=cols, rows=rows):
             norm = normalize_label(item, cols=cols, rows=rows, landscape=landscape)
@@ -664,11 +756,6 @@ def normalize_profile(profile_key: str, raw: Any) -> dict[str, Any]:
                 continue
             if norm["token"] not in allowed:
                 continue
-            if norm["style"] == "banner":
-                edge = str(norm.get("edge") or "top")
-                if edge in seen_banner_edges:
-                    continue
-                seen_banner_edges.add(edge)
             labels.append(norm)
     # Per-profile grayscale (Default vs Coming Soon independent). Missing key
     # migrates from the legacy global PLACEHOLDER_POSTER_GRAYSCALE toggle.
@@ -716,29 +803,44 @@ def _make_label(token: str, row: int = 0, col: int = 0, **style: Any) -> dict[st
         else:
             border_opacity = _DEFAULT_BORDER_OPACITY
     label_style = _normalize_style(style.get("style"), token=token)
-    edge = _normalize_edge(style.get("edge"), default="top")
     size = _normalize_size(style.get("size"), token=token)
     landscape = bool(style.get("landscape"))
+    cols = LANDSCAPE_COLS if landscape else PORTRAIT_COLS
+    rows = LANDSCAPE_ROWS if landscape else PORTRAIT_ROWS
+    token = _normalize_fill_rectangle_token(token)
     if label_style == "banner":
-        thickness = _normalize_banner_thickness(
-            style.get("thickness"), size=size, edge=edge, landscape=landscape
+        x_start, x_end, y_start, y_end = _fill_rect_geometry_from_raw(
+            {
+                "orientation": style.get("orientation"),
+                "edge": style.get("edge"),
+                "thickness": style.get("thickness"),
+                "span_start": style.get("span_start"),
+                "span_end": style.get("span_end"),
+                "depth_start": style.get("depth_start"),
+                "depth_end": style.get("depth_end"),
+                "x_start": style.get("x_start"),
+                "x_end": style.get("x_end"),
+                "y_start": style.get("y_start"),
+                "y_end": style.get("y_end"),
+            },
+            size=size,
+            landscape=landscape,
+            row=row,
+            col=col,
+            cols=cols,
+            rows=rows,
         )
-        span_start, span_end = _normalize_banner_span(style.get("span_start"), style.get("span_end"))
-        x, y = _edge_anchor_xy(edge)
-        row, col = _edge_anchor_cell(
-            edge,
-            cols=LANDSCAPE_COLS if landscape else PORTRAIT_COLS,
-            rows=LANDSCAPE_ROWS if landscape else PORTRAIT_ROWS,
-        )
+        thickness = max(_BANNER_SPAN_MIN_GAP, y_end - y_start)
+        x, y = _fill_rect_center_xy(x_start, x_end, y_start, y_end)
+        row, col = _cell_from_xy(x, y, cols=cols, rows=rows)
     else:
         thickness = banner_base_frac("top", landscape=landscape)
-        span_start, span_end = 0.0, 1.0
+        x_start, x_end = 0.0, 1.0
+        y_start, y_end = 0.0, thickness
         if style.get("x") is not None or style.get("y") is not None:
             x = _clamp_frac(style.get("x"), 0.5)
             y = _clamp_frac(style.get("y"), 0.5)
         else:
-            cols = LANDSCAPE_COLS if landscape else PORTRAIT_COLS
-            rows = LANDSCAPE_ROWS if landscape else PORTRAIT_ROWS
             x = (col + 0.5) / max(1, cols)
             y = (row + 0.5) / max(1, rows)
     return {
@@ -755,10 +857,11 @@ def _make_label(token: str, row: int = 0, col: int = 0, **style: Any) -> dict[st
         "fill_opacity": style.get("fill_opacity", _DEFAULT_FILL_OPACITY),
         "size": size,
         "thickness": thickness,
-        "span_start": span_start,
-        "span_end": span_end,
+        "x_start": x_start,
+        "x_end": x_end,
+        "y_start": y_start,
+        "y_end": y_end,
         "style": label_style,
-        "edge": edge if label_style == "banner" else "top",
         "arted": bool(style.get("arted")) and token in _ARTED_TOKENS and label_style != "banner",
         "rating_source": _normalize_rating_source(style.get("rating_source")) if token == "Rating" else "auto",
         "custom_text": _normalize_custom_text(style.get("custom_text"), token=token),
@@ -1366,7 +1469,7 @@ def resolve_label_tokens(
     """Build token → display string map for layout compose (empty means omit label)."""
     kind = str(media_kind or "movie").strip().lower()
     out: dict[str, str] = {
-        "Banner": "",  # textless fill strip; chips supply copy
+        "FillRectangle": "",  # textless fill box; chips supply copy
         "PLACEHOLDER": "PLACEHOLDER",
         "ComingSoonOrNewEp": str(coming_soon_label or "").strip(),
         "Badge": "badge",  # non-empty keeps the badge label; draw uses the logo asset
@@ -1443,7 +1546,7 @@ def sample_tokens_for_profile(profile_key: str) -> dict[str, str]:
     kind = str(profile_key or "movie.placeholder.default").split(".", 1)[0]
     # Prefer longest common forms so layout chips are sized for worst-case copy.
     base: dict[str, str] = {
-        "Banner": "",
+        "FillRectangle": "",
         "PLACEHOLDER": "PLACEHOLDER",
         "ComingSoonOrNewEp": "Theatrical - Sep 30",
         "Custom": "{Title} {Sep} {Year}",
@@ -1494,7 +1597,7 @@ def serialize_layout_catalog() -> dict[str, Any]:
     """API payload for the designer (profiles, tokens, grids, sample strings)."""
     doc = get_layout_doc()
     token_meta = [
-        {"name": "Banner", "label": "Banner (fill strip)"},
+        {"name": "FillRectangle", "label": "Fill rectangle"},
         {"name": "PLACEHOLDER", "label": "PLACEHOLDER"},
         {"name": "ComingSoonOrNewEp", "label": "Coming Soon / New Ep. / Airing"},
         {"name": "Custom", "label": "Custom text"},
@@ -1529,7 +1632,6 @@ def serialize_layout_catalog() -> dict[str, Any]:
         "grids": grids,
         "sizes": list(LABEL_SIZES),
         "styles": list(LABEL_STYLES),
-        "banner_edges": list(BANNER_EDGES),
         "arted_tokens": sorted(_ARTED_TOKENS),
         "rating_sources": list(_RATING_SOURCES),
         "fingerprint": layout_fingerprint(doc),

@@ -787,66 +787,75 @@ def _draw_layout_chip(
     return Image.alpha_composite(base, overlay)
 
 
-def _layout_banner_thickness(
-    img_w: int,
-    img_h: int,
-    *,
-    edge: str,
-    size: str = "medium",
-    thickness: float | None = None,
-) -> int:
-    """Full-edge banner bar thickness from a continuous depth fraction (or legacy size)."""
-    from services.poster_layouts import _normalize_banner_thickness
-
-    w, h = int(img_w), int(img_h)
-    landscape = w > h
-    side = str(edge or "top").strip().lower() in {"left", "right"}
-    span = w if side else h
-    frac = _normalize_banner_thickness(
-        thickness, size=str(size or "medium"), edge=str(edge or "top"), landscape=landscape
-    )
-    return max(36, int(round(span * frac)))
+def _frac_axis_px(start: float, end: float, dim: int) -> tuple[int, int]:
+    """Map a 0..1 axis range to inclusive-start / exclusive-end bake pixels."""
+    d = max(1, int(dim))
+    a = max(0.0, min(1.0, float(start)))
+    b = max(0.0, min(1.0, float(end)))
+    if b < a:
+        a, b = b, a
+    x0 = int(round(d * a))
+    x1 = max(x0 + 1, int(round(d * b)))
+    x0 = max(0, min(d, x0))
+    x1 = max(0, min(d, x1))
+    if x1 <= x0:
+        x1 = min(d, x0 + 1)
+    return x0, x1
 
 
 def _draw_layout_banner(
     out,
     *,
-    edge: str = "top",
     fill_color: str,
     fill_opacity: float,
-    size: str = "medium",
-    thickness: float | None = None,
+    x_start: float | None = None,
+    x_end: float | None = None,
+    y_start: float | None = None,
+    y_end: float | None = None,
+    # Legacy fields (orientation/span/depth or edge+thickness) when x/y absent.
+    orientation: str | None = None,
     span_start: float | None = None,
     span_end: float | None = None,
+    depth_start: float | None = None,
+    depth_end: float | None = None,
+    edge: str | None = None,
+    size: str = "medium",
+    thickness: float | None = None,
 ):
-    """Draw a textless edge fill strip (optional along-edge span; chips supply copy)."""
+    """Draw a textless fill rectangle; chips supply copy."""
     mods = _pillow()
     if mods is None:
         return out
     Image, ImageDraw, _, _, _ = mods
-    from services.poster_layouts import _normalize_banner_span
+    from services.poster_layouts import _fill_rect_geometry_from_raw
 
     base = out.convert("RGBA") if out.mode != "RGBA" else out
     w, h = base.size
-    side = str(edge or "top").strip().lower()
-    if side not in {"top", "bottom", "left", "right"}:
-        side = "top"
-    bar = _layout_banner_thickness(w, h, edge=side, size=size, thickness=thickness)
-    a, b = _normalize_banner_span(span_start, span_end)
-    if side in {"top", "bottom"}:
-        x0 = int(round(w * a))
-        x1 = max(x0 + 1, int(round(w * b)))
-        if side == "top":
-            box = [x0, 0, x1, bar]
-        else:
-            box = [x0, max(0, h - bar), x1, h]
-    else:
-        y0 = int(round(h * a))
-        y1 = max(y0 + 1, int(round(h * b)))
-        if side == "left":
-            box = [0, y0, bar, y1]
-        else:
-            box = [max(0, w - bar), y0, w, y1]
+    landscape = w > h
+    xa, xb, ya, yb = _fill_rect_geometry_from_raw(
+        {
+            "x_start": x_start,
+            "x_end": x_end,
+            "y_start": y_start,
+            "y_end": y_end,
+            "orientation": orientation,
+            "edge": edge,
+            "thickness": thickness,
+            "span_start": span_start,
+            "span_end": span_end,
+            "depth_start": depth_start,
+            "depth_end": depth_end,
+        },
+        size=str(size or "medium"),
+        landscape=landscape,
+        row=0,
+        col=0,
+        cols=1,
+        rows=1,
+    )
+    x0, x1 = _frac_axis_px(xa, xb, w)
+    y0, y1 = _frac_axis_px(ya, yb, h)
+    box = [x0, y0, x1, y1]
 
     fill_opacity = max(0.0, min(1.0, float(fill_opacity)))
     fill_rgb = _parse_hex_rgba(fill_color, alpha=255)[:3]
@@ -954,36 +963,42 @@ def apply_layout_overlay(
     def _is_banner_label(lab: dict) -> bool:
         token = str(lab.get("token") or "").strip()
         style = str(lab.get("style") or "").strip().lower()
-        return token == "Banner" or style == "banner"
+        return token in {"FillRectangle", "Banner"} or style == "banner"
 
-    # Banners first (textless fill strips), then chips / badge on top.
+    # Fill rectangles first, then chips / badge on top.
     banners = [lab for lab in label_list if isinstance(lab, dict) and _is_banner_label(lab)]
     chips = [lab for lab in label_list if isinstance(lab, dict) and not _is_banner_label(lab)]
 
     for label in banners:
-        edge = str(label.get("edge") or "top").strip().lower()
-        if edge not in {"top", "bottom", "left", "right"}:
-            edge = "top"
         label_size = str(label.get("size") or "medium").strip().lower()
         raw_thickness = label.get("thickness")
         try:
             thickness_val = float(raw_thickness) if raw_thickness is not None else None
         except (TypeError, ValueError):
             thickness_val = None
+        orient_raw = str(label.get("orientation") or "").strip().lower() or None
+        edge_raw = str(label.get("edge") or "").strip().lower() or None
         out = _draw_layout_banner(
             out,
-            edge=edge,
             fill_color=str(label.get("fill_color") or "#000000"),
             fill_opacity=float(label.get("fill_opacity") if label.get("fill_opacity") is not None else 0.65),
-            size=label_size,
-            thickness=thickness_val,
+            x_start=label.get("x_start"),
+            x_end=label.get("x_end"),
+            y_start=label.get("y_start"),
+            y_end=label.get("y_end"),
+            orientation=orient_raw,
             span_start=label.get("span_start"),
             span_end=label.get("span_end"),
+            depth_start=label.get("depth_start"),
+            depth_end=label.get("depth_end"),
+            edge=edge_raw,
+            size=label_size,
+            thickness=thickness_val,
         )
 
     for label in chips:
         token = str(label.get("token") or "").strip()
-        if token == "Banner":
+        if token in {"FillRectangle", "Banner"}:
             continue
         ax, ay = _layout_anchor_xy(label, width=w, height=h, cols=grid_cols, rows=grid_rows)
         label_size = str(label.get("size") or ("medium" if token == "Badge" else "small")).strip().lower()
