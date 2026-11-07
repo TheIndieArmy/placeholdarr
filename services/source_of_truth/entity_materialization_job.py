@@ -7,6 +7,10 @@ contention with other workers touching the same title.
 
 Enqueueing the same call as a normal PENDING job moves that commit to another
 worker turn so the webhook_event job can finish immediately after enqueue.
+
+Pending jobs with the same ``observation_source`` are coalesced and chunked
+(like art/NFO refresh) so ARR delete bursts become a few materialization jobs
+instead of one per webhook.
 """
 
 from __future__ import annotations
@@ -14,6 +18,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from core.config import settings
 from core.logger import logger, start_verbose_stall_heartbeat
 from services.placeholders import movie_placeholder_path
 from services.placeholder_activity_log import (
@@ -23,9 +28,37 @@ from services.placeholder_activity_log import (
 )
 from services.postgres.db import get_session
 from services.postgres.models import Job, Movie
-from services.source_of_truth.materializer import run_materialization_for_entities
+from services.source_of_truth.materializer import (
+    bulk_materialization_active,
+    run_materialization_for_entities,
+)
 
 ENTITY_MATERIALIZATION_JOB_TYPE = "entity_materialization"
+
+
+def materialization_job_batch_size() -> int:
+    return max(
+        1,
+        int(
+            getattr(settings, "MATERIALIZATION_JOB_BATCH_SIZE", None)
+            or getattr(settings, "STATUS_JOB_BATCH_SIZE", 100)
+            or 100
+        ),
+    )
+
+
+def _normalize_ids(values: list[int] | tuple[int, ...] | None) -> list[int]:
+    seen: set[int] = set()
+    out: list[int] = []
+    for value in values or []:
+        if value is None:
+            continue
+        iv = int(value)
+        if iv in seen:
+            continue
+        seen.add(iv)
+        out.append(iv)
+    return out
 
 
 def _payload_targets_movie_deleted(payload: dict[str, Any], movie_row_id: int) -> bool:
@@ -100,6 +133,16 @@ def movie_still_soft_deleted(movie_row_id: int) -> bool:
         sess.close()
 
 
+def _job_is_coalesce_eligible(payload: dict[str, Any], observation_source: str) -> bool:
+    """Movie-deleted finalize jobs stay exclusive; everything else may merge."""
+    if bool(payload.get("finalize_movie_deleted_activity")):
+        return False
+    return str(payload.get("observation_source") or "").strip() == str(observation_source or "").strip()
+
+
+def _merge_id_lists(*groups: list[int]) -> list[int]:
+    return _normalize_ids([x for group in groups for x in group])
+
 
 def enqueue_entity_materialization_job(
     session,
@@ -108,28 +151,159 @@ def enqueue_entity_materialization_job(
     episode_ids: list[int] | None,
     observation_source: str,
     payload_extras: dict[str, Any] | None = None,
+    coalesce: bool | None = None,
 ) -> Job:
-    """Insert a Job row; caller must commit so NOTIFY reaches workers."""
-    body: dict[str, Any] = {
-        "movie_ids": [int(x) for x in movie_ids if x is not None],
-        "episode_ids": [int(x) for x in (episode_ids or []) if x is not None],
-        "observation_source": str(observation_source),
-    }
-    if payload_extras:
-        for k, v in payload_extras.items():
-            body[str(k)] = v
+    """Insert or coalesce a Job row; caller must commit so NOTIFY reaches workers.
+
+    When ``coalesce`` is true (default except movie-deleted finalize), pending
+    jobs with the same ``observation_source`` absorb new ids up to
+    ``MATERIALIZATION_JOB_BATCH_SIZE``, then additional jobs are created.
+    """
+    movies = _normalize_ids(movie_ids)
+    episodes = _normalize_ids(episode_ids)
+    obs = str(observation_source or "event_materialization")
+    extras = dict(payload_extras or {})
+    exclusive = bool(extras.get("finalize_movie_deleted_activity"))
+    should_coalesce = (not exclusive) if coalesce is None else bool(coalesce)
 
     from services.source_of_truth.job_priority import default_priority_for
 
-    job = Job(
-        job_type=ENTITY_MATERIALIZATION_JOB_TYPE,
-        payload=body,
-        status="PENDING",
-        max_attempts=5,
-        priority=default_priority_for(ENTITY_MATERIALIZATION_JOB_TYPE),
-    )
-    session.add(job)
-    return job
+    job_priority = default_priority_for(ENTITY_MATERIALIZATION_JOB_TYPE)
+    batch_size = materialization_job_batch_size()
+    now = datetime.now(timezone.utc)
+
+    last_merged: Job | None = None
+    if should_coalesce and (movies or episodes):
+        pending_jobs = (
+            session.query(Job)
+            .filter(
+                Job.job_type == ENTITY_MATERIALIZATION_JOB_TYPE,
+                Job.status == "PENDING",
+            )
+            .order_by(Job.run_after.asc().nullsfirst(), Job.id.asc())
+            .with_for_update(skip_locked=True)
+            .all()
+        )
+        for job in pending_jobs:
+            payload = dict(job.payload or {}) if isinstance(job.payload, dict) else {}
+            if not _job_is_coalesce_eligible(payload, obs):
+                continue
+            existing_movies = _normalize_ids(payload.get("movie_ids") or [])
+            existing_episodes = _normalize_ids(payload.get("episode_ids") or [])
+            existing_movie_set = set(existing_movies)
+            existing_episode_set = set(existing_episodes)
+
+            # Drop ids already queued even when this job is at capacity.
+            if any(m in existing_movie_set for m in movies) or any(
+                e in existing_episode_set for e in episodes
+            ):
+                movies = [m for m in movies if m not in existing_movie_set]
+                episodes = [e for e in episodes if e not in existing_episode_set]
+                last_merged = job
+                if not movies and not episodes:
+                    return job
+
+            used = len(existing_movies) + len(existing_episodes)
+            capacity = max(0, batch_size - used)
+            if capacity <= 0 or (not movies and not episodes):
+                continue
+
+            add_movies: list[int] = []
+            add_episodes: list[int] = []
+            for mid in movies:
+                if len(add_movies) + len(add_episodes) >= capacity:
+                    break
+                add_movies.append(mid)
+            for eid in episodes:
+                if len(add_movies) + len(add_episodes) >= capacity:
+                    break
+                add_episodes.append(eid)
+            if not add_movies and not add_episodes:
+                continue
+
+            add_movie_set = set(add_movies)
+            add_episode_set = set(add_episodes)
+            movies = [m for m in movies if m not in add_movie_set]
+            episodes = [e for e in episodes if e not in add_episode_set]
+
+            payload["movie_ids"] = existing_movies + add_movies
+            payload["episode_ids"] = existing_episodes + add_episodes
+            payload["observation_source"] = obs
+            if extras.get("run_determination_first"):
+                payload["run_determination_first"] = True
+            for key, value in extras.items():
+                if key in {
+                    "movie_ids",
+                    "episode_ids",
+                    "observation_source",
+                    "finalize_movie_deleted_activity",
+                }:
+                    continue
+                if key not in payload:
+                    payload[key] = value
+            job.payload = payload
+            job.updated_at = now
+            session.add(job)
+            last_merged = job
+            logger.debug(
+                f"Coalesced entity_materialization job_id={job.id} obs={obs} "
+                f"added_movies={len(add_movies)} added_episodes={len(add_episodes)}",
+                extra={"emoji_type": "processing"},
+            )
+            if not movies and not episodes:
+                return job
+
+    if not movies and not episodes:
+        if last_merged is not None:
+            return last_merged
+        # Empty enqueue (caller passed no ids): still create a no-op pending job
+        # only when exclusive finalize paths need a row; otherwise skip create.
+        body = {
+            "movie_ids": [],
+            "episode_ids": [],
+            "observation_source": obs,
+            **{str(k): v for k, v in extras.items()},
+        }
+        job = Job(
+            job_type=ENTITY_MATERIALIZATION_JOB_TYPE,
+            payload=body,
+            status="PENDING",
+            max_attempts=5,
+            priority=job_priority,
+        )
+        session.add(job)
+        session.flush()
+        return job
+
+    created: Job | None = None
+    while movies or episodes:
+        chunk_movies: list[int] = []
+        chunk_episodes: list[int] = []
+        while movies and (len(chunk_movies) + len(chunk_episodes)) < batch_size:
+            chunk_movies.append(movies.pop(0))
+        while episodes and (len(chunk_movies) + len(chunk_episodes)) < batch_size:
+            chunk_episodes.append(episodes.pop(0))
+        body = {
+            "movie_ids": chunk_movies,
+            "episode_ids": chunk_episodes,
+            "observation_source": obs,
+        }
+        for key, value in extras.items():
+            body[str(key)] = value
+        job = Job(
+            job_type=ENTITY_MATERIALIZATION_JOB_TYPE,
+            payload=body,
+            status="PENDING",
+            max_attempts=5,
+            priority=job_priority,
+        )
+        session.add(job)
+        session.flush()
+        created = job
+        if not should_coalesce:
+            break
+    assert created is not None
+    return created
 
 
 def _finalize_movie_deleted_activity(
@@ -215,13 +389,28 @@ def process_entity_materialization_job(session, job: Job) -> dict[str, Any]:
     If the title was re-added before this job runs (``is_deleted`` cleared),
     skip delete teardown / purge / "removed" activity so a quick undo does not
     fight the new add.
+
+    When a large lite/full materialization holds the catalog, event-scoped jobs
+    defer (PENDING + run_after) instead of piling onto the same row locks.
     """
     payload = job.payload if isinstance(job.payload, dict) else {}
-    movie_ids = [int(x) for x in (payload.get("movie_ids") or []) if x is not None]
-    episode_ids = [int(x) for x in (payload.get("episode_ids") or []) if x is not None]
+    movie_ids = _normalize_ids(payload.get("movie_ids") or [])
+    episode_ids = _normalize_ids(payload.get("episode_ids") or [])
     observation_source = str(payload.get("observation_source") or "event_materialization")
     run_determination_first = bool(payload.get("run_determination_first"))
     finalize = bool(payload.get("finalize_movie_deleted_activity"))
+
+    if (
+        not finalize
+        and observation_source.startswith("event_")
+        and bulk_materialization_active()
+    ):
+        from services.worker import JobDeferredError
+
+        raise JobDeferredError(
+            "bulk_materialization_active",
+            delay_seconds=int(getattr(settings, "MATERIALIZATION_EVENT_DEFER_SECONDS", 30) or 30),
+        )
 
     stop_v = start_verbose_stall_heartbeat(
         f"entity_materialization job_id={job.id} obs={observation_source}",
@@ -236,6 +425,9 @@ def process_entity_materialization_job(session, job: Job) -> dict[str, Any]:
                     extra={"emoji_type": "info"},
                 )
                 return {"ok": True, "superseded": True, "movie_id": movie_row_id}
+
+        if not movie_ids and not episode_ids:
+            return {"ok": True, "skipped": "no_targets"}
 
         determination_stats: dict[str, Any] | None = None
         if run_determination_first and (movie_ids or episode_ids):
@@ -304,6 +496,7 @@ def process_entity_materialization_job(session, job: Job) -> dict[str, Any]:
 __all__ = [
     "ENTITY_MATERIALIZATION_JOB_TYPE",
     "enqueue_entity_materialization_job",
+    "materialization_job_batch_size",
     "process_entity_materialization_job",
     "supersede_pending_movie_deleted_materialization",
     "movie_still_soft_deleted",

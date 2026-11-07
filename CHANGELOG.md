@@ -13,6 +13,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 - **Poster layout designer**: Grid label editor for placeholder art across Movie / TV / Episode profiles.
 - **Layout fingerprints**: Saving a profile only invalidates matching placeholder art sidecars.
+- **Materialization batching**: Webhook deletes/adds queue coalesced jobs; large lite mats commit in chunks (#152).
 
 ### Added
 
@@ -36,6 +37,8 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Poster layout designer UI**: Dark-themed selects/color fields and no overflow from the style editors.
 - **Poster layout save**: Saving no longer remaps chip positions as if they were on the old 6×9 grid.
 - **Discard unsaved**: Designer discard restores the last saved layout instead of wiping to factory seed.
+- **Webhook materialization**: Episode/movie file deletes and series/movie adds enqueue coalesced `entity_materialization` jobs instead of holding the webhook worker through a long commit (#152).
+- **Lite materialization lock windows**: Large scoped mats commit every `MATERIALIZATION_COMMIT_CHUNK_SIZE` ids and use a short persist `lock_timeout`; event mats defer while bulk lite/full mat is active (#152).
 
 ## Pre-release
 

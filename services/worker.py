@@ -826,6 +826,11 @@ def _process_claimed_job(session, job: Job):
 
     if job.job_type == ENTITY_MATERIALIZATION_JOB_TYPE:
         result = process_entity_materialization_job(session, job)
+        if result.get('defer'):
+            raise JobDeferredError(
+                str(result.get('skipped') or 'deferred'),
+                delay_seconds=int(result.get('defer_seconds') or 30),
+            )
         if not result.get('ok', False):
             raise ValueError(str(result.get('reason') or 'entity_materialization_failed'))
         return
