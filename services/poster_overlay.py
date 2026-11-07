@@ -815,26 +815,37 @@ def _draw_layout_banner(
     fill_opacity: float,
     size: str = "medium",
     thickness: float | None = None,
+    span_start: float | None = None,
+    span_end: float | None = None,
 ):
-    """Draw a textless full-edge fill strip (chips supply any copy on top)."""
+    """Draw a textless edge fill strip (optional along-edge span; chips supply copy)."""
     mods = _pillow()
     if mods is None:
         return out
     Image, ImageDraw, _, _, _ = mods
+    from services.poster_layouts import _normalize_banner_span
+
     base = out.convert("RGBA") if out.mode != "RGBA" else out
     w, h = base.size
     side = str(edge or "top").strip().lower()
     if side not in {"top", "bottom", "left", "right"}:
         side = "top"
     bar = _layout_banner_thickness(w, h, edge=side, size=size, thickness=thickness)
-    if side == "top":
-        box = [0, 0, w, bar]
-    elif side == "bottom":
-        box = [0, max(0, h - bar), w, h]
-    elif side == "left":
-        box = [0, 0, bar, h]
+    a, b = _normalize_banner_span(span_start, span_end)
+    if side in {"top", "bottom"}:
+        x0 = int(round(w * a))
+        x1 = max(x0 + 1, int(round(w * b)))
+        if side == "top":
+            box = [x0, 0, x1, bar]
+        else:
+            box = [x0, max(0, h - bar), x1, h]
     else:
-        box = [max(0, w - bar), 0, w, h]
+        y0 = int(round(h * a))
+        y1 = max(y0 + 1, int(round(h * b)))
+        if side == "left":
+            box = [0, y0, bar, y1]
+        else:
+            box = [max(0, w - bar), y0, w, y1]
 
     fill_opacity = max(0.0, min(1.0, float(fill_opacity)))
     fill_rgb = _parse_hex_rgba(fill_color, alpha=255)[:3]
@@ -931,6 +942,8 @@ def apply_layout_overlay(
             fill_opacity=float(label.get("fill_opacity") if label.get("fill_opacity") is not None else 0.65),
             size=label_size,
             thickness=thickness_val,
+            span_start=label.get("span_start"),
+            span_end=label.get("span_end"),
         )
 
     for label in chips:

@@ -34,6 +34,10 @@ export type PosterLayoutLabel = {
   size: LabelSize;
   /** Banner strip depth as a fraction of poster height (top/bottom) or width (left/right). */
   thickness: number;
+  /** Along-edge coverage start (0..1). Top/bottom: left→right. Left/right: top→bottom. */
+  span_start: number;
+  /** Along-edge coverage end (0..1). */
+  span_end: number;
   style: LabelStyle;
   edge: BannerEdge;
   arted: boolean;
@@ -69,6 +73,25 @@ const SIZE_MULT: Record<LabelSize, number> = { small: 1, medium: 1.5, large: 2 }
 const BANNER_SIZE_MULT: Record<LabelSize, number> = { small: 0.72, medium: 1, large: 1.35 };
 const BANNER_THICKNESS_MIN = 0.04;
 const BANNER_THICKNESS_MAX = 0.45;
+const BANNER_SPAN_MIN_GAP = 0.05;
+
+function normalizeBannerSpan(start: unknown, end: unknown): { start: number; end: number } {
+  const one = (raw: unknown, fallback: number) => {
+    const n = typeof raw === "number" ? raw : Number(raw);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(0, Math.min(1, n));
+  };
+  let a = one(start, 0);
+  let b = one(end, 1);
+  if (b < a) [a, b] = [b, a];
+  if (b - a < BANNER_SPAN_MIN_GAP) {
+    const mid = (a + b) / 2;
+    a = Math.max(0, mid - BANNER_SPAN_MIN_GAP / 2);
+    b = Math.min(1, a + BANNER_SPAN_MIN_GAP);
+    if (b - a < BANNER_SPAN_MIN_GAP) a = Math.max(0, b - BANNER_SPAN_MIN_GAP);
+  }
+  return { start: a, end: b };
+}
 const CUSTOM_TEXT_MAX_LEN = 120;
 const CUSTOM_SEP_DEFAULT = "·";
 const RATING_ICONS: Record<string, string> = {
@@ -275,6 +298,10 @@ function normalizeLabelColors(label: PosterLayoutLabel, landscape = false): Post
     style === "banner"
       ? normalizeBannerThickness(label.thickness, edge, size, landscape)
       : bannerBaseFrac("top", landscape);
+  const span =
+    style === "banner"
+      ? normalizeBannerSpan(label.span_start, label.span_end)
+      : { start: 0, end: 1 };
   const arted = Boolean(label.arted) && label.token === "Rating" && style !== "banner";
   let ratingSource = String(label.rating_source || "auto").trim().toLowerCase() || "auto";
   if (arted && (ratingSource === "auto" || !ratingSource)) ratingSource = "imdb";
@@ -295,6 +322,8 @@ function normalizeLabelColors(label: PosterLayoutLabel, landscape = false): Post
     fill_opacity: typeof label.fill_opacity === "number" ? label.fill_opacity : 0.65,
     size,
     thickness,
+    span_start: span.start,
+    span_end: span.end,
     style,
     edge,
     arted,
@@ -704,6 +733,8 @@ export default function PosterLayoutDesigner(props: Props) {
       fill_opacity: 0.65,
       size: "medium",
       thickness: bannerBaseFrac(edge, kind === "episode"),
+      span_start: 0,
+      span_end: 1,
       style: "banner",
       edge,
       arted: false,
@@ -742,6 +773,8 @@ export default function PosterLayoutDesigner(props: Props) {
       fill_opacity: placeToken === "Badge" ? 1 : 0.65,
       size: placeToken === "Badge" ? "medium" : "small",
       thickness: bannerBaseFrac("top", kind === "episode"),
+      span_start: 0,
+      span_end: 1,
       style: "chip",
       edge: "top",
       arted: false,
@@ -1062,14 +1095,17 @@ export default function PosterLayoutDesigner(props: Props) {
                   labelSize,
                   kind === "episode",
                 );
+                const span = normalizeBannerSpan(label.span_start, label.span_end);
+                const along = (span.end - span.start) * 100;
+                const alongStart = span.start * 100;
                 const stripStyle: CSSProperties =
                   edge === "top"
-                    ? { left: 0, top: 0, width: "100%", height: `${frac * 100}%` }
+                    ? { left: `${alongStart}%`, top: 0, width: `${along}%`, height: `${frac * 100}%` }
                     : edge === "bottom"
-                      ? { left: 0, bottom: 0, width: "100%", height: `${frac * 100}%` }
+                      ? { left: `${alongStart}%`, bottom: 0, width: `${along}%`, height: `${frac * 100}%` }
                       : edge === "left"
-                        ? { left: 0, top: 0, width: `${frac * 100}%`, height: "100%" }
-                        : { right: 0, top: 0, width: `${frac * 100}%`, height: "100%" };
+                        ? { left: 0, top: `${alongStart}%`, width: `${frac * 100}%`, height: `${along}%` }
+                        : { right: 0, top: `${alongStart}%`, width: `${frac * 100}%`, height: `${along}%` };
                 return (
                   <div
                     key={label.id}
@@ -1412,43 +1448,107 @@ export default function PosterLayoutDesigner(props: Props) {
                 </div>
               ) : null}
               {isBannerLabel(selected) ? (
-                <label className="space-y-1 text-[12px] text-slate-400 min-w-0 block">
-                  <span>
-                    Size (
-                    {Math.round(
-                      normalizeBannerThickness(
-                        selected.thickness,
-                        normalizeBannerEdge(selected.edge),
-                        normalizeLabelSize(selected.size, selected.token),
-                        kind === "episode",
-                      ) * 100,
-                    )}
-                    %)
-                  </span>
-                  <input
-                    type="range"
-                    min={Math.round(BANNER_THICKNESS_MIN * 100)}
-                    max={Math.round(BANNER_THICKNESS_MAX * 100)}
-                    step={1}
-                    value={Math.round(
-                      normalizeBannerThickness(
-                        selected.thickness,
-                        normalizeBannerEdge(selected.edge),
-                        normalizeLabelSize(selected.size, selected.token),
-                        kind === "episode",
-                      ) * 100,
-                    )}
-                    onChange={(e) =>
-                      patchSelected({
-                        thickness: Math.max(
-                          BANNER_THICKNESS_MIN,
-                          Math.min(BANNER_THICKNESS_MAX, Number(e.target.value) / 100),
-                        ),
-                      })
-                    }
-                    className="w-full accent-[var(--brand-accent)]"
-                  />
-                </label>
+                <>
+                  <label className="space-y-1 text-[12px] text-slate-400 min-w-0 block">
+                    <span>
+                      Depth (
+                      {Math.round(
+                        normalizeBannerThickness(
+                          selected.thickness,
+                          normalizeBannerEdge(selected.edge),
+                          normalizeLabelSize(selected.size, selected.token),
+                          kind === "episode",
+                        ) * 100,
+                      )}
+                      %)
+                    </span>
+                    <input
+                      type="range"
+                      min={Math.round(BANNER_THICKNESS_MIN * 100)}
+                      max={Math.round(BANNER_THICKNESS_MAX * 100)}
+                      step={1}
+                      value={Math.round(
+                        normalizeBannerThickness(
+                          selected.thickness,
+                          normalizeBannerEdge(selected.edge),
+                          normalizeLabelSize(selected.size, selected.token),
+                          kind === "episode",
+                        ) * 100,
+                      )}
+                      onChange={(e) =>
+                        patchSelected({
+                          thickness: Math.max(
+                            BANNER_THICKNESS_MIN,
+                            Math.min(BANNER_THICKNESS_MAX, Number(e.target.value) / 100),
+                          ),
+                        })
+                      }
+                      className="w-full accent-[var(--brand-accent)]"
+                    />
+                  </label>
+                  {(() => {
+                    const span = normalizeBannerSpan(selected.span_start, selected.span_end);
+                    const edge = normalizeBannerEdge(selected.edge);
+                    const sideA = edge === "left" || edge === "right" ? "Top" : "Left";
+                    const sideB = edge === "left" || edge === "right" ? "Bottom" : "Right";
+                    const startPct = Math.round(span.start * 100);
+                    const endPct = Math.round(span.end * 100);
+                    const gapPct = Math.round(BANNER_SPAN_MIN_GAP * 100);
+                    return (
+                      <div className="space-y-2 min-w-0">
+                        <div className="text-[12px] text-slate-400">
+                          Along edge ({startPct}% – {endPct}%)
+                        </div>
+                        <label className="space-y-1 text-[12px] text-slate-400 min-w-0 block">
+                          <span>
+                            {sideA} ({startPct}%)
+                          </span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={100 - gapPct}
+                            step={1}
+                            value={startPct}
+                            onChange={(e) => {
+                              const nextStart = Math.min(
+                                Number(e.target.value) / 100,
+                                span.end - BANNER_SPAN_MIN_GAP,
+                              );
+                              patchSelected({
+                                span_start: Math.max(0, nextStart),
+                                span_end: span.end,
+                              });
+                            }}
+                            className="w-full accent-[var(--brand-accent)]"
+                          />
+                        </label>
+                        <label className="space-y-1 text-[12px] text-slate-400 min-w-0 block">
+                          <span>
+                            {sideB} ({endPct}%)
+                          </span>
+                          <input
+                            type="range"
+                            min={gapPct}
+                            max={100}
+                            step={1}
+                            value={endPct}
+                            onChange={(e) => {
+                              const nextEnd = Math.max(
+                                Number(e.target.value) / 100,
+                                span.start + BANNER_SPAN_MIN_GAP,
+                              );
+                              patchSelected({
+                                span_start: span.start,
+                                span_end: Math.min(1, nextEnd),
+                              });
+                            }}
+                            className="w-full accent-[var(--brand-accent)]"
+                          />
+                        </label>
+                      </div>
+                    );
+                  })()}
+                </>
               ) : (
                 <div className="space-y-2">
                   <div className="text-[12px] text-slate-400">Size</div>
