@@ -3,9 +3,8 @@ from __future__ import annotations
 import os
 import threading
 import time
-from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
-from typing import Any, Iterator
+from typing import Any
 
 from sqlalchemy import func, or_, text
 
@@ -61,29 +60,6 @@ from services.source_of_truth.refresh_throttle import try_acquire_refresh_lease
 from services.source_of_truth.status_orchestrator import StatusOrchestrator
 from services.messages.context import build_projection_context_from_session
 from services.status_projection import projected_status_display
-
-# Large lite/full materialization holds catalog row locks for a long time.
-# Event-scoped entity_materialization jobs defer while this depth is > 0.
-_bulk_materialization_depth = 0
-_bulk_materialization_lock = threading.Lock()
-
-
-def bulk_materialization_active() -> bool:
-    with _bulk_materialization_lock:
-        return _bulk_materialization_depth > 0
-
-
-@contextmanager
-def bulk_materialization_scope() -> Iterator[None]:
-    """Mark a large sync materialization so event mats can defer instead of contending."""
-    global _bulk_materialization_depth
-    with _bulk_materialization_lock:
-        _bulk_materialization_depth += 1
-    try:
-        yield
-    finally:
-        with _bulk_materialization_lock:
-            _bulk_materialization_depth = max(0, _bulk_materialization_depth - 1)
 
 
 def materialization_commit_chunk_size() -> int:
@@ -1987,7 +1963,6 @@ def run_materialization_for_entities(
     subject_part = f" · {subject}" if subject else ""
     chunk_size = materialization_commit_chunk_size()
     total_ids = len(movie_ids) + len(episode_ids)
-    use_bulk_scope = total_ids > chunk_size and not str(observation_source or "").startswith("event_")
 
     stop_scoped_hb = threading.Event()
     scoped_started = time.monotonic()
@@ -2019,60 +1994,58 @@ def run_materialization_for_entities(
         )
         _scoped_t.start()
 
-    scope = bulk_materialization_scope() if use_bulk_scope else nullcontext()
     try:
-        with scope:
-            # Build chunks: movies first, then episodes. Density scope keeps the full
-            # episode id list so series stubs still evaluate across the whole request.
-            remaining_movies = list(movie_ids)
-            remaining_episodes = list(episode_ids)
-            density_scope = list(episode_ids) if episode_ids else None
-            merged: dict[str, Any] = {}
-            chunk_index = 0
-            while remaining_movies or remaining_episodes:
-                chunk_movies: list[int] = []
-                chunk_episodes: list[int] = []
-                while remaining_movies and (len(chunk_movies) + len(chunk_episodes)) < chunk_size:
-                    chunk_movies.append(remaining_movies.pop(0))
-                while remaining_episodes and (len(chunk_movies) + len(chunk_episodes)) < chunk_size:
-                    chunk_episodes.append(remaining_episodes.pop(0))
-                chunk_index += 1
-                if total_ids > chunk_size:
-                    logger.info(
-                        f"Scoped materialization chunk {chunk_index}{subject_part}: "
-                        f"movies={len(chunk_movies)} episodes={len(chunk_episodes)} "
-                        f"remaining={len(remaining_movies) + len(remaining_episodes)}",
-                        extra={"emoji_type": "processing"},
-                    )
-                part = _run_materialization_entity_chunk(
-                    movie_ids=chunk_movies,
-                    episode_ids=chunk_episodes,
-                    observation_source=observation_source,
-                    subject_part=subject_part,
-                    density_scope_episode_ids=density_scope,
+        # Build chunks: movies first, then episodes. Density scope keeps the full
+        # episode id list so series stubs still evaluate across the whole request.
+        remaining_movies = list(movie_ids)
+        remaining_episodes = list(episode_ids)
+        density_scope = list(episode_ids) if episode_ids else None
+        merged: dict[str, Any] = {}
+        chunk_index = 0
+        while remaining_movies or remaining_episodes:
+            chunk_movies: list[int] = []
+            chunk_episodes: list[int] = []
+            while remaining_movies and (len(chunk_movies) + len(chunk_episodes)) < chunk_size:
+                chunk_movies.append(remaining_movies.pop(0))
+            while remaining_episodes and (len(chunk_movies) + len(chunk_episodes)) < chunk_size:
+                chunk_episodes.append(remaining_episodes.pop(0))
+            chunk_index += 1
+            if total_ids > chunk_size:
+                logger.info(
+                    f"Scoped materialization chunk {chunk_index}{subject_part}: "
+                    f"movies={len(chunk_movies)} episodes={len(chunk_episodes)} "
+                    f"remaining={len(remaining_movies) + len(remaining_episodes)}",
+                    extra={"emoji_type": "processing"},
                 )
-                _merge_materialization_stats(merged, part)
-
-            logger.info(
-                f"Scoped materialization complete{subject_part}: {merged}",
-                extra={"emoji_type": "success"},
+            part = _run_materialization_entity_chunk(
+                movie_ids=chunk_movies,
+                episode_ids=chunk_episodes,
+                observation_source=observation_source,
+                subject_part=subject_part,
+                density_scope_episode_ids=density_scope,
             )
-            if purge_catalog_tombstones:
-                try:
-                    from services.source_of_truth.catalog_tombstone_purge import purge_cleaned_deleted_catalog
+            _merge_materialization_stats(merged, part)
 
-                    purge_stats = purge_cleaned_deleted_catalog(
-                        movie_ids=movie_ids,
-                        episode_ids=episode_ids,
-                    )
-                    if isinstance(purge_stats, dict):
-                        merged["catalog_tombstone_purge"] = purge_stats
-                except Exception as purge_exc:
-                    logger.debug(
-                        f"Scoped catalog tombstone purge skipped{subject_part}: {purge_exc}",
-                        extra={"emoji_type": "debug"},
-                    )
-            return merged
+        logger.info(
+            f"Scoped materialization complete{subject_part}: {merged}",
+            extra={"emoji_type": "success"},
+        )
+        if purge_catalog_tombstones:
+            try:
+                from services.source_of_truth.catalog_tombstone_purge import purge_cleaned_deleted_catalog
+
+                purge_stats = purge_cleaned_deleted_catalog(
+                    movie_ids=movie_ids,
+                    episode_ids=episode_ids,
+                )
+                if isinstance(purge_stats, dict):
+                    merged["catalog_tombstone_purge"] = purge_stats
+            except Exception as purge_exc:
+                logger.debug(
+                    f"Scoped catalog tombstone purge skipped{subject_part}: {purge_exc}",
+                    extra={"emoji_type": "debug"},
+                )
+        return merged
     except Exception as e:
         logger.error(
             f"Scoped materialization failed{subject_part}: {e}",

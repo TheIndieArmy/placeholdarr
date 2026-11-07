@@ -28,10 +28,7 @@ from services.placeholder_activity_log import (
 )
 from services.postgres.db import get_session
 from services.postgres.models import Job, Movie
-from services.source_of_truth.materializer import (
-    bulk_materialization_active,
-    run_materialization_for_entities,
-)
+from services.source_of_truth.materializer import run_materialization_for_entities
 
 ENTITY_MATERIALIZATION_JOB_TYPE = "entity_materialization"
 
@@ -389,9 +386,6 @@ def process_entity_materialization_job(session, job: Job) -> dict[str, Any]:
     If the title was re-added before this job runs (``is_deleted`` cleared),
     skip delete teardown / purge / "removed" activity so a quick undo does not
     fight the new add.
-
-    When a large lite/full materialization holds the catalog, event-scoped jobs
-    defer (PENDING + run_after) instead of piling onto the same row locks.
     """
     payload = job.payload if isinstance(job.payload, dict) else {}
     movie_ids = _normalize_ids(payload.get("movie_ids") or [])
@@ -399,18 +393,6 @@ def process_entity_materialization_job(session, job: Job) -> dict[str, Any]:
     observation_source = str(payload.get("observation_source") or "event_materialization")
     run_determination_first = bool(payload.get("run_determination_first"))
     finalize = bool(payload.get("finalize_movie_deleted_activity"))
-
-    if (
-        not finalize
-        and observation_source.startswith("event_")
-        and bulk_materialization_active()
-    ):
-        from services.worker import JobDeferredError
-
-        raise JobDeferredError(
-            "bulk_materialization_active",
-            delay_seconds=int(getattr(settings, "MATERIALIZATION_EVENT_DEFER_SECONDS", 30) or 30),
-        )
 
     stop_v = start_verbose_stall_heartbeat(
         f"entity_materialization job_id={job.id} obs={observation_source}",

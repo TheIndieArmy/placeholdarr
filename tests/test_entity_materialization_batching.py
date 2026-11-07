@@ -10,26 +10,12 @@ from services.source_of_truth.entity_materialization_job import (
     enqueue_entity_materialization_job,
     materialization_job_batch_size,
 )
-from services.source_of_truth.materializer import (
-    bulk_materialization_active,
-    bulk_materialization_scope,
-    materialization_commit_chunk_size,
-)
+from services.source_of_truth.materializer import materialization_commit_chunk_size
 
 
 def test_materialization_batch_size_defaults_positive():
     assert materialization_job_batch_size() >= 1
     assert materialization_commit_chunk_size() >= 1
-
-
-def test_bulk_materialization_scope_toggles_active_flag():
-    assert bulk_materialization_active() is False
-    with bulk_materialization_scope():
-        assert bulk_materialization_active() is True
-        with bulk_materialization_scope():
-            assert bulk_materialization_active() is True
-        assert bulk_materialization_active() is True
-    assert bulk_materialization_active() is False
 
 
 def test_enqueue_coalesces_same_observation_source_into_pending_job():

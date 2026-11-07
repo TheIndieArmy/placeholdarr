@@ -502,10 +502,6 @@ class Settings(BaseSettings):
     MATERIALIZATION_COMMIT_LOCK_TIMEOUT_SECONDS: int = int(
         os.getenv("MATERIALIZATION_COMMIT_LOCK_TIMEOUT_SECONDS", "15").split("#")[0].strip() or "15"
     )
-    # When lite/full mat is active, defer event materialization jobs this many seconds.
-    MATERIALIZATION_EVENT_DEFER_SECONDS: int = int(
-        os.getenv("MATERIALIZATION_EVENT_DEFER_SECONDS", "30").split("#")[0].strip() or "30"
-    )
     MEDIA_REFRESH_SECTION_FALLBACK_ENABLED: bool = os.getenv("MEDIA_REFRESH_SECTION_FALLBACK_ENABLED", "true").split('#')[0].strip().lower() == "true"
     MATERIALIZATION_OVERLAP_ENABLED: bool = True
     MATERIALIZATION_OVERLAP_MOVIE_CHECKPOINT_COUNT: int = 200
