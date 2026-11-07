@@ -362,7 +362,7 @@ def render_custom_chip_text(
 _BANNER_THICKNESS_MIN = 0.04
 _BANNER_THICKNESS_MAX = 0.45
 _BANNER_SIZE_MULT = {"small": 0.72, "medium": 1.0, "large": 1.35}
-_BANNER_SPAN_MIN_GAP = 0.05
+_BANNER_SPAN_MIN_GAP = 0.01
 
 
 def _normalize_banner_span(start: Any, end: Any) -> tuple[float, float]:
