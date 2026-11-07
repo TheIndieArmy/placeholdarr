@@ -30,6 +30,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Layout doc version**: Collapsed to shipped version `1` (interim pre-release docs 2–5 migrate once).
 - **Banner along-edge span**: Depth stays perpendicular from the edge; a dual-thumb slider sets how far along the edge the strip covers.
 - **Layout art refresh scope**: First Apply migrates all placeholder art once; later saves enqueue only changed media kinds (and Coming Soon vs Default where cheap).
+- **Layout designer placement**: Drag the selected chip on the sticky bake preview (or keep using bake-px X/Y); crosshair guides follow the chip.
 
 ### Fixed
 

@@ -450,6 +450,8 @@ function BakePxAxisControl(props: {
   frac: number;
   dim: number;
   onChange: (frac: number) => void;
+  /** Fired while the user is adjusting this control (keeps the preview drag handle visible). */
+  onInteract?: () => void;
 }) {
   const px = fracToBakePx(props.frac, props.dim);
   const midPx = Math.round(props.dim / 2);
@@ -457,10 +459,15 @@ function BakePxAxisControl(props: {
   const setPx = (raw: number) => {
     if (!Number.isFinite(raw)) return;
     const next = Math.max(0, Math.min(props.dim, Math.round(raw)));
+    props.onInteract?.();
     props.onChange(bakePxToFrac(next, props.dim));
   };
   return (
-    <div className="space-y-1 text-[12px] text-slate-400 min-w-0">
+    <div
+      className="space-y-1 text-[12px] text-slate-400 min-w-0"
+      onPointerDown={() => props.onInteract?.()}
+      onFocusCapture={() => props.onInteract?.()}
+    >
       <div className="flex items-center gap-2">
         <span className="shrink-0">{props.label}</span>
         <div className="ml-auto flex items-center gap-1.5 shrink-0">
@@ -677,9 +684,13 @@ type Props = {
     hoveredId?: string | null;
     /** Selected label id; preview bake draws it last so it sits on top. */
     selectedId?: string | null;
+    /** True while X/Y bake-px controls are being adjusted. */
+    placementControlsHot?: boolean;
   }) => void;
   /** Mount Preview art controls under the sticky bake preview. */
   onPreviewArtControlsChange?: (node: ReactNode | null) => void;
+  /** Register a handler so the sticky preview can drag-update chip x/y. */
+  onRegisterPlacementDrag?: (handler: ((x: number, y: number) => void) | null) => void;
 };
 
 function labelElementName(
@@ -699,6 +710,22 @@ export default function PosterLayoutDesigner(props: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [listHovering, setListHovering] = useState(false);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [placementControlsHot, setPlacementControlsHot] = useState(false);
+  const placementHotTimerRef = useRef<number | null>(null);
+  const bumpPlacementControlsHot = useCallback(() => {
+    setPlacementControlsHot(true);
+    if (placementHotTimerRef.current != null) window.clearTimeout(placementHotTimerRef.current);
+    // Keep "hot" briefly after each tweak so the preview handle does not flicker between slider ticks.
+    placementHotTimerRef.current = window.setTimeout(() => {
+      placementHotTimerRef.current = null;
+      setPlacementControlsHot(false);
+    }, 400);
+  }, []);
+  useEffect(() => {
+    return () => {
+      if (placementHotTimerRef.current != null) window.clearTimeout(placementHotTimerRef.current);
+    };
+  }, []);
   const [placeToken, setPlaceToken] = useState<string>("PLACEHOLDER");
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -786,6 +813,7 @@ export default function PosterLayoutDesigner(props: Props) {
       listHovering,
       hoveredId,
       selectedId,
+      placementControlsHot,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
@@ -799,7 +827,37 @@ export default function PosterLayoutDesigner(props: Props) {
     markersKey,
     listHovering,
     hoveredId,
+    placementControlsHot,
   ]);
+
+  useEffect(() => {
+    if (!props.onRegisterPlacementDrag) return;
+    props.onRegisterPlacementDrag((x, y) => {
+      setDraft((prev) => {
+        if (!prev || !selectedId) return prev;
+        const current = prev[activeKey] || { labels: [], grayscale: false };
+        const list = current.labels || [];
+        const sel = list.find((l) => l.id === selectedId);
+        if (!sel || isBannerLabel(sel)) return prev;
+        const nx = clampFrac(x, 0.5);
+        const ny = clampFrac(y, 0.5);
+        const cols = kind === "episode" ? 33 : 25;
+        const rows = kind === "episode" ? 21 : 37;
+        const cell = cellFromXY(nx, ny, cols, rows);
+        return {
+          ...prev,
+          [activeKey]: {
+            ...current,
+            labels: list.map((l) =>
+              l.id === selectedId ? { ...l, x: nx, y: ny, row: cell.row, col: cell.col } : l,
+            ),
+          },
+        };
+      });
+    });
+    return () => props.onRegisterPlacementDrag?.(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeKey, kind, selectedId, props.onRegisterPlacementDrag]);
 
   useEffect(() => {
     // Kind change restores the bundled sample id so movie/TV/episode stay appropriate.
@@ -1504,12 +1562,14 @@ export default function PosterLayoutDesigner(props: Props) {
                               frac={selected.x}
                               dim={bake.w}
                               onChange={(x) => patchSelected({ x })}
+                              onInteract={bumpPlacementControlsHot}
                             />
                             <BakePxAxisControl
                               label="Y"
                               frac={selected.y}
                               dim={bake.h}
                               onChange={(y) => patchSelected({ y })}
+                              onInteract={bumpPlacementControlsHot}
                             />
                           </div>
                         );
