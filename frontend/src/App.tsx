@@ -106,6 +106,7 @@ import { useLibraryShelves } from "./library/useLibraryShelves";
 import { ConfirmModal } from "./ConfirmModal";
 import { CollectionsPanel } from "./collections/CollectionsPanel";
 import DummyMediaSettings from "./DummyMediaSettings";
+import PosterLayoutDesigner from "./settings/PosterLayoutDesigner";
 import { useActivityTasks } from "./activity/useActivityTasks";
 import { useActivityFeed } from "./activity/useActivityFeed";
 import { PlaceholdersPanel } from "./activity/PlaceholdersPanel";
@@ -287,15 +288,6 @@ const SETTINGS_SECTION_SLUGS: Record<string, string> = {
   Advanced: "advanced",
 };
 
-/** Overlay layer toggles (not poster language). */
-const POSTER_OVERLAY_LAYER_KEYS = [
-  "PLACEHOLDER_POSTER_GRAYSCALE",
-  "PLACEHOLDER_POSTER_BADGE",
-] as const;
-const POSTER_OVERLAY_BANNER_KEYS = [
-  "PLACEHOLDER_POSTER_PLACEHOLDER_BANNER",
-  "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
-] as const;
 const POSTER_LANGUAGE_FIELD_KEYS = [
   "ENABLE_PREFERRED_POSTER_LANGUAGE",
   "PREFER_ORIGINAL_POSTER_LANGUAGE",
@@ -462,12 +454,6 @@ type WizardStepDef = { key: string; name: string };
 const LOOK_AND_FEEL_FIELD_KEYS = [
   "PLACEHOLDER_STATUS_UPDATES",
   "PLACEHOLDER_STATUS_PROJECTION_MODE",
-  "PLACEHOLDER_POSTER_GRAYSCALE",
-  "PLACEHOLDER_POSTER_BADGE",
-  "PLACEHOLDER_POSTER_BADGE_POSITION",
-  "PLACEHOLDER_POSTER_PLACEHOLDER_BANNER",
-  "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
-  "PLACEHOLDER_POSTER_BANNER_POSITION",
   "ENABLE_PREFERRED_POSTER_LANGUAGE",
   "PREFER_ORIGINAL_POSTER_LANGUAGE",
   "PREFERRED_POSTER_LANGUAGE",
@@ -545,8 +531,11 @@ const SETTINGS_UI_HIDDEN_FIELD_KEYS = new Set<string>([
   // Superseded by ALWAYS + FALLBACK lists.
   "MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES",
   "TV_PLAY_PLACEHOLDER_ALSO_INSTANCES",
-  // Inlined next to badge / Banner heading (preview shows the effect).
+  // Layout designer owns badge / banners; positions were inlined beside those toggles.
+  "PLACEHOLDER_POSTER_BADGE",
   "PLACEHOLDER_POSTER_BADGE_POSITION",
+  "PLACEHOLDER_POSTER_PLACEHOLDER_BANNER",
+  "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
   "PLACEHOLDER_POSTER_BANNER_POSITION",
   // Legacy single watchlist Arr defaults (migrated into *_TARGETS_JSON).
   "WATCHLIST_RADARR_INSTANCE_KEY",
@@ -7534,7 +7523,8 @@ function LookAndFeelSectionIntro(props: { embedded?: boolean }) {
     <div className={wrapClass}>
       <p className="ui-field-description text-slate-300 leading-relaxed">
         Choose how placeholders look in Plex, Jellyfin, and Emby: status text in the player, optional TMDB poster
-        language, and poster overlays on library art. Overlay previews update as you change those options.
+        language, grayscale, and the poster layout designer for badge and label chips. Previews update as you change
+        those options.
       </p>
     </div>
   );
@@ -7545,16 +7535,101 @@ function PosterOverlayControlsWithPreview(props: {
   values: FieldValueMap;
   controls: ReactNode;
   compact?: boolean;
+  /** Extra frames under the primary controls. */
+  belowControls?: ReactNode;
+  layoutPreview?: {
+    profileKey: string;
+    labelsJson?: string;
+    grayscale?: boolean;
+    baseUrl?: string | null;
+    sampleTokens?: Record<string, string> | null;
+    sampleTokensJson?: string;
+  } | null;
 }) {
   return (
     <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:gap-8">
-      <div className="min-w-0 flex-1">{props.controls}</div>
+      <div className="min-w-0 flex-1 space-y-6">
+        {props.controls}
+        {props.belowControls}
+      </div>
       <aside className="w-full shrink-0 lg:sticky lg:top-4 lg:w-[22.5rem]">
         <div className={`mb-3 ${SETTINGS_DENSITY_LEGEND_CLASS}`}>Preview</div>
-        <PosterOverlayLivePreview values={props.values} compact={props.compact} layout="gallery" />
+        <PosterOverlayLivePreview
+          values={props.values}
+          compact={props.compact}
+          layout="focus"
+          layoutPreview={props.layoutPreview}
+        />
         <PlexUnwatchedPreviewWarning />
       </aside>
     </div>
+  );
+}
+
+/** Layout designer with shared sticky preview (Settings + onboarding). */
+function PosterArtOverlaysBlock(props: {
+  values: FieldValueMap;
+  accentHex: string;
+  compact?: boolean;
+}) {
+  const [layoutPreview, setLayoutPreview] = useState<{
+    profileKey: string;
+    labelsJson?: string;
+    grayscale: boolean;
+    baseUrl?: string | null;
+    sampleTokens?: Record<string, string> | null;
+    sampleTokensJson?: string;
+  } | null>(null);
+  const handleLayoutPreviewChange = useCallback(
+    (state: {
+      profileKey: string;
+      labels: unknown[];
+      grayscale: boolean;
+      baseUrl?: string | null;
+      sampleTokens?: Record<string, string> | null;
+    }) => {
+      const labelsJson = JSON.stringify(state.labels);
+      const baseUrl = state.baseUrl || null;
+      const sampleTokens = state.sampleTokens || null;
+      const sampleTokensJson = JSON.stringify(sampleTokens || {});
+      setLayoutPreview((prev) => {
+        if (
+          prev &&
+          prev.profileKey === state.profileKey &&
+          prev.labelsJson === labelsJson &&
+          prev.grayscale === state.grayscale &&
+          (prev.baseUrl || null) === baseUrl &&
+          (prev.sampleTokensJson || "{}") === sampleTokensJson
+        ) {
+          return prev;
+        }
+        return {
+          profileKey: state.profileKey,
+          labelsJson,
+          grayscale: state.grayscale,
+          baseUrl,
+          sampleTokens,
+          sampleTokensJson,
+        };
+      });
+    },
+    [],
+  );
+  return (
+    <PosterOverlayControlsWithPreview
+      values={props.values}
+      compact={props.compact}
+      layoutPreview={layoutPreview}
+      controls={
+        <SettingsDensityFrame legend="Layout designer">
+          <PosterLayoutDesigner
+            accentHex={props.accentHex}
+            compact={props.compact}
+            onPreviewChange={handleLayoutPreviewChange}
+          />
+        </SettingsDensityFrame>
+      }
+    />
   );
 }
 
@@ -7602,7 +7677,7 @@ function PosterBadgeDescription(props: { spacing: "settings" | "wizard" }) {
   const top = props.spacing === "settings" ? "mt-1" : "mb-2";
   return (
     <p className={`ui-field-description leading-relaxed ${top}`}>
-      Placeholdarr logo badge on the poster. Position is independent of the text bar.
+      Placeholdarr logo badge on the poster. Prefer the layout designer Badge label instead.
     </p>
   );
 }
@@ -7615,8 +7690,8 @@ function PlexUnwatchedPreviewWarning() {
         Plex tip
       </p>
       <p>
-        On Plex, the unwatched count indicator sits in the top right and can cover Placeholdarr badge and banner text. To
-        avoid conflict, use a bottom banner and do not put the Placeholdarr badge in the top right corner.
+        On Plex, the unwatched count indicator sits in the top right and can cover Placeholdarr badge and label text. Prefer
+        bottom rows or left columns for important labels.
       </p>
         </div>
   );
@@ -7626,8 +7701,7 @@ function PosterPlaceholderBannerDescription(props: { spacing: "settings" | "wiza
   const top = props.spacing === "settings" ? "mt-1" : "mb-2";
     return (
       <p className={`ui-field-description leading-relaxed ${top}`}>
-      A PLACEHOLDER text bar on the poster. If Coming Soon is also enabled, unreleased titles use that
-      date bar instead.
+        Legacy PLACEHOLDER banner toggle. New installs should place a PLACEHOLDER label in the layout designer instead.
       </p>
     );
   }
@@ -7636,8 +7710,8 @@ function ComingSoonPosterBannerDescription(props: { spacing: "settings" | "wizar
   const top = props.spacing === "settings" ? "mt-1" : "mb-2";
     return (
       <p className={`ui-field-description leading-relaxed ${top}`}>
-      A date or New Ep. text bar on unreleased titles (Theatrical, Digital, Physical, or Airing; series
-      and seasons show New Ep.). Replaces the PLACEHOLDER bar on those posters when both are enabled.
+        Legacy Coming Soon banner toggle. Unreleased titles already use the Coming Soon layout profile; place a
+        Coming Soon / New Ep. label there in the designer.
       </p>
     );
   }
@@ -7727,28 +7801,164 @@ function PosterOverlayPreviewTile(props: {
   );
 }
 
+function posterPreviewMetaForProfile(profileKey: string | null | undefined): {
+  kind: string;
+  label: string;
+  aspect: string;
+} {
+  const key = String(profileKey || "movie.placeholder.default");
+  const parts = key.split(".");
+  const media = parts[0] || "movie";
+  const availability = parts.length >= 3 ? parts[1] : "placeholder";
+  const coming = key.endsWith(".coming_soon");
+  const availLabel = availability === "real" ? "Real" : "Placeholder";
+  const timing = coming ? "Coming Soon" : "Default";
+  if (media === "episode") {
+    return {
+      kind: "episode",
+      label: `Episode · ${availLabel} · ${timing}`,
+      aspect: "aspect-video",
+    };
+  }
+  if (media === "tv") {
+    return {
+      kind: "series",
+      label: `TV title · ${availLabel} · ${timing}`,
+      aspect: "aspect-[2/3]",
+    };
+  }
+  return {
+    kind: "movie",
+    label: `Movie · ${availLabel} · ${timing}`,
+    aspect: "aspect-[2/3]",
+  };
+}
+
+/** Sticky preview that POSTs the active designer draft (avoids GET query truncation). */
+function PosterOverlayFocusPreview(props: {
+  values: FieldValueMap;
+  layoutPreview: {
+    profileKey: string;
+    labelsJson?: string;
+    grayscale?: boolean;
+    baseUrl?: string | null;
+    sampleTokens?: Record<string, string> | null;
+    sampleTokensJson?: string;
+  };
+}) {
+  const grayscale = Boolean(props.layoutPreview.grayscale);
+  const baseUrl = props.layoutPreview.baseUrl || null;
+  const sampleTokens = props.layoutPreview.sampleTokens || null;
+  const sampleTokensJson = props.layoutPreview.sampleTokensJson || "{}";
+  const meta = posterPreviewMetaForProfile(props.layoutPreview.profileKey);
+  const [src, setSrc] = useState<string | null>(null);
+  const blobRef = useRef<string | null>(null);
+  const labelsJson = props.layoutPreview.labelsJson || "[]";
+
+  useEffect(() => {
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const csrf = getCsrfToken();
+          let labels: unknown[] = [];
+          try {
+            labels = JSON.parse(labelsJson) as unknown[];
+          } catch {
+            labels = [];
+          }
+          const response = await fetch("/api/settings/poster-overlay-preview", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+              Accept: "image/jpeg",
+              "Content-Type": "application/json",
+              ...(csrf ? { "X-CSRF-Token": csrf } : {}),
+            },
+            body: JSON.stringify({
+              kind: meta.kind,
+              grayscale,
+              profile_key: props.layoutPreview.profileKey,
+              labels,
+              dim_base: false,
+              base_url: baseUrl || undefined,
+              sample_tokens: sampleTokens || undefined,
+            }),
+          });
+          if (!response.ok) throw new Error(`Preview failed (${response.status})`);
+          const blob = await response.blob();
+          if (cancelled) return;
+          const url = URL.createObjectURL(blob);
+          if (blobRef.current) URL.revokeObjectURL(blobRef.current);
+          blobRef.current = url;
+          setSrc(url);
+        } catch {
+          if (!cancelled) setSrc(null);
+        }
+      })();
+    }, 120);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [baseUrl, grayscale, labelsJson, meta.kind, props.layoutPreview.profileKey, sampleTokens, sampleTokensJson]);
+
+  useEffect(() => {
+    return () => {
+      if (blobRef.current) URL.revokeObjectURL(blobRef.current);
+    };
+  }, []);
+
+  const widthClass = meta.kind === "episode" ? "w-full" : "w-full max-w-[20rem] mx-auto";
+  if (!src) {
+    return (
+      <div className={`rounded-lg border border-[#424753]/40 bg-[#0b111b] ${widthClass} ${meta.aspect} flex items-center justify-center`}>
+        <span className="text-[12px] text-slate-500">Loading preview…</span>
+      </div>
+    );
+  }
+  return (
+    <PosterOverlayPreviewTile
+      src={src}
+      label={meta.label}
+      aspect={meta.aspect}
+      widthClass={widthClass}
+    />
+  );
+}
+
 function PosterOverlayLivePreview(props: {
   values: FieldValueMap;
   compact?: boolean;
-  /** ``gallery``: posters side-by-side then episode; ``rail`` stacks; ``row`` wraps. */
-  layout?: "row" | "rail" | "gallery";
+  /** ``gallery``: posters side-by-side then episode; ``rail`` stacks; ``row`` wraps; ``focus``: active profile only. */
+  layout?: "row" | "rail" | "gallery" | "focus";
+  /** When set, all tiles use this layout draft (designer sticky preview). */
+  layoutPreview?: {
+    profileKey: string;
+    labelsJson?: string;
+    grayscale?: boolean;
+    baseUrl?: string | null;
+    sampleTokens?: Record<string, string> | null;
+    sampleTokensJson?: string;
+  } | null;
 }) {
-  const grayscale = posterOverlaySettingOn(props.values.PLACEHOLDER_POSTER_GRAYSCALE);
-  const badge = posterOverlaySettingOn(props.values.PLACEHOLDER_POSTER_BADGE);
-  const badgePosition = String(props.values.PLACEHOLDER_POSTER_BADGE_POSITION ?? "bottom_right");
-  const placeholderBanner = posterOverlaySettingOn(props.values.PLACEHOLDER_POSTER_PLACEHOLDER_BANNER);
-  const comingSoonBanner = posterOverlaySettingOn(props.values.PLACEHOLDER_POSTER_COMING_SOON_BANNER);
-  const bannerPosition = String(props.values.PLACEHOLDER_POSTER_BANNER_POSITION ?? "top");
+  const draftGrayscale = props.layoutPreview?.grayscale;
   const layerQs = new URLSearchParams({
-    grayscale: grayscale ? "true" : "false",
-    badge: badge ? "true" : "false",
-    badge_position: badgePosition,
-    placeholder_banner: placeholderBanner ? "true" : "false",
-    coming_soon_banner: comingSoonBanner ? "true" : "false",
-    banner_position: bannerPosition,
+    // Prefer draft grayscale when present; otherwise the preview endpoint uses the saved profile.
+    ...(typeof draftGrayscale === "boolean"
+      ? { grayscale: draftGrayscale ? "true" : "false" }
+      : {}),
   });
+  const focus = props.layout === "focus";
   const gallery = props.layout === "gallery";
   const rail = props.layout === "rail";
+
+  if (focus && props.layoutPreview?.profileKey) {
+    return (
+      <PosterOverlayFocusPreview values={props.values} layoutPreview={props.layoutPreview} />
+    );
+  }
+
   const posterW = gallery
     ? "w-[10.5rem]"
     : rail
@@ -7763,21 +7973,24 @@ function PosterOverlayLivePreview(props: {
       : props.compact
         ? "w-[16rem]"
         : "w-[20rem]";
-  const items: Array<{ kind: string; label: string; aspect: string; widthClass: string }> = [
+  const items: Array<{ kind: string; profileKey: string; label: string; aspect: string; widthClass: string }> = [
     {
       kind: "movie",
+      profileKey: "movie.placeholder.default",
       label: "Movie",
       aspect: "aspect-[2/3]",
       widthClass: posterW,
     },
     {
       kind: "series",
+      profileKey: "tv.placeholder.default",
       label: "TV title",
       aspect: "aspect-[2/3]",
       widthClass: posterW,
     },
     {
       kind: "episode",
+      profileKey: "episode.placeholder.default",
       label: "Episode",
       aspect: "aspect-video",
       widthClass: episodeW,
@@ -7786,6 +7999,24 @@ function PosterOverlayLivePreview(props: {
   const tile = (item: (typeof items)[number]) => {
     const qs = new URLSearchParams(layerQs);
     qs.set("kind", item.kind);
+    const draft = props.layoutPreview;
+    if (draft?.profileKey) {
+      qs.set("profile_key", draft.profileKey);
+      if (draft.labelsJson) qs.set("layout", draft.labelsJson);
+      const draftKind = draft.profileKey.startsWith("episode.")
+        ? "episode"
+        : draft.profileKey.startsWith("tv.")
+          ? "series"
+          : "movie";
+      if (draftKind !== item.kind && gallery) {
+        qs.set("profile_key", item.profileKey);
+        qs.delete("layout");
+      } else if (draftKind === item.kind) {
+        qs.set("kind", draftKind);
+      }
+    } else {
+      qs.set("profile_key", item.profileKey);
+    }
     const src = `/api/settings/poster-overlay-preview?${qs.toString()}`;
     return (
       <PosterOverlayPreviewTile
@@ -7797,6 +8028,11 @@ function PosterOverlayLivePreview(props: {
       />
     );
   };
+  if (focus) {
+    // No draft yet: fall back to movie default.
+    const item = items[0];
+    return <div className="flex w-full flex-col gap-3">{tile(item)}</div>;
+  }
   if (gallery) {
     const posters = items.filter((i) => i.kind !== "episode");
     const episode = items.find((i) => i.kind === "episode");
@@ -9114,27 +9350,7 @@ function SettingsPanel(props: {
                       ) : null;
                     })}
                   </SettingsDensityFrame>
-                  <PosterOverlayControlsWithPreview
-                    values={props.values}
-                    controls={
-                      <SettingsDensityFrame
-                        legend="Overlays"
-                        intro={
-                          <p>
-                            Compose grayscale, badge, and text banners independently. The preview updates as you
-                            change options. Banner position applies when either text banner is enabled.
-                          </p>
-                        }
-                      >
-                        {[...POSTER_OVERLAY_LAYER_KEYS, ...POSTER_OVERLAY_BANNER_KEYS].map((key) => {
-                          const field = active.fields.find((f) => f.key === key);
-                          return field ? (
-                            <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
-                          ) : null;
-                        })}
-                      </SettingsDensityFrame>
-                    }
-                  />
+                  <PosterArtOverlaysBlock values={props.values} accentHex={accent.hex} />
                 </div>
               ) : active.name === "Dummy Video" ? (
                 <div className="px-6 py-5 space-y-6">
@@ -12764,12 +12980,6 @@ function OnboardingWizard(props: {
               const statusFields = fields.filter(
                 (f) => f.key === "PLACEHOLDER_STATUS_UPDATES" || f.key === "PLACEHOLDER_STATUS_PROJECTION_MODE",
               );
-              const layerFields = POSTER_OVERLAY_LAYER_KEYS.map((k) => fieldByKey.get(k)).filter(
-                Boolean,
-              ) as SettingsField[];
-              const bannerFields = POSTER_OVERLAY_BANNER_KEYS.map((k) => fieldByKey.get(k)).filter(
-                Boolean,
-              ) as SettingsField[];
               const languageFields = POSTER_LANGUAGE_FIELD_KEYS.map((k) => fieldByKey.get(k)).filter(
                 Boolean,
               ) as SettingsField[];
@@ -12796,25 +13006,7 @@ function OnboardingWizard(props: {
                       {languageFields.map((field) => wizardFieldRow(field, { density: true }))}
                     </SettingsDensityFrame>
                   ) : null}
-                  <PosterOverlayControlsWithPreview
-                    values={props.values}
-                    compact
-                    controls={
-                      <SettingsDensityFrame
-                        legend="Overlays"
-                        intro={
-                          <p>
-                            Compose grayscale, badge, and text banners independently. The preview updates as you
-                            change options. Banner position applies when either text banner is enabled.
-                          </p>
-                        }
-                      >
-                        {[...layerFields, ...bannerFields].map((field) =>
-                          wizardFieldRow(field, { density: true }),
-                        )}
-                      </SettingsDensityFrame>
-                    }
-                  />
+                  <PosterArtOverlaysBlock values={props.values} accentHex={accent.hex} compact />
                     </div>
               );
             })()
