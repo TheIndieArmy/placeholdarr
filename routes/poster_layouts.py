@@ -13,6 +13,7 @@ from services.poster_layouts import (
     changed_profile_keys,
     ensure_layouts_persisted,
     get_layout_doc,
+    layout_art_targets_from_changed_profiles,
     layout_fingerprint,
     normalize_doc,
     reload_layout_cache,
@@ -63,25 +64,29 @@ async def put_poster_layouts(request: Request):
             {"version": body.get("version"), "profiles": profiles_in},
             seed_if_empty=False,
         )
+        # Preserve migration flag across designer saves (not part of the PUT body).
+        normalized["art_library_synced"] = bool(prior.get("art_library_synced"))
         saved = save_layout_doc(normalized)
         changed_keys = changed_profile_keys(prior, saved)
         changed = bool(changed_keys) or layout_fingerprint(saved) != prior_fp
+        layout_art = layout_art_targets_from_changed_profiles(changed_keys, doc=saved)
 
         backfill: dict[str, Any] = {"ok": True, "enqueued": False, "scope": apply_scope}
-        if changed:
+        if changed and layout_art.get("kinds"):
             from services.source_of_truth.placeholder_refresh import (
                 execute_placeholder_refresh_apply_scope,
             )
 
-            # Use settings_save* so Apply now skips the multi-minute sidecar scan
-            # (same as overlay/language settings). Per-profile layout_hash still
-            # skips unchanged titles when workers bake.
+            # Skip determination (settings_save*). First layout art sync is full-library;
+            # later saves enqueue only changed media kinds / variants. Bake still
+            # no-ops via per-profile layout_hash when a queued title does not need work.
             out = execute_placeholder_refresh_apply_scope(
                 apply_scope=apply_scope,
                 metadata=False,
                 art=True,
                 templates=False,
                 art_scope="all",
+                layout_art=layout_art,
                 source="settings_save:poster_layouts",
                 task_run_trigger="settings_change" if apply_scope == "now" else None,
             )
@@ -92,6 +97,7 @@ async def put_poster_layouts(request: Request):
                 "scope": out.get("scope") or apply_scope,
                 "pending": bool(out.get("pending")),
                 "changed_profiles": changed_keys,
+                "layout_art": layout_art,
                 **({} if not art else {"art": art}),
             }
 
