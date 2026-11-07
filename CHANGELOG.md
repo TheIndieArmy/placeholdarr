@@ -31,6 +31,8 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 - **Poster layout preview**: Chip labels no longer crash the live preview (RGBA composite).
 - **Poster layout designer UI**: Dark-themed selects/color fields and no overflow from the style editors.
+- **Poster layout save**: Saving no longer remaps chip positions as if they were on the old 6×9 grid.
+- **Discard unsaved**: Designer discard restores the last saved layout instead of wiping to factory seed.
 
 ## Pre-release
 

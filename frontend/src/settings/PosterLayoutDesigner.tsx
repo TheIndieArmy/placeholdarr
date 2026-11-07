@@ -844,7 +844,11 @@ export default function PosterLayoutDesigner(props: Props) {
         {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ profiles: draft, apply_scope: scope }),
+          body: JSON.stringify({
+            version: catalog?.version,
+            profiles: draft,
+            apply_scope: scope,
+          }),
         },
       );
       setCatalog(data);
@@ -861,23 +865,12 @@ export default function PosterLayoutDesigner(props: Props) {
     }
   }
 
-  async function resetActiveProfile() {
-    setBusy(true);
+  function discardUnsavedProfile() {
+    if (!catalog) return;
+    setDraft(cloneProfiles(catalog.profiles || {}));
+    setSelectedId(null);
     setSaveError(null);
-    try {
-      const data = await fetchJson<PosterLayoutCatalog>(
-        `/api/settings/poster-layouts/reset/${encodeURIComponent(activeKey)}`,
-        { method: "POST" },
-      );
-      setCatalog(data);
-      setDraft(cloneProfiles(data.profiles || {}));
-      setSelectedId(null);
-      setSaveMsg(`Reset ${activeKey} to seeded defaults. Save to refresh library art.`);
-    } catch (err) {
-      setSaveError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
+    setSaveMsg("Discarded unsaved edits. Layout restored to the last saved version.");
   }
 
   if (loadError) {
@@ -1713,11 +1706,12 @@ export default function PosterLayoutDesigner(props: Props) {
             </button>
             <button
               type="button"
-              disabled={busy}
-              onClick={() => void resetActiveProfile()}
+              disabled={busy || !dirty}
+              title="Discard unsaved edits and restore the last saved layout"
+              onClick={() => discardUnsavedProfile()}
               className="text-[12px] uppercase tracking-wider text-slate-400 hover:text-slate-200 disabled:opacity-40"
             >
-              Reset profile
+              Discard unsaved
             </button>
             {dirty ? <span className="text-[12px] text-amber-200/90">Unsaved changes</span> : null}
             {saveMsg ? <span className="text-[12px] text-slate-400">{saveMsg}</span> : null}
