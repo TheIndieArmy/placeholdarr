@@ -362,6 +362,29 @@ def render_custom_chip_text(
 _BANNER_THICKNESS_MIN = 0.04
 _BANNER_THICKNESS_MAX = 0.45
 _BANNER_SIZE_MULT = {"small": 0.72, "medium": 1.0, "large": 1.35}
+_BANNER_SPAN_MIN_GAP = 0.05
+
+
+def _normalize_banner_span(start: Any, end: Any) -> tuple[float, float]:
+    """Along-edge coverage as fractions 0..1 (full edge is 0..1)."""
+
+    def _one(raw: Any, default: float) -> float:
+        try:
+            return max(0.0, min(1.0, float(raw)))
+        except (TypeError, ValueError):
+            return default
+
+    a = _one(start, 0.0)
+    b = _one(end, 1.0)
+    if b < a:
+        a, b = b, a
+    if b - a < _BANNER_SPAN_MIN_GAP:
+        mid = (a + b) / 2.0
+        a = max(0.0, mid - _BANNER_SPAN_MIN_GAP / 2.0)
+        b = min(1.0, a + _BANNER_SPAN_MIN_GAP)
+        if b - a < _BANNER_SPAN_MIN_GAP:
+            a = max(0.0, b - _BANNER_SPAN_MIN_GAP)
+    return a, b
 
 
 def banner_base_frac(edge: str, *, landscape: bool) -> float:
@@ -486,9 +509,11 @@ def normalize_label(raw: Any, *, cols: int, rows: int, landscape: bool = False) 
         thickness = _normalize_banner_thickness(
             raw.get("thickness"), size=size, edge=edge, landscape=landscape
         )
+        span_start, span_end = _normalize_banner_span(raw.get("span_start"), raw.get("span_end"))
     else:
         edge = "top"
         thickness = banner_base_frac("top", landscape=landscape)
+        span_start, span_end = 0.0, 1.0
     return {
         "id": label_id,
         "token": token,
@@ -501,6 +526,8 @@ def normalize_label(raw: Any, *, cols: int, rows: int, landscape: bool = False) 
         "fill_opacity": _opacity(raw.get("fill_opacity"), _DEFAULT_FILL_OPACITY),
         "size": size,
         "thickness": thickness,
+        "span_start": span_start,
+        "span_end": span_end,
         "style": style,
         "edge": edge,
         "arted": arted,
@@ -639,8 +666,10 @@ def _make_label(token: str, row: int, col: int, **style: Any) -> dict[str, Any]:
         thickness = _normalize_banner_thickness(
             style.get("thickness"), size=size, edge=edge, landscape=landscape
         )
+        span_start, span_end = _normalize_banner_span(style.get("span_start"), style.get("span_end"))
     else:
         thickness = banner_base_frac("top", landscape=landscape)
+        span_start, span_end = 0.0, 1.0
     return {
         "id": _new_label_id(),
         "token": token,
@@ -653,6 +682,8 @@ def _make_label(token: str, row: int, col: int, **style: Any) -> dict[str, Any]:
         "fill_opacity": style.get("fill_opacity", _DEFAULT_FILL_OPACITY),
         "size": size,
         "thickness": thickness,
+        "span_start": span_start,
+        "span_end": span_end,
         "style": label_style,
         "edge": edge if label_style == "banner" else "top",
         "arted": bool(style.get("arted")) and token in _ARTED_TOKENS and label_style != "banner",
