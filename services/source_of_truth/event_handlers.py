@@ -13,27 +13,19 @@ from core.logger import logger
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Season, Series, Movie, Placeholder
 from services.placeholders import episode_placeholder_path, movie_placeholder_path
-from services.placeholder_activity_log import (
-    append_placeholder_activity_status,
-    materialization_stats_dict,
-    outcome_reason_and_status_from_materialization,
-)
+from services.placeholder_activity_log import append_placeholder_activity_status
 from services.source_of_truth.arr_api import (
     fetch_radarr_movie,
     fetch_sonarr_episodes,
     fetch_sonarr_series_item,
 )
 from services.source_of_truth.arr_share_guard import expand_determination_entity_ids
-from services.source_of_truth.determiner import (
-    run_determination_for_entities,
-    run_determination_for_entities_with_siblings,
-)
+from services.source_of_truth.determiner import run_determination_for_entities
 from services.source_of_truth.entity_materialization_job import (
     enqueue_entity_materialization_job,
 )
 from services.source_of_truth.materializer import (
     _mark_placeholder_rows_deleted,
-    run_materialization_for_entities,
 )
 from services.source_of_truth.import_grace import (
     interrupt_import_grace_keep_placeholder,
@@ -125,6 +117,32 @@ def _resolve_arr_context(content_type: str, instance: str | None = None) -> dict
         "instance_id": str(selected.get("instance_id") or "").strip().lower(),
         "base_url": base_url,
         "api_key": api_key,
+    }
+
+
+def _enqueue_event_materialization(
+    session,
+    *,
+    movie_ids: list[int] | None = None,
+    episode_ids: list[int] | None = None,
+    observation_source: str,
+    run_determination_first: bool = True,
+) -> dict[str, Any]:
+    """Queue coalesced entity materialization off the webhook worker thread."""
+    job = enqueue_entity_materialization_job(
+        session,
+        movie_ids=list(movie_ids or []),
+        episode_ids=list(episode_ids or []),
+        observation_source=observation_source,
+        payload_extras={"run_determination_first": bool(run_determination_first)},
+    )
+    return {
+        "queued": True,
+        "job_id": int(getattr(job, "id", 0) or 0) or None,
+        "observation_source": observation_source,
+        "movie_ids": [int(x) for x in (movie_ids or []) if x is not None],
+        "episode_ids": [int(x) for x in (episode_ids or []) if x is not None],
+        "run_determination_first": bool(run_determination_first),
     }
 
 
@@ -371,16 +389,14 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
         stats["episodes_touched"] = len(episode_ids)
         session.commit()
 
-        determination_stats = run_determination_for_entities(episode_ids=episode_ids)
-        materialization_stats = run_materialization_for_entities(
+        series_db_id = int(series_row.id)
+        materialization_stats = _enqueue_event_materialization(
+            session,
             episode_ids=episode_ids,
             observation_source="event_series_add",
+            run_determination_first=True,
         )
-
-        series_db_id = int(series_row.id)
         series_after = session.query(Series).filter(Series.id == series_db_id).first()
-        mat = materialization_stats_dict(materialization_stats)
-        result_reason, status_label = outcome_reason_and_status_from_materialization("Series added", mat)
         append_placeholder_activity_status(
             session,
             item_type="series",
@@ -395,12 +411,11 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
             path=str(getattr(series_after, "placeholder_folder", "") or getattr(series_row, "placeholder_folder", "") or ""),
             item_title=str(getattr(series_after, "title", None) or getattr(series_row, "title", None) or "Unknown Series"),
             series_title=str(getattr(series_after, "title", None) or getattr(series_row, "title", None) or "") or None,
-            reason=result_reason,
-            status_label=status_label,
+            reason="Series added. Determination and placeholder materialization queued.",
+            status_label="Queued",
             source="event_series_add",
             extra_snapshot={
-                "determination": determination_stats if isinstance(determination_stats, dict) else {},
-                "materialization": mat,
+                "materialization": materialization_stats,
                 "series_id": series_db_id,
                 "episode_ids": episode_ids,
                 "episodes_touched": len(episode_ids),
@@ -408,16 +423,12 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
         )
         session.commit()
 
-        # Followup logic removed as observation system is deprecated.
-        pass
-
         return {
             "ok": True,
             "event": "seriesadd",
             "series_id": series_db_id,
             "episode_ids": episode_ids,
             "upsert_stats": stats,
-            "determination": determination_stats,
             "materialization": materialization_stats,
         }
     except Exception:
@@ -498,16 +509,15 @@ def process_movie_add_event(payload: dict[str, Any], instance: str | None = None
         )
 
         supersede_pending_movie_deleted_materialization(session, movie_row_id)
-        session.commit()
-
-        determination_stats = run_determination_for_entities(movie_ids=[movie_row_id])
-        materialization_stats = run_materialization_for_entities(
+        materialization_stats = _enqueue_event_materialization(
+            session,
             movie_ids=[movie_row_id],
             observation_source="event_movie_add",
+            run_determination_first=True,
         )
+        session.commit()
+
         movie_after = session.query(Movie).filter(Movie.id == movie_row_id).first()
-        mat = materialization_stats_dict(materialization_stats)
-        result_reason, status_label = outcome_reason_and_status_from_materialization("Movie added", mat)
         result_path = (
             str(getattr(movie_after, "placeholder_filepath", "") or "").strip()
             if movie_after
@@ -527,25 +537,20 @@ def process_movie_add_event(payload: dict[str, Any], instance: str | None = None
             path=str(result_path or ""),
             item_title=str(getattr(movie_after, "title", None) or getattr(movie_row, "title", None) or "Unknown Movie"),
             series_title=None,
-            reason=result_reason,
-            status_label=status_label,
+            reason="Movie added. Determination and placeholder materialization queued.",
+            status_label="Queued",
             source="event_movie_add",
             extra_snapshot={
-                "determination": determination_stats if isinstance(determination_stats, dict) else {},
-                "materialization": mat,
+                "materialization": materialization_stats,
                 "movie_id": int(movie_row_id),
             },
         )
         session.commit()
 
-        # Followup logic removed as observation system is deprecated.
-        pass
-
         return {
             "ok": True,
             "event": "movieadd",
             "movie_id": movie_row_id,
-            "determination": determination_stats,
             "materialization": materialization_stats,
         }
     except Exception:
@@ -1020,23 +1025,21 @@ def process_movie_file_deleted_event(payload: dict[str, Any], instance: str | No
         finally:
             expand_session.close()
 
-        determination_stats = run_determination_for_entities_with_siblings(movie_ids=[movie_row_id])
-        materialization_stats = run_materialization_for_entities(
+        materialization_stats = _enqueue_event_materialization(
+            session,
             movie_ids=mat_movie_ids,
             episode_ids=mat_episode_ids,
             observation_source="event_movie_file_deleted",
+            run_determination_first=True,
         )
-
-        movie_after = session.query(Movie).filter(Movie.id == movie_row_id).first()
-        mat = materialization_stats_dict(materialization_stats)
-        result_reason, status_label = outcome_reason_and_status_from_materialization("Movie file deleted", mat)
+        result_reason = "Movie file deleted. Determination and placeholder materialization queued."
         if real_scan_job is not None:
             result_reason = f"{result_reason} Real library scan scheduled."
         result_path = (
-            str(getattr(movie_after, "placeholder_filepath", "") or "").strip()
-            if movie_after
-            else ""
-        ) or movie_placeholder_path(movie_after or movie_row)
+            str(getattr(movie_row, "placeholder_filepath", "") or "").strip()
+            or movie_placeholder_path(movie_row)
+            or ""
+        )
         append_placeholder_activity_status(
             session,
             item_type="movie",
@@ -1045,18 +1048,17 @@ def process_movie_file_deleted_event(payload: dict[str, Any], instance: str | No
             series_id=None,
             season_id=None,
             season_number=None,
-            instance_key=getattr(movie_after, "instance_key", None) if movie_after else getattr(movie_row, "instance_key", None),
-            instance_id=getattr(movie_after, "instance_id", None) if movie_after else getattr(movie_row, "instance_id", None),
+            instance_key=getattr(movie_row, "instance_key", None),
+            instance_id=getattr(movie_row, "instance_id", None),
             event_type="placeholder_event_movie_file_deleted_result",
             path=str(result_path or ""),
-            item_title=str(getattr(movie_after, "title", None) or getattr(movie_row, "title", None) or "Unknown Movie"),
+            item_title=str(getattr(movie_row, "title", None) or "Unknown Movie"),
             series_title=None,
             reason=result_reason,
-            status_label=status_label,
+            status_label="Queued",
             source="event_movie_file_deleted",
             extra_snapshot={
-                "determination": determination_stats if isinstance(determination_stats, dict) else {},
-                "materialization": mat,
+                "materialization": materialization_stats,
                 "movie_id": int(movie_row_id),
                 "deleted_file_path": deleted_file_path,
                 "real_library_scan_scheduled": real_scan_job is not None,
@@ -1069,7 +1071,6 @@ def process_movie_file_deleted_event(payload: dict[str, Any], instance: str | No
             "event": "movie_file_deleted",
             "movie_id": movie_row_id,
             "grace_interrupted": False,
-            "determination": determination_stats,
             "materialization": materialization_stats,
             "real_library_scan_scheduled": real_scan_job is not None,
         }
@@ -1286,6 +1287,8 @@ def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | 
 
         determination_stats: dict[str, Any] | None = None
         materialization_stats: dict[str, Any] | None = None
+        determination_stats = None
+        materialization_stats = None
         if rematerialize_ids:
             expand_session = get_session()
             try:
@@ -1296,11 +1299,12 @@ def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | 
             finally:
                 expand_session.close()
 
-            determination_stats = run_determination_for_entities_with_siblings(episode_ids=rematerialize_ids)
-            materialization_stats = run_materialization_for_entities(
+            materialization_stats = _enqueue_event_materialization(
+                session,
                 movie_ids=mat_movie_ids,
                 episode_ids=mat_episode_ids,
                 observation_source="event_episode_file_deleted",
+                run_determination_first=True,
             )
 
         n_eps = len(episode_ids)
@@ -1317,9 +1321,10 @@ def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | 
             status_label = "Grace Interrupted"
             mat: dict[str, Any] = {}
         else:
-            mat = materialization_stats_dict(materialization_stats or {})
+            mat = materialization_stats if isinstance(materialization_stats, dict) else {}
             prefix = "Episode file deleted" if n_eps == 1 else f"Episode file deleted ({n_eps} episodes)"
-            result_reason, status_label = outcome_reason_and_status_from_materialization(prefix, mat)
+            result_reason = f"{prefix}. Determination and placeholder materialization queued."
+            status_label = "Queued"
             if n_interrupted:
                 result_reason = (
                     f"{result_reason} ({n_interrupted} episode(s) interrupted mid-grace without rematerialize)."
@@ -1490,18 +1495,19 @@ def process_series_deleted_event(payload: dict[str, Any], instance: str | None =
         except Exception:
             pass
 
-        determination_stats = run_determination_for_entities(episode_ids=episode_ids)
-        materialization_stats = run_materialization_for_entities(
+        materialization_stats = _enqueue_event_materialization(
+            session,
             episode_ids=episode_ids,
             observation_source="event_series_deleted",
+            run_determination_first=True,
         )
+        session.commit()
 
         return {
             "ok": True,
             "event": "series_deleted",
             "series_id": series_row_id,
             "episode_ids": episode_ids,
-            "determination": determination_stats,
             "materialization": materialization_stats,
         }
     except Exception:

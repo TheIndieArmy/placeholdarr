@@ -490,6 +490,18 @@ class Settings(BaseSettings):
     IMPORT_GRACE_ACCELERATED_STEP_SECONDS: int = int(os.getenv("IMPORT_GRACE_ACCELERATED_STEP_SECONDS", "5").split('#')[0].strip())
     STATUS_JOB_BATCH_SIZE: int = int(os.getenv("STATUS_JOB_BATCH_SIZE", "100").split('#')[0].strip())
     STATUS_JOB_DEBOUNCE_SECONDS: float = float(os.getenv("STATUS_JOB_DEBOUNCE_SECONDS", "0.5").split('#')[0].strip())
+    # Entity materialization jobs (off webhook path): coalesce pending ids up to this size.
+    MATERIALIZATION_JOB_BATCH_SIZE: int = int(
+        os.getenv("MATERIALIZATION_JOB_BATCH_SIZE", "100").split("#")[0].strip() or "100"
+    )
+    # Commit every N movie+episode ids during large scoped/lite materialization.
+    MATERIALIZATION_COMMIT_CHUNK_SIZE: int = int(
+        os.getenv("MATERIALIZATION_COMMIT_CHUNK_SIZE", "200").split("#")[0].strip() or "200"
+    )
+    # Fail-fast on materializer persist instead of waiting hours on row locks.
+    MATERIALIZATION_COMMIT_LOCK_TIMEOUT_SECONDS: int = int(
+        os.getenv("MATERIALIZATION_COMMIT_LOCK_TIMEOUT_SECONDS", "15").split("#")[0].strip() or "15"
+    )
     MEDIA_REFRESH_SECTION_FALLBACK_ENABLED: bool = os.getenv("MEDIA_REFRESH_SECTION_FALLBACK_ENABLED", "true").split('#')[0].strip().lower() == "true"
     MATERIALIZATION_OVERLAP_ENABLED: bool = True
     MATERIALIZATION_OVERLAP_MOVIE_CHECKPOINT_COUNT: int = 200

@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, text
 
 from services.source_of_truth.calendar_phase import (
     compute_dummy_variant_for_episode,
@@ -60,6 +60,24 @@ from services.source_of_truth.refresh_throttle import try_acquire_refresh_lease
 from services.source_of_truth.status_orchestrator import StatusOrchestrator
 from services.messages.context import build_projection_context_from_session
 from services.status_projection import projected_status_display
+
+
+def materialization_commit_chunk_size() -> int:
+    return max(
+        1,
+        int(getattr(settings, "MATERIALIZATION_COMMIT_CHUNK_SIZE", 200) or 200),
+    )
+
+
+def _merge_materialization_stats(into: dict[str, Any], part: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(part, dict):
+        return into
+    for key, value in part.items():
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            into[key] = into.get(key, 0) + value
+        elif key not in into:
+            into[key] = value
+    return into
 
 
 def _enqueue_media_refresh_via_new_session(
@@ -1867,6 +1885,58 @@ def run_materialization_pass() -> dict[str, Any]:
         session.close()
 
 
+def _run_materialization_entity_chunk(
+    *,
+    movie_ids: list[int],
+    episode_ids: list[int],
+    observation_source: str,
+    subject_part: str,
+    density_scope_episode_ids: list[int] | None,
+) -> dict[str, Any]:
+    """Materialize one id chunk in its own session/transaction (short lock window)."""
+    session = get_session()
+    try:
+        stats = run_materialization_for_entities_in_session(
+            session,
+            movie_ids=movie_ids,
+            episode_ids=episode_ids,
+            observation_source=observation_source,
+            density_scope_episode_ids=density_scope_episode_ids,
+        )
+        if movie_ids or episode_ids:
+            logger.info(
+                f"Scoped materialization persisting{subject_part}: observation_source={observation_source} "
+                f"chunk_movies={len(movie_ids)} chunk_episodes={len(episode_ids)} "
+                f"(if this line is followed by a long silence, commit is usually waiting on a row lock)",
+                extra={"emoji_type": "info"},
+            )
+        try:
+            timeout_s = int(getattr(settings, "MATERIALIZATION_COMMIT_LOCK_TIMEOUT_SECONDS", 15) or 15)
+            if timeout_s > 0:
+                session.execute(text(f"SET LOCAL lock_timeout = '{timeout_s}s'"))
+        except Exception:
+            pass
+        v_hb = start_verbose_stall_heartbeat(
+            f"scoped_materialization.session.commit source={observation_source}",
+        )
+        try:
+            session.commit()
+        finally:
+            v_hb.set()
+        return stats if isinstance(stats, dict) else {}
+    except Exception:
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
+
+
 def run_materialization_for_entities(
     movie_ids: list[int] | None = None,
     episode_ids: list[int] | None = None,
@@ -1880,6 +1950,9 @@ def run_materialization_for_entities(
     This is used by webhook/event workflows so only affected content is
     materialized, refreshed, and observed.
 
+    Large id sets are processed in commit chunks (``MATERIALIZATION_COMMIT_CHUNK_SIZE``)
+    so one lite sync cannot hold row locks across the whole library.
+
     When ``purge_catalog_tombstones`` is False, soft-deleted catalog rows are
     left in place after placeholder teardown so callers can still write
     activity history (or other FK-bound rows) before hard-purge.
@@ -1888,8 +1961,9 @@ def run_materialization_for_entities(
     episode_ids = [int(eid) for eid in (episode_ids or []) if eid is not None]
     subject = str(log_subject or "").strip()
     subject_part = f" · {subject}" if subject else ""
+    chunk_size = materialization_commit_chunk_size()
+    total_ids = len(movie_ids) + len(episode_ids)
 
-    session = get_session()
     stop_scoped_hb = threading.Event()
     scoped_started = time.monotonic()
     _scoped_hb_interval = max(
@@ -1902,7 +1976,7 @@ def run_materialization_for_entities(
                 f"Scoped materialization still running: observation_source={observation_source} "
                 f"movies={len(movie_ids)} episodes={len(episode_ids)} "
                 f"elapsed_s={time.monotonic() - scoped_started:.1f} "
-                f"(long stall after 'persisting' → often PostgreSQL commit waiting on locks)",
+                f"(long stall often means PostgreSQL lock wait or a large chunk still running)",
                 extra={"emoji_type": "processing"},
             )
 
@@ -1910,7 +1984,7 @@ def run_materialization_for_entities(
     if movie_ids or episode_ids:
         logger.info(
             f"Scoped materialization starting{subject_part}: observation_source={observation_source} "
-            f"movies={len(movie_ids)} episodes={len(episode_ids)}",
+            f"movies={len(movie_ids)} episodes={len(episode_ids)} commit_chunk_size={chunk_size}",
             extra={"emoji_type": "info"},
         )
         _scoped_t = threading.Thread(
@@ -1919,31 +1993,43 @@ def run_materialization_for_entities(
             daemon=True,
         )
         _scoped_t.start()
+
     try:
-        stats = run_materialization_for_entities_in_session(
-            session,
-            movie_ids=movie_ids,
-            episode_ids=episode_ids,
-            observation_source=observation_source,
-        )
-        if movie_ids or episode_ids:
-            logger.info(
-                f"Scoped materialization persisting{subject_part}: observation_source={observation_source} "
-                f"(if this line is followed by a long silence, commit is usually waiting on a row lock)",
-                extra={"emoji_type": "info"},
+        # Build chunks: movies first, then episodes. Density scope keeps the full
+        # episode id list so series stubs still evaluate across the whole request.
+        remaining_movies = list(movie_ids)
+        remaining_episodes = list(episode_ids)
+        density_scope = list(episode_ids) if episode_ids else None
+        merged: dict[str, Any] = {}
+        chunk_index = 0
+        while remaining_movies or remaining_episodes:
+            chunk_movies: list[int] = []
+            chunk_episodes: list[int] = []
+            while remaining_movies and (len(chunk_movies) + len(chunk_episodes)) < chunk_size:
+                chunk_movies.append(remaining_movies.pop(0))
+            while remaining_episodes and (len(chunk_movies) + len(chunk_episodes)) < chunk_size:
+                chunk_episodes.append(remaining_episodes.pop(0))
+            chunk_index += 1
+            if total_ids > chunk_size:
+                logger.info(
+                    f"Scoped materialization chunk {chunk_index}{subject_part}: "
+                    f"movies={len(chunk_movies)} episodes={len(chunk_episodes)} "
+                    f"remaining={len(remaining_movies) + len(remaining_episodes)}",
+                    extra={"emoji_type": "processing"},
+                )
+            part = _run_materialization_entity_chunk(
+                movie_ids=chunk_movies,
+                episode_ids=chunk_episodes,
+                observation_source=observation_source,
+                subject_part=subject_part,
+                density_scope_episode_ids=density_scope,
             )
-        v_hb = start_verbose_stall_heartbeat(
-            f"scoped_materialization.session.commit source={observation_source}",
-        )
-        try:
-            session.commit()
-        finally:
-            v_hb.set()
+            _merge_materialization_stats(merged, part)
+
         logger.info(
-            f"Scoped materialization complete{subject_part}: {stats}",
+            f"Scoped materialization complete{subject_part}: {merged}",
             extra={"emoji_type": "success"},
         )
-        # After placeholder teardown, hard-purge cleaned soft-deleted catalog rows for this scope.
         if purge_catalog_tombstones:
             try:
                 from services.source_of_truth.catalog_tombstone_purge import purge_cleaned_deleted_catalog
@@ -1952,16 +2038,15 @@ def run_materialization_for_entities(
                     movie_ids=movie_ids,
                     episode_ids=episode_ids,
                 )
-                if isinstance(stats, dict) and isinstance(purge_stats, dict):
-                    stats["catalog_tombstone_purge"] = purge_stats
+                if isinstance(purge_stats, dict):
+                    merged["catalog_tombstone_purge"] = purge_stats
             except Exception as purge_exc:
                 logger.debug(
                     f"Scoped catalog tombstone purge skipped{subject_part}: {purge_exc}",
                     extra={"emoji_type": "debug"},
                 )
-        return stats
+        return merged
     except Exception as e:
-        session.rollback()
         logger.error(
             f"Scoped materialization failed{subject_part}: {e}",
             extra={"emoji_type": "error"},
@@ -1969,7 +2054,6 @@ def run_materialization_for_entities(
         raise
     finally:
         stop_scoped_hb.set()
-        session.close()
 
 
 def run_materialization_for_entities_in_session(
@@ -1977,9 +2061,15 @@ def run_materialization_for_entities_in_session(
     movie_ids: list[int] | None = None,
     episode_ids: list[int] | None = None,
     observation_source: str = "event_materialization",
+    density_scope_episode_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     movie_ids = [int(mid) for mid in (movie_ids or []) if mid is not None]
     episode_ids = [int(eid) for eid in (episode_ids or []) if eid is not None]
+    density_ids = (
+        [int(eid) for eid in density_scope_episode_ids if eid is not None]
+        if density_scope_episode_ids is not None
+        else list(episode_ids)
+    )
 
     actionable_movie_ids = [
         r[0]
@@ -2000,5 +2090,5 @@ def run_materialization_for_entities_in_session(
         movie_ids=actionable_movie_ids,
         episode_ids=actionable_episode_ids,
         observation_source=observation_source,
-        density_scope_episode_ids=episode_ids,
+        density_scope_episode_ids=density_ids,
     )
