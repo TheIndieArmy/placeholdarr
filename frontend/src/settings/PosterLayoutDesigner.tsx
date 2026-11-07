@@ -73,7 +73,8 @@ const SIZE_MULT: Record<LabelSize, number> = { small: 1, medium: 1.5, large: 2 }
 const BANNER_SIZE_MULT: Record<LabelSize, number> = { small: 0.72, medium: 1, large: 1.35 };
 const BANNER_THICKNESS_MIN = 0.04;
 const BANNER_THICKNESS_MAX = 0.45;
-const BANNER_SPAN_MIN_GAP = 0.05;
+/** Minimum along-edge width so the strip stays visible; thumbs can nearly meet. */
+const BANNER_SPAN_MIN_GAP = 0.01;
 
 function normalizeBannerSpan(start: unknown, end: unknown): { start: number; end: number } {
   const one = (raw: unknown, fallback: number) => {
@@ -91,6 +92,105 @@ function normalizeBannerSpan(start: unknown, end: unknown): { start: number; end
     if (b - a < BANNER_SPAN_MIN_GAP) a = Math.max(0, b - BANNER_SPAN_MIN_GAP);
   }
   return { start: a, end: b };
+}
+
+/** One track, two draggable thumbs for banner along-edge coverage. */
+function BannerSpanSlider(props: {
+  start: number;
+  end: number;
+  accentHex: string;
+  onChange: (start: number, end: number) => void;
+}) {
+  const trackRef = useRef<HTMLDivElement | null>(null);
+  const dragRef = useRef<"start" | "end" | null>(null);
+  const spanRef = useRef({ start: props.start, end: props.end });
+  const onChangeRef = useRef(props.onChange);
+  const span = normalizeBannerSpan(props.start, props.end);
+  spanRef.current = span;
+  onChangeRef.current = props.onChange;
+
+  const valueFromClientX = (clientX: number) => {
+    const el = trackRef.current;
+    if (!el) return 0;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0) return 0;
+    return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  };
+
+  const applyDrag = (clientX: number) => {
+    const which = dragRef.current;
+    if (!which) return;
+    const cur = spanRef.current;
+    const v = valueFromClientX(clientX);
+    if (which === "start") {
+      onChangeRef.current(Math.min(v, cur.end - BANNER_SPAN_MIN_GAP), cur.end);
+    } else {
+      onChangeRef.current(cur.start, Math.max(v, cur.start + BANNER_SPAN_MIN_GAP));
+    }
+  };
+
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      if (!dragRef.current) return;
+      applyDrag(e.clientX);
+    };
+    const onUp = () => {
+      dragRef.current = null;
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+  }, []);
+
+  const beginThumb = (which: "start" | "end") => (e: ReactPointerEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragRef.current = which;
+    applyDrag(e.clientX);
+  };
+
+  return (
+    <div
+      ref={trackRef}
+      className="relative h-7 w-full touch-none select-none"
+      onPointerDown={(e) => {
+        const v = valueFromClientX(e.clientX);
+        const distStart = Math.abs(v - span.start);
+        const distEnd = Math.abs(v - span.end);
+        dragRef.current = distStart <= distEnd ? "start" : "end";
+        applyDrag(e.clientX);
+      }}
+    >
+      <div className="pointer-events-none absolute left-0 right-0 top-1/2 h-1.5 -translate-y-1/2 rounded-full border border-[#424753]/55 bg-[#0b111b]" />
+      <div
+        className="pointer-events-none absolute top-1/2 h-1.5 -translate-y-1/2 rounded-full"
+        style={{
+          left: `${span.start * 100}%`,
+          width: `${(span.end - span.start) * 100}%`,
+          backgroundColor: props.accentHex,
+          opacity: 0.75,
+        }}
+      />
+      {(["start", "end"] as const).map((which) => {
+        const value = which === "start" ? span.start : span.end;
+        return (
+          <button
+            key={which}
+            type="button"
+            aria-label={which === "start" ? "Banner span start" : "Banner span end"}
+            className="absolute top-1/2 z-[2] h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[#0b111b] shadow-sm"
+            style={{ left: `${value * 100}%`, backgroundColor: props.accentHex }}
+            onPointerDown={beginThumb(which)}
+          />
+        );
+      })}
+    </div>
+  );
 }
 const CUSTOM_TEXT_MAX_LEN = 120;
 const CUSTOM_SEP_DEFAULT = "·";
@@ -1488,63 +1588,19 @@ export default function PosterLayoutDesigner(props: Props) {
                   </label>
                   {(() => {
                     const span = normalizeBannerSpan(selected.span_start, selected.span_end);
-                    const edge = normalizeBannerEdge(selected.edge);
-                    const sideA = edge === "left" || edge === "right" ? "Top" : "Left";
-                    const sideB = edge === "left" || edge === "right" ? "Bottom" : "Right";
                     const startPct = Math.round(span.start * 100);
                     const endPct = Math.round(span.end * 100);
-                    const gapPct = Math.round(BANNER_SPAN_MIN_GAP * 100);
                     return (
-                      <div className="space-y-2 min-w-0">
+                      <div className="space-y-1 min-w-0">
                         <div className="text-[12px] text-slate-400">
                           Along edge ({startPct}% – {endPct}%)
                         </div>
-                        <label className="space-y-1 text-[12px] text-slate-400 min-w-0 block">
-                          <span>
-                            {sideA} ({startPct}%)
-                          </span>
-                          <input
-                            type="range"
-                            min={0}
-                            max={100 - gapPct}
-                            step={1}
-                            value={startPct}
-                            onChange={(e) => {
-                              const nextStart = Math.min(
-                                Number(e.target.value) / 100,
-                                span.end - BANNER_SPAN_MIN_GAP,
-                              );
-                              patchSelected({
-                                span_start: Math.max(0, nextStart),
-                                span_end: span.end,
-                              });
-                            }}
-                            className="w-full accent-[var(--brand-accent)]"
-                          />
-                        </label>
-                        <label className="space-y-1 text-[12px] text-slate-400 min-w-0 block">
-                          <span>
-                            {sideB} ({endPct}%)
-                          </span>
-                          <input
-                            type="range"
-                            min={gapPct}
-                            max={100}
-                            step={1}
-                            value={endPct}
-                            onChange={(e) => {
-                              const nextEnd = Math.max(
-                                Number(e.target.value) / 100,
-                                span.start + BANNER_SPAN_MIN_GAP,
-                              );
-                              patchSelected({
-                                span_start: span.start,
-                                span_end: Math.min(1, nextEnd),
-                              });
-                            }}
-                            className="w-full accent-[var(--brand-accent)]"
-                          />
-                        </label>
+                        <BannerSpanSlider
+                          start={span.start}
+                          end={span.end}
+                          accentHex={props.accentHex}
+                          onChange={(start, end) => patchSelected({ span_start: start, span_end: end })}
+                        />
                       </div>
                     );
                   })()}
