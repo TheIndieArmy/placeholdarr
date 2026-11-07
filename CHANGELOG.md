@@ -9,6 +9,29 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Summary
+
+- **Poster layout designer**: Grid label editor for placeholder art across Movie / TV / Episode profiles.
+- **Layout fingerprints**: Saving a profile only invalidates matching placeholder art sidecars.
+
+### Added
+
+- **Poster layout designer**: Settings → Poster Art grid editor for badge, banners, Custom templates, SeriesStatus, and metadata chips.
+- **Layout profiles**: Twelve keys (`placeholder` / `real` × Default / Coming Soon); bake uses Placeholder; Real is reserved and disabled in the UI.
+- **Preview art**: TMDB id or random library pick with live sample tokens for the designer.
+- **SeriesStatus label**: Airing / Ended / Canceled / Returning from Sonarr status on TV and episode profiles.
+
+### Changed
+
+- **Poster overlays**: Grayscale can be per profile; badge and banner toggles move into layout profiles (seeded from prior settings).
+- **Poster layout grid**: Odd snap grids (portrait 25×37, landscape 33×21) so a cell center sits at exact 50%.
+- **Art refresh**: Per-profile `layout_hash` / `layout_profile` so unrelated profiles keep their baked art.
+
+### Fixed
+
+- **Poster layout preview**: Chip labels no longer crash the live preview (RGBA composite).
+- **Poster layout designer UI**: Dark-themed selects/color fields and no overflow from the style editors.
+
 ## Pre-release
 
 ## Released

@@ -635,6 +635,57 @@ def pick_exact_poster_from_images(
     return None, None
 
 
+def poster_image_url(poster_path: Any, *, size: str = "w500") -> str | None:
+    """Build a TMDB image CDN URL from a ``poster_path`` / ``still_path`` value."""
+    path = str(poster_path or "").strip()
+    if not path:
+        return None
+    if not path.startswith("/"):
+        path = "/" + path
+    size_key = str(size or "w500").strip() or "w500"
+    return f"https://image.tmdb.org/t/p/{size_key}{path}"
+
+
+def fetch_movie_poster_url(tmdb_id: int) -> tuple[str | None, str]:
+    """Return ``(poster_url, title)`` for a movie TMDB id."""
+    tid = int(tmdb_id)
+    data = _request(f"/movie/{tid}")
+    title = str(data.get("title") or data.get("original_title") or "").strip()
+    return poster_image_url(data.get("poster_path")), title
+
+
+def fetch_tv_poster_url(tmdb_id: int) -> tuple[str | None, str]:
+    """Return ``(poster_url, title)`` for a TV TMDB id."""
+    tid = int(tmdb_id)
+    data = _request(f"/tv/{tid}")
+    title = str(data.get("name") or data.get("original_name") or "").strip()
+    return poster_image_url(data.get("poster_path")), title
+
+
+def fetch_tv_episode_still_url(tmdb_id: int) -> tuple[str | None, str]:
+    """Return an episode still for a TV show TMDB id (prefers season 1 stills)."""
+    tid = int(tmdb_id)
+    data = _request(f"/tv/{tid}")
+    title = str(data.get("name") or data.get("original_name") or "").strip()
+    # Prefer a real episode still so the designer landscape board matches episode thumbs.
+    try:
+        season = _request(f"/tv/{tid}/season/1")
+    except TmdbError:
+        season = {}
+    episodes = season.get("episodes") if isinstance(season, dict) else None
+    if isinstance(episodes, list):
+        for ep in episodes:
+            if not isinstance(ep, dict):
+                continue
+            still = poster_image_url(ep.get("still_path"), size="w780")
+            if still:
+                ep_name = str(ep.get("name") or "").strip()
+                label = f"{title}: {ep_name}".strip(": ") if ep_name else title
+                return still, label
+    # Fall back to series poster (will be letterboxed into landscape).
+    return poster_image_url(data.get("poster_path")), title
+
+
 def fetch_movie_original_language(tmdb_id: int) -> str | None:
     tid = int(tmdb_id)
     cache_key = f"/movie/{tid}?fields=original_language"

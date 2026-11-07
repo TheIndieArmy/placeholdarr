@@ -5377,6 +5377,60 @@ async def settings_current():
     return JSONResponse(content=get_settings_payload())
 
 
+def _parse_preview_layout_labels(raw: Any) -> tuple[list | None, str | None]:
+    """Return (labels, error_message)."""
+    if raw is None:
+        return None, None
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None, None
+        try:
+            import json as _json
+
+            raw = _json.loads(text)
+        except Exception:
+            return None, "Invalid layout JSON"
+    if isinstance(raw, dict) and isinstance(raw.get("labels"), list):
+        return list(raw.get("labels") or []), None
+    if isinstance(raw, list):
+        return list(raw), None
+    return None, "layout must be a labels array or {labels: [...]} object"
+
+
+def _poster_overlay_preview_jpeg(
+    *,
+    kind: str = "movie",
+    grayscale: bool = False,
+    badge: bool = False,
+    badge_position: str = "bottom_right",
+    placeholder_banner: bool = False,
+    coming_soon_banner: bool = False,
+    banner_position: str = "top",
+    profile_key: str | None = None,
+    layout_labels: list | None = None,
+    dim_base: bool = False,
+    base_url: str | None = None,
+    sample_token_overrides: dict | None = None,
+):
+    from services.poster_overlay import render_overlay_preview_jpeg
+
+    return render_overlay_preview_jpeg(
+        kind=str(kind or "movie"),
+        grayscale=bool(grayscale),
+        badge=bool(badge),
+        badge_position=str(badge_position or "bottom_right"),
+        placeholder_banner=bool(placeholder_banner),
+        coming_soon_banner=bool(coming_soon_banner),
+        banner_position=str(banner_position or "top"),
+        profile_key=str(profile_key).strip() if profile_key else None,
+        layout_labels=layout_labels,
+        dim_base=bool(dim_base),
+        base_url=str(base_url).strip() if base_url else None,
+        sample_token_overrides=sample_token_overrides if isinstance(sample_token_overrides, dict) else None,
+    )
+
+
 @router.get("/api/settings/poster-overlay-preview")
 async def settings_poster_overlay_preview(
     kind: str = "movie",
@@ -5386,19 +5440,79 @@ async def settings_poster_overlay_preview(
     placeholder_banner: bool = False,
     coming_soon_banner: bool = False,
     banner_position: str = "top",
+    profile_key: str | None = None,
+    layout: str | None = None,
+    dim_base: bool = False,
+    base_url: str | None = None,
 ):
-    """Live JPEG preview of composited poster overlay layers for Settings / onboarding."""
-    from services.poster_overlay import render_overlay_preview_jpeg
+    """Live JPEG preview of composited poster overlay layers for Settings / onboarding.
 
-    data = render_overlay_preview_jpeg(
-        kind=str(kind or "movie"),
-        grayscale=bool(grayscale),
-        badge=bool(badge),
-        badge_position=str(badge_position or "bottom_right"),
-        placeholder_banner=bool(placeholder_banner),
-        coming_soon_banner=bool(coming_soon_banner),
-        banner_position=str(banner_position or "top"),
+    Pass ``profile_key`` (and optional draft ``layout`` JSON of labels) to preview
+    the grid layout designer path. Prefer POST for large drafts.
+    """
+    draft_labels, err = _parse_preview_layout_labels(layout)
+    if err:
+        return JSONResponse({"ok": False, "message": err}, status_code=400)
+
+    try:
+        data = _poster_overlay_preview_jpeg(
+            kind=str(kind or "movie"),
+            grayscale=bool(grayscale),
+            badge=bool(badge),
+            badge_position=str(badge_position or "bottom_right"),
+            placeholder_banner=bool(placeholder_banner),
+            coming_soon_banner=bool(coming_soon_banner),
+            banner_position=str(banner_position or "top"),
+            profile_key=str(profile_key).strip() if profile_key else None,
+            layout_labels=draft_labels,
+            dim_base=bool(dim_base),
+            base_url=base_url,
+        )
+    except Exception as exc:
+        logger.warning(f"Poster overlay preview failed: {exc}", extra={"emoji_type": "warning"})
+        return JSONResponse({"ok": False, "message": "Preview render failed"}, status_code=500)
+    if not data:
+        return JSONResponse(
+            {"ok": False, "message": "Preview unavailable (Pillow or sample art missing)"},
+            status_code=503,
+        )
+    return StreamingResponse(
+        iter([data]),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store"},
     )
+
+
+@router.post("/api/settings/poster-overlay-preview")
+async def settings_poster_overlay_preview_post(request: Request):
+    """Designer draft preview (JSON body avoids long GET query strings)."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "message": "Expected a JSON object"}, status_code=400)
+    draft_labels, err = _parse_preview_layout_labels(body.get("layout") if "layout" in body else body.get("labels"))
+    if err:
+        return JSONResponse({"ok": False, "message": err}, status_code=400)
+    profile_key = body.get("profile_key")
+    try:
+        data = _poster_overlay_preview_jpeg(
+            kind=str(body.get("kind") or "movie"),
+            grayscale=bool(body.get("grayscale")),
+            badge=bool(body.get("badge")),
+            badge_position=str(body.get("badge_position") or "bottom_right"),
+            placeholder_banner=bool(body.get("placeholder_banner")),
+            coming_soon_banner=bool(body.get("coming_soon_banner")),
+            banner_position=str(body.get("banner_position") or "top"),
+            profile_key=str(profile_key).strip() if profile_key else None,
+            layout_labels=draft_labels,
+            dim_base=bool(body.get("dim_base", True)),
+            base_url=str(body.get("base_url") or "").strip() or None,
+            sample_token_overrides=body.get("sample_tokens")
+            if isinstance(body.get("sample_tokens"), dict)
+            else None,
+        )
+    except Exception as exc:
+        logger.warning(f"Poster overlay preview POST failed: {exc}", extra={"emoji_type": "warning"})
+        return JSONResponse({"ok": False, "message": "Preview render failed"}, status_code=500)
     if not data:
         return JSONResponse(
             {"ok": False, "message": "Preview unavailable (Pillow or sample art missing)"},
