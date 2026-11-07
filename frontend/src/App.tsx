@@ -10,6 +10,7 @@ import {
   useState,
   type CSSProperties,
   type FormEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } from "react-router-dom";
@@ -7552,7 +7553,10 @@ function PosterOverlayControlsWithPreview(props: {
     listHovering?: boolean;
     hoveredId?: string | null;
     selectedId?: string | null;
+    placementControlsHot?: boolean;
   } | null;
+  /** Drag-update selected chip x/y from the sticky bake preview. */
+  onPlacementDrag?: (x: number, y: number) => void;
 }) {
   return (
     <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:gap-8">
@@ -7569,6 +7573,7 @@ function PosterOverlayControlsWithPreview(props: {
           layout="focus"
           accentHex={props.accentHex}
           layoutPreview={props.layoutPreview}
+          onPlacementDrag={props.onPlacementDrag}
         />
         {props.belowPreview ? <div className="mt-3">{props.belowPreview}</div> : null}
       </aside>
@@ -7594,8 +7599,16 @@ function PosterArtOverlaysBlock(props: {
     listHovering?: boolean;
     hoveredId?: string | null;
     selectedId?: string | null;
+    placementControlsHot?: boolean;
   } | null>(null);
   const [previewArtControls, setPreviewArtControls] = useState<ReactNode>(null);
+  const placementDragRef = useRef<((x: number, y: number) => void) | null>(null);
+  const registerPlacementDrag = useCallback((handler: ((x: number, y: number) => void) | null) => {
+    placementDragRef.current = handler;
+  }, []);
+  const handlePlacementDrag = useCallback((x: number, y: number) => {
+    placementDragRef.current?.(x, y);
+  }, []);
   const handleLayoutPreviewChange = useCallback(
     (state: {
       profileKey: string;
@@ -7608,6 +7621,7 @@ function PosterArtOverlaysBlock(props: {
       listHovering?: boolean;
       hoveredId?: string | null;
       selectedId?: string | null;
+      placementControlsHot?: boolean;
     }) => {
       const labelsJson = JSON.stringify(state.labels);
       const baseUrl = state.baseUrl || null;
@@ -7620,6 +7634,7 @@ function PosterArtOverlaysBlock(props: {
       const listHovering = Boolean(state.listHovering);
       const hoveredId = state.hoveredId || null;
       const selectedId = state.selectedId || null;
+      const placementControlsHot = Boolean(state.placementControlsHot);
       setLayoutPreview((prev) => {
         const prevGuideKey = prev?.guide ? `${prev.guide.x}:${prev.guide.y}` : "";
         const prevMarkersKey = (prev?.markers || []).map((m) => `${m.id}:${m.n}:${m.x}:${m.y}`).join("|");
@@ -7634,7 +7649,8 @@ function PosterArtOverlaysBlock(props: {
           prevMarkersKey === markersKey &&
           Boolean(prev.listHovering) === listHovering &&
           (prev.hoveredId || null) === hoveredId &&
-          (prev.selectedId || null) === selectedId
+          (prev.selectedId || null) === selectedId &&
+          Boolean(prev.placementControlsHot) === placementControlsHot
         ) {
           return prev;
         }
@@ -7650,6 +7666,7 @@ function PosterArtOverlaysBlock(props: {
           listHovering,
           hoveredId,
           selectedId,
+          placementControlsHot,
         };
       });
     },
@@ -7662,6 +7679,7 @@ function PosterArtOverlaysBlock(props: {
       accentHex={props.accentHex}
       layoutPreview={layoutPreview}
       belowPreview={previewArtControls}
+      onPlacementDrag={handlePlacementDrag}
       controls={
         <SettingsDensityFrame legend="Layout designer">
           <PosterLayoutDesigner
@@ -7669,6 +7687,7 @@ function PosterArtOverlaysBlock(props: {
             compact={props.compact}
             onPreviewChange={handleLayoutPreviewChange}
             onPreviewArtControlsChange={setPreviewArtControls}
+            onRegisterPlacementDrag={registerPlacementDrag}
           />
         </SettingsDensityFrame>
       }
@@ -7762,11 +7781,20 @@ function PosterOverlayPreviewTile(props: {
   markers?: Array<{ id: string; n: number; x: number; y: number }> | null;
   hoveredMarkerId?: string | null;
   accentHex?: string;
+  /** When set with a guide, the selected chip can be dragged on the bake preview. */
+  onPlacementDrag?: (x: number, y: number) => void;
+  /** Keep the drag handle visible while X/Y bake-px controls are in use. */
+  placementControlsHot?: boolean;
 }) {
   const [currentSrc, setCurrentSrc] = useState(props.src);
   const [nextSrc, setNextSrc] = useState<string | null>(null);
   const [nextVisible, setNextVisible] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [previewHovering, setPreviewHovering] = useState(false);
+  const [handleOpaque, setHandleOpaque] = useState(true);
   const currentSrcRef = useRef(props.src);
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const dragActiveRef = useRef(false);
 
   useEffect(() => {
     currentSrcRef.current = currentSrc;
@@ -7810,35 +7838,107 @@ function PosterOverlayPreviewTile(props: {
   }, [props.src]);
 
   const guide = props.guide;
-  const accent = guide?.accentHex || "#38bdf8";
+  const accent = guide?.accentHex || props.accentHex || "#38bdf8";
   const bakeW = Math.max(1, guide?.bakeW || 1000);
   const bakeH = Math.max(1, guide?.bakeH || 1500);
   // Glow only at the exact bake-canvas midpoint (e.g. 500/750 or 960/540).
   const glowX = Boolean(guide && Math.round(guide.x * bakeW) === bakeW / 2);
   const glowY = Boolean(guide && Math.round(guide.y * bakeH) === bakeH / 2);
+  const canDrag = Boolean(guide && props.onPlacementDrag);
+  const wantHandleVisible = Boolean(
+    canDrag && (previewHovering || dragging || props.placementControlsHot),
+  );
+
+  useEffect(() => {
+    if (!canDrag) {
+      setHandleOpaque(false);
+      return;
+    }
+    if (wantHandleVisible) {
+      setHandleOpaque(true);
+      return;
+    }
+    const timer = window.setTimeout(() => setHandleOpaque(false), 1000);
+    return () => window.clearTimeout(timer);
+  }, [canDrag, wantHandleVisible]);
+
+  const fracFromClient = useCallback((clientX: number, clientY: number) => {
+    const el = stageRef.current;
+    if (!el) return null;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    const x = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const y = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+    return { x, y };
+  }, []);
+
+  useEffect(() => {
+    if (!dragging) return;
+    const onMove = (event: PointerEvent) => {
+      if (!dragActiveRef.current || !props.onPlacementDrag) return;
+      const next = fracFromClient(event.clientX, event.clientY);
+      if (!next) return;
+      props.onPlacementDrag(next.x, next.y);
+    };
+    const onUp = () => {
+      dragActiveRef.current = false;
+      setDragging(false);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+  }, [dragging, fracFromClient, props.onPlacementDrag]);
+
+  const beginDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    if (!canDrag || !props.onPlacementDrag) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dragActiveRef.current = true;
+    setDragging(true);
+    const next = fracFromClient(event.clientX, event.clientY);
+    if (next) props.onPlacementDrag(next.x, next.y);
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      /* ignore */
+    }
+  };
 
   return (
     <figure
       className={`shrink-0 rounded-lg overflow-hidden border border-[#424753]/40 bg-[#0f1419]/80 ${props.widthClass}`}
     >
-      <div className={`relative w-full ${props.aspect} bg-[#0b111b]`}>
+      <div
+        ref={stageRef}
+        onPointerEnter={() => setPreviewHovering(true)}
+        onPointerLeave={() => setPreviewHovering(false)}
+        className={`relative w-full ${props.aspect} bg-[#0b111b] ${canDrag ? (dragging ? "cursor-grabbing select-none" : "") : ""}`}
+      >
         <img
           src={currentSrc}
           alt={`${props.label} overlay preview`}
-          className="absolute inset-0 h-full w-full object-cover"
+          draggable={false}
+          className="pointer-events-none absolute inset-0 h-full w-full object-cover"
         />
         {nextSrc ? (
           <img
             src={nextSrc}
             alt=""
             aria-hidden
-            className={`absolute inset-0 h-full w-full object-cover transition-opacity duration-300 ease-out ${
+            draggable={false}
+            className={`pointer-events-none absolute inset-0 h-full w-full object-cover transition-opacity duration-300 ease-out ${
               nextVisible ? "opacity-100" : "opacity-0"
             }`}
           />
         ) : null}
         {guide ? (
           <>
+            {/* Poster midlines (glow when the chip sits on the bake midpoint). */}
             <div
               aria-hidden
               className="pointer-events-none absolute inset-y-0 z-[4] w-px -translate-x-1/2"
@@ -7861,6 +7961,46 @@ function PosterOverlayPreviewTile(props: {
                   : undefined,
               }}
             />
+            {/* Chip position guides while selected. */}
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-y-0 z-[5] w-px -translate-x-1/2"
+              style={{
+                left: `${Math.max(0, Math.min(1, guide.x)) * 100}%`,
+                backgroundColor: `${accent}66`,
+              }}
+            />
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-x-0 z-[5] h-px -translate-y-1/2"
+              style={{
+                top: `${Math.max(0, Math.min(1, guide.y)) * 100}%`,
+                backgroundColor: `${accent}66`,
+              }}
+            />
+            {canDrag ? (
+              <button
+                type="button"
+                title="Drag to place"
+                aria-label="Drag chip position"
+                tabIndex={handleOpaque ? undefined : -1}
+                aria-hidden={!handleOpaque}
+                onPointerDown={beginDrag}
+                className={`absolute z-[9] flex h-7 w-7 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-[#0b111b] shadow-md touch-none transition-opacity duration-300 ease-out ${
+                  dragging ? "cursor-grabbing" : "cursor-grab"
+                } ${handleOpaque ? "opacity-100" : "pointer-events-none opacity-0"}`}
+                style={{
+                  left: `${Math.max(0, Math.min(1, guide.x)) * 100}%`,
+                  top: `${Math.max(0, Math.min(1, guide.y)) * 100}%`,
+                  backgroundColor: accent,
+                  boxShadow: `0 0 0 1px ${accent}, 0 0 12px ${accent}88`,
+                }}
+              >
+                <span className="material-symbols-outlined leading-none text-[#0b111b]" style={{ fontSize: 16 }}>
+                  open_with
+                </span>
+              </button>
+            ) : null}
           </>
         ) : null}
         {props.markers && props.markers.length > 0
@@ -7899,7 +8039,10 @@ function PosterOverlayPreviewTile(props: {
             })
           : null}
       </div>
-      <figcaption className="px-2 py-1.5 text-[11px] text-slate-400 leading-snug">{props.label}</figcaption>
+      <figcaption className="px-2 py-1.5 text-[11px] text-slate-400 leading-snug">
+        {props.label}
+        {canDrag ? <span className="text-slate-500"> · Drag handle to place</span> : null}
+      </figcaption>
     </figure>
   );
 }
@@ -7972,7 +8115,9 @@ function PosterOverlayFocusPreview(props: {
     listHovering?: boolean;
     hoveredId?: string | null;
     selectedId?: string | null;
+    placementControlsHot?: boolean;
   };
+  onPlacementDrag?: (x: number, y: number) => void;
 }) {
   const grayscale = Boolean(props.layoutPreview.grayscale);
   const baseUrl = props.layoutPreview.baseUrl || null;
@@ -8087,6 +8232,8 @@ function PosterOverlayFocusPreview(props: {
       markers={markers}
       hoveredMarkerId={props.layoutPreview.hoveredId || null}
       accentHex={props.accentHex}
+      onPlacementDrag={guide ? props.onPlacementDrag : undefined}
+      placementControlsHot={Boolean(props.layoutPreview.placementControlsHot)}
     />
   );
 }
@@ -8110,7 +8257,9 @@ function PosterOverlayLivePreview(props: {
     listHovering?: boolean;
     hoveredId?: string | null;
     selectedId?: string | null;
+    placementControlsHot?: boolean;
   } | null;
+  onPlacementDrag?: (x: number, y: number) => void;
 }) {
   const draftGrayscale = props.layoutPreview?.grayscale;
   const layerQs = new URLSearchParams({
@@ -8129,6 +8278,7 @@ function PosterOverlayLivePreview(props: {
         values={props.values}
         accentHex={props.accentHex}
         layoutPreview={props.layoutPreview}
+        onPlacementDrag={props.onPlacementDrag}
       />
     );
   }
