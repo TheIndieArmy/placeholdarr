@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import math
 import os
 import re
 from pathlib import Path
@@ -668,9 +669,9 @@ def _draw_layout_chip(
     art_path: Path | None = None,
     landscape: bool = False,
 ):
-    """Draw a content-sized chip centered on ``anchor`` (snap cell center).
+    """Draw a content-sized chip centered on ``anchor`` (fractional x/y point).
 
-    Grid cells only choose *where* the chip sits. Width/height follow the label
+    Placement is independent of any snap grid. Width/height follow the label
     text (and optional art logo). Font size scales with ``size``.
     """
     mods = _pillow()
@@ -885,6 +886,44 @@ def _resolve_layout_label_text(label: dict, token_map: dict) -> tuple[str, Path 
     return text, art_path
 
 
+def _layout_anchor_xy(
+    label: dict,
+    *,
+    width: int,
+    height: int,
+    cols: int,
+    rows: int,
+) -> tuple[int, int]:
+    """Chip/badge center in pixels from fractional ``x``/``y`` (legacy row/col fallback)."""
+    grid_cols = max(1, int(cols))
+    grid_rows = max(1, int(rows))
+    has_x = label.get("x") is not None
+    has_y = label.get("y") is not None
+    if has_x or has_y:
+        try:
+            fx = float(label.get("x")) if has_x else 0.5
+        except (TypeError, ValueError):
+            fx = 0.5
+        try:
+            fy = float(label.get("y")) if has_y else 0.5
+        except (TypeError, ValueError):
+            fy = 0.5
+        if not math.isfinite(fx):
+            fx = 0.5
+        if not math.isfinite(fy):
+            fy = 0.5
+        fx = max(0.0, min(1.0, fx))
+        fy = max(0.0, min(1.0, fy))
+        return int(round(fx * width)), int(round(fy * height))
+    row = int(label.get("row") or 0)
+    col = int(label.get("col") or 0)
+    row = max(0, min(grid_rows - 1, row))
+    col = max(0, min(grid_cols - 1, col))
+    cell_w = width / grid_cols
+    cell_h = height / grid_rows
+    return int((col + 0.5) * cell_w), int((row + 0.5) * cell_h)
+
+
 def apply_layout_overlay(
     img,
     *,
@@ -895,7 +934,7 @@ def apply_layout_overlay(
     cols: int | None = None,
     rows: int | None = None,
 ):
-    """Composite grayscale + grid-anchored labels (banners, chips, badge)."""
+    """Composite grayscale + fraction-anchored labels (banners, chips, badge)."""
     if _pillow() is None:
         _log_pillow_missing_once()
         return None
@@ -909,12 +948,8 @@ def apply_layout_overlay(
     if not label_list:
         return out
     w, h = out.size
-    grid_cols = int(cols or (16 if landscape else 12))
-    grid_rows = int(rows or (10 if landscape else 18))
-    grid_cols = max(1, grid_cols)
-    grid_rows = max(1, grid_rows)
-    cell_w = w / grid_cols
-    cell_h = h / grid_rows
+    grid_cols = max(1, int(cols or (16 if landscape else 12)))
+    grid_rows = max(1, int(rows or (10 if landscape else 18)))
 
     def _is_banner_label(lab: dict) -> bool:
         token = str(lab.get("token") or "").strip()
@@ -950,13 +985,7 @@ def apply_layout_overlay(
         token = str(label.get("token") or "").strip()
         if token == "Banner":
             continue
-        row = int(label.get("row") or 0)
-        col = int(label.get("col") or 0)
-        row = max(0, min(grid_rows - 1, row))
-        col = max(0, min(grid_cols - 1, col))
-        # Snap point = cell center. Size is independent of the cell.
-        ax = int((col + 0.5) * cell_w)
-        ay = int((row + 0.5) * cell_h)
+        ax, ay = _layout_anchor_xy(label, width=w, height=h, cols=grid_cols, rows=grid_rows)
         label_size = str(label.get("size") or ("medium" if token == "Badge" else "small")).strip().lower()
         if token == "Badge":
             mods = _pillow()
