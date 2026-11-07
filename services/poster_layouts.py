@@ -18,13 +18,10 @@ from services.postgres.db import get_session
 from services.postgres.models import AppConfig
 
 CONFIG_KEY = "PLACEHOLDER_POSTER_LAYOUTS"
-# v5: media × availability (placeholder|real) × timing (default|coming_soon).
-# v4: odd grids so one cell center sits at exact 50% (center snap guides).
-# v3: portrait 24×36, landscape 32×20 (each cell is 1/4 the area of v2).
-# v2 was 12×18 / 16×10; v1 was 6×9 / 8×5.
-LAYOUT_DOC_VERSION = 5
+# Shipped layout-designer schema: odd snap grids + placeholder|real profile keys.
+LAYOUT_DOC_VERSION = 1
 
-# ``{media}.{availability}.{variant}`` — bake uses placeholder today; real is ready for later.
+# ``{media}.{availability}.{variant}`` — bake uses placeholder today; real is designer-ready.
 PROFILE_KEYS: tuple[str, ...] = (
     "movie.placeholder.default",
     "movie.placeholder.coming_soon",
@@ -40,7 +37,7 @@ PROFILE_KEYS: tuple[str, ...] = (
     "episode.real.coming_soon",
 )
 
-# Pre-v5 two-segment keys → placeholder availability.
+# Pre-ship two-segment keys → placeholder availability.
 _LEGACY_PROFILE_KEY_MAP: dict[str, str] = {
     "movie.default": "movie.placeholder.default",
     "movie.coming_soon": "movie.placeholder.coming_soon",
@@ -55,13 +52,13 @@ PORTRAIT_ROWS = 37
 LANDSCAPE_COLS = 33
 LANDSCAPE_ROWS = 21
 
-# Prior grid sizes used when migrating saved label coordinates up to the current grid.
-# v4 introduced the current odd grids; v5 only added placeholder/real key segments.
-_LEGACY_GRID_BY_VERSION: dict[int, dict[str, tuple[int, int]]] = {
-    1: {"portrait": (6, 9), "landscape": (8, 5)},
+# Unreleased interim docs only (dev testing before ship). Migrate once into version 1.
+# 2/3 used denser even grids; 4/5 already used the current odd grids (5 added real keys).
+_PRERELEASE_GRID_BY_VERSION: dict[int, dict[str, tuple[int, int]]] = {
     2: {"portrait": (12, 18), "landscape": (16, 10)},
     3: {"portrait": (24, 36), "landscape": (32, 20)},
     4: {"portrait": (PORTRAIT_COLS, PORTRAIT_ROWS), "landscape": (LANDSCAPE_COLS, LANDSCAPE_ROWS)},
+    5: {"portrait": (PORTRAIT_COLS, PORTRAIT_ROWS), "landscape": (LANDSCAPE_COLS, LANDSCAPE_ROWS)},
 }
 
 # Tokens available in the designer (filtered per media kind in the UI).
@@ -754,20 +751,35 @@ def seed_profiles_from_legacy_settings() -> dict[str, Any]:
     return {"version": LAYOUT_DOC_VERSION, "profiles": profiles}
 
 
+def _source_grid_for_prior_version(prior_version: int, *, landscape: bool) -> tuple[int, int] | None:
+    """Return (cols, rows) for a stored prior version, or None when no remap is needed."""
+    if prior_version == LAYOUT_DOC_VERSION:
+        return None
+    kind = "landscape" if landscape else "portrait"
+    interim = _PRERELEASE_GRID_BY_VERSION.get(prior_version)
+    if interim is None:
+        return None
+    cols, rows = interim[kind]
+    return int(cols), int(rows)
+
+
 def _scale_label_coords_from_version(
     profile_key: str,
     labels: list[dict[str, Any]],
     *,
     prior_version: int,
 ) -> list[dict[str, Any]]:
-    """Map cells from an older grid version onto the current grid (preserve cell centers)."""
-    if prior_version >= LAYOUT_DOC_VERSION or not labels:
+    """Map cells from a prior stored grid onto the current grid (preserve cell centers)."""
+    if not labels:
         return labels
+    landscape = str(profile_key).startswith("episode.")
+    source = _source_grid_for_prior_version(prior_version, landscape=landscape)
+    if source is None:
+        return labels
+    old_c, old_r = source
     cols, rows = grid_size_for_profile(profile_key)
-    kind = "landscape" if str(profile_key).startswith("episode.") else "portrait"
-    legacy = _LEGACY_GRID_BY_VERSION.get(prior_version, _LEGACY_GRID_BY_VERSION[1])[kind]
-    old_c, old_r = int(legacy[0]), int(legacy[1])
-    # Integer multiples (v1→v2→v3) keep the old scale factor. Odd v4 grids remap by cell center.
+    if old_c == cols and old_r == rows:
+        return labels
     scale_c = cols // old_c if old_c > 0 else 1
     scale_r = rows // old_r if old_r > 0 else 1
     use_center_map = scale_c * old_c != cols or scale_r * old_r != rows
@@ -791,8 +803,7 @@ def _scale_label_coords_from_version(
 def normalize_doc(payload: Any, *, seed_if_empty: bool = True) -> dict[str, Any]:
     if not isinstance(payload, dict) or not isinstance(payload.get("profiles"), dict):
         return seed_profiles_from_legacy_settings() if seed_if_empty else _empty_doc()
-    # Missing version means "already on the current grid" (designer PUT often omits it).
-    # Defaulting to 1 used to remap every save as if labels lived on the 6×9 v1 grid.
+    # Missing version means "already on the shipped schema" (designer may omit it).
     raw_version = payload.get("version")
     if raw_version is None or raw_version == "":
         prior_version = LAYOUT_DOC_VERSION
@@ -806,7 +817,7 @@ def normalize_doc(payload: Any, *, seed_if_empty: bool = True) -> dict[str, Any]
     any_labels = False
     for key in PROFILE_KEYS:
         prof = normalize_profile(key, profiles_raw.get(key))
-        if prior_version < LAYOUT_DOC_VERSION and prof["labels"]:
+        if prior_version != LAYOUT_DOC_VERSION and prof["labels"]:
             prof = {
                 **prof,
                 "labels": _scale_label_coords_from_version(
@@ -835,7 +846,7 @@ def layout_fingerprint(doc: dict[str, Any] | None = None) -> str:
 def profile_layout_fingerprint(profile_key: str, doc: dict[str, Any] | None = None) -> str:
     """Hash one profile for per-title art sidecars (only that profile invalidates).
 
-    Includes ``version`` so grid migrations (e.g. v3→v4) still rewrite once.
+    Includes ``version`` so schema migrations still rewrite art once.
     """
     data = doc if isinstance(doc, dict) else get_layout_doc()
     key = str(profile_key or "").strip()
@@ -918,7 +929,7 @@ def pick_profile_key(
 
 
 def _rewrite_legacy_profile_keys(profiles_raw: Any) -> dict[str, Any]:
-    """Map pre-v5 ``movie.default`` keys to ``movie.placeholder.default`` and fill gaps."""
+    """Map pre-ship ``movie.default`` keys to ``movie.placeholder.default`` and fill gaps."""
     raw = profiles_raw if isinstance(profiles_raw, dict) else {}
     out: dict[str, Any] = {}
     for key, value in raw.items():
