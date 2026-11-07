@@ -1,14 +1,16 @@
-"""Poster / thumb layout profiles for the grid label designer.
+"""Poster / thumb layout profiles for the label designer.
 
 Stores a versioned JSON document in AppConfig under ``PLACEHOLDER_POSTER_LAYOUTS``.
 Twelve profiles: movie|tv|episode × placeholder|real × default|coming_soon.
 Season posters use TV profiles. Bake uses placeholder today; real is designer-ready.
+Chip placement is fractional ``x``/``y`` (0..1); legacy row/col cells migrate on load.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import threading
 import uuid
@@ -234,6 +236,51 @@ def _clamp_int(value: Any, lo: int, hi: int, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return max(lo, min(hi, n))
+
+
+def _clamp_frac(value: Any, default: float = 0.5) -> float:
+    """Clamp a poster-relative coordinate to ``[0, 1]``."""
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(n):
+        return default
+    return max(0.0, min(1.0, n))
+
+
+def _xy_from_raw(raw: dict[str, Any], *, cols: int, rows: int) -> tuple[float, float]:
+    """Prefer stored ``x``/``y``; otherwise migrate from snap-cell centers."""
+    has_x = raw.get("x") is not None
+    has_y = raw.get("y") is not None
+    if has_x or has_y:
+        return _clamp_frac(raw.get("x"), 0.5), _clamp_frac(raw.get("y"), 0.5)
+    c = max(1, int(cols))
+    r = max(1, int(rows))
+    row = _clamp_int(raw.get("row"), 0, r - 1, 0)
+    col = _clamp_int(raw.get("col"), 0, c - 1, 0)
+    return (col + 0.5) / c, (row + 0.5) / r
+
+
+def _cell_from_xy(x: float, y: float, *, cols: int, rows: int) -> tuple[int, int]:
+    """Nearest snap cell for legacy row/col fields (banners / occupancy helpers)."""
+    c = max(1, int(cols))
+    r = max(1, int(rows))
+    col = _clamp_int(int(round(float(x) * c - 0.5)), 0, c - 1, 0)
+    row = _clamp_int(int(round(float(y) * r - 0.5)), 0, r - 1, 0)
+    return row, col
+
+
+def _edge_anchor_xy(edge: str) -> tuple[float, float]:
+    """Representative center for a banner edge (chips use free ``x``/``y`` instead)."""
+    e = _normalize_edge(edge)
+    if e == "bottom":
+        return 0.5, 1.0
+    if e == "left":
+        return 0.0, 0.5
+    if e == "right":
+        return 1.0, 0.5
+    return 0.5, 0.0
 
 
 def _hex_color(value: Any, default: str) -> str:
@@ -497,13 +544,14 @@ def normalize_label(raw: Any, *, cols: int, rows: int, landscape: bool = False) 
     arted = bool(raw.get("arted")) and token in _ARTED_TOKENS
     style = _normalize_style(raw.get("style"), token=token)
     size = _normalize_size(raw.get("size"), token=token)
-    row = _clamp_int(raw.get("row"), 0, rows - 1, 0)
-    col = _clamp_int(raw.get("col"), 0, cols - 1, 0)
+    x, y = _xy_from_raw(raw, cols=cols, rows=rows)
+    row, col = _cell_from_xy(x, y, cols=cols, rows=rows)
     if style == "banner":
         edge = _normalize_edge(raw.get("edge")) if raw.get("edge") is not None else infer_banner_edge(
             row, col, cols=cols, rows=rows
         )
         row, col = _edge_anchor_cell(edge, cols=cols, rows=rows)
+        x, y = _edge_anchor_xy(edge)
         arted = False
         border_opacity = 0.0
         thickness = _normalize_banner_thickness(
@@ -517,6 +565,8 @@ def normalize_label(raw: Any, *, cols: int, rows: int, landscape: bool = False) 
     return {
         "id": label_id,
         "token": token,
+        "x": x,
+        "y": y,
         "row": row,
         "col": col,
         "text_color": _hex_color(raw.get("text_color"), _DEFAULT_TEXT),
@@ -555,12 +605,15 @@ def _expand_legacy_text_banners(raw_labels: Any, *, cols: int, rows: int) -> lis
                 else infer_banner_edge(row, col, cols=cols, rows=rows)
             )
             anchor_r, anchor_c = _edge_anchor_cell(edge, cols=cols, rows=rows)
+            ax, ay = _edge_anchor_xy(edge)
             banner = {
                 **item,
                 "id": _new_label_id(),
                 "token": BANNER_TOKEN,
                 "style": "banner",
                 "edge": edge,
+                "x": ax,
+                "y": ay,
                 "row": anchor_r,
                 "col": anchor_c,
                 "arted": False,
@@ -572,6 +625,8 @@ def _expand_legacy_text_banners(raw_labels: Any, *, cols: int, rows: int) -> lis
                 "token": token,
                 "style": "chip",
                 "edge": "top",
+                "x": ax,
+                "y": ay,
                 "row": anchor_r,
                 "col": anchor_c,
                 # Text sits on the strip; chip fill stays off by default.
@@ -637,17 +692,18 @@ def _banner_cell(profile_key: str, position: str) -> tuple[int, int]:
     return _edge_anchor_cell(_normalize_edge(position), cols=cols, rows=rows)
 
 
-def _badge_cell(profile_key: str, position: str) -> tuple[int, int]:
+def _badge_xy(profile_key: str, position: str) -> tuple[float, float]:
+    """Legacy corner badge → fractional center of the old corner snap cell."""
     cols, rows = grid_size_for_profile(profile_key)
     pos = str(position or "bottom_right").strip().lower().replace("-", "_")
     top = pos.startswith("top_")
     left = pos.endswith("_left")
     row = 0 if top else rows - 1
     col = 0 if left else cols - 1
-    return row, col
+    return (col + 0.5) / cols, (row + 0.5) / rows
 
 
-def _make_label(token: str, row: int, col: int, **style: Any) -> dict[str, Any]:
+def _make_label(token: str, row: int = 0, col: int = 0, **style: Any) -> dict[str, Any]:
     border_color = style.get("border_color", _DEFAULT_BORDER)
     if "border_opacity" in style:
         border_opacity = style.get("border_opacity", _DEFAULT_BORDER_OPACITY)
@@ -668,12 +724,28 @@ def _make_label(token: str, row: int, col: int, **style: Any) -> dict[str, Any]:
             style.get("thickness"), size=size, edge=edge, landscape=landscape
         )
         span_start, span_end = _normalize_banner_span(style.get("span_start"), style.get("span_end"))
+        x, y = _edge_anchor_xy(edge)
+        row, col = _edge_anchor_cell(
+            edge,
+            cols=LANDSCAPE_COLS if landscape else PORTRAIT_COLS,
+            rows=LANDSCAPE_ROWS if landscape else PORTRAIT_ROWS,
+        )
     else:
         thickness = banner_base_frac("top", landscape=landscape)
         span_start, span_end = 0.0, 1.0
+        if style.get("x") is not None or style.get("y") is not None:
+            x = _clamp_frac(style.get("x"), 0.5)
+            y = _clamp_frac(style.get("y"), 0.5)
+        else:
+            cols = LANDSCAPE_COLS if landscape else PORTRAIT_COLS
+            rows = LANDSCAPE_ROWS if landscape else PORTRAIT_ROWS
+            x = (col + 0.5) / max(1, cols)
+            y = (row + 0.5) / max(1, rows)
     return {
         "id": _new_label_id(),
         "token": token,
+        "x": x,
+        "y": y,
         "row": row,
         "col": col,
         "text_color": style.get("text_color", _DEFAULT_TEXT),
@@ -718,12 +790,10 @@ def seed_profiles_from_legacy_settings() -> dict[str, Any]:
         landscape = key.startswith("episode.")
         if variant == "coming_soon" and cs_on:
             edge = _normalize_edge(banner_pos)
-            r, c = _banner_cell(key, edge)
+            bx, by = _edge_anchor_xy(edge)
             labels.append(
                 _make_label(
                     BANNER_TOKEN,
-                    r,
-                    c,
                     style="banner",
                     edge=edge,
                     size="medium",
@@ -734,21 +804,20 @@ def seed_profiles_from_legacy_settings() -> dict[str, Any]:
             labels.append(
                 _make_label(
                     "ComingSoonOrNewEp",
-                    r,
-                    c,
                     size="medium",
                     fill_opacity=0.0,
                     border_opacity=0.0,
+                    x=bx,
+                    y=by,
+                    landscape=landscape,
                 )
             )
         elif variant == "default" and ph_on:
             edge = _normalize_edge(banner_pos)
-            r, c = _banner_cell(key, edge)
+            bx, by = _edge_anchor_xy(edge)
             labels.append(
                 _make_label(
                     BANNER_TOKEN,
-                    r,
-                    c,
                     style="banner",
                     edge=edge,
                     size="medium",
@@ -759,24 +828,26 @@ def seed_profiles_from_legacy_settings() -> dict[str, Any]:
             labels.append(
                 _make_label(
                     "PLACEHOLDER",
-                    r,
-                    c,
                     size="medium",
                     fill_opacity=0.0,
                     border_opacity=0.0,
+                    x=bx,
+                    y=by,
+                    landscape=landscape,
                 )
             )
         if badge_on:
-            r, c = _badge_cell(key, badge_pos)
+            bx, by = _badge_xy(key, badge_pos)
             labels.append(
                 _make_label(
                     "Badge",
-                    r,
-                    c,
                     fill_color="#0b111b",  # dark logo variant (yellow on navy)
                     border_color="#000000",
                     border_opacity=0.0,
                     fill_opacity=1.0,
+                    x=bx,
+                    y=by,
+                    landscape=landscape,
                 )
             )
         profiles[key] = normalize_profile(key, {"labels": labels, "grayscale": gs_on})
@@ -805,7 +876,7 @@ def _scale_label_coords_from_version(
     *,
     prior_version: int,
 ) -> list[dict[str, Any]]:
-    """Map cells from a prior stored grid onto the current grid (preserve cell centers)."""
+    """Map prior-grid row/col into portable ``x``/``y`` fractions (run before normalize)."""
     if not labels:
         return labels
     landscape = str(profile_key).startswith("episode.")
@@ -813,25 +884,21 @@ def _scale_label_coords_from_version(
     if source is None:
         return labels
     old_c, old_r = source
-    cols, rows = grid_size_for_profile(profile_key)
-    if old_c == cols and old_r == rows:
-        return labels
-    scale_c = cols // old_c if old_c > 0 else 1
-    scale_r = rows // old_r if old_r > 0 else 1
-    use_center_map = scale_c * old_c != cols or scale_r * old_r != rows
     out: list[dict[str, Any]] = []
     for label in labels:
+        if not isinstance(label, dict):
+            continue
         item = dict(label)
-        old_row = int(item.get("row") or 0)
-        old_col = int(item.get("col") or 0)
-        if use_center_map and old_c > 0 and old_r > 0:
-            cx = (old_col + 0.5) / old_c
-            cy = (old_row + 0.5) / old_r
-            item["col"] = _clamp_int(int(round(cx * cols - 0.5)), 0, cols - 1, 0)
-            item["row"] = _clamp_int(int(round(cy * rows - 0.5)), 0, rows - 1, 0)
-        else:
-            item["row"] = _clamp_int(old_row * max(1, scale_r), 0, rows - 1, 0)
-            item["col"] = _clamp_int(old_col * max(1, scale_c), 0, cols - 1, 0)
+        if item.get("x") is not None or item.get("y") is not None:
+            item["x"] = _clamp_frac(item.get("x"), 0.5)
+            item["y"] = _clamp_frac(item.get("y"), 0.5)
+            out.append(item)
+            continue
+        old_row = _clamp_int(item.get("row"), 0, max(0, old_r - 1), 0)
+        old_col = _clamp_int(item.get("col"), 0, max(0, old_c - 1), 0)
+        if old_c > 0 and old_r > 0:
+            item["x"] = (old_col + 0.5) / old_c
+            item["y"] = (old_row + 0.5) / old_r
         out.append(item)
     return out
 
@@ -852,14 +919,17 @@ def normalize_doc(payload: Any, *, seed_if_empty: bool = True) -> dict[str, Any]
     profiles: dict[str, Any] = {}
     any_labels = False
     for key in PROFILE_KEYS:
-        prof = normalize_profile(key, profiles_raw.get(key))
-        if prior_version != LAYOUT_DOC_VERSION and prof["labels"]:
-            prof = {
-                **prof,
-                "labels": _scale_label_coords_from_version(
-                    key, prof["labels"], prior_version=prior_version
-                ),
-            }
+        raw_prof = profiles_raw.get(key)
+        if prior_version != LAYOUT_DOC_VERSION and isinstance(raw_prof, dict):
+            raw_labels = raw_prof.get("labels")
+            if isinstance(raw_labels, list) and raw_labels:
+                raw_prof = {
+                    **raw_prof,
+                    "labels": _scale_label_coords_from_version(
+                        key, raw_labels, prior_version=prior_version
+                    ),
+                }
+        prof = normalize_profile(key, raw_prof)
         if prof["labels"]:
             any_labels = True
         profiles[key] = prof

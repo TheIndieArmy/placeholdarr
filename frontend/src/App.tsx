@@ -7535,8 +7535,11 @@ function PosterOverlayControlsWithPreview(props: {
   values: FieldValueMap;
   controls: ReactNode;
   compact?: boolean;
+  accentHex?: string;
   /** Extra frames under the primary controls. */
   belowControls?: ReactNode;
+  /** Extra content under the sticky bake preview (e.g. Preview art picker). */
+  belowPreview?: ReactNode;
   layoutPreview?: {
     profileKey: string;
     labelsJson?: string;
@@ -7544,6 +7547,11 @@ function PosterOverlayControlsWithPreview(props: {
     baseUrl?: string | null;
     sampleTokens?: Record<string, string> | null;
     sampleTokensJson?: string;
+    guide?: { x: number; y: number } | null;
+    markers?: Array<{ id: string; n: number; x: number; y: number }> | null;
+    listHovering?: boolean;
+    hoveredId?: string | null;
+    selectedId?: string | null;
   } | null;
 }) {
   return (
@@ -7558,9 +7566,10 @@ function PosterOverlayControlsWithPreview(props: {
           values={props.values}
           compact={props.compact}
           layout="focus"
+          accentHex={props.accentHex}
           layoutPreview={props.layoutPreview}
         />
-        <PlexUnwatchedPreviewWarning />
+        {props.belowPreview}
       </aside>
     </div>
   );
@@ -7579,7 +7588,13 @@ function PosterArtOverlaysBlock(props: {
     baseUrl?: string | null;
     sampleTokens?: Record<string, string> | null;
     sampleTokensJson?: string;
+    guide?: { x: number; y: number } | null;
+    markers?: Array<{ id: string; n: number; x: number; y: number }> | null;
+    listHovering?: boolean;
+    hoveredId?: string | null;
+    selectedId?: string | null;
   } | null>(null);
+  const [previewArtControls, setPreviewArtControls] = useState<ReactNode>(null);
   const handleLayoutPreviewChange = useCallback(
     (state: {
       profileKey: string;
@@ -7587,19 +7602,38 @@ function PosterArtOverlaysBlock(props: {
       grayscale: boolean;
       baseUrl?: string | null;
       sampleTokens?: Record<string, string> | null;
+      guide?: { x: number; y: number } | null;
+      markers?: Array<{ id: string; n: number; x: number; y: number }> | null;
+      listHovering?: boolean;
+      hoveredId?: string | null;
+      selectedId?: string | null;
     }) => {
       const labelsJson = JSON.stringify(state.labels);
       const baseUrl = state.baseUrl || null;
       const sampleTokens = state.sampleTokens || null;
       const sampleTokensJson = JSON.stringify(sampleTokens || {});
+      const guide = state.guide || null;
+      const guideKey = guide ? `${guide.x}:${guide.y}` : "";
+      const markers = state.markers || null;
+      const markersKey = (markers || []).map((m) => `${m.id}:${m.n}:${m.x}:${m.y}`).join("|");
+      const listHovering = Boolean(state.listHovering);
+      const hoveredId = state.hoveredId || null;
+      const selectedId = state.selectedId || null;
       setLayoutPreview((prev) => {
+        const prevGuideKey = prev?.guide ? `${prev.guide.x}:${prev.guide.y}` : "";
+        const prevMarkersKey = (prev?.markers || []).map((m) => `${m.id}:${m.n}:${m.x}:${m.y}`).join("|");
         if (
           prev &&
           prev.profileKey === state.profileKey &&
           prev.labelsJson === labelsJson &&
           prev.grayscale === state.grayscale &&
           (prev.baseUrl || null) === baseUrl &&
-          (prev.sampleTokensJson || "{}") === sampleTokensJson
+          (prev.sampleTokensJson || "{}") === sampleTokensJson &&
+          prevGuideKey === guideKey &&
+          prevMarkersKey === markersKey &&
+          Boolean(prev.listHovering) === listHovering &&
+          (prev.hoveredId || null) === hoveredId &&
+          (prev.selectedId || null) === selectedId
         ) {
           return prev;
         }
@@ -7610,6 +7644,11 @@ function PosterArtOverlaysBlock(props: {
           baseUrl,
           sampleTokens,
           sampleTokensJson,
+          guide,
+          markers,
+          listHovering,
+          hoveredId,
+          selectedId,
         };
       });
     },
@@ -7619,13 +7658,16 @@ function PosterArtOverlaysBlock(props: {
     <PosterOverlayControlsWithPreview
       values={props.values}
       compact={props.compact}
+      accentHex={props.accentHex}
       layoutPreview={layoutPreview}
+      belowPreview={previewArtControls}
       controls={
         <SettingsDensityFrame legend="Layout designer">
           <PosterLayoutDesigner
             accentHex={props.accentHex}
             compact={props.compact}
             onPreviewChange={handleLayoutPreviewChange}
+            onPreviewArtControlsChange={setPreviewArtControls}
           />
         </SettingsDensityFrame>
       }
@@ -7682,21 +7724,6 @@ function PosterBadgeDescription(props: { spacing: "settings" | "wizard" }) {
   );
 }
 
-/** Plex unwatched-count tip shown under the overlay preview column. */
-function PlexUnwatchedPreviewWarning() {
-  return (
-    <div className="mt-3 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-3 py-2.5 text-[13px] leading-snug text-yellow-100/95">
-      <p className="font-headline font-semibold uppercase tracking-wider text-yellow-200/90 text-[11px] mb-1">
-        Plex tip
-      </p>
-      <p>
-        On Plex, the unwatched count indicator sits in the top right and can cover Placeholdarr badge and label text. Prefer
-        bottom rows or left columns for important labels.
-      </p>
-        </div>
-  );
-}
-
 function PosterPlaceholderBannerDescription(props: { spacing: "settings" | "wizard" }) {
   const top = props.spacing === "settings" ? "mt-1" : "mb-2";
     return (
@@ -7728,6 +7755,12 @@ function PosterOverlayPreviewTile(props: {
   aspect: string;
   /** Fixed width class (e.g. ``w-[14rem]``). Required so absolute-fit images do not collapse. */
   widthClass: string;
+  /** Optional center crosshairs for the layout designer selection. */
+  guide?: { x: number; y: number; accentHex?: string; bakeW?: number; bakeH?: number } | null;
+  /** Number badges while hovering the designer asset list. */
+  markers?: Array<{ id: string; n: number; x: number; y: number }> | null;
+  hoveredMarkerId?: string | null;
+  accentHex?: string;
 }) {
   const [currentSrc, setCurrentSrc] = useState(props.src);
   const [nextSrc, setNextSrc] = useState<string | null>(null);
@@ -7775,6 +7808,14 @@ function PosterOverlayPreviewTile(props: {
     };
   }, [props.src]);
 
+  const guide = props.guide;
+  const accent = guide?.accentHex || "#38bdf8";
+  const bakeW = Math.max(1, guide?.bakeW || 1000);
+  const bakeH = Math.max(1, guide?.bakeH || 1500);
+  // Glow only at the exact bake-canvas midpoint (e.g. 500/750 or 960/540).
+  const glowX = Boolean(guide && Math.round(guide.x * bakeW) === bakeW / 2);
+  const glowY = Boolean(guide && Math.round(guide.y * bakeH) === bakeH / 2);
+
   return (
     <figure
       className={`shrink-0 rounded-lg overflow-hidden border border-[#424753]/40 bg-[#0f1419]/80 ${props.widthClass}`}
@@ -7795,6 +7836,67 @@ function PosterOverlayPreviewTile(props: {
             }`}
           />
         ) : null}
+        {guide ? (
+          <>
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-y-0 z-[4] w-px -translate-x-1/2"
+              style={{
+                left: "50%",
+                backgroundColor: glowX ? accent : "rgba(148,163,184,0.35)",
+                boxShadow: glowX
+                  ? `0 0 0 1px ${accent}55, 0 0 10px ${accent}, 0 0 18px ${accent}88`
+                  : undefined,
+              }}
+            />
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-x-0 z-[4] h-px -translate-y-1/2"
+              style={{
+                top: "50%",
+                backgroundColor: glowY ? accent : "rgba(148,163,184,0.35)",
+                boxShadow: glowY
+                  ? `0 0 0 1px ${accent}55, 0 0 10px ${accent}, 0 0 18px ${accent}88`
+                  : undefined,
+              }}
+            />
+          </>
+        ) : null}
+        {props.markers && props.markers.length > 0
+          ? [...props.markers]
+              .sort((a, b) => {
+                // Paint the hovered marker last so it stays above overlapping siblings.
+                if (a.id === props.hoveredMarkerId) return 1;
+                if (b.id === props.hoveredMarkerId) return -1;
+                return 0;
+              })
+              .map((marker) => {
+              const hot = marker.id === props.hoveredMarkerId;
+              const markAccent = props.accentHex || accent;
+              // Keep the ~20px badge fully inside the frame (edge anchors used to clip).
+              const pad = 0.045;
+              const x = Math.max(pad, Math.min(1 - pad, marker.x));
+              const y = Math.max(pad, Math.min(1 - pad, marker.y));
+              return (
+                <div
+                  key={marker.id}
+                  aria-hidden
+                  className={`pointer-events-none absolute flex h-5 min-w-[1.25rem] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-md px-1 font-mono text-[11px] font-semibold shadow-sm ${
+                    hot ? "z-[8]" : "z-[5]"
+                  }`}
+                  style={{
+                    left: `${x * 100}%`,
+                    top: `${y * 100}%`,
+                    backgroundColor: hot ? markAccent : "rgba(11, 17, 27, 0.88)",
+                    color: hot ? "#0b111b" : "#e2e8f0",
+                    boxShadow: hot ? `0 0 0 1px ${markAccent}, 0 0 10px ${markAccent}88` : "0 0 0 1px rgba(148,163,184,0.35)",
+                  }}
+                >
+                  {marker.n}
+                </div>
+              );
+            })
+          : null}
       </div>
       <figcaption className="px-2 py-1.5 text-[11px] text-slate-400 leading-snug">{props.label}</figcaption>
     </figure>
@@ -7834,9 +7936,29 @@ function posterPreviewMetaForProfile(profileKey: string | null | undefined): {
   };
 }
 
+/** Move selected chip/badge to the end so the bake draws it last (on top). Banners stay put. */
+function labelsWithSelectedOnTop(labels: unknown[], selectedId: string | null | undefined): unknown[] {
+  if (!selectedId || !Array.isArray(labels) || labels.length < 2) return labels;
+  const idx = labels.findIndex(
+    (lab) => lab && typeof lab === "object" && String((lab as { id?: unknown }).id || "") === selectedId,
+  );
+  if (idx < 0 || idx === labels.length - 1) return labels;
+  const picked = labels[idx];
+  if (!picked || typeof picked !== "object") return labels;
+  const token = String((picked as { token?: unknown }).token || "").trim();
+  const style = String((picked as { style?: unknown }).style || "").trim().toLowerCase();
+  // Banners always bake under chips; never promote a selected banner.
+  if (token === "Banner" || style === "banner") return labels;
+  const next = labels.slice();
+  next.splice(idx, 1);
+  next.push(picked);
+  return next;
+}
+
 /** Sticky preview that POSTs the active designer draft (avoids GET query truncation). */
 function PosterOverlayFocusPreview(props: {
   values: FieldValueMap;
+  accentHex?: string;
   layoutPreview: {
     profileKey: string;
     labelsJson?: string;
@@ -7844,12 +7966,18 @@ function PosterOverlayFocusPreview(props: {
     baseUrl?: string | null;
     sampleTokens?: Record<string, string> | null;
     sampleTokensJson?: string;
+    guide?: { x: number; y: number } | null;
+    markers?: Array<{ id: string; n: number; x: number; y: number }> | null;
+    listHovering?: boolean;
+    hoveredId?: string | null;
+    selectedId?: string | null;
   };
 }) {
   const grayscale = Boolean(props.layoutPreview.grayscale);
   const baseUrl = props.layoutPreview.baseUrl || null;
   const sampleTokens = props.layoutPreview.sampleTokens || null;
   const sampleTokensJson = props.layoutPreview.sampleTokensJson || "{}";
+  const selectedId = props.layoutPreview.selectedId || null;
   const meta = posterPreviewMetaForProfile(props.layoutPreview.profileKey);
   const [src, setSrc] = useState<string | null>(null);
   const blobRef = useRef<string | null>(null);
@@ -7867,6 +7995,7 @@ function PosterOverlayFocusPreview(props: {
           } catch {
             labels = [];
           }
+          labels = labelsWithSelectedOnTop(labels, selectedId);
           const response = await fetch("/api/settings/poster-overlay-preview", {
             method: "POST",
             credentials: "same-origin",
@@ -7901,7 +8030,16 @@ function PosterOverlayFocusPreview(props: {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [baseUrl, grayscale, labelsJson, meta.kind, props.layoutPreview.profileKey, sampleTokens, sampleTokensJson]);
+  }, [
+    baseUrl,
+    grayscale,
+    labelsJson,
+    meta.kind,
+    props.layoutPreview.profileKey,
+    sampleTokens,
+    sampleTokensJson,
+    selectedId,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -7910,10 +8048,30 @@ function PosterOverlayFocusPreview(props: {
   }, []);
 
   const widthClass = meta.kind === "episode" ? "w-full" : "w-full max-w-[20rem] mx-auto";
+  const bakeSize = meta.kind === "episode" ? { bakeW: 1920, bakeH: 1080 } : { bakeW: 1000, bakeH: 1500 };
+  const guide = props.layoutPreview.guide
+    ? { ...props.layoutPreview.guide, accentHex: props.accentHex, ...bakeSize }
+    : null;
+  const showMarkers = Boolean(props.layoutPreview.listHovering);
+  const markers = showMarkers ? props.layoutPreview.markers || null : null;
   if (!src) {
     return (
-      <div className={`rounded-lg border border-[#424753]/40 bg-[#0b111b] ${widthClass} ${meta.aspect} flex items-center justify-center`}>
+      <div className={`relative rounded-lg border border-[#424753]/40 bg-[#0b111b] ${widthClass} ${meta.aspect} flex items-center justify-center overflow-hidden`}>
         <span className="text-[12px] text-slate-500">Loading preview…</span>
+        {guide ? (
+          <>
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-y-0 z-[4] w-px -translate-x-1/2"
+              style={{ left: "50%", backgroundColor: "rgba(148,163,184,0.35)" }}
+            />
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-x-0 z-[4] h-px -translate-y-1/2"
+              style={{ top: "50%", backgroundColor: "rgba(148,163,184,0.35)" }}
+            />
+          </>
+        ) : null}
       </div>
     );
   }
@@ -7923,6 +8081,10 @@ function PosterOverlayFocusPreview(props: {
       label={meta.label}
       aspect={meta.aspect}
       widthClass={widthClass}
+      guide={guide}
+      markers={markers}
+      hoveredMarkerId={props.layoutPreview.hoveredId || null}
+      accentHex={props.accentHex}
     />
   );
 }
@@ -7930,6 +8092,7 @@ function PosterOverlayFocusPreview(props: {
 function PosterOverlayLivePreview(props: {
   values: FieldValueMap;
   compact?: boolean;
+  accentHex?: string;
   /** ``gallery``: posters side-by-side then episode; ``rail`` stacks; ``row`` wraps; ``focus``: active profile only. */
   layout?: "row" | "rail" | "gallery" | "focus";
   /** When set, all tiles use this layout draft (designer sticky preview). */
@@ -7940,6 +8103,11 @@ function PosterOverlayLivePreview(props: {
     baseUrl?: string | null;
     sampleTokens?: Record<string, string> | null;
     sampleTokensJson?: string;
+    guide?: { x: number; y: number } | null;
+    markers?: Array<{ id: string; n: number; x: number; y: number }> | null;
+    listHovering?: boolean;
+    hoveredId?: string | null;
+    selectedId?: string | null;
   } | null;
 }) {
   const draftGrayscale = props.layoutPreview?.grayscale;
@@ -7955,7 +8123,11 @@ function PosterOverlayLivePreview(props: {
 
   if (focus && props.layoutPreview?.profileKey) {
     return (
-      <PosterOverlayFocusPreview values={props.values} layoutPreview={props.layoutPreview} />
+      <PosterOverlayFocusPreview
+        values={props.values}
+        accentHex={props.accentHex}
+        layoutPreview={props.layoutPreview}
+      />
     );
   }
 

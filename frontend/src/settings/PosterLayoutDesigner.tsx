@@ -1,21 +1,15 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
-  type CSSProperties,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
 } from "react";
-import { fetchJson, getCsrfToken } from "../api/client";
+import { fetchJson } from "../api/client";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
-import placeholdarrLogoBlue from "../assets/Placeholdarr_blue.svg";
-import placeholdarrLogoYellow from "../assets/Placeholdarr_yellow.svg";
-import imdbIcon from "../assets/ratings/imdb.svg";
-import tmdbIcon from "../assets/ratings/tmdb.svg";
-import rottenTomatoesIcon from "../assets/ratings/rottentomatoes.svg";
-import metacriticIcon from "../assets/ratings/metacritic.svg";
-import traktIcon from "../assets/ratings/trakt.svg";
 
 export type LabelSize = "small" | "medium" | "large";
 export type LabelStyle = "chip" | "banner";
@@ -24,8 +18,13 @@ export type BannerEdge = "top" | "bottom" | "left" | "right";
 export type PosterLayoutLabel = {
   id: string;
   token: string;
-  row: number;
-  col: number;
+  /** Horizontal center as a fraction of poster width (0..1). */
+  x: number;
+  /** Vertical center as a fraction of poster height (0..1). */
+  y: number;
+  /** Legacy snap cell; kept for migration / banners. */
+  row?: number;
+  col?: number;
   text_color: string;
   fill_color: string;
   border_color: string;
@@ -69,7 +68,27 @@ export type PosterLayoutCatalog = {
 
 const LABEL_SIZES: LabelSize[] = ["small", "medium", "large"];
 const BANNER_EDGES: BannerEdge[] = ["top", "bottom", "left", "right"];
-const SIZE_MULT: Record<LabelSize, number> = { small: 1, medium: 1.5, large: 2 };
+/** Invisible Custom chip used so the empty editor matches the tallest selected layout. */
+const EDITOR_HEIGHT_PROBE: PosterLayoutLabel = {
+  id: "__editor_height__",
+  token: "Custom",
+  x: 0.5,
+  y: 0.5,
+  text_color: "#ffffff",
+  fill_color: "#000000",
+  border_color: "#ffffff",
+  fill_opacity: 0.65,
+  border_opacity: 0,
+  size: "medium",
+  thickness: 0.12,
+  span_start: 0,
+  span_end: 1,
+  style: "chip",
+  edge: "top",
+  arted: true,
+  rating_source: "imdb",
+  custom_text: "{Title} {Sep} {Year}",
+};
 const BANNER_SIZE_MULT: Record<LabelSize, number> = { small: 0.72, medium: 1, large: 1.35 };
 const BANNER_THICKNESS_MIN = 0.04;
 const BANNER_THICKNESS_MAX = 0.45;
@@ -194,13 +213,6 @@ function BannerSpanSlider(props: {
 }
 const CUSTOM_TEXT_MAX_LEN = 120;
 const CUSTOM_SEP_DEFAULT = "·";
-const RATING_ICONS: Record<string, string> = {
-  imdb: imdbIcon,
-  tmdb: tmdbIcon,
-  trakt: traktIcon,
-  rottentomatoes: rottenTomatoesIcon,
-  metacritic: metacriticIcon,
-};
 
 type MediaKind = "movie" | "tv" | "episode";
 type Availability = "placeholder" | "real";
@@ -282,15 +294,6 @@ function solidHex(value: string, fallback: string): string {
   return text.length >= 7 ? text.slice(0, 7) : fallback;
 }
 
-function hexToRgba(value: string, alpha: number, fallback = "#000000"): string {
-  const solid = solidHex(value, fallback).slice(1);
-  const r = parseInt(solid.slice(0, 2), 16);
-  const g = parseInt(solid.slice(2, 4), 16);
-  const b = parseInt(solid.slice(4, 6), 16);
-  const a = Math.max(0, Math.min(1, alpha));
-  return `rgba(${r}, ${g}, ${b}, ${a})`;
-}
-
 function normalizeLabelSize(raw: unknown, token: string): LabelSize {
   const text = String(raw || "").trim().toLowerCase();
   if (text === "small" || text === "medium" || text === "large") return text;
@@ -310,25 +313,6 @@ function normalizeBannerEdge(raw: unknown): BannerEdge {
   const text = String(raw || "").trim().toLowerCase();
   if (text === "top" || text === "bottom" || text === "left" || text === "right") return text;
   return "top";
-}
-
-function edgeAnchorCell(edge: BannerEdge, cols: number, rows: number): { row: number; col: number } {
-  const midC = Math.max(0, Math.floor(cols / 2));
-  const midR = Math.max(0, Math.floor(rows / 2));
-  if (edge === "bottom") return { row: rows - 1, col: midC };
-  if (edge === "left") return { row: midR, col: 0 };
-  if (edge === "right") return { row: midR, col: cols - 1 };
-  return { row: 0, col: midC };
-}
-
-function inferBannerEdge(row: number, col: number, cols: number, rows: number): BannerEdge {
-  const dist: Record<BannerEdge, number> = {
-    top: row,
-    bottom: rows - 1 - row,
-    left: col,
-    right: cols - 1 - col,
-  };
-  return (Object.entries(dist) as Array<[BannerEdge, number]>).sort((a, b) => a[1] - b[1])[0][0];
 }
 
 function bannerBaseFrac(edge: BannerEdge, landscape: boolean): number {
@@ -388,6 +372,138 @@ function renderCustomChipText(template: string, tokenMap: Record<string, string>
     .trim();
 }
 
+
+function clampFrac(raw: unknown, fallback = 0.5): number {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(1, n));
+}
+
+/** Prefer ``x``/``y``; migrate legacy snap-cell centers when missing. */
+function normalizeLabelXY(
+  label: Pick<PosterLayoutLabel, "x" | "y" | "row" | "col">,
+  cols = 25,
+  rows = 37,
+): { x: number; y: number } {
+  const hasX = label.x != null && Number.isFinite(Number(label.x));
+  const hasY = label.y != null && Number.isFinite(Number(label.y));
+  if (hasX || hasY) {
+    return { x: clampFrac(label.x, 0.5), y: clampFrac(label.y, 0.5) };
+  }
+  const c = Math.max(1, cols);
+  const r = Math.max(1, rows);
+  const col = Math.max(0, Math.min(c - 1, Number(label.col) || 0));
+  const row = Math.max(0, Math.min(r - 1, Number(label.row) || 0));
+  return { x: (col + 0.5) / c, y: (row + 0.5) / r };
+}
+
+function edgeAnchorXY(edge: BannerEdge): { x: number; y: number } {
+  if (edge === "bottom") return { x: 0.5, y: 1 };
+  if (edge === "left") return { x: 0, y: 0.5 };
+  if (edge === "right") return { x: 1, y: 0.5 };
+  return { x: 0.5, y: 0 };
+}
+
+/** Preview number-badge anchor: banner strip center (edge x/y would clip off-canvas). */
+function markerAnchorXY(label: PosterLayoutLabel, landscape: boolean): { x: number; y: number } {
+  if (!isBannerLabel(label)) {
+    return { x: clampFrac(label.x, 0.5), y: clampFrac(label.y, 0.5) };
+  }
+  const edge = normalizeBannerEdge(label.edge);
+  const size = normalizeLabelSize(label.size, label.token);
+  const thickness = normalizeBannerThickness(label.thickness, edge, size, landscape);
+  const span = normalizeBannerSpan(label.span_start, label.span_end);
+  const mid = (span.start + span.end) / 2;
+  if (edge === "top") return { x: mid, y: thickness / 2 };
+  if (edge === "bottom") return { x: mid, y: 1 - thickness / 2 };
+  if (edge === "left") return { x: thickness / 2, y: mid };
+  return { x: 1 - thickness / 2, y: mid };
+}
+
+/** Legacy snap cell nearest to a fraction (kept on labels for older bake fallbacks). */
+function cellFromXY(x: number, y: number, cols: number, rows: number): { row: number; col: number } {
+  const c = Math.max(1, cols);
+  const r = Math.max(1, rows);
+  return {
+    col: Math.max(0, Math.min(c - 1, Math.round(x * c - 0.5))),
+    row: Math.max(0, Math.min(r - 1, Math.round(y * r - 0.5))),
+  };
+}
+
+/** Bake canvas size used by Pillow overlays (designer px controls map to this). */
+function bakeSizeForKind(kind: MediaKind): { w: number; h: number } {
+  return kind === "episode" ? { w: 1920, h: 1080 } : { w: 1000, h: 1500 };
+}
+
+function fracToBakePx(frac: number, dim: number): number {
+  return Math.round(clampFrac(frac, 0.5) * Math.max(1, dim));
+}
+
+function bakePxToFrac(px: number, dim: number): number {
+  const d = Math.max(1, dim);
+  return clampFrac(px / d, 0);
+}
+
+/** Slider + typed bake-pixel field for one axis (stores fraction via onChange). */
+function BakePxAxisControl(props: {
+  label: string;
+  frac: number;
+  dim: number;
+  onChange: (frac: number) => void;
+}) {
+  const px = fracToBakePx(props.frac, props.dim);
+  const midPx = Math.round(props.dim / 2);
+  const atCenter = px === midPx;
+  const setPx = (raw: number) => {
+    if (!Number.isFinite(raw)) return;
+    const next = Math.max(0, Math.min(props.dim, Math.round(raw)));
+    props.onChange(bakePxToFrac(next, props.dim));
+  };
+  return (
+    <div className="space-y-1 text-[12px] text-slate-400 min-w-0">
+      <div className="flex items-center gap-2">
+        <span className="shrink-0">{props.label}</span>
+        <div className="ml-auto flex items-center gap-1.5 shrink-0">
+          <button
+            type="button"
+            title={`Snap ${props.label} to center (${midPx} px)`}
+            aria-label={`Center ${props.label}`}
+            onClick={() => setPx(midPx)}
+            className={`rounded-md border px-1.5 py-0.5 text-[10px] font-headline uppercase tracking-wider ${
+              atCenter
+                ? "border-[var(--brand-accent)] text-slate-100 bg-[color:color-mix(in_srgb,var(--brand-accent)_18%,transparent)]"
+                : "border-[#424753]/55 text-slate-400 hover:border-[#424753] hover:text-slate-200"
+            }`}
+          >
+            Center
+          </button>
+          <input
+            type="number"
+            inputMode="numeric"
+            min={0}
+            max={props.dim}
+            step={1}
+            value={px}
+            aria-label={`${props.label} pixels`}
+            onChange={(e) => setPx(Number(e.target.value))}
+            className="w-[4.25rem] shrink-0 rounded-lg border border-[#424753]/55 bg-[#0b111b] px-2 py-1 font-mono text-[12px] tabular-nums text-slate-100 outline-none focus:border-[color:var(--brand-accent)]"
+          />
+        </div>
+      </div>
+      <input
+        type="range"
+        min={0}
+        max={props.dim}
+        step={1}
+        value={px}
+        aria-label={`${props.label} position`}
+        onChange={(e) => setPx(Number(e.target.value))}
+        className="w-full accent-[var(--brand-accent)]"
+      />
+    </div>
+  );
+}
+
 /** Lift legacy ``#RRGGBBAA`` into RGB + opacity (alpha 00 meant border off). */
 function normalizeLabelColors(label: PosterLayoutLabel, landscape = false): PosterLayoutLabel {
   const border = hexOr(label.border_color, "#000000");
@@ -415,8 +531,19 @@ function normalizeLabelColors(label: PosterLayoutLabel, landscape = false): Post
         : typeof label.border_opacity === "number" && !Number.isNaN(label.border_opacity)
           ? Math.max(0, Math.min(1, label.border_opacity))
           : 0;
+  const cols = landscape ? 33 : 25;
+  const rows = landscape ? 21 : 37;
+  const xy =
+    style === "banner"
+      ? edgeAnchorXY(edge)
+      : normalizeLabelXY(label, cols, rows);
+  const cell = cellFromXY(xy.x, xy.y, cols, rows);
   return {
     ...label,
+    x: xy.x,
+    y: xy.y,
+    row: cell.row,
+    col: cell.col,
     border_color: border.length === 9 ? border.slice(0, 7) : solidHex(label.border_color, "#000000"),
     border_opacity: Math.max(0, Math.min(1, borderOpacity)),
     fill_opacity: typeof label.fill_opacity === "number" ? label.fill_opacity : 0.65,
@@ -432,116 +559,104 @@ function normalizeLabelColors(label: PosterLayoutLabel, landscape = false): Post
   };
 }
 
-/** Match bake-time clamp: keep a content-sized chip fully on the poster. */
-function clampBoxToBoard(
-  ax: number,
-  ay: number,
-  boxW: number,
-  boxH: number,
-  boardW: number,
-  boardH: number,
-  margin = 4,
-): { cx: number; cy: number } {
-  let x0 = ax - boxW / 2;
-  let y0 = ay - boxH / 2;
-  let x1 = x0 + boxW;
-  let y1 = y0 + boxH;
-  const maxX = Math.max(margin + 1, boardW - margin);
-  const maxY = Math.max(margin + 1, boardH - margin);
-  if (boxW > maxX - margin) {
-    x0 = margin;
-    x1 = maxX;
-  } else {
-    if (x0 < margin) {
-      x1 += margin - x0;
-      x0 = margin;
-    }
-    if (x1 > maxX) {
-      const shift = x1 - maxX;
-      x0 -= shift;
-      x1 -= shift;
-    }
-  }
-  if (boxH > maxY - margin) {
-    y0 = margin;
-    y1 = maxY;
-  } else {
-    if (y0 < margin) {
-      y1 += margin - y0;
-      y0 = margin;
-    }
-    if (y1 > maxY) {
-      const shift = y1 - maxY;
-      y0 -= shift;
-      y1 -= shift;
-    }
-  }
-  return { cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 };
-}
+export type LayoutPreviewMarker = {
+  id: string;
+  /** 1-based list index. */
+  n: number;
+  x: number;
+  y: number;
+};
 
-function estimateHandleSizePx(
-  token: string,
-  sampleText: string,
-  boardW: number,
-  mediaKind: MediaKind,
-  size: LabelSize = "small",
-  arted = false,
-): { w: number; h: number } {
-  // Mirror bake metrics (1000×1500 / 1920×1080) so edge-clamp shifts match the JPEG chip.
-  const posterW = mediaKind === "episode" ? 1920 : 1000;
-  const posterH = mediaKind === "episode" ? 1080 : 1500;
-  const scale = boardW / posterW;
-  const mult = SIZE_MULT[size] || 1;
-  if (token === "Badge") {
-    const frac = mediaKind === "episode" ? 0.18 : 0.11;
-    // Medium matches legacy corner badge size.
-    const side = Math.max(24, posterH * frac) * scale * (mult / SIZE_MULT.medium);
-    return { w: side, h: side };
-  }
-  const preferred =
-    (mediaKind === "episode"
-      ? Math.max(28, Math.min(56, posterH * 0.055))
-      : Math.max(26, Math.min(52, posterW * 0.048))) * mult;
-  const padY = Math.max(8, preferred * 0.32);
-  // Mirror bake: arted ratings hug the logo+score cluster.
-  const padX = arted && token === "Rating" ? Math.max(5, preferred * 0.16) : Math.max(14, preferred * 0.55);
-  const text = String(sampleText || token);
-  // Approx glyph width at bake font size, then scale to the designer board.
-  let textW = Math.max(preferred * 0.55, text.length * preferred * 0.5);
-  const textH = preferred * 0.72;
-  if (arted && token === "Rating") {
-    const iconH = Math.max(textH, preferred * 0.78);
-    const gap = preferred * 0.1;
-    textW += iconH + gap;
-  }
-  const w = Math.min(boardW * 0.9, (textW + padX * 2) * scale);
-  const h = (textH + padY * 2) * scale;
-  return { w: Math.max(20, w), h: Math.max(16, h) };
-}
-
-/** Snap-cell center, then shift so the live chip stays on-poster. */
-function clampedHandlePct(args: {
-  row: number;
-  col: number;
-  cols: number;
-  rows: number;
-  boardW: number;
-  boardH: number;
-  token: string;
-  sampleText: string;
-  mediaKind: MediaKind;
-  size?: LabelSize;
-  arted?: boolean;
-}): { leftPct: number; topPct: number } {
-  const { row, col, cols, rows, boardW, boardH, token, sampleText, mediaKind, size, arted } = args;
-  if (boardW <= 0 || boardH <= 0) {
-    return { leftPct: ((col + 0.5) / cols) * 100, topPct: ((row + 0.5) / rows) * 100 };
-  }
-  const ax = ((col + 0.5) / cols) * boardW;
-  const ay = ((row + 0.5) / rows) * boardH;
-  const dims = estimateHandleSizePx(token, sampleText, boardW, mediaKind, size || "small", Boolean(arted));
-  const { cx, cy } = clampBoxToBoard(ax, ay, dims.w, dims.h, boardW, boardH);
-  return { leftPct: (cx / boardW) * 100, topPct: (cy / boardH) * 100 };
+/** Invisible tallest editor body (Custom chip). Locks panel height without inserting mid-form gaps. */
+function EditorHeightLock(props: {
+  kind: MediaKind;
+  catalog: PosterLayoutCatalog | null;
+  activeKey: string;
+  sampleTokens: Record<string, string>;
+}) {
+  const bake = bakeSizeForKind(props.kind);
+  const label = EDITOR_HEIGHT_PROBE;
+  const noop = () => {};
+  const tokenNames =
+    props.catalog?.custom_template_tokens?.[props.activeKey] || [
+      "Title",
+      "Year",
+      "ComingSoonOrNewEp",
+      "Rating",
+      "Runtime",
+      "Sep",
+    ];
+  return (
+    <div className="space-y-3">
+      <div className="text-[13px] font-semibold text-slate-200 truncate">Custom</div>
+      <div className="space-y-2">
+        <div className="text-[12px] text-slate-400">Size</div>
+        <div className="flex flex-wrap gap-2">
+          {(props.catalog?.sizes?.length ? props.catalog.sizes : LABEL_SIZES).map((opt) => (
+            <button
+              key={opt}
+              type="button"
+              tabIndex={-1}
+              className="rounded-lg border border-[#424753]/55 px-3 py-1.5 text-[12px] font-headline uppercase tracking-wider text-slate-400"
+            >
+              {opt}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="grid grid-cols-1 gap-3 min-w-0 sm:grid-cols-2">
+        <BakePxAxisControl label="X" frac={label.x} dim={bake.w} onChange={noop} />
+        <BakePxAxisControl label="Y" frac={label.y} dim={bake.h} onChange={noop} />
+      </div>
+      <div className="space-y-2 min-w-0">
+        <label className="space-y-1 text-[12px] text-slate-400 min-w-0 block">
+          <span>Custom text</span>
+          <input
+            type="text"
+            tabIndex={-1}
+            readOnly
+            value={label.custom_text}
+            className={`${FIELD_CLASS} font-mono text-[12px]`}
+          />
+        </label>
+        <p className="text-[11px] text-slate-500 leading-snug">
+          Use static poster tokens like <span className="font-mono">{"{Title}"}</span> and{" "}
+          <span className="font-mono">{"{Sep}"}</span>. Empty values collapse automatically.
+        </p>
+        <div className="flex flex-wrap gap-1.5">
+          {tokenNames.map((name) => (
+            <button
+              key={name}
+              type="button"
+              tabIndex={-1}
+              className="rounded-md border border-[#424753]/55 px-1.5 py-0.5 font-mono text-[11px] text-slate-400"
+            >
+              {`{${name}}`}
+            </button>
+          ))}
+        </div>
+        <p className="text-[11px] text-slate-500 truncate">
+          Preview:{" "}
+          <span className="text-slate-300">
+            {renderCustomChipText(label.custom_text, props.sampleTokens) || "(empty)"}
+          </span>
+        </p>
+      </div>
+      <div className="grid grid-cols-1 gap-3 min-w-0 sm:grid-cols-2">
+        <ColorField label="Text" value={label.text_color} onChange={noop} />
+        <ColorField label="Fill" value={label.fill_color} onChange={noop} />
+        <ColorField label="Border" value={label.border_color} onChange={noop} />
+        <label className="space-y-1 text-[12px] text-slate-400 min-w-0">
+          <span>Fill opacity (65%)</span>
+          <input type="range" tabIndex={-1} disabled value={65} className="w-full accent-[var(--brand-accent)]" />
+        </label>
+        <label className="space-y-1 text-[12px] text-slate-400 min-w-0 sm:col-span-2">
+          <span>Border opacity (0%)</span>
+          <input type="range" tabIndex={-1} disabled value={0} className="w-full accent-[var(--brand-accent)]" />
+        </label>
+      </div>
+    </div>
+  );
 }
 
 type Props = {
@@ -554,8 +669,26 @@ type Props = {
     grayscale: boolean;
     baseUrl?: string | null;
     sampleTokens?: Record<string, string> | null;
+    /** Center guides for the selected chip (null for banners / no selection). */
+    guide?: { x: number; y: number } | null;
+    /** Number badges overlaid on the sticky preview while the asset list is hovered. */
+    markers?: LayoutPreviewMarker[];
+    listHovering?: boolean;
+    hoveredId?: string | null;
+    /** Selected label id; preview bake draws it last so it sits on top. */
+    selectedId?: string | null;
   }) => void;
+  /** Mount Preview art controls under the sticky bake preview. */
+  onPreviewArtControlsChange?: (node: ReactNode | null) => void;
 };
+
+function labelElementName(
+  label: PosterLayoutLabel,
+  tokenMeta: Array<{ name: string; label: string }>,
+): string {
+  if (isBannerLabel(label)) return "Banner";
+  return tokenMeta.find((t) => t.name === label.token)?.label || label.token;
+}
 
 export default function PosterLayoutDesigner(props: Props) {
   const [catalog, setCatalog] = useState<PosterLayoutCatalog | null>(null);
@@ -564,6 +697,8 @@ export default function PosterLayoutDesigner(props: Props) {
   const [availability, setAvailability] = useState<Availability>("placeholder");
   const [variant, setVariant] = useState<Variant>("default");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [listHovering, setListHovering] = useState(false);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [placeToken, setPlaceToken] = useState<string>("PLACEHOLDER");
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -571,21 +706,12 @@ export default function PosterLayoutDesigner(props: Props) {
   const [busy, setBusy] = useState(false);
   const [applyOpen, setApplyOpen] = useState(false);
   const [applyScope, setApplyScope] = useState<ApplyScope>("next_full_sync");
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewTmdbId, setPreviewTmdbId] = useState(DEFAULT_PREVIEW_ART.movie.tmdbId);
   const [previewBaseUrl, setPreviewBaseUrl] = useState<string | null>(null);
   const [previewArtTitle, setPreviewArtTitle] = useState<string | null>(DEFAULT_PREVIEW_ART.movie.title);
   const [previewArtTokens, setPreviewArtTokens] = useState<Record<string, string> | null>(null);
   const [previewArtBusy, setPreviewArtBusy] = useState(false);
   const [previewArtError, setPreviewArtError] = useState<string | null>(null);
-  const [dragId, setDragId] = useState<string | null>(null);
-  const [dropCell, setDropCell] = useState<{ row: number; col: number } | null>(null);
-  const [boardSize, setBoardSize] = useState({ w: 0, h: 0 });
-
-  const boardRef = useRef<HTMLDivElement | null>(null);
-  const dragMovedRef = useRef(false);
-  const previewBlobRef = useRef<string | null>(null);
 
   const activeKey = profileKey(kind, availability, variant);
 
@@ -606,31 +732,13 @@ export default function PosterLayoutDesigner(props: Props) {
     };
   }, [reload]);
 
-  useEffect(() => {
-    return () => {
-      if (previewBlobRef.current) URL.revokeObjectURL(previewBlobRef.current);
-    };
-  }, []);
-
-  useEffect(() => {
-    const el = boardRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const apply = () => {
-      const rect = el.getBoundingClientRect();
-      setBoardSize({ w: rect.width, h: rect.height });
-    };
-    apply();
-    const ro = new ResizeObserver(apply);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [catalog, kind, variant]);
-
-  const grid = catalog?.grids?.[activeKey] || (kind === "episode" ? { cols: 33, rows: 21 } : { cols: 25, rows: 37 });
-  const centerCol = Math.floor((grid.cols - 1) / 2);
-  const centerRow = Math.floor((grid.rows - 1) / 2);
   const labels = draft?.[activeKey]?.labels || [];
   const profileGrayscale = Boolean(draft?.[activeKey]?.grayscale);
-  const allowed = (catalog?.allowed_tokens?.[activeKey] || []).filter((name) => name !== "Banner");
+  const placeOptions = useMemo(() => {
+    const tokens = catalog?.allowed_tokens?.[activeKey] || [];
+    const chips = tokens.filter((name) => name !== "Banner");
+    return ["Banner", ...chips];
+  }, [activeKey, catalog?.allowed_tokens]);
   const tokenMeta = catalog?.tokens || [];
   const sampleTokens = useMemo(() => {
     const catalogSampleTokens = catalog?.sample_tokens?.[activeKey] || {};
@@ -644,12 +752,28 @@ export default function PosterLayoutDesigner(props: Props) {
   }, [catalog, draft]);
 
   useEffect(() => {
-    const first = allowed.includes(placeToken) ? placeToken : allowed[0] || "PLACEHOLDER";
+    const first = placeOptions.includes(placeToken) ? placeToken : placeOptions[0] || "PLACEHOLDER";
     if (first !== placeToken) setPlaceToken(first);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeKey, allowed.join("|")]);
+  }, [activeKey, placeOptions.join("|")]);
 
   const labelsKey = JSON.stringify(labels);
+  const selectedForGuide = labels.find((l) => l.id === selectedId) || null;
+  const guide =
+    selectedForGuide && !isBannerLabel(selectedForGuide)
+      ? { x: clampFrac(selectedForGuide.x, 0.5), y: clampFrac(selectedForGuide.y, 0.5) }
+      : null;
+  const guideKey = guide ? `${guide.x}:${guide.y}` : "";
+  const markers: LayoutPreviewMarker[] = labels.map((label, index) => {
+    const anchor = markerAnchorXY(label, kind === "episode");
+    return {
+      id: label.id,
+      n: index + 1,
+      x: anchor.x,
+      y: anchor.y,
+    };
+  });
+  const markersKey = markers.map((m) => `${m.id}:${m.n}:${m.x}:${m.y}`).join("|");
   useEffect(() => {
     props.onPreviewChange?.({
       profileKey: activeKey,
@@ -657,9 +781,25 @@ export default function PosterLayoutDesigner(props: Props) {
       grayscale: profileGrayscale,
       baseUrl: previewBaseUrl,
       sampleTokens: previewArtTokens,
+      guide,
+      markers,
+      listHovering,
+      hoveredId,
+      selectedId,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeKey, labelsKey, profileGrayscale, previewBaseUrl, previewArtTokens]);
+  }, [
+    activeKey,
+    labelsKey,
+    profileGrayscale,
+    previewBaseUrl,
+    previewArtTokens,
+    guideKey,
+    selectedId,
+    markersKey,
+    listHovering,
+    hoveredId,
+  ]);
 
   useEffect(() => {
     // Kind change restores the bundled sample id so movie/TV/episode stay appropriate.
@@ -671,53 +811,7 @@ export default function PosterLayoutDesigner(props: Props) {
     setPreviewArtError(null);
   }, [kind]);
 
-  useEffect(() => {
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      void (async () => {
-        try {
-          const csrf = getCsrfToken();
-          const response = await fetch("/api/settings/poster-overlay-preview", {
-            method: "POST",
-            credentials: "same-origin",
-            headers: {
-              Accept: "image/jpeg",
-              "Content-Type": "application/json",
-              ...(csrf ? { "X-CSRF-Token": csrf } : {}),
-            },
-            body: JSON.stringify({
-              kind: previewKind(kind),
-              grayscale: profileGrayscale,
-              profile_key: activeKey,
-              // Board art only; interactive HTML chips are the labels you drag.
-              labels: [],
-              dim_base: true,
-              base_url: previewBaseUrl || undefined,
-            }),
-          });
-          if (!response.ok) {
-            throw new Error(`Preview failed (${response.status})`);
-          }
-          const blob = await response.blob();
-          if (cancelled) return;
-          const url = URL.createObjectURL(blob);
-          if (previewBlobRef.current) URL.revokeObjectURL(previewBlobRef.current);
-          previewBlobRef.current = url;
-          setPreviewUrl(url);
-          setPreviewError(null);
-        } catch (err) {
-          if (cancelled) return;
-          setPreviewError(err instanceof Error ? err.message : String(err));
-        }
-      })();
-    }, 120);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [activeKey, kind, profileGrayscale, previewBaseUrl]);
-
-  async function applyPreviewArt(opts: { tmdbId?: string; random?: boolean }) {
+  const applyPreviewArt = useCallback(async (opts: { tmdbId?: string; random?: boolean }) => {
     setPreviewArtBusy(true);
     setPreviewArtError(null);
     try {
@@ -752,7 +846,82 @@ export default function PosterLayoutDesigner(props: Props) {
     } finally {
       setPreviewArtBusy(false);
     }
-  }
+  }, [kind]);
+
+  const previewArtControls = useMemo(
+    () => (
+      <div className="mt-3 space-y-1.5">
+        <label className="text-[12px] uppercase tracking-wider text-slate-500">Preview art</label>
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            value={previewTmdbId}
+            onChange={(e) => setPreviewTmdbId(e.target.value.replace(/[^\d]/g, ""))}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                const id = previewTmdbId.trim();
+                if (id) void applyPreviewArt({ tmdbId: id });
+              }
+            }}
+            placeholder={kind === "episode" ? "TV TMDB ID" : "TMDB ID"}
+            className={`${FIELD_CLASS} flex-1`}
+            disabled={previewArtBusy}
+          />
+          <button
+            type="button"
+            title="Load TMDB art"
+            disabled={previewArtBusy || !previewTmdbId.trim()}
+            onClick={() => void applyPreviewArt({ tmdbId: previewTmdbId.trim() })}
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[#424753]/55 text-slate-300 hover:border-[#424753] hover:text-slate-100 disabled:opacity-40"
+          >
+            <span className="material-symbols-outlined leading-none" style={{ fontSize: 22 }}>
+              search
+            </span>
+          </button>
+          <button
+            type="button"
+            title={
+              kind === "episode"
+                ? "Random episode thumb from library"
+                : kind === "tv"
+                  ? "Random TV poster from library"
+                  : "Random movie poster from library"
+            }
+            disabled={previewArtBusy}
+            onClick={() => void applyPreviewArt({ random: true })}
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[#424753]/55 text-slate-300 hover:border-[#424753] hover:text-slate-100 disabled:opacity-40"
+          >
+            <span className="material-symbols-outlined leading-none" style={{ fontSize: 22 }}>
+              casino
+            </span>
+          </button>
+        </div>
+        {previewArtTitle ? (
+          <p className="text-[11px] text-slate-500 truncate" title={previewArtTitle}>
+            {previewArtTitle}
+          </p>
+        ) : null}
+        {previewArtError ? <p className="text-[11px] text-red-400">{previewArtError}</p> : null}
+      </div>
+    ),
+    [
+      applyPreviewArt,
+      kind,
+      previewArtBusy,
+      previewArtError,
+      previewArtTitle,
+      previewTmdbId,
+    ],
+  );
+
+  useLayoutEffect(() => {
+    props.onPreviewArtControlsChange?.(previewArtControls);
+    return () => props.onPreviewArtControlsChange?.(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewArtControls]);
 
   const selected = labels.find((l) => l.id === selectedId) || null;
 
@@ -778,33 +947,6 @@ export default function PosterLayoutDesigner(props: Props) {
     });
   }
 
-  function labelAt(row: number, col: number): PosterLayoutLabel | undefined {
-    // Banners use edge anchors only; they should not block chip snap cells.
-    return labels.find(
-      (l) => normalizeLabelStyle(l.style, l.token) !== "banner" && l.row === row && l.col === col,
-    );
-  }
-
-  function cellFromPoint(clientX: number, clientY: number): { row: number; col: number } | null {
-    const board = boardRef.current;
-    if (!board) return null;
-    const rect = board.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return null;
-    // Allow dragging past the poster edge; snap to the nearest in-bounds cell.
-    const x = Math.min(Math.max(clientX - rect.left, 0), rect.width - 0.001);
-    const y = Math.min(Math.max(clientY - rect.top, 0), rect.height - 0.001);
-    let col = Math.min(grid.cols - 1, Math.max(0, Math.floor((x / rect.width) * grid.cols)));
-    let row = Math.min(grid.rows - 1, Math.max(0, Math.floor((y / rect.height) * grid.rows)));
-    // Magnetic snap to the exact center cell (odd grids put that cell's center at 50%).
-    const nx = x / rect.width;
-    const ny = y / rect.height;
-    const magnetX = 0.5 / grid.cols; // half a cell in normalized units
-    const magnetY = 0.5 / grid.rows;
-    if (Math.abs(nx - 0.5) <= magnetX) col = centerCol;
-    if (Math.abs(ny - 0.5) <= magnetY) row = centerRow;
-    return { row, col };
-  }
-
   function bannerAtEdge(edge: BannerEdge): PosterLayoutLabel | undefined {
     return labels.find((l) => isBannerLabel(l) && normalizeBannerEdge(l.edge) === edge);
   }
@@ -820,12 +962,12 @@ export default function PosterLayoutDesigner(props: Props) {
       setSelectedId(existingBanner.id);
       return;
     }
-    const anchor = edgeAnchorCell(edge, grid.cols, grid.rows);
+    const anchor = edgeAnchorXY(edge);
     const next: PosterLayoutLabel = {
       id: newLabelId(),
       token: "Banner",
-      row: anchor.row,
-      col: anchor.col,
+      x: anchor.x,
+      y: anchor.y,
       text_color: "#ffffff",
       fill_color: "#000000",
       border_color: "#ffffff",
@@ -845,18 +987,14 @@ export default function PosterLayoutDesigner(props: Props) {
     setSelectedId(next.id);
   }
 
-  function placeOrSelect(row: number, col: number) {
-    const existing = labelAt(row, col);
-    if (existing) {
-      setSelectedId(existing.id);
-      return;
-    }
-    if (!placeToken || !allowed.includes(placeToken)) return;
-    // Only one badge per profile: empty-cell click relocates it instead of stacking copies.
+  function placeChip() {
+    if (!placeToken || placeToken === "Banner" || !placeOptions.includes(placeToken)) return;
     if (placeToken === "Badge") {
       const badge = labels.find((l) => l.token === "Badge");
       if (badge) {
-        moveLabel(badge.id, row, col);
+        updateActiveLabels(
+          labels.map((l) => (l.id === badge.id ? { ...l, x: 0.5, y: 0.5 } : l)),
+        );
         setSelectedId(badge.id);
         return;
       }
@@ -864,8 +1002,8 @@ export default function PosterLayoutDesigner(props: Props) {
     const next: PosterLayoutLabel = {
       id: newLabelId(),
       token: placeToken,
-      row,
-      col,
+      x: 0.5,
+      y: 0.5,
       text_color: "#ffffff",
       fill_color: placeToken === "Badge" ? "#0b111b" : "#000000",
       border_color: "#ffffff",
@@ -885,85 +1023,40 @@ export default function PosterLayoutDesigner(props: Props) {
     setSelectedId(next.id);
   }
 
-  function moveLabel(id: string, row: number, col: number) {
-    const moving = labels.find((l) => l.id === id);
-    if (!moving || isBannerLabel(moving)) return;
-    const occupant = labelAt(row, col);
-    if (occupant && occupant.id !== id) return;
-    updateActiveLabels(labels.map((l) => (l.id === id ? { ...l, row, col } : l)));
+  function placeSelectedToken() {
+    if (placeToken === "Banner") {
+      placeBanner();
+      return;
+    }
+    placeChip();
   }
+
+  const canPlaceSelected =
+    placeToken === "Banner"
+      ? BANNER_EDGES.some((e) => !bannerAtEdge(e))
+      : Boolean(placeToken && placeOptions.includes(placeToken));
 
   function patchSelected(patch: Partial<PosterLayoutLabel>) {
     if (!selected) return;
-    updateActiveLabels(labels.map((l) => (l.id === selected.id ? { ...l, ...patch } : l)));
+    updateActiveLabels(
+      labels.map((l) => {
+        if (l.id !== selected.id) return l;
+        const next = { ...l, ...patch };
+        if (patch.x != null || patch.y != null) {
+          const cols = kind === "episode" ? 33 : 25;
+          const rows = kind === "episode" ? 21 : 37;
+          const cell = cellFromXY(clampFrac(next.x, 0.5), clampFrac(next.y, 0.5), cols, rows);
+          next.row = cell.row;
+          next.col = cell.col;
+        }
+        return next;
+      }),
+    );
   }
 
-  function removeSelected() {
-    if (!selected) return;
-    updateActiveLabels(labels.filter((l) => l.id !== selected.id));
-    setSelectedId(null);
-  }
-
-  function beginDrag(labelId: string, e: ReactPointerEvent<HTMLElement>) {
-    const moving = labels.find((l) => l.id === labelId);
-    if (moving && isBannerLabel(moving)) {
-      // Banners are not grabbable so chips can be placed on top of them.
-      setSelectedId(labelId);
-      return;
-    }
-    const cell = cellFromPoint(e.clientX, e.clientY);
-    setSelectedId(labelId);
-    setDragId(labelId);
-    setDropCell(cell);
-    dragMovedRef.current = false;
-    boardRef.current?.setPointerCapture(e.pointerId);
-  }
-
-  function onBoardPointerDown(e: ReactPointerEvent<HTMLDivElement>) {
-    if (e.button !== 0) return;
-    // Label handles stopPropagation; this only runs for empty board clicks.
-    if (e.target !== e.currentTarget && !(e.target as HTMLElement | null)?.dataset?.boardEmpty) {
-      return;
-    }
-    const cell = cellFromPoint(e.clientX, e.clientY);
-    if (!cell) return;
-    // Never place when a label already owns this snap cell.
-    if (labelAt(cell.row, cell.col)) {
-      const hit = labelAt(cell.row, cell.col);
-      if (hit) beginDrag(hit.id, e);
-      return;
-    }
-    placeOrSelect(cell.row, cell.col);
-  }
-
-  function onLabelPointerDown(labelId: string, e: ReactPointerEvent<HTMLDivElement>) {
-    if (e.button !== 0) return;
-    e.stopPropagation();
-    e.preventDefault();
-    beginDrag(labelId, e);
-  }
-
-  function onBoardPointerMove(e: ReactPointerEvent<HTMLDivElement>) {
-    if (!dragId) return;
-    const cell = cellFromPoint(e.clientX, e.clientY);
-    if (!cell) return;
-    dragMovedRef.current = true;
-    setDropCell(cell);
-  }
-
-  function onBoardPointerUp(e: ReactPointerEvent<HTMLDivElement>) {
-    if (!dragId) return;
-    const cell = dropCell || cellFromPoint(e.clientX, e.clientY);
-    if (cell && dragMovedRef.current) {
-      moveLabel(dragId, cell.row, cell.col);
-    }
-    setDragId(null);
-    setDropCell(null);
-    try {
-      boardRef.current?.releasePointerCapture(e.pointerId);
-    } catch {
-      /* ignore */
-    }
+  function removeLabel(id: string) {
+    updateActiveLabels(labels.filter((l) => l.id !== id));
+    if (selectedId === id) setSelectedId(null);
   }
 
   async function persist(scope: ApplyScope) {
@@ -1017,432 +1110,115 @@ export default function PosterLayoutDesigner(props: Props) {
     <div className="space-y-4 min-w-0">
       <p className="ui-field-description leading-relaxed">
         Design posters as you please. Movie, TV, and Episode each have Default and Coming Soon layouts for placeholders.
-        Real-file overlays are planned for later (Arr root folders).
       </p>
 
-      <div className="flex flex-wrap gap-2">
-        {MEDIA_TABS.map((tab) => (
-          <button
-            key={tab.kind}
-            type="button"
-            onClick={() => {
-              setKind(tab.kind);
-              setSelectedId(null);
-            }}
-            className={`px-3 py-1.5 rounded-lg text-[13px] font-headline uppercase tracking-wider border ${
-              kind === tab.kind ? "" : "border-[#424753]/40 text-slate-400 hover:text-slate-200"
-            }`}
-            style={
-              kind === tab.kind
-                ? { borderColor: props.accentHex, color: props.accentHex, backgroundColor: `${props.accentHex}14` }
-                : undefined
-            }
-          >
-            {tab.label}
-          </button>
-        ))}
-        <span className="self-center text-slate-600 px-1">·</span>
-        {AVAILABILITY_TABS.map((tab) => {
-          const realSoon = tab.availability === "real";
-          const active = availability === tab.availability;
-          return (
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          {MEDIA_TABS.map((tab) => (
             <button
-              key={tab.availability}
+              key={tab.kind}
               type="button"
-              disabled={realSoon}
-              title={
-                realSoon
-                  ? "Coming soon: overlays for real posters in Arr root folders"
-                  : undefined
-              }
               onClick={() => {
-                if (realSoon) return;
-                setAvailability(tab.availability);
+                setKind(tab.kind);
                 setSelectedId(null);
               }}
               className={`px-3 py-1.5 rounded-lg text-[13px] font-headline uppercase tracking-wider border ${
-                realSoon
-                  ? "cursor-not-allowed border-[#424753]/25 text-slate-600 opacity-55"
-                  : active
-                    ? ""
-                    : "border-[#424753]/40 text-slate-400 hover:text-slate-200"
+                kind === tab.kind ? "" : "border-[#424753]/40 text-slate-400 hover:text-slate-200"
               }`}
               style={
-                !realSoon && active
+                kind === tab.kind
                   ? { borderColor: props.accentHex, color: props.accentHex, backgroundColor: `${props.accentHex}14` }
                   : undefined
               }
             >
               {tab.label}
             </button>
-          );
-        })}
-        <span className="self-center text-slate-600 px-1">·</span>
-        {VARIANT_TABS.map((tab) => (
+          ))}
+          <span className="self-center text-slate-600 px-1">·</span>
+          {AVAILABILITY_TABS.map((tab) => {
+            const realSoon = tab.availability === "real";
+            const active = availability === tab.availability;
+            return (
+              <button
+                key={tab.availability}
+                type="button"
+                disabled={realSoon}
+                title={
+                  realSoon
+                    ? "Coming soon: overlays for real posters"
+                    : undefined
+                }
+                onClick={() => {
+                  if (realSoon) return;
+                  setAvailability(tab.availability);
+                  setSelectedId(null);
+                }}
+                className={`px-3 py-1.5 rounded-lg text-[13px] font-headline uppercase tracking-wider border ${
+                  realSoon
+                    ? "cursor-not-allowed border-[#424753]/25 text-slate-600 opacity-55"
+                    : active
+                      ? ""
+                      : "border-[#424753]/40 text-slate-400 hover:text-slate-200"
+                }`}
+                style={
+                  !realSoon && active
+                    ? { borderColor: props.accentHex, color: props.accentHex, backgroundColor: `${props.accentHex}14` }
+                    : undefined
+                }
+              >
+                {tab.label}
+              </button>
+            );
+          })}
+          <span className="self-center text-slate-600 px-1">·</span>
+          {VARIANT_TABS.map((tab) => (
+            <button
+              key={tab.variant}
+              type="button"
+              onClick={() => {
+                setVariant(tab.variant);
+                setSelectedId(null);
+              }}
+              className={`px-3 py-1.5 rounded-lg text-[13px] font-headline uppercase tracking-wider border ${
+                variant === tab.variant ? "" : "border-[#424753]/40 text-slate-400 hover:text-slate-200"
+              }`}
+              style={
+                variant === tab.variant
+                  ? { borderColor: props.accentHex, color: props.accentHex, backgroundColor: `${props.accentHex}14` }
+                  : undefined
+              }
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-3">
+          {dirty ? <span className="text-[12px] text-amber-200/90">Unsaved changes</span> : null}
+          {saveMsg ? <span className="text-[12px] text-slate-400">{saveMsg}</span> : null}
+          {saveError ? <span className="text-[12px] text-red-400">{saveError}</span> : null}
           <button
-            key={tab.variant}
             type="button"
-            onClick={() => {
-              setVariant(tab.variant);
-              setSelectedId(null);
-            }}
-            className={`px-3 py-1.5 rounded-lg text-[13px] font-headline uppercase tracking-wider border ${
-              variant === tab.variant ? "" : "border-[#424753]/40 text-slate-400 hover:text-slate-200"
-            }`}
-            style={
-              variant === tab.variant
-                ? { borderColor: props.accentHex, color: props.accentHex, backgroundColor: `${props.accentHex}14` }
-                : undefined
-            }
+            disabled={busy || !dirty}
+            title="Discard unsaved edits and restore the last saved layout"
+            onClick={() => discardUnsavedProfile()}
+            className="text-[12px] uppercase tracking-wider text-slate-400 hover:text-slate-200 disabled:opacity-40"
           >
-            {tab.label}
+            Discard unsaved
           </button>
-        ))}
+          <button
+            type="button"
+            disabled={!dirty || busy}
+            onClick={() => setApplyOpen(true)}
+            className={`px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-40`}
+            style={accentFilledStyle(props.accentHex)}
+          >
+            {busy ? "Saving…" : "Save layouts"}
+          </button>
+        </div>
       </div>
 
-      <div className={`flex flex-col gap-4 min-w-0 ${props.compact ? "" : "xl:flex-row xl:items-start"}`}>
-        {/* Fixed portrait window so Movie/TV/Episode tabs do not jump the section height. */}
-        <div className="w-[17rem] max-w-full shrink-0 space-y-3">
-          <div className="relative w-full aspect-[2/3] rounded-lg overflow-hidden border border-[#424753]/40 bg-[#0b111b]">
-            {/* Stage: full-bleed for posters; letterboxed 16:9 for episode thumbs. */}
-            <div
-              ref={boardRef}
-              className={`touch-none select-none ${
-                kind === "episode"
-                  ? "absolute left-0 right-0 top-1/2 w-full -translate-y-1/2 aspect-video overflow-hidden border-y border-[#424753]/35"
-                  : "absolute inset-0"
-              } ${dragId ? "cursor-grabbing" : "cursor-crosshair"}`}
-              onPointerDown={onBoardPointerDown}
-              onPointerMove={onBoardPointerMove}
-              onPointerUp={onBoardPointerUp}
-              onPointerCancel={onBoardPointerUp}
-            >
-            {/* Empty-hit layer so clicks on art/grid still place; labels sit above and capture drags. */}
-            <div className="absolute inset-0 z-0" data-board-empty="1" />
-            {previewUrl ? (
-              <img
-                src={previewUrl}
-                alt={`${activeKey} layout preview`}
-                className="absolute inset-0 z-[1] h-full w-full object-cover pointer-events-none"
-                draggable={false}
-              />
-            ) : (
-              <div className="absolute inset-0 z-[1] flex items-center justify-center text-[12px] text-slate-500 px-3 text-center pointer-events-none">
-                {previewError || "Loading preview…"}
-              </div>
-            )}
-            {(() => {
-              const moving = dragId ? labels.find((l) => l.id === dragId) : selected;
-              if (!moving || isBannerLabel(moving)) return null;
-              const guideCell =
-                dragId && dropCell
-                  ? dropCell
-                  : { row: moving.row, col: moving.col };
-              const glowX = guideCell.col === centerCol;
-              const glowY = guideCell.row === centerRow;
-              return (
-                <>
-                  <div
-                    aria-hidden
-                    className="pointer-events-none absolute inset-y-0 z-[4] w-px -translate-x-1/2"
-                    style={{
-                      left: "50%",
-                      backgroundColor: glowX ? props.accentHex : "rgba(148,163,184,0.35)",
-                      boxShadow: glowX
-                        ? `0 0 0 1px ${props.accentHex}55, 0 0 10px ${props.accentHex}, 0 0 18px ${props.accentHex}88`
-                        : undefined,
-                    }}
-                  />
-                  <div
-                    aria-hidden
-                    className="pointer-events-none absolute inset-x-0 z-[4] h-px -translate-y-1/2"
-                    style={{
-                      top: "50%",
-                      backgroundColor: glowY ? props.accentHex : "rgba(148,163,184,0.35)",
-                      boxShadow: glowY
-                        ? `0 0 0 1px ${props.accentHex}55, 0 0 10px ${props.accentHex}, 0 0 18px ${props.accentHex}88`
-                        : undefined,
-                    }}
-                  />
-                </>
-              );
-            })()}
-            {labels.map((label) => {
-              const meta = tokenMeta.find((t) => t.name === label.token);
-              const displayName = meta?.label || label.token;
-              const sampleText = String(
-                label.token === "Custom"
-                  ? renderCustomChipText(
-                      normalizeCustomText(label.custom_text, "Custom") || "{Title} {Sep} {Year}",
-                      sampleTokens,
-                    ) || "Custom text"
-                  : label.token === "Rating" && label.rating_source && label.rating_source !== "auto"
-                    ? sampleTokens[`Rating:${label.rating_source}`] || sampleTokens.Rating || displayName
-                    : sampleTokens[label.token] || displayName || label.token,
-              );
-              const active = label.id === selectedId;
-              const dragging = label.id === dragId;
-              const labelStyle = normalizeLabelStyle(label.style, label.token);
-              const labelSize = normalizeLabelSize(label.size, label.token);
-              const showRing = active || dragging;
-              const fillOpacity = label.fill_opacity ?? 0.65;
-
-              if (labelStyle === "banner") {
-                const edge = normalizeBannerEdge(label.edge);
-                const frac = normalizeBannerThickness(
-                  label.thickness,
-                  edge,
-                  labelSize,
-                  kind === "episode",
-                );
-                const span = normalizeBannerSpan(label.span_start, label.span_end);
-                const along = (span.end - span.start) * 100;
-                const alongStart = span.start * 100;
-                const stripStyle: CSSProperties =
-                  edge === "top"
-                    ? { left: `${alongStart}%`, top: 0, width: `${along}%`, height: `${frac * 100}%` }
-                    : edge === "bottom"
-                      ? { left: `${alongStart}%`, bottom: 0, width: `${along}%`, height: `${frac * 100}%` }
-                      : edge === "left"
-                        ? { left: 0, top: `${alongStart}%`, width: `${frac * 100}%`, height: `${along}%` }
-                        : { right: 0, top: `${alongStart}%`, width: `${frac * 100}%`, height: `${along}%` };
-                return (
-                  <div
-                    key={label.id}
-                    aria-hidden
-                    className="absolute z-[5] pointer-events-none"
-                    style={{
-                      ...stripStyle,
-                      backgroundColor: hexToRgba(label.fill_color, fillOpacity, "#000000"),
-                      boxShadow: active
-                        ? `inset 0 0 0 1px rgba(0,0,0,0.55), inset 0 0 0 3px ${props.accentHex}`
-                        : undefined,
-                    }}
-                    title={`Banner · ${edge} (select from the list to edit)`}
-                  />
-                );
-              }
-
-              const row = dragging && dropCell ? dropCell.row : label.row;
-              const col = dragging && dropCell ? dropCell.col : label.col;
-              const blocked = Boolean(
-                dragging &&
-                  dropCell &&
-                  labelAt(dropCell.row, dropCell.col) &&
-                  labelAt(dropCell.row, dropCell.col)?.id !== label.id,
-              );
-              const isBadge = label.token === "Badge";
-              const arted = Boolean(label.arted) && label.token === "Rating";
-              const ratingSource =
-                arted
-                  ? label.rating_source && label.rating_source !== "auto"
-                    ? label.rating_source
-                    : "imdb"
-                  : label.rating_source && label.rating_source !== "auto"
-                    ? label.rating_source
-                    : String(sampleTokens.RatingSource || "imdb");
-              const ratingIcon = arted ? RATING_ICONS[ratingSource] || RATING_ICONS.imdb : null;
-              const size = estimateHandleSizePx(
-                label.token,
-                sampleText,
-                boardSize.w || 272,
-                kind,
-                labelSize,
-                arted,
-              );
-              const { leftPct, topPct } = clampedHandlePct({
-                row,
-                col,
-                cols: grid.cols,
-                rows: grid.rows,
-                boardW: boardSize.w,
-                boardH: boardSize.h,
-                token: label.token,
-                sampleText,
-                mediaKind: kind,
-                size: labelSize,
-                arted,
-              });
-              const borderOpacity = label.border_opacity ?? 0;
-              const stroke = Math.max(2, Math.round(size.h * 0.08));
-              const badgeVariant = badgeLogoVariant(label.fill_color);
-              const fontPx = Math.max(9, Math.round(size.h * 0.42));
-              return (
-                <div
-                  key={label.id}
-                  role="button"
-                  tabIndex={-1}
-                  aria-label={`Move ${displayName}`}
-                  className={`absolute z-10 cursor-grab active:cursor-grabbing ${showRing ? "z-20" : ""}`}
-                  style={{
-                    left: `${leftPct}%`,
-                    top: `${topPct}%`,
-                    width: size.w,
-                    height: size.h,
-                    transform: "translate(-50%, -50%)",
-                    opacity: blocked ? 0.45 : 1,
-                    boxShadow: showRing
-                      ? `0 0 0 1px rgba(0,0,0,0.55), 0 0 0 3px ${props.accentHex}`
-                      : undefined,
-                  }}
-                  title={`${displayName} (drag to move)`}
-                  onPointerDown={(e) => onLabelPointerDown(label.id, e)}
-                >
-                  {isBadge ? (
-                    <span
-                      className="flex h-full w-full items-center justify-center overflow-hidden"
-                      style={{
-                        borderRadius: "20%",
-                        backgroundColor: badgeVariant === "light" ? "#fbbf24" : "#0b111b",
-                      }}
-                    >
-                      <img
-                        src={badgeVariant === "light" ? placeholdarrLogoBlue : placeholdarrLogoYellow}
-                        alt=""
-                        draggable={false}
-                        className="pointer-events-none h-[70%] w-[70%] object-contain"
-                      />
-                    </span>
-                  ) : (
-                    <span
-                      className={`flex h-full w-full items-center justify-center overflow-hidden rounded-md font-headline whitespace-nowrap ${
-                        ratingIcon ? "gap-0.5 px-1" : "gap-1 px-1.5"
-                      }`}
-                      style={{
-                        color: solidHex(label.text_color, "#ffffff"),
-                        backgroundColor: hexToRgba(label.fill_color, fillOpacity, "#000000"),
-                        border:
-                          borderOpacity > 0
-                            ? `${stroke}px solid ${hexToRgba(label.border_color, borderOpacity, "#ffffff")}`
-                            : "none",
-                        fontSize: fontPx,
-                        lineHeight: 1,
-                      }}
-                    >
-                      {ratingIcon ? (
-                        <span
-                          className="inline-flex shrink-0 items-center justify-center overflow-hidden rounded-[20%]"
-                          style={{
-                            height: Math.max(11, Math.round(size.h * 0.58)),
-                            width: Math.max(11, Math.round(size.h * 0.58)),
-                            backgroundColor: ratingSource === "imdb" ? "#F5C518" : "#1e2430",
-                          }}
-                        >
-                          <img
-                            src={ratingIcon}
-                            alt=""
-                            draggable={false}
-                            className="pointer-events-none object-contain"
-                            style={{ height: "78%", width: "78%" }}
-                          />
-                        </span>
-                      ) : null}
-                      {sampleText}
-                    </span>
-                  )}
-                </div>
-              );
-            })}
-            </div>
-          </div>
-
-          <div className="space-y-1.5 px-0.5">
-            <label className="text-[12px] uppercase tracking-wider text-slate-500">Preview art</label>
-            <div className="flex items-center gap-2 pl-0.5">
-              <input
-                type="text"
-                inputMode="numeric"
-                pattern="[0-9]*"
-                value={previewTmdbId}
-                onChange={(e) => setPreviewTmdbId(e.target.value.replace(/[^\d]/g, ""))}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    const id = previewTmdbId.trim();
-                    if (id) void applyPreviewArt({ tmdbId: id });
-                  }
-                }}
-                placeholder={kind === "episode" ? "TV TMDB ID" : "TMDB ID"}
-                className={`${FIELD_CLASS} flex-1`}
-                disabled={previewArtBusy}
-              />
-              <button
-                type="button"
-                title="Load TMDB art"
-                disabled={previewArtBusy || !previewTmdbId.trim()}
-                onClick={() => void applyPreviewArt({ tmdbId: previewTmdbId.trim() })}
-                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[#424753]/55 text-slate-300 hover:border-[#424753] hover:text-slate-100 disabled:opacity-40"
-              >
-                <span className="material-symbols-outlined leading-none" style={{ fontSize: 22 }}>
-                  search
-                </span>
-              </button>
-              <button
-                type="button"
-                title={
-                  kind === "episode"
-                    ? "Random episode thumb from library"
-                    : kind === "tv"
-                      ? "Random TV poster from library"
-                      : "Random movie poster from library"
-                }
-                disabled={previewArtBusy}
-                onClick={() => void applyPreviewArt({ random: true })}
-                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[#424753]/55 text-slate-300 hover:border-[#424753] hover:text-slate-100 disabled:opacity-40"
-              >
-                <span className="material-symbols-outlined leading-none" style={{ fontSize: 22 }}>
-                  casino
-                </span>
-              </button>
-            </div>
-            {previewArtTitle ? (
-              <p className="text-[11px] text-slate-500 truncate" title={previewArtTitle}>
-                {previewArtTitle}
-              </p>
-            ) : null}
-            {previewArtError ? <p className="text-[11px] text-red-400">{previewArtError}</p> : null}
-          </div>
-
-          <div className="rounded-lg border border-[#424753]/40 divide-y divide-[#424753]/25 overflow-hidden">
-            {labels.length === 0 ? (
-              <div className="px-3 py-2 text-[13px] text-slate-500">No labels on this profile yet.</div>
-            ) : (
-              labels.map((label) => {
-                const meta = tokenMeta.find((t) => t.name === label.token);
-                const active = label.id === selectedId;
-                const banner = isBannerLabel(label);
-                return (
-                  <button
-                    key={label.id}
-                    type="button"
-                    onClick={() => setSelectedId(label.id)}
-                    className={`w-full text-left px-3 py-2 text-[13px] flex items-center justify-between gap-2 ${
-                      active ? "bg-white/5 text-slate-100" : "text-slate-300 hover:bg-white/[0.03]"
-                    }`}
-                  >
-                    <span className="truncate">
-                      {banner
-                        ? "Banner"
-                        : label.token === "Custom"
-                          ? renderCustomChipText(
-                              normalizeCustomText(label.custom_text, "Custom") || "{Title} {Sep} {Year}",
-                              sampleTokens,
-                            ) || "Custom text"
-                          : meta?.label || label.token}
-                    </span>
-                    <span className="text-[11px] text-slate-500 font-mono shrink-0">
-                      {banner
-                        ? normalizeBannerEdge(label.edge)
-                        : `r${label.row + 1}c${label.col + 1}`}
-                    </span>
-                  </button>
-                );
-              })
-            )}
-          </div>
-        </div>
-
-        <div className="min-w-0 flex-1 space-y-3 overflow-hidden">
+      <div className={`flex flex-col gap-4 min-w-0 ${props.compact ? "" : "xl:flex-row-reverse xl:items-start"}`}>
+        <div className="w-full max-w-md shrink-0 space-y-3 xl:w-[17rem]">
           <div className="flex items-center justify-between gap-3 rounded-lg border border-[#424753]/40 px-3 py-2.5">
             <div className="min-w-0">
               <div className="text-[13px] font-semibold text-slate-200">Grayscale</div>
@@ -1472,321 +1248,430 @@ export default function PosterLayoutDesigner(props: Props) {
               />
             </button>
           </div>
-          <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
-            <button
-              type="button"
-              disabled={BANNER_EDGES.every((e) => Boolean(bannerAtEdge(e)))}
-              onClick={() => placeBanner()}
-              className="rounded-lg border border-[#424753]/55 px-3 py-1.5 text-[12px] font-headline uppercase tracking-wider text-slate-300 hover:border-[#424753] hover:text-slate-100 disabled:opacity-40"
-            >
-              Add banner
-            </button>
-            <label className="text-[12px] uppercase tracking-wider text-slate-500 shrink-0">Add chip</label>
-            <select
-              value={placeToken}
-              onChange={(e) => setPlaceToken(e.target.value)}
-              className={`${SELECT_CLASS} sm:max-w-[16rem]`}
-            >
-              {allowed.map((name) => {
-                const meta = tokenMeta.find((t) => t.name === name);
+          <div
+            className="rounded-lg border border-[#424753]/40 divide-y divide-[#424753]/25 overflow-hidden"
+            onMouseEnter={() => setListHovering(true)}
+            onMouseLeave={() => {
+              setListHovering(false);
+              setHoveredId(null);
+            }}
+          >
+            {labels.length === 0 ? (
+              <div className="px-3 py-2 text-[13px] text-slate-500">No labels on this profile yet.</div>
+            ) : (
+              labels.map((label, index) => {
+                const active = label.id === selectedId;
+                const hovered = label.id === hoveredId;
+                const n = index + 1;
+                const name = labelElementName(label, tokenMeta);
                 return (
-                  <option key={name} value={name} className="bg-[#0b111b] text-slate-100">
-                    {meta?.label || name}
-                  </option>
+                  <div
+                    key={label.id}
+                    onMouseEnter={() => setHoveredId(label.id)}
+                    className={`flex items-center gap-1 px-2 py-1.5 ${
+                      active || hovered ? "bg-white/5 text-slate-100" : "text-slate-300 hover:bg-white/[0.03]"
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setSelectedId(label.id)}
+                      className="min-w-0 flex-1 text-left text-[13px] flex items-center gap-2 truncate px-1 py-0.5"
+                    >
+                      <span
+                        className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md font-mono text-[11px] ${
+                          hovered
+                            ? "bg-[color:color-mix(in_srgb,var(--brand-accent)_35%,transparent)] text-slate-100"
+                            : "bg-[#0b111b] text-slate-500"
+                        }`}
+                      >
+                        {n}
+                      </span>
+                      <span className="truncate">{name}</span>
+                    </button>
+                    <button
+                      type="button"
+                      title={`Remove ${name}`}
+                      aria-label={`Remove ${name}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeLabel(label.id);
+                      }}
+                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-red-400/20 bg-transparent text-red-400 transition hover:border-red-400/35 hover:bg-red-500/10 hover:text-red-300"
+                    >
+                      <span className="material-symbols-outlined leading-none" style={{ fontSize: 18 }}>
+                        delete
+                      </span>
+                    </button>
+                  </div>
                 );
-              })}
-            </select>
+              })
+            )}
+            <div className="flex items-center gap-2 px-2 py-2 bg-[#0b111b]/40">
+              <select
+                value={placeToken}
+                onChange={(e) => setPlaceToken(e.target.value)}
+                aria-label="Add label type"
+                className={`${SELECT_CLASS} flex-1 min-w-0`}
+              >
+                {placeOptions.map((name) => {
+                  const meta = tokenMeta.find((t) => t.name === name);
+                  return (
+                    <option key={name} value={name} className="bg-[#0b111b] text-slate-100">
+                      {meta?.label || name}
+                    </option>
+                  );
+                })}
+              </select>
+              <button
+                type="button"
+                title={placeToken === "Banner" ? "Add banner" : `Add ${placeToken}`}
+                disabled={!canPlaceSelected}
+                onClick={() => placeSelectedToken()}
+                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[#424753]/55 text-slate-300 hover:border-[#424753] hover:text-slate-100 disabled:opacity-40"
+              >
+                <span className="material-symbols-outlined leading-none" style={{ fontSize: 22 }}>
+                  add
+                </span>
+              </button>
+            </div>
           </div>
+        </div>
 
-          {selected ? (
-            <div className="space-y-3 rounded-lg border border-[#424753]/40 p-3 min-w-0 overflow-hidden">
-              <div className="flex items-center justify-between gap-2 min-w-0">
-                <div className="text-[13px] font-semibold text-slate-200 truncate">
-                  {tokenMeta.find((t) => t.name === selected.token)?.label || selected.token}
-                </div>
-                <button
-                  type="button"
-                  onClick={removeSelected}
-                  className="text-[12px] uppercase tracking-wider text-red-300/90 hover:text-red-200 shrink-0"
-                >
-                  Remove
-                </button>
-              </div>
-              {isBannerLabel(selected) ? (
-                <div className="space-y-2">
-                  <div className="text-[12px] text-slate-400">Edge</div>
-                  <div className="flex flex-wrap gap-2">
-                    {(catalog?.banner_edges?.length ? catalog.banner_edges : BANNER_EDGES).map((opt) => {
-                      const active = normalizeBannerEdge(selected.edge) === opt;
-                      const taken = Boolean(bannerAtEdge(opt) && bannerAtEdge(opt)?.id !== selected.id);
-                      return (
-                        <button
-                          key={opt}
-                          type="button"
-                          disabled={taken}
-                          onClick={() => {
-                            const anchor = edgeAnchorCell(opt, grid.cols, grid.rows);
-                            patchSelected({
-                              token: "Banner",
-                              edge: opt,
-                              row: anchor.row,
-                              col: anchor.col,
-                              style: "banner",
-                            });
-                          }}
-                          className={`rounded-lg border px-3 py-1.5 text-[12px] font-headline uppercase tracking-wider disabled:opacity-35 ${
-                            active
-                              ? "border-[var(--brand-accent)] text-slate-100 bg-[color:color-mix(in_srgb,var(--brand-accent)_18%,transparent)]"
-                              : "border-[#424753]/55 text-slate-400 hover:border-[#424753] hover:text-slate-200"
-                          }`}
-                        >
-                          {opt}
-                        </button>
-                      );
-                    })}
+        <div className="flex min-w-0 flex-1 flex-col gap-3 overflow-hidden">
+          {/* Height locked to tallest (Custom) editor; visible controls stay top-aligned. */}
+          <div
+            className={`grid min-w-0 flex-1 overflow-hidden rounded-lg border ${
+              selected ? "border-[#424753]/40" : "border-dashed border-[#424753]/40"
+            }`}
+          >
+            <div
+              className="col-start-1 row-start-1 invisible pointer-events-none min-w-0 p-3"
+              aria-hidden
+              inert
+            >
+              <EditorHeightLock
+                kind={kind}
+                catalog={catalog}
+                activeKey={activeKey}
+                sampleTokens={sampleTokens}
+              />
+            </div>
+            <div className="col-start-1 row-start-1 flex min-h-0 min-w-0 flex-col p-3">
+              {selected ? (
+                <div className="min-w-0 space-y-3">
+                  <div className="text-[13px] font-semibold text-slate-200 truncate">
+                    {tokenMeta.find((t) => t.name === selected.token)?.label || selected.token}
                   </div>
-                </div>
-              ) : null}
-              {isBannerLabel(selected) ? (
-                <>
-                  <label className="space-y-1 text-[12px] text-slate-400 min-w-0 block">
-                    <span>
-                      Depth (
-                      {Math.round(
-                        normalizeBannerThickness(
-                          selected.thickness,
-                          normalizeBannerEdge(selected.edge),
-                          normalizeLabelSize(selected.size, selected.token),
-                          kind === "episode",
-                        ) * 100,
-                      )}
-                      %)
-                    </span>
-                    <input
-                      type="range"
-                      min={Math.round(BANNER_THICKNESS_MIN * 100)}
-                      max={Math.round(BANNER_THICKNESS_MAX * 100)}
-                      step={1}
-                      value={Math.round(
-                        normalizeBannerThickness(
-                          selected.thickness,
-                          normalizeBannerEdge(selected.edge),
-                          normalizeLabelSize(selected.size, selected.token),
-                          kind === "episode",
-                        ) * 100,
-                      )}
-                      onChange={(e) =>
-                        patchSelected({
-                          thickness: Math.max(
-                            BANNER_THICKNESS_MIN,
-                            Math.min(BANNER_THICKNESS_MAX, Number(e.target.value) / 100),
-                          ),
-                        })
-                      }
-                      className="w-full accent-[var(--brand-accent)]"
-                    />
-                  </label>
-                  {(() => {
-                    const span = normalizeBannerSpan(selected.span_start, selected.span_end);
-                    const startPct = Math.round(span.start * 100);
-                    const endPct = Math.round(span.end * 100);
-                    return (
-                      <div className="space-y-1 min-w-0">
-                        <div className="text-[12px] text-slate-400">
-                          Along edge ({startPct}% – {endPct}%)
+                  {isBannerLabel(selected) ? (
+                    <>
+                      <div className="space-y-2">
+                        <div className="text-[12px] text-slate-400">Edge</div>
+                        <div className="flex flex-wrap gap-2">
+                          {(catalog?.banner_edges?.length ? catalog.banner_edges : BANNER_EDGES).map((opt) => {
+                            const active = normalizeBannerEdge(selected.edge) === opt;
+                            const taken = Boolean(bannerAtEdge(opt) && bannerAtEdge(opt)?.id !== selected.id);
+                            return (
+                              <button
+                                key={opt}
+                                type="button"
+                                disabled={taken}
+                                onClick={() => {
+                                  const anchor = edgeAnchorXY(opt);
+                                  patchSelected({
+                                    token: "Banner",
+                                    edge: opt,
+                                    x: anchor.x,
+                                    y: anchor.y,
+                                    style: "banner",
+                                  });
+                                }}
+                                className={`rounded-lg border px-3 py-1.5 text-[12px] font-headline uppercase tracking-wider disabled:opacity-35 ${
+                                  active
+                                    ? "border-[var(--brand-accent)] text-slate-100 bg-[color:color-mix(in_srgb,var(--brand-accent)_18%,transparent)]"
+                                    : "border-[#424753]/55 text-slate-400 hover:border-[#424753] hover:text-slate-200"
+                                }`}
+                              >
+                                {opt}
+                              </button>
+                            );
+                          })}
                         </div>
-                        <BannerSpanSlider
-                          start={span.start}
-                          end={span.end}
-                          accentHex={props.accentHex}
-                          onChange={(start, end) => patchSelected({ span_start: start, span_end: end })}
-                        />
                       </div>
-                    );
-                  })()}
-                </>
-              ) : (
-                <div className="space-y-2">
-                  <div className="text-[12px] text-slate-400">Size</div>
-                  <div className="flex flex-wrap gap-2">
-                    {(catalog?.sizes?.length ? catalog.sizes : LABEL_SIZES).map((opt) => {
-                      const active = normalizeLabelSize(selected.size, selected.token) === opt;
-                      return (
-                        <button
-                          key={opt}
-                          type="button"
-                          onClick={() => patchSelected({ size: opt })}
-                          className={`rounded-lg border px-3 py-1.5 text-[12px] font-headline uppercase tracking-wider ${
-                            active
-                              ? "border-[var(--brand-accent)] text-slate-100 bg-[color:color-mix(in_srgb,var(--brand-accent)_18%,transparent)]"
-                              : "border-[#424753]/55 text-slate-400 hover:border-[#424753] hover:text-slate-200"
-                          }`}
-                        >
-                          {opt}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-              {selected.token === "Badge" ? (
-                <div className="space-y-2">
-                  <p className="text-[12px] text-slate-500">Placeholdarr logo. Dark is yellow on navy; light is blue on yellow.</p>
-                  <div className="flex flex-wrap gap-2">
-                    {([
-                      { id: "dark" as const, label: "Dark", fill: "#0b111b" },
-                      { id: "light" as const, label: "Light", fill: "#fbbf24" },
-                    ]).map((opt) => {
-                      const active = badgeLogoVariant(selected.fill_color) === opt.id;
-                      return (
-                        <button
-                          key={opt.id}
-                          type="button"
-                          onClick={() => patchSelected({ fill_color: opt.fill, fill_opacity: 1 })}
-                          className={`rounded-lg border px-3 py-1.5 text-[12px] font-headline uppercase tracking-wider ${
-                            active
-                              ? "border-[var(--brand-accent)] text-slate-100 bg-[color:color-mix(in_srgb,var(--brand-accent)_18%,transparent)]"
-                              : "border-[#424753]/55 text-slate-400 hover:border-[#424753] hover:text-slate-200"
-                          }`}
-                        >
-                          {opt.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              ) : isBannerLabel(selected) ? (
-                <div className="grid grid-cols-1 gap-3 min-w-0 sm:grid-cols-2">
-                  <ColorField
-                    label="Fill"
-                    value={selected.fill_color}
-                    onChange={(v) => patchSelected({ fill_color: solidHex(v, "#000000") })}
-                  />
-                  <label className="space-y-1 text-[12px] text-slate-400 min-w-0">
-                    <span>Fill opacity ({Math.round((selected.fill_opacity ?? 0.65) * 100)}%)</span>
-                    <input
-                      type="range"
-                      min={0}
-                      max={100}
-                      value={Math.round((selected.fill_opacity ?? 0.65) * 100)}
-                      onChange={(e) => patchSelected({ fill_opacity: Number(e.target.value) / 100 })}
-                      className="w-full accent-[var(--brand-accent)]"
-                    />
-                  </label>
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 gap-3 min-w-0 sm:grid-cols-2">
-                  {selected.token === "Custom" ? (
-                    <div className="space-y-2 min-w-0 sm:col-span-2">
                       <label className="space-y-1 text-[12px] text-slate-400 min-w-0 block">
-                        <span>Custom text</span>
+                        <span>
+                          Depth (
+                          {Math.round(
+                            normalizeBannerThickness(
+                              selected.thickness,
+                              normalizeBannerEdge(selected.edge),
+                              normalizeLabelSize(selected.size, selected.token),
+                              kind === "episode",
+                            ) * 100,
+                          )}
+                          %)
+                        </span>
                         <input
-                          type="text"
-                          value={selected.custom_text || ""}
-                          maxLength={catalog?.custom_text_max_length || CUSTOM_TEXT_MAX_LEN}
-                          placeholder="{Title} {Sep} {Year}"
+                          type="range"
+                          min={Math.round(BANNER_THICKNESS_MIN * 100)}
+                          max={Math.round(BANNER_THICKNESS_MAX * 100)}
+                          step={1}
+                          value={Math.round(
+                            normalizeBannerThickness(
+                              selected.thickness,
+                              normalizeBannerEdge(selected.edge),
+                              normalizeLabelSize(selected.size, selected.token),
+                              kind === "episode",
+                            ) * 100,
+                          )}
                           onChange={(e) =>
                             patchSelected({
-                              custom_text: e.target.value
-                                .replace(/[\n\r]/g, "")
-                                .slice(0, catalog?.custom_text_max_length || CUSTOM_TEXT_MAX_LEN),
+                              thickness: Math.max(
+                                BANNER_THICKNESS_MIN,
+                                Math.min(BANNER_THICKNESS_MAX, Number(e.target.value) / 100),
+                              ),
                             })
                           }
-                          className={`${FIELD_CLASS} font-mono text-[12px]`}
+                          className="w-full accent-[var(--brand-accent)]"
                         />
                       </label>
-                      <p className="text-[11px] text-slate-500 leading-snug">
-                        Use static poster tokens like <span className="font-mono">{"{Title}"}</span> and{" "}
-                        <span className="font-mono">{"{Sep}"}</span>. Empty values collapse automatically.
-                      </p>
-                      <div className="flex flex-wrap gap-1.5">
-                        {(
-                          catalog?.custom_template_tokens?.[activeKey] || [
-                            "Title",
-                            "Year",
-                            "ComingSoonOrNewEp",
-                            "Rating",
-                            "Runtime",
-                            "Sep",
-                          ]
-                        ).map((name) => (
-                          <button
-                            key={name}
-                            type="button"
-                            title={`Insert {${name}}`}
-                            onClick={() => {
-                              const maxLen = catalog?.custom_text_max_length || CUSTOM_TEXT_MAX_LEN;
-                              const insert = `{${name}}`;
-                              const current = String(selected.custom_text || "");
-                              const next = `${current}${current && !current.endsWith(" ") ? " " : ""}${insert}`.slice(
-                                0,
-                                maxLen,
+                      {(() => {
+                        const span = normalizeBannerSpan(selected.span_start, selected.span_end);
+                        const startPct = Math.round(span.start * 100);
+                        const endPct = Math.round(span.end * 100);
+                        return (
+                          <div className="space-y-1 min-w-0">
+                            <div className="text-[12px] text-slate-400">
+                              Along edge ({startPct}% – {endPct}%)
+                            </div>
+                            <BannerSpanSlider
+                              start={span.start}
+                              end={span.end}
+                              accentHex={props.accentHex}
+                              onChange={(start, end) => patchSelected({ span_start: start, span_end: end })}
+                            />
+                          </div>
+                        );
+                      })()}
+                      <div className="grid grid-cols-1 gap-3 min-w-0 sm:grid-cols-2">
+                        <ColorField
+                          label="Fill"
+                          value={selected.fill_color}
+                          onChange={(v) => patchSelected({ fill_color: solidHex(v, "#000000") })}
+                        />
+                        <label className="space-y-1 text-[12px] text-slate-400 min-w-0">
+                          <span>Fill opacity ({Math.round((selected.fill_opacity ?? 0.65) * 100)}%)</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={100}
+                            value={Math.round((selected.fill_opacity ?? 0.65) * 100)}
+                            onChange={(e) => patchSelected({ fill_opacity: Number(e.target.value) / 100 })}
+                            className="w-full accent-[var(--brand-accent)]"
+                          />
+                        </label>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="space-y-2">
+                        <div className="text-[12px] text-slate-400">Size</div>
+                        <div className="flex flex-wrap gap-2">
+                          {(catalog?.sizes?.length ? catalog.sizes : LABEL_SIZES).map((opt) => {
+                            const active = normalizeLabelSize(selected.size, selected.token) === opt;
+                            return (
+                              <button
+                                key={opt}
+                                type="button"
+                                onClick={() => patchSelected({ size: opt })}
+                                className={`rounded-lg border px-3 py-1.5 text-[12px] font-headline uppercase tracking-wider ${
+                                  active
+                                    ? "border-[var(--brand-accent)] text-slate-100 bg-[color:color-mix(in_srgb,var(--brand-accent)_18%,transparent)]"
+                                    : "border-[#424753]/55 text-slate-400 hover:border-[#424753] hover:text-slate-200"
+                                }`}
+                              >
+                                {opt}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      {(() => {
+                        const bake = bakeSizeForKind(kind);
+                        return (
+                          <div className="grid grid-cols-1 gap-3 min-w-0 sm:grid-cols-2">
+                            <BakePxAxisControl
+                              label="X"
+                              frac={selected.x}
+                              dim={bake.w}
+                              onChange={(x) => patchSelected({ x })}
+                            />
+                            <BakePxAxisControl
+                              label="Y"
+                              frac={selected.y}
+                              dim={bake.h}
+                              onChange={(y) => patchSelected({ y })}
+                            />
+                          </div>
+                        );
+                      })()}
+                      {selected.token === "Badge" ? (
+                        <div className="space-y-2">
+                          <p className="text-[12px] text-slate-500">
+                            Placeholdarr logo. Dark is yellow on navy; light is blue on yellow.
+                          </p>
+                          <div className="flex flex-wrap gap-2">
+                            {([
+                              { id: "dark" as const, label: "Dark", fill: "#0b111b" },
+                              { id: "light" as const, label: "Light", fill: "#fbbf24" },
+                            ]).map((opt) => {
+                              const active = badgeLogoVariant(selected.fill_color) === opt.id;
+                              return (
+                                <button
+                                  key={opt.id}
+                                  type="button"
+                                  onClick={() => patchSelected({ fill_color: opt.fill, fill_opacity: 1 })}
+                                  className={`rounded-lg border px-3 py-1.5 text-[12px] font-headline uppercase tracking-wider ${
+                                    active
+                                      ? "border-[var(--brand-accent)] text-slate-100 bg-[color:color-mix(in_srgb,var(--brand-accent)_18%,transparent)]"
+                                      : "border-[#424753]/55 text-slate-400 hover:border-[#424753] hover:text-slate-200"
+                                  }`}
+                                >
+                                  {opt.label}
+                                </button>
                               );
-                              patchSelected({ custom_text: next });
-                            }}
-                            className="rounded-md border border-[#424753]/55 px-1.5 py-0.5 font-mono text-[11px] text-slate-400 hover:border-[#424753] hover:text-slate-200"
+                            })}
+                          </div>
+                        </div>
+                      ) : null}
+                      {selected.token === "Custom" ? (
+                        <div className="space-y-2 min-w-0">
+                          <label className="space-y-1 text-[12px] text-slate-400 min-w-0 block">
+                            <span>Custom text</span>
+                            <input
+                              type="text"
+                              value={selected.custom_text || ""}
+                              maxLength={catalog?.custom_text_max_length || CUSTOM_TEXT_MAX_LEN}
+                              placeholder="{Title} {Sep} {Year}"
+                              onChange={(e) =>
+                                patchSelected({
+                                  custom_text: e.target.value
+                                    .replace(/[\n\r]/g, "")
+                                    .slice(0, catalog?.custom_text_max_length || CUSTOM_TEXT_MAX_LEN),
+                                })
+                              }
+                              className={`${FIELD_CLASS} font-mono text-[12px]`}
+                            />
+                          </label>
+                          <p className="text-[11px] text-slate-500 leading-snug">
+                            Use static poster tokens like <span className="font-mono">{"{Title}"}</span> and{" "}
+                            <span className="font-mono">{"{Sep}"}</span>. Empty values collapse automatically.
+                          </p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {(
+                              catalog?.custom_template_tokens?.[activeKey] || [
+                                "Title",
+                                "Year",
+                                "ComingSoonOrNewEp",
+                                "Rating",
+                                "Runtime",
+                                "Sep",
+                              ]
+                            ).map((name) => (
+                              <button
+                                key={name}
+                                type="button"
+                                title={`Insert {${name}}`}
+                                onClick={() => {
+                                  const maxLen = catalog?.custom_text_max_length || CUSTOM_TEXT_MAX_LEN;
+                                  const insert = `{${name}}`;
+                                  const current = String(selected.custom_text || "");
+                                  const next = `${current}${current && !current.endsWith(" ") ? " " : ""}${insert}`.slice(
+                                    0,
+                                    maxLen,
+                                  );
+                                  patchSelected({ custom_text: next });
+                                }}
+                                className="rounded-md border border-[#424753]/55 px-1.5 py-0.5 font-mono text-[11px] text-slate-400 hover:border-[#424753] hover:text-slate-200"
+                              >
+                                {`{${name}}`}
+                              </button>
+                            ))}
+                          </div>
+                          <p
+                            className="text-[11px] text-slate-500 truncate"
+                            title={renderCustomChipText(selected.custom_text || "", sampleTokens)}
                           >
-                            {`{${name}}`}
-                          </button>
-                        ))}
-                      </div>
-                      <p className="text-[11px] text-slate-500 truncate" title={renderCustomChipText(selected.custom_text || "", sampleTokens)}>
-                        Preview:{" "}
-                        <span className="text-slate-300">
-                          {renderCustomChipText(selected.custom_text || "", sampleTokens) || "(empty)"}
-                        </span>
-                      </p>
-                    </div>
-                  ) : null}
-                  {(catalog?.arted_tokens || ["Rating"]).includes(selected.token) ? (
-                    <div className="space-y-2 sm:col-span-2">
-                      <div className="text-[12px] text-slate-400">Chip look</div>
-                      <div className="flex flex-wrap gap-2">
-                        {([
-                          { id: false, label: "Text" },
-                          { id: true, label: "Arted" },
-                        ] as const).map((opt) => {
-                          const active = Boolean(selected.arted) === opt.id;
-                          return (
-                            <button
-                              key={String(opt.id)}
-                              type="button"
-                              onClick={() => {
-                                if (opt.id) {
-                                  const source =
-                                    selected.rating_source && selected.rating_source !== "auto"
-                                      ? selected.rating_source
-                                      : "imdb";
-                                  patchSelected({ arted: true, rating_source: source });
-                                  return;
-                                }
-                                patchSelected({ arted: false });
-                              }}
-                              className={`rounded-lg border px-3 py-1.5 text-[12px] font-headline uppercase tracking-wider ${
-                                active
-                                  ? "border-[var(--brand-accent)] text-slate-100 bg-[color:color-mix(in_srgb,var(--brand-accent)_18%,transparent)]"
-                                  : "border-[#424753]/55 text-slate-400 hover:border-[#424753] hover:text-slate-200"
-                              }`}
+                            Preview:{" "}
+                            <span className="text-slate-300">
+                              {renderCustomChipText(selected.custom_text || "", sampleTokens) || "(empty)"}
+                            </span>
+                          </p>
+                        </div>
+                      ) : null}
+                      {(catalog?.arted_tokens || ["Rating"]).includes(selected.token) ? (
+                        <div className="space-y-2">
+                          <div className="text-[12px] text-slate-400">Chip look</div>
+                          <div className="flex flex-wrap gap-2">
+                            {([
+                              { id: false, label: "Text" },
+                              { id: true, label: "Arted" },
+                            ] as const).map((opt) => {
+                              const active = Boolean(selected.arted) === opt.id;
+                              return (
+                                <button
+                                  key={String(opt.id)}
+                                  type="button"
+                                  onClick={() => {
+                                    if (opt.id) {
+                                      const source =
+                                        selected.rating_source && selected.rating_source !== "auto"
+                                          ? selected.rating_source
+                                          : "imdb";
+                                      patchSelected({ arted: true, rating_source: source });
+                                      return;
+                                    }
+                                    patchSelected({ arted: false });
+                                  }}
+                                  className={`rounded-lg border px-3 py-1.5 text-[12px] font-headline uppercase tracking-wider ${
+                                    active
+                                      ? "border-[var(--brand-accent)] text-slate-100 bg-[color:color-mix(in_srgb,var(--brand-accent)_18%,transparent)]"
+                                      : "border-[#424753]/55 text-slate-400 hover:border-[#424753] hover:text-slate-200"
+                                  }`}
+                                >
+                                  {opt.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          <label
+                            className={`block space-y-1 text-[12px] min-w-0 ${
+                              selected.arted
+                                ? "text-slate-400"
+                                : "pointer-events-none text-slate-600 opacity-40"
+                            }`}
+                            aria-hidden={!selected.arted}
+                          >
+                            <span>Rating source</span>
+                            <select
+                              value={
+                                selected.rating_source && selected.rating_source !== "auto"
+                                  ? selected.rating_source
+                                  : "imdb"
+                              }
+                              disabled={!selected.arted}
+                              tabIndex={selected.arted ? undefined : -1}
+                              onChange={(e) => patchSelected({ rating_source: e.target.value })}
+                              className={SELECT_CLASS}
                             >
-                              {opt.label}
-                            </button>
-                          );
-                        })}
-                      </div>
-                      {selected.arted && selected.token === "Rating" ? (
-                        <label className="block space-y-1 text-[12px] text-slate-400 min-w-0">
-                          <span>Rating source</span>
-                          <select
-                            value={
-                              selected.rating_source && selected.rating_source !== "auto"
-                                ? selected.rating_source
-                                : "imdb"
-                            }
-                            onChange={(e) => patchSelected({ rating_source: e.target.value })}
-                            className={SELECT_CLASS}
-                          >
-                            {(catalog?.rating_sources || ["imdb", "tmdb", "trakt", "rottentomatoes", "metacritic"]).map(
-                              (source) => (
+                              {(
+                                catalog?.rating_sources || [
+                                  "imdb",
+                                  "tmdb",
+                                  "trakt",
+                                  "rottentomatoes",
+                                  "metacritic",
+                                ]
+                              ).map((source) => (
                                 <option key={source} value={source} className="bg-[#0b111b] text-slate-100">
                                   {source === "rottentomatoes"
                                     ? "Rotten Tomatoes"
@@ -1796,83 +1681,78 @@ export default function PosterLayoutDesigner(props: Props) {
                                         ? "IMDb"
                                         : source.charAt(0).toUpperCase() + source.slice(1)}
                                 </option>
-                              ),
-                            )}
-                          </select>
-                        </label>
+                              ))}
+                            </select>
+                          </label>
+                        </div>
                       ) : null}
-                    </div>
-                  ) : null}
-                  <ColorField
-                    label="Text"
-                    value={selected.text_color}
-                    onChange={(v) => patchSelected({ text_color: solidHex(v, "#ffffff") })}
-                  />
-                  <ColorField
-                    label="Fill"
-                    value={selected.fill_color}
-                    onChange={(v) => patchSelected({ fill_color: solidHex(v, "#000000") })}
-                  />
-                  <ColorField
-                    label="Border"
-                    value={selected.border_color}
-                    onChange={(v) => {
-                      const next = solidHex(v, "#ffffff");
-                      // Picking a color with opacity at 0 would look like a no-op; turn the stroke on.
-                      const opacity = (selected.border_opacity ?? 0) > 0 ? selected.border_opacity : 1;
-                      patchSelected({ border_color: next, border_opacity: opacity });
-                    }}
-                  />
-                  <label className="space-y-1 text-[12px] text-slate-400 min-w-0">
-                    <span>Fill opacity ({Math.round((selected.fill_opacity ?? 0.65) * 100)}%)</span>
-                    <input
-                      type="range"
-                      min={0}
-                      max={100}
-                      value={Math.round((selected.fill_opacity ?? 0.65) * 100)}
-                      onChange={(e) => patchSelected({ fill_opacity: Number(e.target.value) / 100 })}
-                      className="w-full accent-[var(--brand-accent)]"
-                    />
-                  </label>
-                  <label className="space-y-1 text-[12px] text-slate-400 min-w-0 sm:col-span-2">
-                    <span>Border opacity ({Math.round((selected.border_opacity ?? 0) * 100)}%)</span>
-                    <input
-                      type="range"
-                      min={0}
-                      max={100}
-                      value={Math.round((selected.border_opacity ?? 0) * 100)}
-                      onChange={(e) => patchSelected({ border_opacity: Number(e.target.value) / 100 })}
-                      className="w-full accent-[var(--brand-accent)]"
-                    />
-                  </label>
+                      {selected.token !== "Badge" ? (
+                        <div className="grid grid-cols-1 gap-3 min-w-0 sm:grid-cols-2">
+                          <ColorField
+                            label="Text"
+                            value={selected.text_color}
+                            onChange={(v) => patchSelected({ text_color: solidHex(v, "#ffffff") })}
+                          />
+                          <ColorField
+                            label="Fill"
+                            value={selected.fill_color}
+                            onChange={(v) => patchSelected({ fill_color: solidHex(v, "#000000") })}
+                          />
+                          <ColorField
+                            label="Border"
+                            value={selected.border_color}
+                            onChange={(v) => {
+                              const next = solidHex(v, "#ffffff");
+                              const opacity = (selected.border_opacity ?? 0) > 0 ? selected.border_opacity : 1;
+                              patchSelected({ border_color: next, border_opacity: opacity });
+                            }}
+                          />
+                          <label className="space-y-1 text-[12px] text-slate-400 min-w-0">
+                            <span>Fill opacity ({Math.round((selected.fill_opacity ?? 0.65) * 100)}%)</span>
+                            <input
+                              type="range"
+                              min={0}
+                              max={100}
+                              value={Math.round((selected.fill_opacity ?? 0.65) * 100)}
+                              onChange={(e) => patchSelected({ fill_opacity: Number(e.target.value) / 100 })}
+                              className="w-full accent-[var(--brand-accent)]"
+                            />
+                          </label>
+                          <label className="space-y-1 text-[12px] text-slate-400 min-w-0 sm:col-span-2">
+                            <span>Border opacity ({Math.round((selected.border_opacity ?? 0) * 100)}%)</span>
+                            <input
+                              type="range"
+                              min={0}
+                              max={100}
+                              value={Math.round((selected.border_opacity ?? 0) * 100)}
+                              onChange={(e) =>
+                                patchSelected({ border_opacity: Number(e.target.value) / 100 })
+                              }
+                              className="w-full accent-[var(--brand-accent)]"
+                            />
+                          </label>
+                        </div>
+                      ) : null}
+                    </>
+                  )}
+                </div>
+              ) : (
+                <div className="flex flex-1 items-center justify-center px-6 py-10 text-center">
+                  <p className="max-w-sm text-[13px] leading-relaxed text-slate-500">
+                    Select an element from the list, or add one with the dropdown and + button.
+                  </p>
                 </div>
               )}
             </div>
-          ) : null}
-
-          <div className="flex flex-wrap items-center gap-3 pt-1">
-            <button
-              type="button"
-              disabled={!dirty || busy}
-              onClick={() => setApplyOpen(true)}
-              className={`px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-40`}
-              style={accentFilledStyle(props.accentHex)}
-            >
-              {busy ? "Saving…" : "Save layouts"}
-            </button>
-            <button
-              type="button"
-              disabled={busy || !dirty}
-              title="Discard unsaved edits and restore the last saved layout"
-              onClick={() => discardUnsavedProfile()}
-              className="text-[12px] uppercase tracking-wider text-slate-400 hover:text-slate-200 disabled:opacity-40"
-            >
-              Discard unsaved
-            </button>
-            {dirty ? <span className="text-[12px] text-amber-200/90">Unsaved changes</span> : null}
-            {saveMsg ? <span className="text-[12px] text-slate-400">{saveMsg}</span> : null}
-            {previewError ? <span className="text-[12px] text-red-400">{previewError}</span> : null}
-            {saveError ? <span className="text-[12px] text-red-400">{saveError}</span> : null}
+          </div>
+          <div className="shrink-0 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-3 py-2 text-[12px] leading-snug text-yellow-100/95">
+            <p className="mb-0.5 font-headline text-[10px] font-semibold uppercase tracking-wider text-yellow-200/90">
+              Plex tip
+            </p>
+            <p>
+              On Plex, the unwatched count in the top right can cover badge and label text. Prefer bottom or left
+              placement for important labels.
+            </p>
           </div>
         </div>
       </div>
