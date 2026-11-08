@@ -327,6 +327,17 @@ def _set_job_step(
 
 
 def _find_active_reconcile_job(session, entity_type: str, entity_id: int) -> Job | None:
+    rows = _iter_active_reconcile_jobs(session, entity_type, entity_id, limit=50)
+    return rows[0] if rows else None
+
+
+def _iter_active_reconcile_jobs(
+    session,
+    entity_type: str,
+    entity_id: int,
+    *,
+    limit: int = 100,
+) -> list[Job]:
     rows = (
         session.query(Job)
         .filter(
@@ -334,11 +345,12 @@ def _find_active_reconcile_job(session, entity_type: str, entity_id: int) -> Job
             Job.status.in_(tuple(ACTIVE_JOB_STATUSES)),
         )
         .order_by(Job.id.desc())
-        .limit(50)
+        .limit(max(1, int(limit)))
         .all()
     )
     want_type = str(entity_type).strip().lower()
     want_id = int(entity_id)
+    matched: list[Job] = []
     for row in rows:
         payload = _payload_dict(row)
         if str(payload.get("entity_type") or "").strip().lower() != want_type:
@@ -348,8 +360,139 @@ def _find_active_reconcile_job(session, entity_type: str, entity_id: int) -> Job
                 continue
         except (TypeError, ValueError):
             continue
-        return row
-    return None
+        matched.append(row)
+    return matched
+
+
+def cancel_active_reconcile_for_entity(
+    *,
+    entity_type: str,
+    entity_id: int,
+    reason: str = "superseded_by_never_policy",
+) -> dict[str, Any]:
+    """Fail active Title Refresh jobs for this title and revoke in-flight claims.
+
+    Used when the user sets Never so a long series reconcile cannot keep
+    rematerializing after placeholders should stay gone.
+    """
+    from datetime import datetime, timezone
+
+    kind = str(entity_type).strip().lower()
+    eid = int(entity_id)
+    reason_text = str(reason or "superseded_by_never_policy").strip() or "superseded_by_never_policy"
+    now = datetime.now(timezone.utc)
+    cancelled_ids: list[int] = []
+    session = get_session()
+    try:
+        rows = _iter_active_reconcile_jobs(session, kind, eid, limit=100)
+        # Series Never should also stop episode-scoped refreshes under that series.
+        if kind == "series":
+            ep_ids = set(_episode_row_ids_for_series(session, eid))
+            if ep_ids:
+                extra = (
+                    session.query(Job)
+                    .filter(
+                        Job.job_type == ENTITY_RECONCILE_JOB_TYPE,
+                        Job.status.in_(tuple(ACTIVE_JOB_STATUSES)),
+                    )
+                    .order_by(Job.id.desc())
+                    .limit(200)
+                    .all()
+                )
+                for row in extra:
+                    payload = _payload_dict(row)
+                    if str(payload.get("entity_type") or "").strip().lower() != "episode":
+                        continue
+                    try:
+                        if int(payload.get("entity_id")) not in ep_ids:
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+                    if row not in rows:
+                        rows.append(row)
+
+        seen_ids = {int(r.id) for r in rows}
+        # Include PENDING follow-ups for the same title (and episode children of a series).
+        pending = (
+            session.query(Job)
+            .filter(
+                Job.job_type == ENTITY_RECONCILE_JOB_TYPE,
+                Job.status == "PENDING",
+            )
+            .order_by(Job.id.desc())
+            .limit(200)
+            .all()
+        )
+        ep_ids_for_pending: set[int] = set()
+        if kind == "series":
+            ep_ids_for_pending = set(_episode_row_ids_for_series(session, eid))
+        for row in pending:
+            if int(row.id) in seen_ids:
+                continue
+            payload = _payload_dict(row)
+            ptype = str(payload.get("entity_type") or "").strip().lower()
+            try:
+                pid = int(payload.get("entity_id"))
+            except (TypeError, ValueError):
+                continue
+            if ptype == kind and pid == eid:
+                rows.append(row)
+                seen_ids.add(int(row.id))
+            elif kind == "series" and ptype == "episode" and pid in ep_ids_for_pending:
+                rows.append(row)
+                seen_ids.add(int(row.id))
+
+        for row in rows:
+            status = str(row.status or "").upper()
+            if status in ("CLAIMED", "WORKING"):
+                try:
+                    from services.worker import mark_claim_revoked
+
+                    mark_claim_revoked(int(row.id))
+                except Exception:
+                    pass
+            row.status = "FAILED"
+            row.error_message = reason_text
+            row.claim_token = None
+            row.updated_at = now
+            session.add(row)
+            cancelled_ids.append(int(row.id))
+
+        if cancelled_ids:
+            session.commit()
+            logger.info(
+                f"Cancelled {len(cancelled_ids)} entity_reconcile job(s) for "
+                f"{kind}#{eid}: {cancelled_ids} ({reason_text})",
+                extra={"emoji_type": "info"},
+            )
+        else:
+            session.rollback()
+    except Exception as exc:
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        logger.warning(
+            f"Failed cancelling entity_reconcile for {kind}#{eid}: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+        return {"ok": False, "cancelled_job_ids": [], "error": str(exc)}
+    finally:
+        session.close()
+    return {"ok": True, "cancelled_job_ids": cancelled_ids}
+
+
+def _ensure_reconcile_claim_active(job: Job) -> None:
+    """Raise when Never (or the stale-CLAIMED reaper) revoked this in-flight job."""
+    try:
+        from services.worker import is_claim_revoked
+
+        if is_claim_revoked(int(job.id)):
+            raise ValueError(f"entity_reconcile_cancelled job_id={int(job.id)}")
+    except ValueError:
+        raise
+    except Exception:
+        pass
 
 
 def _find_pending_reconcile_job(session, entity_type: str, entity_id: int) -> Job | None:
@@ -840,6 +983,7 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
     session.commit()
 
     def _step(step: str) -> None:
+        _ensure_reconcile_claim_active(job)
         _set_job_step(session, job, step, arr_label=targets.arr_label)
         _log_reconcile_info(entity_type, title, _step_log_detail(step, arr_label=targets.arr_label), job_id=int(job.id))
 
@@ -850,6 +994,54 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
     placeholders: list[Placeholder] = []
     pipeline_held = False
     try:
+        # Never means placeholders stay gone; do not Arr-refresh / rematerialize the title.
+        try:
+            from services.source_of_truth.placeholder_policy import policy_from_entity
+
+            if entity_type == "movie":
+                ent = session.query(Movie).filter(Movie.id == int(entity_id)).first()
+                if ent is not None and policy_from_entity(ent) == "never":
+                    _log_reconcile_info(
+                        entity_type,
+                        title,
+                        "Skipped: title is Never",
+                        job_id=int(job.id),
+                    )
+                    return {"ok": True, "skipped": "never_policy"}
+            elif entity_type == "series":
+                ent = session.query(Series).filter(Series.id == int(entity_id)).first()
+                if ent is not None and policy_from_entity(ent) == "never":
+                    _log_reconcile_info(
+                        entity_type,
+                        title,
+                        "Skipped: series is Never",
+                        job_id=int(job.id),
+                    )
+                    return {"ok": True, "skipped": "never_policy"}
+            elif entity_type == "episode":
+                from services.source_of_truth.placeholder_policy import (
+                    episode_effective_policy,
+                    load_series_for_episode,
+                )
+
+                ep = session.query(Episode).filter(Episode.id == int(entity_id)).first()
+                series = None
+                if ep is not None:
+                    _season, series = load_series_for_episode(session, ep)
+                if ep is not None and episode_effective_policy(series=series, episode=ep)[0] == "never":
+                    _log_reconcile_info(
+                        entity_type,
+                        title,
+                        "Skipped: episode is Never",
+                        job_id=int(job.id),
+                    )
+                    return {"ok": True, "skipped": "never_policy"}
+        except Exception as never_exc:
+            logger.debug(
+                f"entity_reconcile never-policy precheck skipped: {never_exc}",
+                extra={"emoji_type": "debug"},
+            )
+
         _log_reconcile_info(entity_type, title, "Started scan & refresh", job_id=int(job.id))
         if targets.arr_kind == "radarr":
             _step("arr_refresh")
@@ -1194,6 +1386,7 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
 
 __all__ = [
     "ENTITY_RECONCILE_JOB_TYPE",
+    "cancel_active_reconcile_for_entity",
     "enqueue_entity_reconcile",
     "process_entity_reconcile_job",
     "reconcile_job_status_view",

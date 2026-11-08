@@ -4926,6 +4926,15 @@ async def movie_placeholder_policy_set(movie_id: int, request: Request):
         )
         return _placeholder_policy_set_response(snapshot, out)
 
+    if policy == "never":
+        from services.source_of_truth.entity_reconcile import cancel_active_reconcile_for_entity
+
+        cancel_active_reconcile_for_entity(
+            entity_type="movie",
+            entity_id=int(movie_id),
+            reason="superseded_by_never_policy",
+        )
+
     fast = apply_movie_placeholder_policy_fast(int(movie_id))
     if not fast.get("ok", False):
         return JSONResponse(
@@ -5002,6 +5011,15 @@ async def episode_placeholder_policy_set(episode_id: int, request: Request):
         )
         return _placeholder_policy_set_response(snapshot, out)
 
+    if policy == "never":
+        from services.source_of_truth.entity_reconcile import cancel_active_reconcile_for_entity
+
+        cancel_active_reconcile_for_entity(
+            entity_type="episode",
+            entity_id=int(episode_id),
+            reason="superseded_by_never_policy",
+        )
+
     fast = apply_episode_placeholder_policy_fast(int(episode_id))
     if not fast.get("ok", False):
         return JSONResponse(
@@ -5048,6 +5066,15 @@ async def series_placeholder_policy_set(series_id: int, request: Request):
             source=f"library_series_policy:{series_id}",
         )
         return _placeholder_policy_set_response(snapshot, out)
+
+    if policy == "never":
+        from services.source_of_truth.entity_reconcile import cancel_active_reconcile_for_entity
+
+        cancel_active_reconcile_for_entity(
+            entity_type="series",
+            entity_id=int(series_id),
+            reason="superseded_by_never_policy",
+        )
 
     fast = apply_series_gate_fast(int(series_id), policy=policy)
     if not fast.get("ok", False):
