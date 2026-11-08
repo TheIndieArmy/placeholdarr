@@ -13,24 +13,32 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## Released
 
-## [0.13.0] - 2026-11-07
+## [0.13.0] - 2026-11-08
 
 ### Summary
 
 - **Poster layout designer**: Design placeholder overlays per Movie / TV / Episode and Released / Coming Soon profile.
 - **Fill rectangle and placement**: Free bake-px fills, sticky preview guides, and drag-to-place chips.
 - **Share layouts**: Copy across profiles; import and export layout JSON.
+- **Text date formats**: `{Token:format}` picker for layout Text and Status Updates (including preferred ReleaseDate and Coming Soon stamps).
+- **Arted Rating and size**: Logo left/right/above/below/fill; continuous chip size with S/M/L.
+- **Calendar Coming Soon art**: Day-rollover and status-flip rebakes for stale CS / New Ep. stamps.
 - **Materialization batching**: Webhook deletes/adds queue coalesced jobs; large lite mats commit in chunks (#152).
 
 ### Added
 
-- **Poster layout designer**: Settings → Poster Art grid editor for badge, banners, Custom templates, SeriesStatus, and metadata chips.
+- **Poster layout designer**: Settings → Poster Art grid editor for badge, fill rectangles, Text templates, and Rating.
 - **Layout profiles**: Twelve keys (`placeholder` / `real` × Released / Coming Soon); bake uses Placeholder; Real is reserved and disabled in the UI.
 - **Preview art**: TMDB id or random library pick with live sample tokens for the designer.
 - **SeriesStatus label**: Airing / Ended / Canceled / Returning from Sonarr status on TV and episode profiles.
 - **Layout import / export**: Download current or all layout JSON; import either file type into the draft (confirm before overwrite).
 - **Copy layout to**: Copy the current draft to another timing or media profile (or All); confirm before overwriting a non-empty destination.
-- **Custom text presets**: Quick fills for smart release / next episode, title+year, and media-specific date labels.
+- **Text presets**: Quick fills for smart release / next episode, title+year, and media-specific date labels.
+- **Custom date formats**: Date tokens and date presets open a format picker (`iso` / `short` / `medium` / `long` / `mdy` / `dmy` / `ymd`) and insert `{Token:format}`. Numeric choices show `MM/DD/YYYY`, `DD/MM/YYYY`, and `YYYY/MM/DD`.
+- **Status Updates date formats**: Date tokens in the Status Message Tokens modal use the same format picker and `{Token:format}` rendering.
+- **ReleaseDate formats**: `{ReleaseDate:format}` uses the preferred movie release date (or TV air date) with the shared date format picker.
+- **Coming Soon stamp formats**: Layout `{ComingSoonOrNewEp:format}` keeps the label (`Theatrical` / `Airing` / `New Ep.`) and reformats the date half.
+- **Layout locale framework**: Setting-owned `PLACEHOLDER_LAYOUT_LOCALE` (English at launch) drives overlay/date stamp language; layout JSON stays locale-agnostic for sharing. Settings UI and more locales come later (#161).
 
 ### Changed
 
@@ -47,6 +55,11 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Coming Soon chip**: Removed as a placeable element; use Custom text with `{ComingSoonOrNewEp}` (legacy chips migrate on load).
 - **Released layout tab**: Designer Default tab renamed to Released (profile key stays `default`).
 - **Layout when-to-use**: Centered amber note and tab hover titles explain Released vs Coming Soon (TV uses next unaired episode).
+- **Layout placeables**: Add menu is Text, Fill rectangle, Badge, and Rating; other metadata chips become Text templates (`{Title}`, dates, and so on).
+- **Layout Text editor**: Token chips move into a Status Updates-style modal; presets stay on the designer panel.
+- **Calendar sync Coming Soon art**: After date/status work, rebakes Coming Soon / New Ep. posters whose stamped label is stale (day rollover and status flips), not only ARR date diffs.
+- **Layout chip size**: Continuous size slider with S / M / L presets (same row pattern as Center on position).
+- **Arted Rating logo**: Left, right, above, below, or fill background; fill opacity fades the logo and fill color only paints the margin around it.
 
 ### Fixed
 
@@ -56,6 +69,9 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Discard unsaved**: Designer discard restores the last saved layout instead of wiping to factory seed.
 - **Webhook materialization**: Episode/movie file deletes and series/movie adds enqueue coalesced `entity_materialization` jobs instead of holding the webhook worker through a long commit (#152).
 - **Lite materialization lock windows**: Large scoped mats commit every `MATERIALIZATION_COMMIT_CHUNK_SIZE` ids and use a short persist `lock_timeout` (#152).
+- **Calendar Coming Soon episode thumbs**: Status flips that leave Coming Soon rebake episode stills (no longer dropped by the narrow art-scope still gate).
+- **Coming Soon + TV art stills**: Narrow `coming_soon_and_tv` jobs rewrite episode thumbs for ids already in the job (including CS exit), not only while status is still Coming Soon.
+- **Status Updates separator preview**: Empty tokens collapse `{Sep}` the same way as live rendering (no stray separator in the modal preview).
 
 ## [0.12.6] - 2026-11-06
 

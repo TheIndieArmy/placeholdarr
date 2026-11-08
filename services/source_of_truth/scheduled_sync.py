@@ -209,6 +209,18 @@ def _run_self_healing_pipeline_inner(run_id: str, *, include_calendar_date_refre
     stats["materialization"] = run_materialization_pass()
     stats["calendar"] = run_calendar_phase()
     stats["orphan_placeholders"] = run_orphan_placeholder_cleanup()
+    try:
+        from services.source_of_truth.placeholder_art_reconciler import (
+            enqueue_art_refresh_for_calendar_coming_soon,
+        )
+
+        cal = stats.get("calendar") if isinstance(stats.get("calendar"), dict) else {}
+        stats["coming_soon_art"] = enqueue_art_refresh_for_calendar_coming_soon(
+            status_changed_placeholder_ids=(cal or {}).get("status_changed_placeholder_ids") or [],
+            source="self_healing",
+        )
+    except Exception as art_exc:
+        stats["coming_soon_art"] = {"ok": False, "reason": str(art_exc)}
     return stats
 
 
@@ -477,6 +489,30 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
             pipeline_stats["calendar"] = run_calendar_phase()
             pipeline_stats["orphan_placeholders"] = run_orphan_placeholder_cleanup()
             phases.end("calendar", metrics=metrics_from_pipeline(pipeline_stats).get("calendar"))
+
+            # Day-rollover New Ep. / CS label art (same follow-up as calendar_sync).
+            try:
+                from services.source_of_truth.placeholder_art_reconciler import (
+                    enqueue_art_refresh_for_calendar_coming_soon,
+                )
+
+                cal = (
+                    pipeline_stats.get("calendar")
+                    if isinstance(pipeline_stats.get("calendar"), dict)
+                    else {}
+                )
+                pipeline_stats["coming_soon_art"] = enqueue_art_refresh_for_calendar_coming_soon(
+                    status_changed_placeholder_ids=(cal or {}).get("status_changed_placeholder_ids")
+                    or [],
+                    source=f"full_sync:{trigger}",
+                    task_run_id=int(task_run_id) if task_run_id is not None else None,
+                )
+            except Exception as art_exc:
+                pipeline_stats["coming_soon_art"] = {"ok": False, "reason": str(art_exc)}
+                logger.warning(
+                    f"Full sync Coming Soon art enqueue failed: {art_exc}",
+                    extra={"emoji_type": "warning"},
+                )
 
             result["pipeline"] = pipeline_stats
         finally:
@@ -920,6 +956,38 @@ def run_calendar_only_maintenance(*, trigger: TaskTrigger = "manual") -> dict[st
             total=cal_total,
             unit_label="placeholders",
         )
+
+        phases.begin("coming_soon_art", "Coming Soon art")
+        try:
+            from services.source_of_truth.placeholder_art_reconciler import (
+                enqueue_art_refresh_for_calendar_coming_soon,
+            )
+
+            cal = result.get("calendar") if isinstance(result.get("calendar"), dict) else {}
+            changed_ids = (cal or {}).get("status_changed_placeholder_ids") or []
+            art_out = enqueue_art_refresh_for_calendar_coming_soon(
+                status_changed_placeholder_ids=changed_ids,
+                source=f"calendar_sync:{trigger}",
+                task_run_id=int(task_run_id) if task_run_id is not None else None,
+            )
+            result["coming_soon_art"] = art_out if isinstance(art_out, dict) else {}
+        except Exception as art_exc:
+            result["coming_soon_art"] = {"ok": False, "reason": str(art_exc)}
+            logger.warning(
+                f"Calendar sync Coming Soon art enqueue failed: {art_exc}",
+                extra={"emoji_type": "warning"},
+            )
+        art_summary = result.get("coming_soon_art") if isinstance(result.get("coming_soon_art"), dict) else {}
+        art_needed = int(art_summary.get("needed") or art_summary.get("placeholder_count") or 0)
+        art_candidates = int(art_summary.get("candidates") or 0)
+        phases.end(
+            "coming_soon_art",
+            status="skipped" if art_summary.get("reason") in {"no_candidates", "up_to_date"} else "done",
+            done=art_needed,
+            total=art_candidates or art_needed,
+            unit_label="posters",
+        )
+
         finish_task_run(task_run_id, status="done", summary=result)
         _apply_schedule_after_success("calendar_sync", trigger)
         return result

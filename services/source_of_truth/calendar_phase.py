@@ -678,6 +678,8 @@ def run_calendar_phase() -> dict[str, Any]:
         "variant_switched": 0,
         "chunks_committed": 0,
         "errors": 0,
+        # Placeholder ids whose status/reason changed (for Coming Soon art follow-up).
+        "status_changed_placeholder_ids": [],
     }
 
     if not bool(getattr(settings, "ENABLE_STATUS_ORCHESTRATOR_CALENDAR", True)):
@@ -854,6 +856,10 @@ def _run_calendar_phase_inner(stats: dict[str, Any]) -> dict[str, Any]:
                         },
                     )
                 )
+                try:
+                    stats["status_changed_placeholder_ids"].append(int(placeholder.id))
+                except Exception:
+                    pass
 
             chunk_applied = 0
             if chunk_intents:
@@ -894,6 +900,22 @@ def _run_calendar_phase_inner(stats: dict[str, Any]) -> dict[str, Any]:
             )
         finally:
             session.close()
+
+    changed_ids = stats.get("status_changed_placeholder_ids") or []
+    if isinstance(changed_ids, list) and changed_ids:
+        # Stable unique ids for art follow-up.
+        seen: set[int] = set()
+        unique: list[int] = []
+        for raw in changed_ids:
+            try:
+                pid = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if pid in seen:
+                continue
+            seen.add(pid)
+            unique.append(pid)
+        stats["status_changed_placeholder_ids"] = unique
 
     logger.info(
         "Calendar phase: release-window scan finished in "

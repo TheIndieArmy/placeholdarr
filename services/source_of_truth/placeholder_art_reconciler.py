@@ -239,16 +239,15 @@ def collect_tv_placeholder_ids(session) -> list[int]:
 def art_scope_writes_episode_stills(art_scope: str | None, display_status: str | None) -> bool:
     """Whether a narrow art refresh should rewrite episode thumbs.
 
-    ``tv_new_ep`` only updates series/season posters. ``coming_soon_and_tv`` stills
-    only for Coming Soon episode rows; other scopes rewrite stills as usual.
+    ``tv_new_ep`` only updates series/season posters (no stills). All other scopes
+    rewrite stills for episode ids already in the job, including
+    ``coming_soon_and_tv`` so thumbs that just left Coming Soon can rebake.
+    ``display_status`` is kept for call-site compatibility and is unused.
     """
+    _ = display_status  # call sites still pass status; scope alone decides.
     scope = str(art_scope or "all").strip().lower() or "all"
     if scope == "tv_new_ep":
         return False
-    if scope == "coming_soon_and_tv":
-        from services.source_of_truth.calendar_phase import _is_coming_soon_status
-
-        return _is_coming_soon_status(display_status)
     return True
 
 
@@ -761,6 +760,87 @@ def enqueue_art_refresh_for_calendar_date_changes(
     if not unique:
         return {"ok": True, "placeholder_count": 0, "enqueued": False, "reason": "no_placeholders"}
     return enqueue_placeholder_art_refresh(unique, session=session)
+
+
+def enqueue_art_refresh_for_calendar_coming_soon(
+    *,
+    status_changed_placeholder_ids: list[int] | set[int] | None = None,
+    source: str = "calendar_sync",
+    task_run_id: int | None = None,
+) -> dict:
+    """Rebake Coming Soon / New Ep. posters whose overlay label or profile stamp is stale.
+
+    Used after calendar date refresh + calendar status so day-rollover next-unairied
+    labels update even when ARR did not change ``air_date``, and so titles that leave
+    Coming Soon are not left with a stamped CS label.
+
+    Candidates: current Coming Soon placeholders, TV series/season posters, plus any
+    placeholders whose calendar status/reason just changed. Determination uses
+    ``art_scope="all"`` so episode thumbs exiting Coming Soon stay eligible; the job
+    skips a second determination and writes with ``all`` still rules for those ids.
+    """
+    session = get_session()
+    try:
+        candidates = set(collect_placeholder_ids_for_art_scope(session, "coming_soon_and_tv"))
+        for raw in status_changed_placeholder_ids or []:
+            try:
+                candidates.add(int(raw))
+            except (TypeError, ValueError):
+                continue
+        if not candidates:
+            return {
+                "ok": True,
+                "placeholder_count": 0,
+                "enqueued": False,
+                "reason": "no_candidates",
+                "source": source,
+                "art_scope": "coming_soon_and_tv",
+            }
+        # Determine with ``all`` so episode thumbs that just left Coming Soon
+        # (status_changed) are not vetoed by the coming_soon_and_tv still gate.
+        needed = determine_art_refresh_ids(
+            session,
+            sorted(candidates),
+            art_scope="all",
+        )
+        if not needed:
+            return {
+                "ok": True,
+                "placeholder_count": 0,
+                "enqueued": False,
+                "reason": "up_to_date",
+                "source": source,
+                "art_scope": "coming_soon_and_tv",
+                "candidates": len(candidates),
+            }
+        # Job payload uses ``all`` for write-time stills (CS-exit thumbs). Candidate
+        # set was already narrowed; skip a second determination that would re-apply
+        # the coming_soon_and_tv still filter and drop those ids.
+        extras: dict[str, Any] = {
+            "art_backfill_source": source,
+            "art_scope": "all",
+            "coming_soon_only": False,
+        }
+        if task_run_id is not None:
+            tid = int(task_run_id)
+            extras[FULL_SYNC_TASK_RUN_ID_KEY] = tid
+            extras[ART_BACKFILL_TASK_RUN_ID_KEY] = tid
+        out = enqueue_placeholder_art_refresh(
+            needed,
+            session=session,
+            merge_into_pending=False,
+            payload_extras=extras,
+            skip_determination=True,
+        )
+        batch_count = int(out.get("jobs_created") or 0)
+        out["art_scope"] = "coming_soon_and_tv"
+        out["candidates"] = len(candidates)
+        out["needed"] = len(needed)
+        out["enqueued"] = bool(out.get("ok")) and batch_count > 0
+        out["source"] = source
+        return out
+    finally:
+        session.close()
 
 
 def enqueue_placeholder_art_backfill_all(

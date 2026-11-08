@@ -417,6 +417,11 @@ class Settings(BaseSettings):
         os.getenv("PLACEHOLDER_POSTER_COMING_SOON_BANNER", "false").split("#")[0].strip().lower()
         in {"1", "true", "yes", "on"}
     )
+    # Layout/overlay date + Coming Soon stamp language (not TMDB art language).
+    # Setting-owned; English only at launch. UI + more locales come later.
+    PLACEHOLDER_LAYOUT_LOCALE: str = (
+        os.getenv("PLACEHOLDER_LAYOUT_LOCALE", "en").split("#")[0].strip().lower() or "en"
+    )
     # Legacy New Ep. toggle (migrated into Coming Soon; kept for DB migrate only).
     PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER: bool = (
         os.getenv("PLACEHOLDER_POSTER_SERIES_NEW_EP_BANNER", "false").split("#")[0].strip().lower()

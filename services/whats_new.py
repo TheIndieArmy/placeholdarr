@@ -336,11 +336,14 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         title="Poster layout designer",
         body=(
             "Placeholder poster overlays are yours to design. Build separate Released and Coming Soon overlays "
-            "for Movie, TV, and Episode: fill rectangles, metadata chips, Custom text (including the "
-            "smart release / next-episode label), ratings, and the Placeholdarr badge. Drag elements "
-            "on the live preview to place them exactly where you want them. Copy a layout across "
-            "profiles, or import and export JSON to share a look. "
-            "Series with a known unaired episode use Coming Soon; otherwise they use Released.\n\n"
+            "for Movie, TV, and Episode: fill rectangles, Text templates, ratings, and the Placeholdarr badge. "
+            "Drag elements on the live preview to place them. Copy a layout across profiles, or import and "
+            "export JSON to share a look. Series with a known unaired episode use Coming Soon; otherwise "
+            "they use Released.\n\n"
+            "Text and Status Updates date tokens open a format picker. Arted ratings can put the logo left, "
+            "right, above, below, or as a fill. Chip size is a continuous slider with S / M / L presets. "
+            "Calendar sync rebakes Coming Soon and New Ep. art when labels go stale after a day rollover or "
+            "status flip.\n\n"
             "Support for overlays on real file posters is coming in a future update."
         ),
         cta_label="Open Poster Art",

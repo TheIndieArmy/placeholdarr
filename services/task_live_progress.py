@@ -703,6 +703,7 @@ LITE_SYNC_CORE_PHASES: list[tuple[str, str]] = [
 CALENDAR_ONLY_PHASES: list[tuple[str, str]] = [
     ("calendar_dates", "Calendar dates"),
     ("calendar", "Calendar status"),
+    ("coming_soon_art", "Coming Soon art"),
 ]
 
 WATCHLIST_SYNC_PHASES: list[tuple[str, str]] = [
