@@ -208,7 +208,7 @@ const FILTER_META: Record<
   PLAYBACK_SEARCH_ALREADY_MONITORED_DESTS: {
     label: "Search already-monitored titles on playback",
     description:
-      "Pick destinations where playback may search again even if Arr already had that scope monitored before this play. TV play mode decides the check: episode mode checks each episode for monitored; season mode checks the season for monitored; series mode checks the series for monitored. Movies use the movie monitored flag. Destinations not listed skip re-search when that scope was already monitored.",
+      "Pick destinations where playback may search again even if the episode (or movie) was already monitored in Arr before this play. Destinations not listed skip those already-monitored titles. In season play mode, Placeholdarr still chooses season vs episode search from whatever remains after that filter (full missing season can season-search; a partial list episode-searches).",
   },
   PLAYBACK_SEARCH_FUTURE_DESTS: {
     label: "Search future titles on playback",

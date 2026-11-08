@@ -2441,17 +2441,15 @@ def _partition_playback_targets(
     *,
     now_date: date | None = None,
     dest_folder: str | None = None,
-    mode: str | None = None,
 ) -> dict[str, Any]:
     """Split lookahead targets into monitor vs search buckets.
 
-    Per-episode "already monitored" suppress applies in episode play mode only.
-    Season/series modes apply that filter at season/series scope after partition.
+    "Already monitored" suppress is always per-episode. Season mode then chooses
+    SeasonSearch vs EpisodeSearch from whatever remains eligible per season.
     """
     eff = now_date or local_today()
     series_id = int(series_row.id)
     max_known_order = build_series_max_known_order_within_horizon(session, series_id, now_date=eff)
-    play_mode = str(mode or _play_mode() or "episode").strip().lower()
 
     to_monitor: list[Episode] = []
     search_eligible: list[Episode] = []
@@ -2460,8 +2458,6 @@ def _partition_playback_targets(
     monitor_only = _playback_monitor_only_no_search(dest_folder)
     suppress_future = (not monitor_only) and _suppress_search_for_future_titles(dest_folder)
     suppress_monitored = (not monitor_only) and _suppress_search_for_already_monitored(dest_folder)
-    # Episode mode: skip already-monitored episodes. Season/series: handled later by scope.
-    suppress_monitored_episodes = suppress_monitored and play_mode == "episode"
 
     for ep in targets:
         season_number = _episode_season_number(session, ep)
@@ -2482,7 +2478,7 @@ def _partition_playback_targets(
             continue
         if is_future and suppress_future:
             continue
-        if bool(getattr(ep, "sonarr_monitored", False)) and suppress_monitored_episodes:
+        if bool(getattr(ep, "sonarr_monitored", False)) and suppress_monitored:
             continue
         search_eligible.append(ep)
 
@@ -2494,7 +2490,7 @@ def _partition_playback_targets(
             skipped_search_reason = "future_only"
         elif not to_monitor:
             skipped_search_reason = "no_unmonitored_search_targets"
-        elif suppress_monitored_episodes:
+        elif suppress_monitored:
             skipped_search_reason = "suppressed_monitored"
 
     monitor_ids = [int(ep.sonarrid) for ep in to_monitor if getattr(ep, "sonarrid", None)]
@@ -2509,70 +2505,6 @@ def _partition_playback_targets(
         "skipped_search_reason": skipped_search_reason,
         "dest_folder": dest_folder or "",
     }
-
-
-def _season_monitored_snapshot(
-    session,
-    series_row: Series,
-    season_numbers: list[int],
-) -> dict[int, bool]:
-    """Map season_number -> local sonarr_monitored before playback flips seasons On."""
-    out: dict[int, bool] = {}
-    if not season_numbers:
-        return out
-    rows = (
-        session.query(Season)
-        .filter(
-            Season.series_id == int(series_row.id),
-            Season.season_number.in_([int(s) for s in season_numbers]),
-        )
-        .all()
-    )
-    by_num = {int(getattr(row, "season_number", 0) or 0): row for row in rows}
-    for sn in season_numbers:
-        row = by_num.get(int(sn))
-        out[int(sn)] = bool(getattr(row, "sonarr_monitored", False)) if row is not None else False
-    return out
-
-
-def _apply_scope_already_monitored_suppress(
-    session,
-    *,
-    mode: str,
-    search_eligible: list[Episode],
-    dest_folder: str | None,
-    was_series_monitored: bool,
-    was_season_monitored: dict[int, bool],
-) -> tuple[list[Episode], str | None]:
-    """Filter search_eligible by season/series monitored state when suppress is on.
-
-    Uses pre-ensure snapshots so the first play still searches after we mark scope On.
-    """
-    if not search_eligible:
-        return search_eligible, None
-    if not _suppress_search_for_already_monitored(dest_folder):
-        return search_eligible, None
-    if _playback_monitor_only_no_search(dest_folder):
-        return search_eligible, None
-
-    play_mode = str(mode or "episode").strip().lower()
-    if play_mode == "series":
-        if was_series_monitored:
-            return [], "already_monitored"
-        return search_eligible, None
-
-    if play_mode == "season":
-        kept: list[Episode] = []
-        for ep in search_eligible:
-            sn = _episode_season_number(session, ep)
-            if was_season_monitored.get(int(sn), False):
-                continue
-            kept.append(ep)
-        if not kept:
-            return [], "already_monitored"
-        return kept, None
-
-    return search_eligible, None
 
 
 def _search_eligible_ids(search_eligible: list[Episode]) -> list[int]:
@@ -2644,41 +2576,119 @@ def _trigger_playback_sonarr_search_for_row(
     target_meta: dict[str, Any],
     base_url: str,
     api_key: str,
-) -> bool:
+) -> dict[str, Any]:
+    """Trigger Arr search for playback. Returns status including per-season results."""
+    empty: dict[str, Any] = {
+        "search_triggered": False,
+        "season_searches": {},
+        "season_searches_failed": [],
+        "episode_search": None,
+        "episode_search_seasons": [],
+    }
     if not search_eligible or not getattr(series_row, "sonarrid", None):
-        return False
+        return empty
 
     series_id = int(series_row.sonarrid)
     eligible_ids = _search_eligible_ids(search_eligible)
     if not eligible_ids:
-        return False
+        return empty
 
-    # Season mode: always SeasonSearch per involved season. Sonarr only grabs missing
-    # episodes in that season, so a boundary pull of S1+S2 should be two season
-    # commands, not a bulk EpisodeSearch.
+    # Season mode: per season, SeasonSearch when every target ep in that season is
+    # still search-eligible (whole missing season / packs); otherwise EpisodeSearch
+    # for the remaining ids (partial season, future filter, already-monitored, etc.).
     if mode == "season":
-        season_numbers = _playback_target_season_numbers(session, search_eligible)
-        if not season_numbers:
-            return False
-        any_ok = False
-        for season_number in season_numbers:
-            if trigger_sonarr_search(
-                series_id=series_id,
-                season_number=int(season_number),
-                url=base_url,
-                api_key=api_key,
-            ):
-                any_ok = True
-        return bool(any_ok)
+        by_season_targets: dict[int, list[Episode]] = {}
+        by_season_eligible: dict[int, list[Episode]] = {}
+        for ep in targets:
+            sn = _episode_season_number(session, ep)
+            by_season_targets.setdefault(int(sn), []).append(ep)
+        for ep in search_eligible:
+            sn = _episode_season_number(session, ep)
+            by_season_eligible.setdefault(int(sn), []).append(ep)
+
+        season_searches: dict[str, bool] = {}
+        episode_ids: list[int] = []
+        episode_search_seasons: list[int] = []
+        for sn, elig in sorted(by_season_eligible.items()):
+            season_targets = by_season_targets.get(int(sn)) or []
+            elig_ids = {
+                int(ep.id) for ep in elig if getattr(ep, "id", None) is not None
+            }
+            target_ids = {
+                int(ep.id) for ep in season_targets if getattr(ep, "id", None) is not None
+            }
+            if target_ids and elig_ids == target_ids:
+                ok = bool(
+                    trigger_sonarr_search(
+                        series_id=series_id,
+                        season_number=int(sn),
+                        url=base_url,
+                        api_key=api_key,
+                    )
+                )
+                season_searches[str(int(sn))] = ok
+            else:
+                episode_search_seasons.append(int(sn))
+                for ep in elig:
+                    if getattr(ep, "sonarrid", None):
+                        episode_ids.append(int(ep.sonarrid))
+
+        episode_search_ok: bool | None = None
+        if episode_ids:
+            # Dedupe while preserving order.
+            seen_ids: set[int] = set()
+            unique_ids: list[int] = []
+            for eid in episode_ids:
+                if eid in seen_ids:
+                    continue
+                seen_ids.add(eid)
+                unique_ids.append(eid)
+            episode_search_ok = bool(
+                trigger_sonarr_search(
+                    series_id=series_id,
+                    episode_ids=unique_ids,
+                    url=base_url,
+                    api_key=api_key,
+                )
+            )
+
+        failed = [int(k) for k, v in season_searches.items() if not v]
+        if failed:
+            logger.warning(
+                "playback: season search failed for series_id=%s seasons=%s",
+                getattr(series_row, "id", None),
+                failed,
+            )
+        if episode_search_ok is False:
+            logger.warning(
+                "playback: episode search failed for series_id=%s seasons=%s",
+                getattr(series_row, "id", None),
+                episode_search_seasons,
+            )
+        any_ok = any(season_searches.values()) or bool(episode_search_ok)
+        return {
+            "search_triggered": bool(any_ok),
+            "season_searches": season_searches,
+            "season_searches_failed": failed,
+            "episode_search": episode_search_ok,
+            "episode_search_seasons": episode_search_seasons,
+        }
 
     eligible_set = {int(ep.id) for ep in search_eligible if getattr(ep, "id", None) is not None}
     target_set = {int(ep.id) for ep in targets if getattr(ep, "id", None) is not None}
     full_target_scope = eligible_set == target_set and len(target_set) > 0
 
     if mode == "series" and full_target_scope:
-        return bool(trigger_sonarr_search(series_id=series_id, url=base_url, api_key=api_key))
+        ok = bool(trigger_sonarr_search(series_id=series_id, url=base_url, api_key=api_key))
+        return {
+            "search_triggered": ok,
+            "season_searches": {},
+            "season_searches_failed": [],
+            "episode_search": None,
+            "episode_search_seasons": [],
+        }
 
-    return bool(
+    ok = bool(
         trigger_sonarr_search(
             series_id=series_id,
             episode_ids=eligible_ids,
@@ -2686,6 +2696,13 @@ def _trigger_playback_sonarr_search_for_row(
             api_key=api_key,
         )
     )
+    return {
+        "search_triggered": ok,
+        "season_searches": {},
+        "season_searches_failed": [],
+        "episode_search": ok,
+        "episode_search_seasons": [],
+    }
 
 
 def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2803,28 +2820,12 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
             "target_meta": target_meta,
         }
     mode = _play_mode()
-    partition = _partition_playback_targets(
-        session, series_row, targets, dest_folder=dest_folder, mode=mode
-    )
+    partition = _partition_playback_targets(session, series_row, targets, dest_folder=dest_folder)
     to_monitor: list[Episode] = partition["to_monitor"]
     search_eligible: list[Episode] = partition["search_eligible"]
     monitor_ids: list[int] = partition["monitor_ids"]
     skipped_search_reason = partition.get("skipped_search_reason")
-
-    # Snapshot Arr monitored scope before we flip series/seasons On for this play.
-    was_series_monitored = bool(getattr(series_row, "sonarr_monitored", False))
     target_season_numbers = _playback_target_season_numbers(session, targets)
-    was_season_monitored = _season_monitored_snapshot(session, series_row, target_season_numbers)
-    search_eligible, scope_skip_reason = _apply_scope_already_monitored_suppress(
-        session,
-        mode=mode,
-        search_eligible=search_eligible,
-        dest_folder=dest_folder,
-        was_series_monitored=was_series_monitored,
-        was_season_monitored=was_season_monitored,
-    )
-    if scope_skip_reason and not search_eligible:
-        skipped_search_reason = scope_skip_reason
 
     monitor_result = {"updated": 0, "failed": 0}
     if monitor_ids:
@@ -2847,9 +2848,15 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
             monitor_new_items="all",
         )
 
-    search_triggered = False
+    search_result: dict[str, Any] = {
+        "search_triggered": False,
+        "season_searches": {},
+        "season_searches_failed": [],
+        "episode_search": None,
+        "episode_search_seasons": [],
+    }
     if search_eligible:
-        search_triggered = _trigger_playback_sonarr_search_for_row(
+        search_result = _trigger_playback_sonarr_search_for_row(
             session,
             series_row=series_row,
             targets=targets,
@@ -2859,6 +2866,7 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
             base_url=base_url,
             api_key=api_key,
         )
+    search_triggered = bool(search_result.get("search_triggered"))
 
     # Episode and season lookahead modes both set reached_end when the window hits
     # the last known episode. Flip series On and monitorNewItems=all so newly
@@ -2903,6 +2911,10 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
         'monitor_updated': int(monitor_result.get('updated', 0)),
         'monitor_failed': int(monitor_result.get('failed', 0)),
         'search_triggered': bool(search_triggered),
+        'season_searches': search_result.get("season_searches") or {},
+        'season_searches_failed': list(search_result.get("season_searches_failed") or []),
+        'episode_search': search_result.get("episode_search"),
+        'episode_search_seasons': list(search_result.get("episode_search_seasons") or []),
         'reached_end_marked': bool(reached_end_marked),
         'status_intents_applied': len(intents),
     }
