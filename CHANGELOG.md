@@ -9,6 +9,17 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Added
+
+- **Custom date formats**: Date tokens and date presets open a format picker (`iso` / `short` / `medium` / `long` / `mdy` / `dmy` / `ymd`) and insert `{Token:format}`. Numeric choices show `MM/DD/YYYY`, `DD/MM/YYYY`, and `YYYY/MM/DD`.
+- **Status Updates date formats**: Date tokens in the Status Message Tokens modal use the same format picker and `{Token:format}` rendering.
+
+### Changed
+
+- **Layout placeables**: Add menu is Text, Fill rectangle, Badge, and Rating; other metadata chips become Text templates (`{Title}`, dates, and so on).
+- **Layout Text editor**: Token chips move into a Status Updates-style modal; presets stay on the designer panel.
+- **Calendar sync Coming Soon art**: After date/status work, rebakes Coming Soon / New Ep. posters whose stamped label is stale (day rollover and status flips), not only ARR date diffs.
+
 ## Pre-release
 
 ## Released
@@ -24,13 +35,13 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ### Added
 
-- **Poster layout designer**: Settings → Poster Art grid editor for badge, banners, Custom templates, SeriesStatus, and metadata chips.
+- **Poster layout designer**: Settings → Poster Art grid editor for badge, fill rectangles, Text templates, and Rating.
 - **Layout profiles**: Twelve keys (`placeholder` / `real` × Released / Coming Soon); bake uses Placeholder; Real is reserved and disabled in the UI.
 - **Preview art**: TMDB id or random library pick with live sample tokens for the designer.
 - **SeriesStatus label**: Airing / Ended / Canceled / Returning from Sonarr status on TV and episode profiles.
 - **Layout import / export**: Download current or all layout JSON; import either file type into the draft (confirm before overwrite).
 - **Copy layout to**: Copy the current draft to another timing or media profile (or All); confirm before overwriting a non-empty destination.
-- **Custom text presets**: Quick fills for smart release / next episode, title+year, and media-specific date labels.
+- **Text presets**: Quick fills for smart release / next episode, title+year, and media-specific date labels.
 
 ### Changed
 

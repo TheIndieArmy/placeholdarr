@@ -26,8 +26,19 @@ from services.messages.registry import (
 from services.messages import store
 
 
-_TOKEN_PATTERN = re.compile(r"\{([A-Za-z][A-Za-z0-9_]*)\}")
+# ``{Token}`` or ``{DateToken:format}`` (format optional; date tokens only).
+_TOKEN_PATTERN = re.compile(r"\{([A-Za-z][A-Za-z0-9_]*)(?::([A-Za-z0-9_-]+))?\}")
 _LITERAL_BRACE = re.compile(r"\{\{|\}\}")  # Not currently used but reserved for escaping.
+_DATE_TOKENS: frozenset[str] = frozenset(
+    {
+        "TheatricalDate",
+        "DigitalDate",
+        "PhysicalDate",
+        "AirDate",
+        "SeriesPremiereDate",
+        "SeasonPremiereDate",
+    }
+)
 
 # Internal sentinel used in place of the configured separator during substitution.
 # After all tokens render, ``_collapse_separators`` splits on the sentinel, drops
@@ -208,14 +219,20 @@ def render(
 
     def _replace(match: re.Match[str]) -> str:
         token_name = match.group(1)
+        fmt = match.group(2)
         if get_token_spec(token_name) is None:
             return ""
-        return _resolve_token(
+        value = _resolve_token(
             token_name,
             ctx,
             separator=sep,
             nesting=_nesting + (key,),
         )
+        if fmt and token_name in _DATE_TOKENS and value:
+            from services.poster_layouts import format_custom_date_token
+
+            return format_custom_date_token(value, fmt)
+        return value
 
     rendered = _TOKEN_PATTERN.sub(_replace, template)
     rendered = _collapse_separators(rendered, sep)

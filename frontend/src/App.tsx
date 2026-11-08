@@ -72,6 +72,12 @@ import { UI_SECTION_FRAME_CLASS, UI_SECTION_LEGEND_CLASS } from "./uiSectionFram
 import { TmdbAttribution } from "./TmdbAttribution";
 import { getBrandSemanticTokens, semanticTokensToCssVars, type BrandSemanticTokens } from "./brandSemanticTheme";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "./brandAccentUi";
+import {
+  DATE_FORMAT_OPTIONS,
+  STATUS_AND_LAYOUT_DATE_TOKENS,
+  formatDateToken,
+  normalizeDateFormat,
+} from "./dateFormats";
 import type {
   ActivityRow,
   ActivitySubPage,
@@ -3582,8 +3588,9 @@ function TaskRunConfirmModals(props: {
       </p>
     ) : props.modal === "calendar" ? (
       <p className="ui-field-description mt-2 leading-relaxed">
-        Calendar sync refreshes release dates from ARR and updates Coming Soon / countdown placeholder status. It does
-        not pull full Arr catalogs.
+        Calendar sync refreshes release dates from ARR, updates Coming Soon / countdown placeholder status, and rebakes
+        Coming Soon / New Ep. posters when their stamped date label is stale (including day rollover). It does not pull
+        full Arr catalogs.
       </p>
     ) : (
       <p className="ui-field-description mt-2 leading-relaxed">
@@ -10209,10 +10216,10 @@ function resolveWrapperPair(
   return { open: "[", close: "]" };
 }
 
-/** Extract `{Token}` names without `String.prototype.matchAll` (older WebViews / browsers). */
+/** Extract `{Token}` / `{DateToken:format}` names without ``matchAll`` (older WebViews). */
 function collectStatusTemplateTokenNames(template: string): string[] {
   const out: string[] = [];
-  const re = /\{([A-Za-z][A-Za-z0-9_]*)\}/g;
+  const re = /\{([A-Za-z][A-Za-z0-9_]*)(?::[A-Za-z0-9_-]+)?\}/g;
   const text = typeof template === "string" ? template : "";
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) out.push(m[1]);
@@ -10277,7 +10284,7 @@ function validateStatusMessageTemplate(
   maxLength: number,
 ): { error: string | null; warnings: string[] } {
   if (template.length > maxLength) return { error: `Template exceeds ${maxLength} characters`, warnings: [] };
-  const stripped = template.replace(/\{[A-Za-z][A-Za-z0-9_]*\}/g, "");
+  const stripped = template.replace(/\{[A-Za-z][A-Za-z0-9_]*(?::[A-Za-z0-9_-]+)?\}/g, "");
   if (stripped.includes("{") || stripped.includes("}")) {
     return { error: "Unbalanced or stray braces", warnings: [] };
   }
@@ -10301,12 +10308,16 @@ function validateStatusMessageTemplate(
 }
 
 function clientRenderStatusMessage(template: string, ctx: Record<string, string>, separator: string, caseMode: string, allTokenSamples: Record<string, string>): string {
-  const filled = template.replace(/\{([A-Za-z][A-Za-z0-9_]*)\}/g, (_match, name: string) => {
-    if (name === "Sep") return separator || "·";
-    if (name in ctx) return ctx[name] ?? "";
-    if (name in allTokenSamples) return allTokenSamples[name];
-    return "";
-  });
+  const filled = template.replace(
+    /\{([A-Za-z][A-Za-z0-9_]*)(?::([A-Za-z0-9_-]+))?\}/g,
+    (_match, name: string, fmt: string | undefined) => {
+      if (name === "Sep") return separator || "·";
+      const raw = name in ctx ? (ctx[name] ?? "") : name in allTokenSamples ? allTokenSamples[name] : "";
+      if (!raw) return "";
+      if (fmt && STATUS_AND_LAYOUT_DATE_TOKENS.has(name)) return formatDateToken(raw, fmt);
+      return raw;
+    },
+  );
   const collapsed = filled
     .replace(/[ \t]+/g, " ")
     .replace(/\(\s+/g, "(")
@@ -11186,12 +11197,14 @@ function StatusMessagesTokenModal(props: {
   const accent = getBrandAccent(props.brand, props.themeMode);
   const row = (props.payload.registry ?? []).find((r) => r.key === props.rowKey);
   const [draft, setDraft] = useState(props.currentValue);
+  const [pendingDateToken, setPendingDateToken] = useState<string | null>(null);
   const editorRef = useRef<HTMLInputElement | null>(null);
   const cursorRef = useRef<number>(props.currentValue.length);
 
   useEffect(() => {
     setDraft(props.currentValue);
     cursorRef.current = props.currentValue.length;
+    setPendingDateToken(null);
   }, [props.currentValue, props.rowKey]);
 
   if (!row) return null;
@@ -11236,6 +11249,21 @@ function StatusMessagesTokenModal(props: {
         el.setSelectionRange(cursorRef.current, cursorRef.current);
       }
     });
+  }
+
+  function insertToken(token: StatusMessageTokenSpec) {
+    if (STATUS_AND_LAYOUT_DATE_TOKENS.has(token.name)) {
+      setPendingDateToken(token.name);
+      return;
+    }
+    insert(token.placeholder || `{${token.name}}`);
+  }
+
+  function applyDateFormat(formatId: string) {
+    if (!pendingDateToken) return;
+    const fmt = normalizeDateFormat(formatId);
+    insert(`{${pendingDateToken}:${fmt}}`);
+    setPendingDateToken(null);
   }
 
   function commitAndClose() {
@@ -11309,14 +11337,19 @@ function StatusMessagesTokenModal(props: {
 
             const renderTokenChip = (token: StatusMessageTokenSpec) => {
               const isAllowed = allowed.has(token.name);
-              const tooltip = isAllowed ? token.description : `${token.description}\n\nNot available for this message.`;
+              const isDate = STATUS_AND_LAYOUT_DATE_TOKENS.has(token.name);
+              const tooltip = isAllowed
+                ? isDate
+                  ? `${token.description}\n\nOpens a date format picker.`
+                  : token.description
+                : `${token.description}\n\nNot available for this message.`;
               return (
                 <button
                   key={token.name}
                   type="button"
                   title={tooltip}
                   disabled={!isAllowed}
-                  onClick={() => isAllowed && insert(token.placeholder)}
+                  onClick={() => isAllowed && insertToken(token)}
                   className={`flex flex-col items-start gap-0.5 rounded-lg border px-3 py-1.5 text-left transition-colors ${
                     isAllowed
                       ? "border-[#424753]/60 bg-[#1e2430] hover:bg-[#252e3a] text-slate-100"
@@ -11415,6 +11448,50 @@ function StatusMessagesTokenModal(props: {
           </div>
         </div>
       </div>
+
+      {pendingDateToken ? (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setPendingDateToken(null);
+          }}
+        >
+          <div className="w-full max-w-md rounded-2xl border border-[#424753]/40 bg-[#171c22] overflow-hidden">
+            <div className="px-5 py-4 border-b border-[#424753]/30">
+              <h3 className="text-[18px] font-bold text-white font-headline">Date format</h3>
+              <p className="ui-field-description mt-1">
+                Choose a format for{" "}
+                <span className="font-mono text-slate-300">{`{${pendingDateToken}}`}</span>. It will be inserted as{" "}
+                <span className="font-mono text-slate-300">{`{${pendingDateToken}:format}`}</span>.
+              </p>
+            </div>
+            <div className="px-5 py-4 space-y-2">
+              {DATE_FORMAT_OPTIONS.map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => applyDateFormat(opt.id)}
+                  className="flex w-full items-center justify-between gap-3 rounded-lg border border-[#424753]/55 px-3 py-2.5 text-left hover:border-[#424753] hover:bg-white/[0.03]"
+                >
+                  <span className="text-[13px] font-headline uppercase tracking-wider text-slate-200">
+                    {opt.label}
+                  </span>
+                  <span className="font-mono text-[12px] text-slate-400">{opt.example}</span>
+                </button>
+              ))}
+            </div>
+            <div className="px-5 py-3 border-t border-[#424753]/30 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setPendingDateToken(null)}
+                className="text-[14px] font-headline uppercase tracking-wider text-slate-400 hover:text-slate-200"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

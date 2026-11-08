@@ -14,6 +14,7 @@ import math
 import re
 import threading
 import uuid
+from datetime import date, datetime
 from typing import Any
 
 from services.postgres.db import get_session
@@ -65,80 +66,17 @@ _PRERELEASE_GRID_BY_VERSION: dict[int, dict[str, tuple[int, int]]] = {
 
 # Tokens available in the designer (filtered per media kind in the UI).
 # ``FillRectangle`` is a textless fill box; place chips on top for copy.
-# Placeable designer chips (ComingSoonOrNewEp is Custom-only; see ``_CUSTOM_TEMPLATE_TOKENS``).
+# Placeable designer chips: Text (Custom), Fill, Badge, Rating. Metadata lives in Text templates.
 LABEL_TOKENS: tuple[str, ...] = (
     "FillRectangle",
-    "PLACEHOLDER",
     "Custom",
     "Badge",
-    "SeriesStatus",
-    "Title",
-    "Year",
-    "Certification",
-    "Genres",
-    "Runtime",
-    "TheatricalDate",
-    "DigitalDate",
-    "PhysicalDate",
-    "AirDate",
-    "SeriesPremiereDate",
-    "SXXEYY",
     "Rating",
 )
 
-MOVIE_TOKENS = frozenset(
-    {
-        "FillRectangle",
-        "PLACEHOLDER",
-        "Custom",
-        "Badge",
-        "Title",
-        "Year",
-        "Certification",
-        "Genres",
-        "Runtime",
-        "TheatricalDate",
-        "DigitalDate",
-        "PhysicalDate",
-        "Rating",
-    }
-)
-TV_TOKENS = frozenset(
-    {
-        "FillRectangle",
-        "PLACEHOLDER",
-        "Custom",
-        "Badge",
-        "SeriesStatus",
-        "Title",
-        "Year",
-        "Certification",
-        "Genres",
-        "Runtime",
-        "AirDate",
-        "SeriesPremiereDate",
-        "SXXEYY",
-        "Rating",
-    }
-)
-EPISODE_TOKENS = frozenset(
-    {
-        "FillRectangle",
-        "PLACEHOLDER",
-        "Custom",
-        "Badge",
-        "SeriesStatus",
-        "Title",
-        "Year",
-        "Certification",
-        "Genres",
-        "Runtime",
-        "AirDate",
-        "SeriesPremiereDate",
-        "SXXEYY",
-        "Rating",
-    }
-)
+MOVIE_TOKENS = frozenset(LABEL_TOKENS)
+TV_TOKENS = frozenset(LABEL_TOKENS)
+EPISODE_TOKENS = frozenset(LABEL_TOKENS)
 
 CUSTOM_TOKEN = "Custom"
 _CUSTOM_TEXT_MAX_LEN = 120
@@ -165,7 +103,110 @@ _CUSTOM_TEMPLATE_TOKENS: frozenset[str] = frozenset(
         "Sep",
     }
 )
-_CUSTOM_TOKEN_PATTERN = re.compile(r"\{([A-Za-z][A-Za-z0-9_]*)\}")
+# Insert-chip order for Text templates (media filters apply below).
+_CUSTOM_TOKEN_ORDER: tuple[str, ...] = (
+    "PLACEHOLDER",
+    "ComingSoonOrNewEp",
+    "Title",
+    "Year",
+    "Certification",
+    "Genres",
+    "Runtime",
+    "TheatricalDate",
+    "DigitalDate",
+    "PhysicalDate",
+    "AirDate",
+    "SeriesPremiereDate",
+    "SXXEYY",
+    "SeriesStatus",
+    "Rating",
+    "Sep",
+)
+_MOVIE_CUSTOM_TOKENS = frozenset(
+    {
+        "PLACEHOLDER",
+        "ComingSoonOrNewEp",
+        "Title",
+        "Year",
+        "Certification",
+        "Genres",
+        "Runtime",
+        "TheatricalDate",
+        "DigitalDate",
+        "PhysicalDate",
+        "Rating",
+        "Sep",
+    }
+)
+_TV_CUSTOM_TOKENS = frozenset(
+    {
+        "PLACEHOLDER",
+        "ComingSoonOrNewEp",
+        "Title",
+        "Year",
+        "Certification",
+        "Genres",
+        "Runtime",
+        "AirDate",
+        "SeriesPremiereDate",
+        "SXXEYY",
+        "SeriesStatus",
+        "Rating",
+        "Sep",
+    }
+)
+_EPISODE_CUSTOM_TOKENS = frozenset(
+    {
+        "PLACEHOLDER",
+        "ComingSoonOrNewEp",
+        "Title",
+        "Year",
+        "Certification",
+        "Genres",
+        "Runtime",
+        "AirDate",
+        "SeriesPremiereDate",
+        "SXXEYY",
+        "SeriesStatus",
+        "Rating",
+        "Sep",
+    }
+)
+# Pre-cut placeables (and Coming Soon) → Text with ``{Token}`` on load.
+_LEGACY_SINGLE_TOKEN_CHIPS: frozenset[str] = frozenset(
+    {
+        "ComingSoonOrNewEp",
+        "PLACEHOLDER",
+        "SeriesStatus",
+        "Title",
+        "Year",
+        "Certification",
+        "Genres",
+        "Runtime",
+        "TheatricalDate",
+        "DigitalDate",
+        "PhysicalDate",
+        "AirDate",
+        "SeriesPremiereDate",
+        "SXXEYY",
+    }
+)
+# ``{Token}`` or ``{DateToken:format}`` (format is optional; date tokens only).
+_CUSTOM_TOKEN_PATTERN = re.compile(r"\{([A-Za-z][A-Za-z0-9_]*)(?::([A-Za-z0-9_-]+))?\}")
+_CUSTOM_DATE_TOKENS: frozenset[str] = frozenset(
+    {
+        "TheatricalDate",
+        "DigitalDate",
+        "PhysicalDate",
+        "AirDate",
+        "SeriesPremiereDate",
+    }
+)
+# Format ids in templates. Numeric uses regional patterns (not a sample date).
+_CUSTOM_DATE_FORMATS: tuple[str, ...] = ("iso", "short", "medium", "long", "mdy", "dmy", "ymd")
+_CUSTOM_DATE_FORMAT_DEFAULT = "iso"
+# ``numeric`` was US-style during early drafts.
+_CUSTOM_DATE_FORMAT_ALIASES: dict[str, str] = {"numeric": "mdy"}
 
 _DEFAULT_TEXT = "#ffffff"
 _DEFAULT_FILL = "#000000"
@@ -356,21 +397,118 @@ def _normalize_custom_text(raw: Any, *, token: str) -> str:
 
 
 def custom_template_tokens_for_profile(profile_key: str) -> list[str]:
-    """Ordered `{Token}` names allowed in Custom chips for this profile."""
-    allowed = tokens_for_profile(profile_key)
-    names = [name for name in LABEL_TOKENS if name in _CUSTOM_TEMPLATE_TOKENS and name in allowed]
-    # Smart release / next-ep string: Custom-only (not a placeable chip).
-    if "ComingSoonOrNewEp" in _CUSTOM_TEMPLATE_TOKENS and "ComingSoonOrNewEp" not in names:
-        # After PLACEHOLDER when present, else near the front.
-        try:
-            insert_at = names.index("PLACEHOLDER") + 1
-        except ValueError:
-            insert_at = 0
-        names.insert(insert_at, "ComingSoonOrNewEp")
-    # Sep is always available for Status Updates-style separators.
-    if "Sep" not in names:
-        names.append("Sep")
-    return names
+    """Ordered `{Token}` names allowed in Text (Custom) chips for this profile."""
+    media, _, _ = parse_profile_key(profile_key)
+    if media == "movie":
+        allowed = _MOVIE_CUSTOM_TOKENS
+    elif media == "episode":
+        allowed = _EPISODE_CUSTOM_TOKENS
+    else:
+        allowed = _TV_CUSTOM_TOKENS
+    return [name for name in _CUSTOM_TOKEN_ORDER if name in allowed]
+
+
+def _parse_token_date_value(raw: Any) -> date | None:
+    """Parse an ISO date (or date-like) from a layout token string."""
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, datetime):
+        return raw.date()
+    if isinstance(raw, date):
+        return raw
+    text = str(raw).strip()
+    if not text:
+        return None
+    # Prefer YYYY-MM-DD (token map / samples).
+    head = text[:10]
+    try:
+        return date.fromisoformat(head)
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
+
+
+def _normalize_custom_date_format(fmt: str | None) -> str:
+    key = str(fmt or "").strip().lower() or _CUSTOM_DATE_FORMAT_DEFAULT
+    key = _CUSTOM_DATE_FORMAT_ALIASES.get(key, key)
+    if key not in _CUSTOM_DATE_FORMATS:
+        return _CUSTOM_DATE_FORMAT_DEFAULT
+    return key
+
+
+def format_custom_date_token(raw: Any, fmt: str | None = None) -> str:
+    """Format a date token value; blank input stays blank.
+
+    Formats: ``iso`` (default), ``short``, ``medium``, ``long``, ``mdy`` (MM/DD/YYYY),
+    ``dmy`` (DD/MM/YYYY), ``ymd`` (YYYY/MM/DD). Legacy ``numeric`` aliases to ``mdy``.
+    """
+    parsed = _parse_token_date_value(raw)
+    if parsed is None:
+        return ""
+    key = _normalize_custom_date_format(fmt)
+    if key == "iso":
+        return parsed.isoformat()
+    if key == "short":
+        # Sep 30
+        return parsed.strftime("%b %d").replace(" 0", " ")
+    if key == "medium":
+        # Sep 30, 2026
+        return f"{parsed.strftime('%b %d').replace(' 0', ' ')}, {parsed.year}"
+    if key == "long":
+        # September 30, 2026
+        return f"{parsed.strftime('%B %d').replace(' 0', ' ')}, {parsed.year}"
+    if key == "mdy":
+        # 9/30/2026 (US)
+        return f"{parsed.month}/{parsed.day}/{parsed.year}"
+    if key == "dmy":
+        # 30/9/2026 (day-first)
+        return f"{parsed.day}/{parsed.month}/{parsed.year}"
+    if key == "ymd":
+        # 2026/09/30 (year-first, zero-padded like ISO)
+        return f"{parsed.year}/{parsed.month:02d}/{parsed.day:02d}"
+    return parsed.isoformat()
+
+
+def custom_date_format_options(*, sample: date | None = None) -> list[dict[str, str]]:
+    """UI catalog: format id, label, and example/pattern for the date-token picker.
+
+    Wordy formats show a sample date. Numeric formats show ``MM/DD/YYYY`` / ``DD/MM/YYYY`` /
+    ``YYYY/MM/DD``.
+    """
+    sample_date = sample or date(2026, 9, 30)
+    # Numeric rows: pattern string (not a filled-in sample).
+    patterns = {
+        "iso": None,
+        "short": None,
+        "medium": None,
+        "long": None,
+        "mdy": "MM/DD/YYYY",
+        "dmy": "DD/MM/YYYY",
+        "ymd": "YYYY/MM/DD",
+    }
+    labels = {
+        "iso": "ISO",
+        "short": "Short",
+        "medium": "Medium",
+        "long": "Long",
+        "mdy": "Numeric",
+        "dmy": "Numeric",
+        "ymd": "Numeric",
+    }
+    out: list[dict[str, str]] = []
+    for fmt in _CUSTOM_DATE_FORMATS:
+        pattern = patterns.get(fmt)
+        out.append(
+            {
+                "id": fmt,
+                "label": labels.get(fmt, fmt),
+                "example": pattern if pattern else format_custom_date_token(sample_date, fmt),
+            }
+        )
+    return out
 
 
 def render_custom_chip_text(
@@ -382,6 +520,7 @@ def render_custom_chip_text(
     """Fill a Custom chip template from static layout tokens; empty values collapse.
 
     Supports ``{Title}``, ``{Year}``, ``{Sep}``, and the other poster metadata tokens.
+    Date tokens may include a format: ``{TheatricalDate:short}``.
     Missing / blank tokens drop out (same idea as Status Updates).
     """
     text = str(template or "")
@@ -392,11 +531,20 @@ def render_custom_chip_text(
 
     def _replace(match: re.Match[str]) -> str:
         name = match.group(1)
+        fmt = match.group(2)
         if name == "Sep":
             return _CUSTOM_SEP_SENTINEL
         if name not in _CUSTOM_TEMPLATE_TOKENS:
             return ""
-        return str(ctx.get(name) or "").strip()
+        raw = str(ctx.get(name) or "").strip()
+        if not raw:
+            return ""
+        if name in _CUSTOM_DATE_TOKENS:
+            # Bare ``{TheatricalDate}`` keeps ISO (legacy); ``:format`` reformats.
+            if fmt:
+                return format_custom_date_token(raw, fmt)
+            return format_custom_date_token(raw, _CUSTOM_DATE_FORMAT_DEFAULT)
+        return raw
 
     rendered = _CUSTOM_TOKEN_PATTERN.sub(_replace, text)
     if _CUSTOM_SEP_SENTINEL in rendered:
@@ -638,11 +786,11 @@ def normalize_label(raw: Any, *, cols: int, rows: int, landscape: bool = False) 
         return None
     token = _normalize_fill_rectangle_token(str(raw.get("token") or "").strip())
     custom_text_raw = raw.get("custom_text")
-    # Legacy placeable Coming Soon chip → Custom with the smart template token.
-    if token == "ComingSoonOrNewEp":
-        token = CUSTOM_TOKEN
+    # Former single-value placeables → Text with ``{Token}`` (Coming Soon included).
+    if token in _LEGACY_SINGLE_TOKEN_CHIPS:
         if not str(custom_text_raw or "").strip():
-            custom_text_raw = "{ComingSoonOrNewEp}"
+            custom_text_raw = f"{{{token}}}"
+        token = CUSTOM_TOKEN
     if token not in LABEL_TOKENS:
         return None
     label_id = str(raw.get("id") or "").strip() or _new_label_id()
@@ -942,13 +1090,14 @@ def seed_profiles_from_legacy_settings() -> dict[str, Any]:
             )
             labels.append(
                 _make_label(
-                    "PLACEHOLDER",
+                    CUSTOM_TOKEN,
                     size="medium",
                     fill_opacity=0.0,
                     border_opacity=0.0,
                     x=bx,
                     y=by,
                     landscape=landscape,
+                    custom_text="{PLACEHOLDER}",
                 )
             )
         if badge_on:
@@ -1610,25 +1759,12 @@ def serialize_layout_catalog() -> dict[str, Any]:
     doc = get_layout_doc()
     token_meta = [
         {"name": "FillRectangle", "label": "Fill rectangle"},
-        {"name": "PLACEHOLDER", "label": "PLACEHOLDER"},
-        {"name": "Custom", "label": "Custom text"},
+        {"name": "Custom", "label": "Text"},
         {"name": "Badge", "label": "Placeholdarr badge"},
-        {"name": "SeriesStatus", "label": "Series status"},
-        {"name": "Title", "label": "Title"},
-        {"name": "Year", "label": "Year"},
-        {"name": "Certification", "label": "Certification"},
-        {"name": "Genres", "label": "Genres"},
-        {"name": "Runtime", "label": "Runtime"},
-        {"name": "TheatricalDate", "label": "Theatrical date"},
-        {"name": "DigitalDate", "label": "Digital date"},
-        {"name": "PhysicalDate", "label": "Physical date"},
-        {"name": "AirDate", "label": "Air date"},
-        {"name": "SeriesPremiereDate", "label": "Series premiere date"},
-        {"name": "SXXEYY", "label": "SxxEyy"},
         {"name": "Rating", "label": "Rating"},
     ]
     grids = {key: {"cols": grid_size_for_profile(key)[0], "rows": grid_size_for_profile(key)[1]} for key in PROFILE_KEYS}
-    allowed = {key: sorted(tokens_for_profile(key)) for key in PROFILE_KEYS}
+    allowed = {key: [t for t in LABEL_TOKENS if t in tokens_for_profile(key)] for key in PROFILE_KEYS}
     samples = {key: sample_tokens_for_profile(key) for key in PROFILE_KEYS}
     custom_tokens = {key: custom_template_tokens_for_profile(key) for key in PROFILE_KEYS}
     return {
@@ -1640,6 +1776,8 @@ def serialize_layout_catalog() -> dict[str, Any]:
         "sample_tokens": samples,
         "custom_template_tokens": custom_tokens,
         "custom_text_max_length": _CUSTOM_TEXT_MAX_LEN,
+        "custom_date_tokens": sorted(_CUSTOM_DATE_TOKENS),
+        "custom_date_formats": custom_date_format_options(),
         "grids": grids,
         "sizes": list(LABEL_SIZES),
         "styles": list(LABEL_STYLES),

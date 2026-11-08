@@ -763,6 +763,80 @@ def enqueue_art_refresh_for_calendar_date_changes(
     return enqueue_placeholder_art_refresh(unique, session=session)
 
 
+def enqueue_art_refresh_for_calendar_coming_soon(
+    *,
+    status_changed_placeholder_ids: list[int] | set[int] | None = None,
+    source: str = "calendar_sync",
+    task_run_id: int | None = None,
+) -> dict:
+    """Rebake Coming Soon / New Ep. posters whose overlay label or profile stamp is stale.
+
+    Used after calendar date refresh + calendar status so day-rollover next-unairied
+    labels update even when ARR did not change ``air_date``, and so titles that leave
+    Coming Soon are not left with a stamped CS label.
+
+    Candidates: current Coming Soon placeholders, TV series/season posters, plus any
+    placeholders whose calendar status/reason just changed. Sidecar determination
+    skips titles that already match.
+    """
+    session = get_session()
+    try:
+        candidates = set(collect_placeholder_ids_for_art_scope(session, "coming_soon_and_tv"))
+        for raw in status_changed_placeholder_ids or []:
+            try:
+                candidates.add(int(raw))
+            except (TypeError, ValueError):
+                continue
+        if not candidates:
+            return {
+                "ok": True,
+                "placeholder_count": 0,
+                "enqueued": False,
+                "reason": "no_candidates",
+                "source": source,
+                "art_scope": "coming_soon_and_tv",
+            }
+        needed = determine_art_refresh_ids(
+            session,
+            sorted(candidates),
+            art_scope="all",
+        )
+        if not needed:
+            return {
+                "ok": True,
+                "placeholder_count": 0,
+                "enqueued": False,
+                "reason": "up_to_date",
+                "source": source,
+                "art_scope": "coming_soon_and_tv",
+                "candidates": len(candidates),
+            }
+        extras: dict[str, Any] = {
+            "art_backfill_source": source,
+            "art_scope": "coming_soon_and_tv",
+            "coming_soon_only": False,
+        }
+        if task_run_id is not None:
+            tid = int(task_run_id)
+            extras[FULL_SYNC_TASK_RUN_ID_KEY] = tid
+            extras[ART_BACKFILL_TASK_RUN_ID_KEY] = tid
+        out = enqueue_placeholder_art_refresh(
+            needed,
+            session=session,
+            merge_into_pending=False,
+            payload_extras=extras,
+        )
+        batch_count = int(out.get("jobs_created") or 0)
+        out["art_scope"] = "coming_soon_and_tv"
+        out["candidates"] = len(candidates)
+        out["needed"] = len(needed)
+        out["enqueued"] = bool(out.get("ok")) and batch_count > 0
+        out["source"] = source
+        return out
+    finally:
+        session.close()
+
+
 def enqueue_placeholder_art_backfill_all(
     *,
     source: str = "full_sync",

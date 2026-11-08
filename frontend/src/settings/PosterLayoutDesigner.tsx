@@ -11,6 +11,14 @@ import {
 import { fetchJson } from "../api/client";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
 import {
+  DATE_FORMAT_OPTIONS,
+  STATUS_AND_LAYOUT_DATE_TOKENS,
+  formatDateToken,
+  normalizeDateFormat,
+  type DateFormatOption,
+} from "../dateFormats";
+import { UI_SECTION_FRAME_CLASS } from "../uiSectionFrame";
+import {
   buildLayoutExportPayload,
   downloadJsonFile,
   layoutExportFilename,
@@ -81,6 +89,8 @@ export type PosterLayoutCatalog = {
   rating_sources?: string[];
   custom_template_tokens?: Record<string, string[]>;
   custom_text_max_length?: number;
+  custom_date_tokens?: string[];
+  custom_date_formats?: Array<{ id: string; label: string; example: string }>;
 };
 
 const LABEL_SIZES: LabelSize[] = ["small", "medium", "large"];
@@ -252,6 +262,56 @@ function BannerSpanSlider(props: {
 }
 const CUSTOM_TEXT_MAX_LEN = 120;
 const CUSTOM_SEP_DEFAULT = "·";
+const CUSTOM_DATE_TOKENS = new Set([
+  "TheatricalDate",
+  "DigitalDate",
+  "PhysicalDate",
+  "AirDate",
+  "SeriesPremiereDate",
+]);
+const LEGACY_SINGLE_TOKEN_CHIPS = new Set([
+  "ComingSoonOrNewEp",
+  "PLACEHOLDER",
+  "SeriesStatus",
+  "Title",
+  "Year",
+  "Certification",
+  "Genres",
+  "Runtime",
+  "TheatricalDate",
+  "DigitalDate",
+  "PhysicalDate",
+  "AirDate",
+  "SeriesPremiereDate",
+  "SXXEYY",
+]);
+
+type PosterTextTokenMeta = { name: string; label: string; group: string };
+
+const POSTER_TEXT_TOKEN_META: Record<string, Omit<PosterTextTokenMeta, "name">> = {
+  PLACEHOLDER: { label: "PLACEHOLDER", group: "Media" },
+  ComingSoonOrNewEp: { label: "Smart release / next episode", group: "Media" },
+  Title: { label: "Title", group: "Media" },
+  Year: { label: "Year", group: "Media" },
+  Certification: { label: "Certification", group: "Media" },
+  Genres: { label: "Genres", group: "Media" },
+  Runtime: { label: "Runtime", group: "Media" },
+  Rating: { label: "Rating", group: "Media" },
+  Sep: { label: "Separator", group: "Media" },
+  TheatricalDate: { label: "Theatrical date", group: "Movie" },
+  DigitalDate: { label: "Digital date", group: "Movie" },
+  PhysicalDate: { label: "Physical date", group: "Movie" },
+  SeriesStatus: { label: "Series status", group: "TV" },
+  SeriesPremiereDate: { label: "Series premiere date", group: "TV" },
+  AirDate: { label: "Air date", group: "TV" },
+  SXXEYY: { label: "Season/Episode (SxxEyy)", group: "TV" },
+};
+const POSTER_TEXT_TOKEN_GROUP_ORDER = ["Media", "Movie", "TV"];
+
+/** Fresh regex each call (global flag must not share ``lastIndex``). */
+function customDateTokenRe(): RegExp {
+  return /\{(TheatricalDate|DigitalDate|PhysicalDate|AirDate|SeriesPremiereDate)(?::([A-Za-z0-9_-]+))?\}/g;
+}
 
 type MediaKind = "movie" | "tv" | "episode";
 type Availability = "placeholder" | "real";
@@ -617,14 +677,41 @@ function normalizeCustomText(raw: unknown, token: string, maxLen = CUSTOM_TEXT_M
     .slice(0, maxLen);
 }
 
-/** Fill `{Token}` placeholders from sample/layout values; empty tokens collapse. */
+function templateHasDateToken(template: string): boolean {
+  return customDateTokenRe().test(String(template || ""));
+}
+
+/** Rewrite date tokens in a preset/template to include the chosen format id. */
+function applyDateFormatToTemplate(template: string, formatId: string): string {
+  const fmt = normalizeDateFormat(formatId);
+  return String(template || "").replace(customDateTokenRe(), (_m, name: string) => `{${name}:${fmt}}`);
+}
+
+/** Compare preset templates ignoring which date format was chosen. */
+function presetMatchesCustomText(presetTemplate: string, customText: string): boolean {
+  const norm = (text: string) =>
+    String(text || "")
+      .replace(customDateTokenRe(), (_m, name: string) => `{${name}}`)
+      .trim();
+  return norm(presetTemplate) === norm(customText);
+}
+
+/** Fill `{Token}` / `{DateToken:format}` placeholders; empty tokens collapse. */
 function renderCustomChipText(template: string, tokenMap: Record<string, string>, separator = CUSTOM_SEP_DEFAULT): string {
   const sep = separator || CUSTOM_SEP_DEFAULT;
   const sentinel = "\u001e";
-  const filled = String(template || "").replace(/\{([A-Za-z][A-Za-z0-9_]*)\}/g, (_m, name: string) => {
-    if (name === "Sep") return sentinel;
-    return String(tokenMap[name] ?? "").trim();
-  });
+  const filled = String(template || "").replace(
+    /\{([A-Za-z][A-Za-z0-9_]*)(?::([A-Za-z0-9_-]+))?\}/g,
+    (_m, name: string, fmt: string | undefined) => {
+      if (name === "Sep") return sentinel;
+      const raw = String(tokenMap[name] ?? "").trim();
+      if (!raw) return "";
+      if (CUSTOM_DATE_TOKENS.has(name) || STATUS_AND_LAYOUT_DATE_TOKENS.has(name)) {
+        return formatDateToken(raw, fmt);
+      }
+      return raw;
+    },
+  );
   let rendered = filled;
   if (filled.includes(sentinel)) {
     const parts = filled
@@ -644,6 +731,232 @@ function renderCustomChipText(template: string, tokenMap: Record<string, string>
     .trim();
 }
 
+type DateFormatPickerState = { mode: "preset"; preset: CustomTextPreset };
+
+function PosterTextTokensModal(props: {
+  open: boolean;
+  value: string;
+  maxLength: number;
+  tokenNames: string[];
+  dateTokenNames: Set<string>;
+  dateFormatOptions: DateFormatOption[];
+  sampleTokens: Record<string, string>;
+  accentHex: string;
+  onClose: () => void;
+  onCommit: (next: string) => void;
+}) {
+  const [draft, setDraft] = useState(props.value);
+  const [pendingDateToken, setPendingDateToken] = useState<string | null>(null);
+  const editorRef = useRef<HTMLInputElement | null>(null);
+  const cursorRef = useRef<number>(props.value.length);
+
+  useEffect(() => {
+    if (!props.open) return;
+    setDraft(props.value);
+    cursorRef.current = props.value.length;
+    setPendingDateToken(null);
+  }, [props.open, props.value]);
+
+  if (!props.open) return null;
+
+  const grouped = new Map<string, PosterTextTokenMeta[]>();
+  for (const name of props.tokenNames) {
+    const meta = POSTER_TEXT_TOKEN_META[name] || { label: name, group: "Media" };
+    const entry: PosterTextTokenMeta = { name, label: meta.label, group: meta.group };
+    const arr = grouped.get(entry.group) ?? [];
+    arr.push(entry);
+    grouped.set(entry.group, arr);
+  }
+  const orderedGroups = [
+    ...POSTER_TEXT_TOKEN_GROUP_ORDER.filter((g) => grouped.has(g)),
+    ...Array.from(grouped.keys()).filter((g) => !POSTER_TEXT_TOKEN_GROUP_ORDER.includes(g)),
+  ];
+
+  const preview = renderCustomChipText(draft, props.sampleTokens);
+
+  function insert(placeholder: string) {
+    const maxLen = props.maxLength;
+    const cursor = Math.min(cursorRef.current, draft.length);
+    const next = `${draft.slice(0, cursor)}${placeholder}${draft.slice(cursor)}`.slice(0, maxLen);
+    setDraft(next);
+    cursorRef.current = Math.min(cursor + placeholder.length, next.length);
+    requestAnimationFrame(() => {
+      const el = editorRef.current;
+      if (el) {
+        el.focus();
+        el.setSelectionRange(cursorRef.current, cursorRef.current);
+      }
+    });
+  }
+
+  function insertToken(name: string) {
+    if (props.dateTokenNames.has(name)) {
+      setPendingDateToken(name);
+      return;
+    }
+    insert(`{${name}}`);
+  }
+
+  function applyDateFormat(formatId: string) {
+    if (!pendingDateToken) return;
+    const fmt = normalizeDateFormat(formatId);
+    insert(`{${pendingDateToken}:${fmt}}`);
+    setPendingDateToken(null);
+  }
+
+  function commitAndClose() {
+    props.onCommit(draft.replace(/[\n\r]/g, "").slice(0, props.maxLength));
+    props.onClose();
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) commitAndClose();
+      }}
+    >
+      <div className={`w-full max-w-3xl ${UI_SECTION_FRAME_CLASS} bg-[#171c22] max-h-[85vh] flex flex-col overflow-hidden`}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[#424753]/30">
+          <div>
+            <h3 className="text-[18px] font-bold text-white font-headline">Text tokens</h3>
+            <p className="ui-field-description mt-1">
+              Build the Text chip with poster tokens. Empty values collapse automatically. Date tokens ask for a
+              format.
+            </p>
+          </div>
+          <button type="button" onClick={commitAndClose} className="text-slate-400 hover:text-slate-100">
+            <span className="material-symbols-outlined" style={{ fontSize: 22 }}>
+              close
+            </span>
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          {orderedGroups.map((groupName) => {
+            const tokens = grouped.get(groupName) ?? [];
+            return (
+              <div key={groupName}>
+                <h4 className="text-[12px] font-headline uppercase tracking-widest text-slate-400 mb-2">
+                  {groupName}
+                </h4>
+                <div className="flex flex-wrap gap-2">
+                  {tokens.map((token) => {
+                    const sample = String(props.sampleTokens[token.name] ?? "").trim();
+                    const isDate = props.dateTokenNames.has(token.name);
+                    return (
+                      <button
+                        key={token.name}
+                        type="button"
+                        title={isDate ? `Insert {${token.name}:format}` : `Insert {${token.name}}`}
+                        onClick={() => insertToken(token.name)}
+                        className="flex flex-col items-start gap-0.5 rounded-lg border border-[#424753]/60 bg-[#1e2430] px-3 py-1.5 text-left text-slate-100 transition-colors hover:bg-[#252e3a]"
+                      >
+                        <span className="font-mono text-[13px]">{`{${token.name}}`}</span>
+                        <span className="text-[11px] text-slate-500">
+                          {token.label}
+                          {sample ? ` · ${sample}` : ""}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="px-5 py-4 border-t border-[#424753]/30 space-y-2">
+          <label className="block text-[12px] font-headline uppercase tracking-wider text-slate-400 mb-1">
+            Template
+          </label>
+          <input
+            ref={editorRef}
+            className="w-full bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[15px] text-slate-200 outline-none font-mono"
+            value={draft}
+            placeholder="{Title} {Sep} {Year}"
+            maxLength={props.maxLength}
+            onChange={(e) => {
+              setDraft(e.target.value.replace(/[\n\r]/g, ""));
+              cursorRef.current = e.target.selectionStart ?? e.target.value.length;
+            }}
+            onKeyUp={(e) => {
+              cursorRef.current = e.currentTarget.selectionStart ?? e.currentTarget.value.length;
+            }}
+            onClick={(e) => {
+              cursorRef.current = e.currentTarget.selectionStart ?? e.currentTarget.value.length;
+            }}
+          />
+          <div className="flex items-center gap-2 text-[13px]">
+            <span className="text-slate-500 font-headline uppercase tracking-wider">Preview:</span>
+            <span className="text-slate-200 font-mono truncate">{preview || "(empty)"}</span>
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <button
+              type="button"
+              onClick={props.onClose}
+              className="text-[14px] font-headline uppercase tracking-wider text-slate-400 hover:text-slate-200"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={commitAndClose}
+              className={`px-4 py-2 ${FG_ON_ACCENT_TEXT_CLASS} text-[14px] font-headline uppercase tracking-wider rounded-lg`}
+              style={accentFilledStyle(props.accentHex)}
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {pendingDateToken ? (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setPendingDateToken(null);
+          }}
+        >
+          <div className="w-full max-w-md rounded-2xl border border-[#424753]/40 bg-[#171c22] overflow-hidden">
+            <div className="px-5 py-4 border-b border-[#424753]/30">
+              <h3 className="text-[18px] font-bold text-white font-headline">Date format</h3>
+              <p className="ui-field-description mt-1">
+                Choose a format for{" "}
+                <span className="font-mono text-slate-300">{`{${pendingDateToken}}`}</span>. It will be inserted as{" "}
+                <span className="font-mono text-slate-300">{`{${pendingDateToken}:format}`}</span>.
+              </p>
+            </div>
+            <div className="px-5 py-4 space-y-2">
+              {props.dateFormatOptions.map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => applyDateFormat(opt.id)}
+                  className="flex w-full items-center justify-between gap-3 rounded-lg border border-[#424753]/55 px-3 py-2.5 text-left hover:border-[#424753] hover:bg-white/[0.03]"
+                >
+                  <span className="text-[13px] font-headline uppercase tracking-wider text-slate-200">
+                    {opt.label}
+                  </span>
+                  <span className="font-mono text-[12px] text-slate-400">{opt.example}</span>
+                </button>
+              ))}
+            </div>
+            <div className="px-5 py-3 border-t border-[#424753]/30 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setPendingDateToken(null)}
+                className="text-[14px] font-headline uppercase tracking-wider text-slate-400 hover:text-slate-200"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 function clampFrac(raw: unknown, fallback = 0.5): number {
   const n = typeof raw === "number" ? raw : Number(raw);
@@ -807,10 +1120,10 @@ function normalizeLabelColors(label: PosterLayoutLabel, landscape = false): Post
   let xy: { x: number; y: number };
   let token = label.token === "Banner" ? FILL_RECTANGLE_TOKEN : label.token;
   let customTextRaw = label.custom_text;
-  // Legacy placeable Coming Soon chip → Custom with the smart template token.
-  if (token === "ComingSoonOrNewEp") {
+  // Former single-value placeables → Text with `{Token}`.
+  if (LEGACY_SINGLE_TOKEN_CHIPS.has(token)) {
+    if (!String(customTextRaw || "").trim()) customTextRaw = `{${token}}`;
     token = "Custom";
-    if (!String(customTextRaw || "").trim()) customTextRaw = "{ComingSoonOrNewEp}";
   }
   if (style === "banner") {
     token = FILL_RECTANGLE_TOKEN;
@@ -899,7 +1212,7 @@ function EditorHeightLock(props: {
       </div>
       <div className="space-y-2 min-w-0">
         <label className="space-y-1 text-[12px] text-slate-400 min-w-0 block">
-          <span>Custom text</span>
+          <span>Text</span>
           <input
             type="text"
             tabIndex={-1}
@@ -994,6 +1307,7 @@ function tokenDisplayLabel(
   tokenMeta: Array<{ name: string; label: string }> = [],
 ): string {
   if (token === FILL_RECTANGLE_TOKEN || token === "Banner") return FILL_RECTANGLE_LABEL;
+  if (token === "Custom") return tokenMeta.find((t) => t.name === token)?.label || "Text";
   return tokenMeta.find((t) => t.name === token)?.label || token;
 }
 
@@ -1030,7 +1344,7 @@ export default function PosterLayoutDesigner(props: Props) {
       if (placementHotTimerRef.current != null) window.clearTimeout(placementHotTimerRef.current);
     };
   }, []);
-  const [placeToken, setPlaceToken] = useState<string>("PLACEHOLDER");
+  const [placeToken, setPlaceToken] = useState<string>("Custom");
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
@@ -1042,6 +1356,8 @@ export default function PosterLayoutDesigner(props: Props) {
   /** Single destination, or all other profiles for this availability. */
   const [copyConfirmTarget, setCopyConfirmTarget] = useState<CopyDest | "all" | null>(null);
   const [importConfirmPayload, setImportConfirmPayload] = useState<LayoutSharePayload | null>(null);
+  const [dateFormatPicker, setDateFormatPicker] = useState<DateFormatPickerState | null>(null);
+  const [textTokensOpen, setTextTokensOpen] = useState(false);
   const copyMenuRef = useRef<HTMLDivElement | null>(null);
   const exportMenuRef = useRef<HTMLDivElement | null>(null);
   const importFileRef = useRef<HTMLInputElement | null>(null);
@@ -1121,7 +1437,7 @@ export default function PosterLayoutDesigner(props: Props) {
   }, [catalog, draft]);
 
   useEffect(() => {
-    const first = placeOptions.includes(placeToken) ? placeToken : placeOptions[0] || "PLACEHOLDER";
+    const first = placeOptions.includes(placeToken) ? placeToken : placeOptions[0] || "Custom";
     if (first !== placeToken) setPlaceToken(first);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeKey, placeOptions.join("|")]);
@@ -1794,6 +2110,22 @@ export default function PosterLayoutDesigner(props: Props) {
     if (copyConfirmTarget) applyCopyToDest(copyConfirmTarget);
   }
 
+  function applyDateFormatChoice(formatId: string) {
+    if (!dateFormatPicker || !selected) return;
+    const maxLen = catalog?.custom_text_max_length || CUSTOM_TEXT_MAX_LEN;
+    const fmt = normalizeDateFormat(formatId);
+    const next = applyDateFormatToTemplate(dateFormatPicker.preset.template, fmt).slice(0, maxLen);
+    patchSelected({ custom_text: next });
+    setDateFormatPicker(null);
+  }
+
+  const dateFormatOptions: DateFormatOption[] = catalog?.custom_date_formats?.length
+    ? catalog.custom_date_formats
+    : DATE_FORMAT_OPTIONS;
+  const dateTokenNames = catalog?.custom_date_tokens?.length
+    ? new Set(catalog.custom_date_tokens)
+    : CUSTOM_DATE_TOKENS;
+
   if (loadError) {
     return <div className="text-[13px] text-red-400">{loadError}</div>;
   }
@@ -2259,27 +2591,40 @@ export default function PosterLayoutDesigner(props: Props) {
                       {selected.token === "Custom" ? (
                         <div className="space-y-2 min-w-0">
                           <label className="space-y-1 text-[12px] text-slate-400 min-w-0 block">
-                            <span>Custom text</span>
-                            <input
-                              type="text"
-                              value={selected.custom_text || ""}
-                              maxLength={catalog?.custom_text_max_length || CUSTOM_TEXT_MAX_LEN}
-                              placeholder="{Title} {Sep} {Year}"
-                              onChange={(e) =>
-                                patchSelected({
-                                  custom_text: e.target.value
-                                    .replace(/[\n\r]/g, "")
-                                    .slice(0, catalog?.custom_text_max_length || CUSTOM_TEXT_MAX_LEN),
-                                })
-                              }
-                              className={`${FIELD_CLASS} font-mono text-[12px]`}
-                            />
+                            <span>Text</span>
+                            <div className="flex gap-2 min-w-0">
+                              <input
+                                type="text"
+                                value={selected.custom_text || ""}
+                                maxLength={catalog?.custom_text_max_length || CUSTOM_TEXT_MAX_LEN}
+                                placeholder="{Title} {Sep} {Year}"
+                                onChange={(e) =>
+                                  patchSelected({
+                                    custom_text: e.target.value
+                                      .replace(/[\n\r]/g, "")
+                                      .slice(0, catalog?.custom_text_max_length || CUSTOM_TEXT_MAX_LEN),
+                                  })
+                                }
+                                className={`${FIELD_CLASS} font-mono text-[12px] min-w-0 flex-1`}
+                              />
+                              <button
+                                type="button"
+                                onClick={() => setTextTokensOpen(true)}
+                                className="shrink-0 px-3 py-2 bg-[#252e3a] hover:bg-[#30353b] border border-[#424753]/40 rounded-lg text-[14px] text-slate-300 font-mono transition-colors"
+                                title="Insert a token"
+                              >
+                                {`{ }`}
+                              </button>
+                            </div>
                           </label>
-                          <p className="text-[11px] text-slate-500 leading-snug">
-                            Use static poster tokens like <span className="font-mono">{"{Title}"}</span> and{" "}
-                            <span className="font-mono">{"{Sep}"}</span>. Empty values collapse automatically.{" "}
-                            <span className="font-mono">{"{ComingSoonOrNewEp}"}</span> is the smart release / next
-                            episode label (same as the old Coming Soon chip).
+                          <p
+                            className="text-[11px] text-slate-500 truncate"
+                            title={renderCustomChipText(selected.custom_text || "", sampleTokens)}
+                          >
+                            Preview:{" "}
+                            <span className="text-slate-300">
+                              {renderCustomChipText(selected.custom_text || "", sampleTokens) || "(empty)"}
+                            </span>
                           </p>
                           <div className="space-y-1.5">
                             <div className="text-[12px] text-slate-400">Presets</div>
@@ -2287,20 +2632,27 @@ export default function PosterLayoutDesigner(props: Props) {
                               {CUSTOM_TEXT_PRESETS.filter(
                                 (preset) => !preset.kinds || preset.kinds.includes(kind),
                               ).map((preset) => {
-                                const active = String(selected.custom_text || "").trim() === preset.template;
+                                const active = presetMatchesCustomText(
+                                  preset.template,
+                                  String(selected.custom_text || ""),
+                                );
                                 return (
                                   <button
                                     key={preset.id}
                                     type="button"
                                     title={preset.template}
-                                    onClick={() =>
+                                    onClick={() => {
+                                      if (templateHasDateToken(preset.template)) {
+                                        setDateFormatPicker({ mode: "preset", preset });
+                                        return;
+                                      }
                                       patchSelected({
                                         custom_text: preset.template.slice(
                                           0,
                                           catalog?.custom_text_max_length || CUSTOM_TEXT_MAX_LEN,
                                         ),
-                                      })
-                                    }
+                                      });
+                                    }}
                                     className={`rounded-md border px-1.5 py-0.5 text-[11px] ${
                                       active
                                         ? "border-[var(--brand-accent)] text-slate-100 bg-[color:color-mix(in_srgb,var(--brand-accent)_18%,transparent)]"
@@ -2313,46 +2665,6 @@ export default function PosterLayoutDesigner(props: Props) {
                               })}
                             </div>
                           </div>
-                          <div className="flex flex-wrap gap-1.5">
-                            {(
-                              catalog?.custom_template_tokens?.[activeKey] || [
-                                "Title",
-                                "Year",
-                                "ComingSoonOrNewEp",
-                                "Rating",
-                                "Runtime",
-                                "Sep",
-                              ]
-                            ).map((name) => (
-                              <button
-                                key={name}
-                                type="button"
-                                title={`Insert {${name}}`}
-                                onClick={() => {
-                                  const maxLen = catalog?.custom_text_max_length || CUSTOM_TEXT_MAX_LEN;
-                                  const insert = `{${name}}`;
-                                  const current = String(selected.custom_text || "");
-                                  const next = `${current}${current && !current.endsWith(" ") ? " " : ""}${insert}`.slice(
-                                    0,
-                                    maxLen,
-                                  );
-                                  patchSelected({ custom_text: next });
-                                }}
-                                className="rounded-md border border-[#424753]/55 px-1.5 py-0.5 font-mono text-[11px] text-slate-400 hover:border-[#424753] hover:text-slate-200"
-                              >
-                                {`{${name}}`}
-                              </button>
-                            ))}
-                          </div>
-                          <p
-                            className="text-[11px] text-slate-500 truncate"
-                            title={renderCustomChipText(selected.custom_text || "", sampleTokens)}
-                          >
-                            Preview:{" "}
-                            <span className="text-slate-300">
-                              {renderCustomChipText(selected.custom_text || "", sampleTokens) || "(empty)"}
-                            </span>
-                          </p>
                         </div>
                       ) : null}
                       {(catalog?.arted_tokens || ["Rating"]).includes(selected.token) ? (
@@ -2597,6 +2909,74 @@ export default function PosterLayoutDesigner(props: Props) {
                 style={accentFilledStyle(props.accentHex)}
               >
                 Overwrite
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {selected?.token === "Custom" ? (
+        <PosterTextTokensModal
+          open={textTokensOpen}
+          value={selected.custom_text || ""}
+          maxLength={catalog?.custom_text_max_length || CUSTOM_TEXT_MAX_LEN}
+          tokenNames={
+            catalog?.custom_template_tokens?.[activeKey] || [
+              "Title",
+              "Year",
+              "ComingSoonOrNewEp",
+              "Rating",
+              "Runtime",
+              "Sep",
+            ]
+          }
+          dateTokenNames={dateTokenNames}
+          dateFormatOptions={dateFormatOptions}
+          sampleTokens={sampleTokens}
+          accentHex={props.accentHex}
+          onClose={() => setTextTokensOpen(false)}
+          onCommit={(next) => patchSelected({ custom_text: next })}
+        />
+      ) : null}
+
+      {dateFormatPicker ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setDateFormatPicker(null);
+          }}
+        >
+          <div className="w-full max-w-md rounded-2xl border border-[#424753]/40 bg-[#171c22] overflow-hidden">
+            <div className="px-5 py-4 border-b border-[#424753]/30">
+              <h3 className="text-[18px] font-bold text-white font-headline">Date format</h3>
+              <p className="ui-field-description mt-1">
+                Choose how dates appear in the &quot;{dateFormatPicker.preset.label}&quot; preset. The token is
+                written with your choice (for example{" "}
+                <span className="font-mono text-slate-300">{"{TheatricalDate:short}"}</span>).
+              </p>
+            </div>
+            <div className="px-5 py-4 space-y-2">
+              {dateFormatOptions.map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => applyDateFormatChoice(opt.id)}
+                  className="flex w-full items-center justify-between gap-3 rounded-lg border border-[#424753]/55 px-3 py-2.5 text-left hover:border-[#424753] hover:bg-white/[0.03]"
+                >
+                  <span className="text-[13px] font-headline uppercase tracking-wider text-slate-200">
+                    {opt.label}
+                  </span>
+                  <span className="font-mono text-[12px] text-slate-400">{opt.example}</span>
+                </button>
+              ))}
+            </div>
+            <div className="px-5 py-3 border-t border-[#424753]/30 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setDateFormatPicker(null)}
+                className="text-[14px] font-headline uppercase tracking-wider text-slate-400 hover:text-slate-200"
+              >
+                Cancel
               </button>
             </div>
           </div>
