@@ -9,15 +9,33 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
-### Fixed
-
-- **Library reconcile pipeline lock**: Title Refresh defers when lite/full sync holds the shared pipeline instead of rematerializing on top of it.
-- **Arted Rating missing source**: Missing provider scores show an em dash instead of falling back to IMDb.
-- **Arted Rating decimals**: 0–10 scores keep one decimal (`5.0`); a perfect `10` stays `10`.
-
 ## Pre-release
 
 ## Released
+
+## [0.13.1] - 2026-11-08
+
+### Summary
+
+- **Sonarr season playback search**: Series (and target seasons) are marked monitored before season search so Sonarr no longer rejects with series unmonitored (#141).
+- **Live Arr flags on play**: Monitored and has-file are refreshed from Radarr/Sonarr before playback monitor/search decisions.
+- **Season mode search choice**: Per season, full missing seasons use SeasonSearch; partial lists use EpisodeSearch (#73, #141).
+- **Library reconcile pipeline lock**: Title Refresh defers when lite/full sync holds the shared pipeline.
+- **Arted Rating display**: Missing scores show an em dash; 0-10 scores keep one decimal (`5.0`).
+
+### Fixed
+
+- **SeasonSearch series gate**: Season/series play mode turns the series and involved seasons On (and sets monitor-new-seasons to all) before search; reached-end still sets monitor-new-seasons to all (#141).
+- **Stale playback Arr flags**: Playback live-refreshes series/season/episode monitored and has-file (and movie monitored/has-file) so suppress and search targets match Sonarr/Radarr.
+- **Season mode boundary searches**: End-of-season plays that pull the next season season-search fully missing seasons and episode-search partial current seasons instead of one bulk episode dump (#141).
+- **Episode monitor sync**: Local episode monitored is only set for Sonarr ids that accept the monitor PUT; season/series search is skipped if ensuring series monitored fails (#141).
+- **Library reconcile pipeline lock**: Title Refresh defers when lite/full sync holds the shared pipeline instead of rematerializing on top of it.
+- **Arted Rating missing source**: Missing provider scores show an em dash instead of falling back to IMDb.
+- **Arted Rating decimals**: 0-10 scores keep one decimal (`5.0`); a perfect `10` stays `10`.
+
+### Changed
+
+- **Search already-monitored on playback**: Remains episode/movie scoped; setting copy notes that season play mode still chooses season vs episode search from what remains after that filter.
 
 ## [0.13.0] - 2026-11-08
 
