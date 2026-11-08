@@ -832,6 +832,12 @@ def _process_claimed_job(session, job: Job):
 
     if job.job_type == ENTITY_RECONCILE_JOB_TYPE:
         result = process_entity_reconcile_job(session, job)
+        if result.get('defer'):
+            # Title Refresh waits its turn behind lite/full sync; ARR webhook mats do not (#152).
+            raise JobDeferredError(
+                str(result.get('skipped') or 'deferred'),
+                delay_seconds=int(result.get('defer_seconds') or 90),
+            )
         if not result.get('ok', False):
             raise ValueError(str(result.get('reason') or 'entity_reconcile_failed'))
         return

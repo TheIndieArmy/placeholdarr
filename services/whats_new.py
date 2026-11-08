@@ -351,6 +351,19 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         requires_ack=True,
     ),
     WhatsNewNotice(
+        id="sonarr-season-playback-search-0-13-1",
+        since_version="0.13.1",
+        title="Season playback search with Sonarr",
+        body=(
+            "Season and series play modes now mark the series (and the seasons being searched) monitored in "
+            "Sonarr before a season search. Sonarr rejects season searches when the series is unmonitored, "
+            "even if individual episodes are monitored; that left some plays with zero grabs.\n\n"
+            "Playback also re-checks monitored and has-file from Arr before deciding what to search. In season "
+            "mode, a fully missing season can season-search (packs), while a partial list episode-searches. "
+            "Reached the end of known episodes still turns on monitoring for newly discovered seasons."
+        ),
+    ),
+    WhatsNewNotice(
         id="series-stats-lock-stall-0-12-6",
         since_version="0.12.6",
         title="ARR sync lock stall fixed",

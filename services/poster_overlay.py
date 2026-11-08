@@ -981,18 +981,18 @@ def _resolve_layout_label_text(label: dict, token_map: dict) -> tuple[str, Path 
     elif token == "Rating":
         prefer = str(label.get("rating_source") or "").strip().lower()
         arted = bool(label.get("arted")) and str(label.get("style") or "chip").strip().lower() != "banner"
-        # Arted chips pick an explicit source (default IMDb). Text chips keep Arr's preferred rating.
+        # Arted chips pick an explicit source (default IMDb). Missing source → dash (no IMDb fallback).
         if arted:
             if prefer in ("", "auto"):
                 prefer = "imdb"
             keyed = str(token_map.get(f"Rating:{prefer}") or "").strip()
-            text = keyed or text
+            text = keyed if keyed else "—"
             source = prefer
             art_path = _rating_logo_path(source)
         elif prefer not in ("", "auto"):
             keyed = str(token_map.get(f"Rating:{prefer}") or "").strip()
-            if keyed:
-                text = keyed
+            # Explicit source with no value: dash instead of another provider's score.
+            text = keyed if keyed else "—"
     return text, art_path
 
 

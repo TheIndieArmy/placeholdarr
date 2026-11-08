@@ -7447,8 +7447,9 @@ function PlaybackSectionIntro(props: { variant: PlaybackIntroVariant; embedded?:
       </p>
       <p className="ui-field-description leading-relaxed text-slate-300">
         When a placeholder or real file is played, choose which library destinations each filter applies to. Use them to
-        monitor only, allow re-searching already-monitored titles, or search titles that are not released yet (TV air
-        dates; movie preferred release date from Calendar). Destinations are listed under Movies and TV by folder path.
+        monitor only, allow re-searching already-monitored episodes or movies, or search titles that are not released
+        yet (TV air dates; movie preferred release date from Calendar). Destinations are listed under Movies and TV by
+        folder path.
       </p>
     </div>
   );
@@ -9751,9 +9752,9 @@ function SettingsPanel(props: {
                     intro={
                       <p>
                         When a placeholder or real file is played, choose which library destinations each filter applies
-                        to. Use them to monitor only, allow re-searching already-monitored titles, or search titles that
-                        are not released yet (TV air dates; movie preferred release date from Calendar). Destinations
-                        are listed under Movies and TV by folder path.
+                        to. Use them to monitor only, allow re-searching already-monitored episodes or movies, or search
+                        titles that are not released yet (TV air dates; movie preferred release date from Calendar).
+                        Destinations are listed under Movies and TV by folder path.
                       </p>
                     }
                   >
