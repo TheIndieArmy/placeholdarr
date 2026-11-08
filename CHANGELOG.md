@@ -12,6 +12,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 ### Fixed
 
 - **Library reconcile pipeline lock**: Title Refresh defers when lite/full sync holds the shared pipeline instead of rematerializing on top of it.
+- **Never cancels Title Refresh**: Setting Never fails in-flight reconcile jobs for that title and skips new refreshes while Never is set.
 - **Arted Rating missing source**: Missing provider scores show an em dash instead of falling back to IMDb.
 - **Arted Rating decimals**: 0–10 scores keep one decimal (`5.0`); a perfect `10` stays `10`.
 
