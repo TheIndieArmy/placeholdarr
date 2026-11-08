@@ -65,10 +65,10 @@ _PRERELEASE_GRID_BY_VERSION: dict[int, dict[str, tuple[int, int]]] = {
 
 # Tokens available in the designer (filtered per media kind in the UI).
 # ``FillRectangle`` is a textless fill box; place chips on top for copy.
+# Placeable designer chips (ComingSoonOrNewEp is Custom-only; see ``_CUSTOM_TEMPLATE_TOKENS``).
 LABEL_TOKENS: tuple[str, ...] = (
     "FillRectangle",
     "PLACEHOLDER",
-    "ComingSoonOrNewEp",
     "Custom",
     "Badge",
     "SeriesStatus",
@@ -90,7 +90,6 @@ MOVIE_TOKENS = frozenset(
     {
         "FillRectangle",
         "PLACEHOLDER",
-        "ComingSoonOrNewEp",
         "Custom",
         "Badge",
         "Title",
@@ -108,7 +107,6 @@ TV_TOKENS = frozenset(
     {
         "FillRectangle",
         "PLACEHOLDER",
-        "ComingSoonOrNewEp",
         "Custom",
         "Badge",
         "SeriesStatus",
@@ -127,7 +125,6 @@ EPISODE_TOKENS = frozenset(
     {
         "FillRectangle",
         "PLACEHOLDER",
-        "ComingSoonOrNewEp",
         "Custom",
         "Badge",
         "SeriesStatus",
@@ -362,6 +359,14 @@ def custom_template_tokens_for_profile(profile_key: str) -> list[str]:
     """Ordered `{Token}` names allowed in Custom chips for this profile."""
     allowed = tokens_for_profile(profile_key)
     names = [name for name in LABEL_TOKENS if name in _CUSTOM_TEMPLATE_TOKENS and name in allowed]
+    # Smart release / next-ep string: Custom-only (not a placeable chip).
+    if "ComingSoonOrNewEp" in _CUSTOM_TEMPLATE_TOKENS and "ComingSoonOrNewEp" not in names:
+        # After PLACEHOLDER when present, else near the front.
+        try:
+            insert_at = names.index("PLACEHOLDER") + 1
+        except ValueError:
+            insert_at = 0
+        names.insert(insert_at, "ComingSoonOrNewEp")
     # Sep is always available for Status Updates-style separators.
     if "Sep" not in names:
         names.append("Sep")
@@ -632,6 +637,12 @@ def normalize_label(raw: Any, *, cols: int, rows: int, landscape: bool = False) 
     if not isinstance(raw, dict):
         return None
     token = _normalize_fill_rectangle_token(str(raw.get("token") or "").strip())
+    custom_text_raw = raw.get("custom_text")
+    # Legacy placeable Coming Soon chip → Custom with the smart template token.
+    if token == "ComingSoonOrNewEp":
+        token = CUSTOM_TOKEN
+        if not str(custom_text_raw or "").strip():
+            custom_text_raw = "{ComingSoonOrNewEp}"
     if token not in LABEL_TOKENS:
         return None
     label_id = str(raw.get("id") or "").strip() or _new_label_id()
@@ -675,7 +686,7 @@ def normalize_label(raw: Any, *, cols: int, rows: int, landscape: bool = False) 
         "style": style,
         "arted": arted,
         "rating_source": _rating_source_for_label(token=token, arted=arted, raw=raw.get("rating_source")),
-        "custom_text": _normalize_custom_text(raw.get("custom_text"), token=token),
+        "custom_text": _normalize_custom_text(custom_text_raw, token=token),
     }
 
 
@@ -906,13 +917,14 @@ def seed_profiles_from_legacy_settings() -> dict[str, Any]:
             )
             labels.append(
                 _make_label(
-                    "ComingSoonOrNewEp",
+                    CUSTOM_TOKEN,
                     size="medium",
                     fill_opacity=0.0,
                     border_opacity=0.0,
                     x=bx,
                     y=by,
                     landscape=landscape,
+                    custom_text="{ComingSoonOrNewEp}",
                 )
             )
         elif variant == "default" and ph_on:
@@ -1599,7 +1611,6 @@ def serialize_layout_catalog() -> dict[str, Any]:
     token_meta = [
         {"name": "FillRectangle", "label": "Fill rectangle"},
         {"name": "PLACEHOLDER", "label": "PLACEHOLDER"},
-        {"name": "ComingSoonOrNewEp", "label": "Coming Soon / New Ep. / Airing"},
         {"name": "Custom", "label": "Custom text"},
         {"name": "Badge", "label": "Placeholdarr badge"},
         {"name": "SeriesStatus", "label": "Series status"},
