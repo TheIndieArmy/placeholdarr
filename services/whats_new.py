@@ -331,6 +331,22 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         requires_ack=True,
     ),
     WhatsNewNotice(
+        id="poster-layout-designer-0-13-0",
+        since_version="0.13.0",
+        title="Poster layout designer",
+        body=(
+            "Placeholder poster overlays are yours to design. Build separate Released and Coming Soon overlays "
+            "for Movie, TV, and Episode: fill rectangles, metadata chips, Custom text (including the "
+            "smart release / next-episode label), ratings, and the Placeholdarr badge. Drag on the "
+            "live preview, copy a layout across profiles, or import and export JSON to share a look. "
+            "Series with a known unaired episode use Coming Soon; otherwise they use Released.\n\n"
+            "Support for overlays on real file posters is coming in a future update."
+        ),
+        cta_label="Open Poster Art",
+        cta_path="/settings/poster-art",
+        requires_ack=True,
+    ),
+    WhatsNewNotice(
         id="series-stats-lock-stall-0-12-6",
         since_version="0.12.6",
         title="ARR sync lock stall fixed",

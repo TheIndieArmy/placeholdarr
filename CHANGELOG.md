@@ -9,36 +9,44 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+## Pre-release
+
+## Released
+
+## [0.13.0] - 2026-11-07
+
 ### Summary
 
-- **Poster layout designer**: Grid label editor for placeholder art across Movie / TV / Episode profiles.
-- **Layout fingerprints**: Saving a profile only invalidates matching placeholder art sidecars.
+- **Poster layout designer**: Design placeholder overlays per Movie / TV / Episode and Released / Coming Soon profile.
+- **Fill rectangle and placement**: Free bake-px fills, sticky preview guides, and drag-to-place chips.
+- **Share layouts**: Copy across profiles; import and export layout JSON.
 - **Materialization batching**: Webhook deletes/adds queue coalesced jobs; large lite mats commit in chunks (#152).
 
 ### Added
 
 - **Poster layout designer**: Settings → Poster Art grid editor for badge, banners, Custom templates, SeriesStatus, and metadata chips.
-- **Layout profiles**: Twelve keys (`placeholder` / `real` × Default / Coming Soon); bake uses Placeholder; Real is reserved and disabled in the UI.
+- **Layout profiles**: Twelve keys (`placeholder` / `real` × Released / Coming Soon); bake uses Placeholder; Real is reserved and disabled in the UI.
 - **Preview art**: TMDB id or random library pick with live sample tokens for the designer.
 - **SeriesStatus label**: Airing / Ended / Canceled / Returning from Sonarr status on TV and episode profiles.
 - **Layout import / export**: Download current or all layout JSON; import either file type into the draft (confirm before overwrite).
+- **Copy layout to**: Copy the current draft to another timing or media profile (or All); confirm before overwriting a non-empty destination.
+- **Custom text presets**: Quick fills for smart release / next episode, title+year, and media-specific date labels.
 
 ### Changed
 
 - **Poster overlays**: Grayscale can be per profile; badge and banner toggles move into layout profiles (seeded from prior settings).
 - **Poster layout grid**: Odd snap grids (portrait 25×37, landscape 33×21) so a cell center sits at exact 50%.
 - **Art refresh**: Per-profile `layout_hash` / `layout_profile` so unrelated profiles keep their baked art.
+- **Layout fingerprints**: Saving a profile only invalidates matching placeholder art sidecars.
 - **Layout doc version**: Collapsed to shipped version `1` (interim pre-release docs 2–5 migrate once).
 - **Fill rectangle**: Free x/y fill boxes (Horizontal + Vertical bake-px ranges); multiple per profile; replaces Banner / edge / orientation models with migration on load.
-- **Layout art refresh scope**: First Apply migrates all placeholder art once; later saves enqueue only changed media kinds (and Coming Soon vs Default where cheap).
+- **Layout art refresh scope**: First Apply migrates all placeholder art once; later saves enqueue only changed media kinds (and Coming Soon vs Released where cheap).
 - **Layout designer placement**: Drag the selected chip on the sticky bake preview (or keep using bake-px X/Y); crosshair guides follow the chip.
 - **Fill rectangle guides**: Sticky preview outlines the selected fill before bake.
 - **Fill rectangle drag**: Drag the selected fill on the sticky preview to slide it; width and height stay fixed.
 - **Coming Soon chip**: Removed as a placeable element; use Custom text with `{ComingSoonOrNewEp}` (legacy chips migrate on load).
-- **Custom text presets**: Quick fills for smart release / next episode, title+year, and media-specific date labels.
 - **Released layout tab**: Designer Default tab renamed to Released (profile key stays `default`).
 - **Layout when-to-use**: Centered amber note and tab hover titles explain Released vs Coming Soon (TV uses next unaired episode).
-- **Copy layout to**: Copy the current draft to another timing or media profile (or All); confirm before overwriting a non-empty destination.
 
 ### Fixed
 
@@ -48,10 +56,6 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Discard unsaved**: Designer discard restores the last saved layout instead of wiping to factory seed.
 - **Webhook materialization**: Episode/movie file deletes and series/movie adds enqueue coalesced `entity_materialization` jobs instead of holding the webhook worker through a long commit (#152).
 - **Lite materialization lock windows**: Large scoped mats commit every `MATERIALIZATION_COMMIT_CHUNK_SIZE` ids and use a short persist `lock_timeout` (#152).
-
-## Pre-release
-
-## Released
 
 ## [0.12.6] - 2026-11-06
 
