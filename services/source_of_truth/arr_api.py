@@ -738,36 +738,55 @@ def set_sonarr_episode_monitored(
     *,
     url: Optional[str] = None,
     api_key: Optional[str] = None,
-) -> Dict[str, int]:
-    """Set monitored state for Sonarr episode ids one-by-one."""
+) -> Dict[str, Any]:
+    """Set monitored state for Sonarr episode ids one-by-one.
+
+    Returns ``updated`` / ``failed`` counts plus ``updated_ids`` / ``failed_ids`` so
+    callers only sync local flags for ids Sonarr actually accepted.
+    """
     url = url or _default_sonarr_endpoint()[0]
     api_key = api_key or _default_sonarr_endpoint()[1]
     if not url or not api_key:
-        return {'updated': 0, 'failed': len(episode_ids or [])}
+        failed_ids = []
+        for raw_id in episode_ids or []:
+            try:
+                failed_ids.append(int(raw_id))
+            except Exception:
+                continue
+        return {
+            'updated': 0,
+            'failed': len(failed_ids),
+            'updated_ids': [],
+            'failed_ids': failed_ids,
+        }
 
-    updated = 0
-    failed = 0
+    updated_ids: List[int] = []
+    failed_ids: List[int] = []
     for raw_id in episode_ids or []:
         try:
             episode_id = int(raw_id)
         except Exception:
-            failed += 1
             continue
 
         endpoint = _build_endpoint(url, f'episode/{episode_id}')
         episode_payload = _request_json('GET', endpoint, params={'apikey': api_key})
         if not isinstance(episode_payload, dict):
-            failed += 1
+            failed_ids.append(episode_id)
             continue
 
         episode_payload['monitored'] = bool(monitored)
         resp = _request_json('PUT', endpoint, payload=episode_payload, api_key=api_key)
         if resp is None:
-            failed += 1
+            failed_ids.append(episode_id)
         else:
-            updated += 1
+            updated_ids.append(episode_id)
 
-    return {'updated': updated, 'failed': failed}
+    return {
+        'updated': len(updated_ids),
+        'failed': len(failed_ids),
+        'updated_ids': updated_ids,
+        'failed_ids': failed_ids,
+    }
 
 
 def set_sonarr_series_monitored(

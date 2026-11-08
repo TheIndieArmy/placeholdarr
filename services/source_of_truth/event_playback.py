@@ -2827,19 +2827,36 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
     skipped_search_reason = partition.get("skipped_search_reason")
     target_season_numbers = _playback_target_season_numbers(session, targets)
 
-    monitor_result = {"updated": 0, "failed": 0}
+    monitor_result: dict[str, Any] = {
+        "updated": 0,
+        "failed": 0,
+        "updated_ids": [],
+        "failed_ids": [],
+    }
     if monitor_ids:
         monitor_result = set_sonarr_episode_monitored(monitor_ids, True, url=base_url, api_key=api_key)
+        ok_ids = {int(x) for x in (monitor_result.get("updated_ids") or [])}
         for ep in to_monitor:
+            if not getattr(ep, "sonarrid", None):
+                continue
+            if int(ep.sonarrid) not in ok_ids:
+                continue
             ep.sonarr_monitored = True
             session.add(ep)
+        if int(monitor_result.get("failed") or 0) > 0:
+            logger.warning(
+                "playback: episode monitor failed series_id=%s failed_ids=%s",
+                getattr(series_row, "id", None),
+                monitor_result.get("failed_ids") or [],
+            )
 
     # Season/series play modes: series On (SeasonSearch) and mark involved seasons so
     # Sonarr UI/RSS match that scope. Also set monitorNewItems=all so new seasons
     # follow (matches normal Sonarr bookmark expectations after careful/pilot adds).
     # Episode mode leaves seasons Off on purpose; reached_end below still sets all.
+    series_ensure_ok: bool | None = None
     if mode in {"season", "series"} and targets:
-        _ensure_playback_series_monitored(
+        series_ensure_ok = _ensure_playback_series_monitored(
             session,
             series_row,
             base_url=base_url,
@@ -2847,6 +2864,12 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
             season_numbers=target_season_numbers,
             monitor_new_items="all",
         )
+        if not series_ensure_ok:
+            logger.warning(
+                "playback: series/season monitor ensure failed series_id=%s mode=%s; skipping search",
+                getattr(series_row, "id", None),
+                mode,
+            )
 
     search_result: dict[str, Any] = {
         "search_triggered": False,
@@ -2855,7 +2878,7 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
         "episode_search": None,
         "episode_search_seasons": [],
     }
-    if search_eligible:
+    if search_eligible and series_ensure_ok is not False:
         search_result = _trigger_playback_sonarr_search_for_row(
             session,
             series_row=series_row,
@@ -2866,6 +2889,8 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
             base_url=base_url,
             api_key=api_key,
         )
+    elif search_eligible and series_ensure_ok is False:
+        skipped_search_reason = skipped_search_reason or "series_monitor_failed"
     search_triggered = bool(search_result.get("search_triggered"))
 
     # Episode and season lookahead modes both set reached_end when the window hits
@@ -2910,6 +2935,8 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
         'skipped_search_reason': skipped_search_reason,
         'monitor_updated': int(monitor_result.get('updated', 0)),
         'monitor_failed': int(monitor_result.get('failed', 0)),
+        'monitor_failed_ids': list(monitor_result.get('failed_ids') or []),
+        'series_ensure_ok': series_ensure_ok,
         'search_triggered': bool(search_triggered),
         'season_searches': search_result.get("season_searches") or {},
         'season_searches_failed': list(search_result.get("season_searches_failed") or []),
