@@ -159,6 +159,7 @@ def _step_label_for(step: str, *, arr_label: str = "Radarr") -> str:
         "arr_refresh": f"Asking {arr_label} for updates…",
         "arr_wait_refresh": "Waiting for metadata refresh…",
         "sync_catalog": "Syncing catalog…",
+        "waiting_pipeline": "Waiting for library sync to finish…",
         "filesystem": "Checking placeholder files…",
         "determination": "Updating status…",
         "materialization": "Applying placeholders…",
@@ -847,6 +848,7 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
     )
     refresh_paths: set[str] = set()
     placeholders: list[Placeholder] = []
+    pipeline_held = False
     try:
         _log_reconcile_info(entity_type, title, "Started scan & refresh", job_id=int(job.id))
         if targets.arr_kind == "radarr":
@@ -934,107 +936,155 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
                 job_id=int(job.id),
             )
 
-        _step("filesystem")
-        _refresh_placeholder_presence_for_entities(
-            movie_row_ids=targets.movie_row_ids,
-            episode_row_ids=targets.episode_row_ids,
+        # Same pipeline lock as lite/full sync and density Apply now: do not
+        # rematerialize while a library-wide mat is already holding the lock.
+        # Arr refresh above stays outside so a long Sonarr wait does not block sync.
+        from services.source_of_truth.sync_coordinator import (
+            release_pipeline,
+            try_acquire_pipeline,
         )
 
-        scope_total = max(1, len(targets.movie_row_ids or []) + len(targets.episode_row_ids or []))
-        _set_job_step(
-            session,
-            job,
-            "determination",
-            arr_label=targets.arr_label,
-            phase_done=0,
-            phase_total=scope_total,
-        )
-        _log_reconcile_info(
-            entity_type,
-            title,
-            _step_log_detail("determination", arr_label=targets.arr_label),
-            job_id=int(job.id),
-        )
-        run_determination_for_entities_with_siblings(
-            movie_ids=targets.movie_row_ids or None,
-            episode_ids=targets.episode_row_ids or None,
-            log_subject=title,
-        )
-        _set_job_step(
-            session,
-            job,
-            "determination",
-            arr_label=targets.arr_label,
-            phase_done=scope_total,
-            phase_total=scope_total,
-        )
-
-        _set_job_step(
-            session,
-            job,
-            "materialization",
-            arr_label=targets.arr_label,
-            phase_done=0,
-            phase_total=scope_total,
-        )
-        _log_reconcile_info(
-            entity_type,
-            title,
-            _step_log_detail("materialization", arr_label=targets.arr_label),
-            job_id=int(job.id),
-        )
-        run_materialization_for_entities(
-            movie_ids=targets.movie_row_ids or None,
-            episode_ids=targets.episode_row_ids or None,
-            observation_source="entity_reconcile",
-            log_subject=title,
-        )
-        _set_job_step(
-            session,
-            job,
-            "materialization",
-            arr_label=targets.arr_label,
-            phase_done=scope_total,
-            phase_total=scope_total,
-        )
-
-        placeholders = _placeholders_for_scope(
-            session,
-            movie_row_ids=targets.movie_row_ids,
-            episode_row_ids=targets.episode_row_ids,
-        )
-        calendar_total = max(1, len(placeholders))
-        _set_job_step(
-            session,
-            job,
-            "calendar",
-            arr_label=targets.arr_label,
-            phase_done=0,
-            phase_total=calendar_total,
-        )
-        _log_reconcile_info(
-            entity_type,
-            title,
-            _step_log_detail("calendar", arr_label=targets.arr_label),
-            job_id=int(job.id),
-        )
-        calendar_updated = _refresh_calendar_status_for_placeholders(session, placeholders)
-        _set_job_step(
-            session,
-            job,
-            "calendar",
-            arr_label=targets.arr_label,
-            phase_done=calendar_total,
-            phase_total=calendar_total,
-        )
-        if calendar_updated:
+        if not try_acquire_pipeline():
+            _set_job_step(session, job, "waiting_pipeline", arr_label=targets.arr_label)
             _log_reconcile_info(
                 entity_type,
                 title,
-                f"Coming Soon status updated on {calendar_updated} placeholder(s)",
+                "Deferred: library sync pipeline busy",
                 job_id=int(job.id),
             )
-            # Materialization / calendar may have mutated rows; reload for sidecars.
+            return {
+                "ok": True,
+                "defer": True,
+                "skipped": "pipeline_busy",
+                "defer_seconds": 90,
+            }
+        pipeline_held = True
+        _log_reconcile_info(
+            entity_type,
+            title,
+            "Acquired library sync pipeline",
+            job_id=int(job.id),
+        )
+
+        try:
+            _step("filesystem")
+            _refresh_placeholder_presence_for_entities(
+                movie_row_ids=targets.movie_row_ids,
+                episode_row_ids=targets.episode_row_ids,
+            )
+
+            scope_total = max(1, len(targets.movie_row_ids or []) + len(targets.episode_row_ids or []))
+            _set_job_step(
+                session,
+                job,
+                "determination",
+                arr_label=targets.arr_label,
+                phase_done=0,
+                phase_total=scope_total,
+            )
+            _log_reconcile_info(
+                entity_type,
+                title,
+                _step_log_detail("determination", arr_label=targets.arr_label),
+                job_id=int(job.id),
+            )
+            run_determination_for_entities_with_siblings(
+                movie_ids=targets.movie_row_ids or None,
+                episode_ids=targets.episode_row_ids or None,
+                log_subject=title,
+            )
+            _set_job_step(
+                session,
+                job,
+                "determination",
+                arr_label=targets.arr_label,
+                phase_done=scope_total,
+                phase_total=scope_total,
+            )
+
+            _set_job_step(
+                session,
+                job,
+                "materialization",
+                arr_label=targets.arr_label,
+                phase_done=0,
+                phase_total=scope_total,
+            )
+            _log_reconcile_info(
+                entity_type,
+                title,
+                _step_log_detail("materialization", arr_label=targets.arr_label),
+                job_id=int(job.id),
+            )
+            run_materialization_for_entities(
+                movie_ids=targets.movie_row_ids or None,
+                episode_ids=targets.episode_row_ids or None,
+                observation_source="entity_reconcile",
+                log_subject=title,
+            )
+            _set_job_step(
+                session,
+                job,
+                "materialization",
+                arr_label=targets.arr_label,
+                phase_done=scope_total,
+                phase_total=scope_total,
+            )
+
+            placeholders = _placeholders_for_scope(
+                session,
+                movie_row_ids=targets.movie_row_ids,
+                episode_row_ids=targets.episode_row_ids,
+            )
+            calendar_total = max(1, len(placeholders))
+            _set_job_step(
+                session,
+                job,
+                "calendar",
+                arr_label=targets.arr_label,
+                phase_done=0,
+                phase_total=calendar_total,
+            )
+            _log_reconcile_info(
+                entity_type,
+                title,
+                _step_log_detail("calendar", arr_label=targets.arr_label),
+                job_id=int(job.id),
+            )
+            calendar_updated = _refresh_calendar_status_for_placeholders(session, placeholders)
+            _set_job_step(
+                session,
+                job,
+                "calendar",
+                arr_label=targets.arr_label,
+                phase_done=calendar_total,
+                phase_total=calendar_total,
+            )
+            if calendar_updated:
+                _log_reconcile_info(
+                    entity_type,
+                    title,
+                    f"Coming Soon status updated on {calendar_updated} placeholder(s)",
+                    job_id=int(job.id),
+                )
+                # Materialization / calendar may have mutated rows; reload for sidecars.
+                placeholders = _placeholders_for_scope(
+                    session,
+                    movie_row_ids=targets.movie_row_ids,
+                    episode_row_ids=targets.episode_row_ids,
+                )
+        finally:
+            if pipeline_held:
+                release_pipeline()
+                pipeline_held = False
+                _log_reconcile_info(
+                    entity_type,
+                    title,
+                    "Released library sync pipeline",
+                    job_id=int(job.id),
+                )
+
+        if not placeholders:
             placeholders = _placeholders_for_scope(
                 session,
                 movie_row_ids=targets.movie_row_ids,
@@ -1132,6 +1182,13 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
         )
         raise ValueError(str(exc)) from exc
     finally:
+        if pipeline_held:
+            try:
+                from services.source_of_truth.sync_coordinator import release_pipeline
+
+                release_pipeline()
+            except Exception:
+                pass
         stop_v.set()
 
 
