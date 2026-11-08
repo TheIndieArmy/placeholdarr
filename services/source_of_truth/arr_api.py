@@ -392,6 +392,7 @@ def fetch_sonarr_episodes(
     api_key: Optional[str] = None,
     *,
     season_number: Optional[int] = None,
+    bypass_cache: bool = False,
 ) -> List[Dict]:
     """Fetch Sonarr episodes for a series.
 
@@ -405,6 +406,8 @@ def fetch_sonarr_episodes(
 
     For any **other** explicit season, we still pass Sonarr's ``seasonNumber``
     query param and trim client-side.
+
+    ``bypass_cache=True`` forces a live Sonarr read (playback monitored / hasFile decisions).
     """
     url = url or _default_sonarr_endpoint()[0]
     api_key = api_key or _default_sonarr_endpoint()[1]
@@ -424,7 +427,7 @@ def fetch_sonarr_episodes(
     # Specials: never rely on ?seasonNumber=0 — fetch full list, filter locally.
     if season_number is not None and int(season_number) == 0:
         cache_all_key = f'sonarr_episodes:rich:{endpoint}:{series_id}:all'
-        cached_all = _cache_get(cache_all_key)
+        cached_all = None if bypass_cache else _cache_get(cache_all_key)
         if cached_all is not None:
             all_rows = cached_all
         else:
@@ -439,9 +442,10 @@ def fetch_sonarr_episodes(
 
     cache_scope = 'all' if season_number is None else str(int(season_number))
     cache_key = f'sonarr_episodes:rich:{endpoint}:{series_id}:{cache_scope}'
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
+    if not bypass_cache:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
 
     params = dict(base_params)
     if season_number is not None:
@@ -772,10 +776,15 @@ def set_sonarr_series_monitored(
     *,
     include_specials: bool = False,
     season_numbers: Optional[List[int]] = None,
+    monitor_new_items: Optional[str] = None,
     url: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> bool:
-    """Set series monitored state and optionally specific seasons."""
+    """Set series monitored state and optionally specific seasons / new-item policy.
+
+    ``monitor_new_items`` maps to Sonarr's persisted ``monitorNewItems`` field
+    (``all`` or ``none``): whether newly discovered seasons are monitored on refresh.
+    """
     url = url or _default_sonarr_endpoint()[0]
     api_key = api_key or _default_sonarr_endpoint()[1]
     if not url or not api_key or not series_id:
@@ -787,6 +796,10 @@ def set_sonarr_series_monitored(
         return False
 
     series_payload['monitored'] = bool(monitored)
+    if monitor_new_items is not None:
+        new_items = str(monitor_new_items or "").strip().lower()
+        if new_items in {"all", "none"}:
+            series_payload["monitorNewItems"] = new_items
     target_seasons = {int(s) for s in season_numbers or []}
     if target_seasons:
         seasons = series_payload.get('seasons') or []
@@ -812,7 +825,11 @@ def trigger_sonarr_search(
     url: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> bool:
-    """Trigger Sonarr search at episode, season, or series scope."""
+    """Trigger Sonarr search at episode, season, or series scope.
+
+    SeasonSearch rejects releases when the series master switch is Off even if
+    individual episodes are monitored. Ensure series monitored before that command.
+    """
     url = url or _default_sonarr_endpoint()[0]
     api_key = api_key or _default_sonarr_endpoint()[1]
     if not url or not api_key or not series_id:
@@ -822,6 +839,9 @@ def trigger_sonarr_search(
     if episode_ids:
         payload = {'name': 'episodeSearch', 'episodeIds': [int(x) for x in episode_ids]}
     elif season_number is not None:
+        # Sonarr SeasonSearch permanently rejects with "Series is not monitored"
+        # unless the series flag is On (season/episode flags alone are not enough).
+        set_sonarr_series_monitored(int(series_id), True, url=url, api_key=api_key)
         payload = {
             'name': 'seasonSearch',
             'seriesId': int(series_id),

@@ -208,7 +208,7 @@ const FILTER_META: Record<
   PLAYBACK_SEARCH_ALREADY_MONITORED_DESTS: {
     label: "Search already-monitored titles on playback",
     description:
-      "Pick destinations where titles already monitored in Radarr/Sonarr can be searched again on play. Destinations not listed skip that re-search.",
+      "Pick destinations where playback may search again even if Arr already had that scope monitored before this play. TV play mode decides the check: episode mode checks each episode for monitored; season mode checks the season for monitored; series mode checks the series for monitored. Movies use the movie monitored flag. Destinations not listed skip re-search when that scope was already monitored.",
   },
   PLAYBACK_SEARCH_FUTURE_DESTS: {
     label: "Search future titles on playback",
