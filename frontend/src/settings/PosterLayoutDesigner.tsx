@@ -10,6 +10,15 @@ import {
 } from "react";
 import { fetchJson } from "../api/client";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
+import {
+  buildLayoutExportPayload,
+  downloadJsonFile,
+  layoutExportFilename,
+  parseLayoutImportPayload,
+  parseLayoutProfileKey,
+  type LayoutSharePayload,
+  type LayoutShareScope,
+} from "./posterLayoutShare";
 
 export type LabelSize = "small" | "medium" | "large";
 export type LabelStyle = "chip" | "banner";
@@ -261,8 +270,135 @@ const AVAILABILITY_TABS: Array<{ availability: Availability; label: string }> = 
 ];
 
 const VARIANT_TABS: Array<{ variant: Variant; label: string }> = [
-  { variant: "default", label: "Default" },
+  { variant: "default", label: "Released" },
   { variant: "coming_soon", label: "Coming Soon" },
+];
+
+function mediaKindLabel(kind: MediaKind): string {
+  if (kind === "tv") return "TV";
+  if (kind === "episode") return "Episode";
+  return "Movie";
+}
+
+function variantLabel(variant: Variant): string {
+  return variant === "coming_soon" ? "Coming Soon" : "Released";
+}
+
+/** When each timing profile is used (shown under tabs + hover titles). */
+function variantWhenUsed(kind: MediaKind): { released: string; comingSoon: string; note: string } {
+  if (kind === "tv") {
+    return {
+      released:
+        "Series that are completed or continuing without a known unaired episode (such as when between seasons) use the Released poster.",
+      comingSoon: "Series with a known unaired episode use the Coming Soon poster.",
+      note:
+        "Series with a known unaired episode use the Coming Soon poster. Series that are completed or continuing without a known unaired episode (such as when between seasons) use the Released poster.",
+    };
+  }
+  if (kind === "episode") {
+    return {
+      released: "Released when this episode has no upcoming air date.",
+      comingSoon: "Coming Soon for episodes with an upcoming air date.",
+      note: "Episodes with an upcoming air date use the Coming Soon poster. Otherwise they use Released.",
+    };
+  }
+  return {
+    released: "Released when there is no upcoming preferred release date.",
+    comingSoon: "Coming Soon for movies with an upcoming preferred release date.",
+    note: "Movies with an upcoming preferred release date use the Coming Soon poster. Otherwise they use Released.",
+  };
+}
+
+type CopyDest = {
+  key: string;
+  kind: MediaKind;
+  variant: Variant;
+  label: string;
+};
+
+function copyDestinations(kind: MediaKind, availability: Availability, variant: Variant): CopyDest[] {
+  const out: CopyDest[] = [];
+  for (const media of MEDIA_TABS) {
+    for (const tab of VARIANT_TABS) {
+      if (media.kind === kind && tab.variant === variant) continue;
+      out.push({
+        key: profileKey(media.kind, availability, tab.variant),
+        kind: media.kind,
+        variant: tab.variant,
+        label: `${tab.label} (${media.label})`,
+      });
+    }
+  }
+  return out;
+}
+
+/** Quick-fill templates for Custom chips (recreate the old smart Coming Soon chip). */
+type CustomTextPreset = {
+  id: string;
+  label: string;
+  template: string;
+  /** Omit to show for every media kind. */
+  kinds?: MediaKind[];
+};
+
+const CUSTOM_TEXT_PRESETS: CustomTextPreset[] = [
+  {
+    id: "smart-cs",
+    label: "Smart release / next episode",
+    template: "{ComingSoonOrNewEp}",
+  },
+  {
+    id: "title-year",
+    label: "Title and year",
+    template: "{Title} {Sep} {Year}",
+  },
+  {
+    id: "theatrical",
+    label: "Theatrical date",
+    template: "Theatrical - {TheatricalDate}",
+    kinds: ["movie"],
+  },
+  {
+    id: "digital",
+    label: "Digital date",
+    template: "Digital - {DigitalDate}",
+    kinds: ["movie"],
+  },
+  {
+    id: "physical",
+    label: "Physical date",
+    template: "Physical - {PhysicalDate}",
+    kinds: ["movie"],
+  },
+  {
+    id: "airing",
+    label: "Airing date",
+    template: "Airing - {AirDate}",
+    kinds: ["episode"],
+  },
+  {
+    id: "premiere",
+    label: "Series premiere",
+    template: "Premiere - {SeriesPremiereDate}",
+    kinds: ["tv", "episode"],
+  },
+  {
+    id: "status",
+    label: "Series status",
+    template: "{SeriesStatus}",
+    kinds: ["tv", "episode"],
+  },
+  {
+    id: "sxxeyy",
+    label: "Title and episode code",
+    template: "{Title} {Sep} {SXXEYY}",
+    kinds: ["tv", "episode"],
+  },
+  {
+    id: "placeholder",
+    label: "PLACEHOLDER",
+    template: "{PLACEHOLDER}",
+  },
 ];
 
 /** Bundled overlay-examples samples (see frontend/public/overlay-examples/meta.json). */
@@ -670,6 +806,12 @@ function normalizeLabelColors(label: PosterLayoutLabel, landscape = false): Post
   let thickness = yEnd;
   let xy: { x: number; y: number };
   let token = label.token === "Banner" ? FILL_RECTANGLE_TOKEN : label.token;
+  let customTextRaw = label.custom_text;
+  // Legacy placeable Coming Soon chip → Custom with the smart template token.
+  if (token === "ComingSoonOrNewEp") {
+    token = "Custom";
+    if (!String(customTextRaw || "").trim()) customTextRaw = "{ComingSoonOrNewEp}";
+  }
   if (style === "banner") {
     token = FILL_RECTANGLE_TOKEN;
     const geom = fillRectGeometryFromLabel(label, landscape);
@@ -702,7 +844,7 @@ function normalizeLabelColors(label: PosterLayoutLabel, landscape = false): Post
     style,
     arted,
     rating_source: ratingSource,
-    custom_text: normalizeCustomText(label.custom_text, label.token),
+    custom_text: normalizeCustomText(customTextRaw, token),
   };
 }
 
@@ -841,6 +983,8 @@ type Props = {
   }) => void;
   /** Mount Preview art controls under the sticky bake preview. */
   onPreviewArtControlsChange?: (node: ReactNode | null) => void;
+  /** Mount Unsaved / Discard / Save on the Layout designer legend row. */
+  onHeaderActionsChange?: (node: ReactNode | null) => void;
   /** Register a handler so the sticky preview can drag-update chip x/y. */
   onRegisterPlacementDrag?: (handler: ((x: number, y: number) => void) | null) => void;
 };
@@ -893,6 +1037,14 @@ export default function PosterLayoutDesigner(props: Props) {
   const [busy, setBusy] = useState(false);
   const [applyOpen, setApplyOpen] = useState(false);
   const [applyScope, setApplyScope] = useState<ApplyScope>("next_full_sync");
+  const [copyMenuOpen, setCopyMenuOpen] = useState(false);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  /** Single destination, or all other profiles for this availability. */
+  const [copyConfirmTarget, setCopyConfirmTarget] = useState<CopyDest | "all" | null>(null);
+  const [importConfirmPayload, setImportConfirmPayload] = useState<LayoutSharePayload | null>(null);
+  const copyMenuRef = useRef<HTMLDivElement | null>(null);
+  const exportMenuRef = useRef<HTMLDivElement | null>(null);
+  const importFileRef = useRef<HTMLInputElement | null>(null);
   const [previewTmdbId, setPreviewTmdbId] = useState(DEFAULT_PREVIEW_ART.movie.tmdbId);
   const [previewBaseUrl, setPreviewBaseUrl] = useState<string | null>(null);
   const [previewArtTitle, setPreviewArtTitle] = useState<string | null>(DEFAULT_PREVIEW_ART.movie.title);
@@ -932,6 +1084,36 @@ export default function PosterLayoutDesigner(props: Props) {
     if (!previewArtTokens || Object.keys(previewArtTokens).length === 0) return catalogSampleTokens;
     return { ...catalogSampleTokens, ...previewArtTokens, Sep: catalogSampleTokens.Sep || "·" };
   }, [activeKey, catalog?.sample_tokens, previewArtTokens]);
+
+  const whenUsed = variantWhenUsed(kind);
+  const copyDests = useMemo(
+    () => copyDestinations(kind, availability, variant),
+    [kind, availability, variant],
+  );
+
+  useEffect(() => {
+    if (!copyMenuOpen) return;
+    const onDoc = (event: MouseEvent) => {
+      const root = copyMenuRef.current;
+      if (root && event.target instanceof Node && !root.contains(event.target)) {
+        setCopyMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [copyMenuOpen]);
+
+  useEffect(() => {
+    if (!exportMenuOpen) return;
+    const onDoc = (event: MouseEvent) => {
+      const root = exportMenuRef.current;
+      if (root && event.target instanceof Node && !root.contains(event.target)) {
+        setExportMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [exportMenuOpen]);
 
   const dirty = useMemo(() => {
     if (!catalog || !draft) return false;
@@ -1189,6 +1371,43 @@ export default function PosterLayoutDesigner(props: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [previewArtControls]);
 
+  const headerActions = useMemo(
+    () => (
+      <>
+        {dirty ? <span className="text-[12px] text-amber-200/90">Unsaved changes</span> : null}
+        {saveMsg ? <span className="text-[12px] text-slate-400">{saveMsg}</span> : null}
+        {saveError ? <span className="text-[12px] text-red-400">{saveError}</span> : null}
+        <button
+          type="button"
+          disabled={busy || !dirty}
+          title="Discard unsaved edits and restore the last saved layout"
+          onClick={() => discardUnsavedProfile()}
+          className="text-[12px] uppercase tracking-wider text-slate-400 hover:text-slate-200 disabled:opacity-40"
+        >
+          Discard unsaved
+        </button>
+        <button
+          type="button"
+          disabled={!dirty || busy}
+          onClick={() => setApplyOpen(true)}
+          className={`px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-40`}
+          style={accentFilledStyle(props.accentHex)}
+        >
+          {busy ? "Saving…" : "Save layouts"}
+        </button>
+      </>
+    ),
+    // discardUnsavedProfile closes over catalog; dirty/busy/messages drive the UI.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [busy, dirty, props.accentHex, saveError, saveMsg, catalog],
+  );
+
+  useLayoutEffect(() => {
+    props.onHeaderActionsChange?.(headerActions);
+    return () => props.onHeaderActionsChange?.(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [headerActions]);
+
   const selected = labels.find((l) => l.id === selectedId) || null;
 
   function updateActiveLabels(next: PosterLayoutLabel[]) {
@@ -1378,6 +1597,203 @@ export default function PosterLayoutDesigner(props: Props) {
     setSaveMsg("Discarded unsaved edits. Layout restored to the last saved version.");
   }
 
+  function exportLayouts(scope: LayoutShareScope) {
+    if (!draft) return;
+    const payload = buildLayoutExportPayload({
+      scope,
+      draft,
+      activeKey,
+      layoutDocVersion: catalog?.version,
+    });
+    downloadJsonFile(layoutExportFilename(scope, activeKey), payload);
+    setExportMenuOpen(false);
+    setSaveError(null);
+  }
+
+  function applyImportPayload(payload: LayoutSharePayload) {
+    if (!draft) return;
+    const updates: Record<string, PosterLayoutProfile> = {};
+    let importedCount = 0;
+    let focusKey: string | null = null;
+
+    for (const [key, source] of Object.entries(payload.profiles)) {
+      const parsed = parseLayoutProfileKey(key);
+      if (!parsed) continue;
+      const { profile } = buildCopiedProfile(
+        {
+          labels: (source.labels || []) as PosterLayoutLabel[],
+          grayscale: Boolean(source.grayscale),
+        },
+        key,
+        parsed.kind,
+      );
+      updates[key] = profile;
+      importedCount += 1;
+      if (!focusKey) focusKey = key;
+    }
+
+    if (payload.scope === "single" && payload.profile_key && updates[payload.profile_key]) {
+      focusKey = payload.profile_key;
+    }
+
+    if (importedCount === 0) {
+      setSaveError("Import contained no usable layout profiles.");
+      setImportConfirmPayload(null);
+      return;
+    }
+
+    setDraft((prev) => (prev ? { ...prev, ...updates } : prev));
+    if (focusKey) {
+      const parsed = parseLayoutProfileKey(focusKey);
+      if (parsed) {
+        setKind(parsed.kind);
+        setAvailability(parsed.availability);
+        setVariant(parsed.variant);
+      }
+    }
+    setSelectedId(null);
+    setImportConfirmPayload(null);
+    setExportMenuOpen(false);
+    setCopyMenuOpen(false);
+    setSaveError(null);
+    setSaveMsg(null);
+  }
+
+  function requestImportPayload(payload: LayoutSharePayload) {
+    if (!draft) return;
+    const needsConfirm = Object.keys(payload.profiles).some(
+      (key) => (draft[key]?.labels || []).length > 0,
+    );
+    if (needsConfirm) {
+      setImportConfirmPayload(payload);
+      return;
+    }
+    applyImportPayload(payload);
+  }
+
+  async function onImportFileSelected(file: File | null) {
+    if (!file) return;
+    setSaveError(null);
+    try {
+      const text = await file.text();
+      let parsedJson: unknown;
+      try {
+        parsedJson = JSON.parse(text);
+      } catch {
+        throw new Error("Could not parse JSON layout file.");
+      }
+      const payload = parseLayoutImportPayload(parsedJson);
+      requestImportPayload(payload);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (importFileRef.current) importFileRef.current.value = "";
+    }
+  }
+
+  function buildCopiedProfile(
+    source: PosterLayoutProfile,
+    destKey: string,
+    destKind: MediaKind,
+  ): { profile: PosterLayoutProfile; dropped: number } {
+    const allowed = new Set(catalog?.allowed_tokens?.[destKey] || []);
+    const destLandscape = destKind === "episode";
+    const sourceLabels = source.labels || [];
+    const clonedLabels = sourceLabels
+      .filter((label) => {
+        const token = label.token === "Banner" ? FILL_RECTANGLE_TOKEN : label.token;
+        if (allowed.size === 0) return true;
+        return allowed.has(token);
+      })
+      .map((label) =>
+        normalizeLabelColors(
+          {
+            ...JSON.parse(JSON.stringify(label)),
+            id: newLabelId(),
+          } as PosterLayoutLabel,
+          destLandscape,
+        ),
+      );
+    return {
+      profile: {
+        labels: clonedLabels,
+        grayscale: Boolean(source.grayscale),
+      },
+      dropped: sourceLabels.length - clonedLabels.length,
+    };
+  }
+
+  function applyCopyToDest(dest: CopyDest) {
+    if (!draft) return;
+    const source = draft[activeKey] || { labels: [], grayscale: false };
+    const { profile, dropped } = buildCopiedProfile(source, dest.key, dest.kind);
+    setDraft((prev) => {
+      if (!prev) return prev;
+      return { ...prev, [dest.key]: profile };
+    });
+    setKind(dest.kind);
+    setVariant(dest.variant);
+    setSelectedId(null);
+    setCopyMenuOpen(false);
+    setCopyConfirmTarget(null);
+    setSaveError(null);
+    setSaveMsg(
+      dropped > 0
+        ? `Copied layout to ${mediaKindLabel(dest.kind)} · ${variantLabel(dest.variant)} (${dropped} incompatible label${dropped === 1 ? "" : "s"} dropped). Save to keep.`
+        : `Copied layout to ${mediaKindLabel(dest.kind)} · ${variantLabel(dest.variant)}. Save to keep.`,
+    );
+  }
+
+  function applyCopyToAll() {
+    if (!draft) return;
+    const source = draft[activeKey] || { labels: [], grayscale: false };
+    const updates: Record<string, PosterLayoutProfile> = {};
+    let totalDropped = 0;
+    for (const dest of copyDests) {
+      const { profile, dropped } = buildCopiedProfile(source, dest.key, dest.kind);
+      updates[dest.key] = profile;
+      totalDropped += dropped;
+    }
+    setDraft((prev) => (prev ? { ...prev, ...updates } : prev));
+    setSelectedId(null);
+    setCopyMenuOpen(false);
+    setCopyConfirmTarget(null);
+    setSaveError(null);
+    setSaveMsg(
+      totalDropped > 0
+        ? `Copied layout to all other profiles (${totalDropped} incompatible label${totalDropped === 1 ? "" : "s"} dropped across destinations). Save to keep.`
+        : "Copied layout to all other profiles. Save to keep.",
+    );
+  }
+
+  function requestCopyToDest(dest: CopyDest) {
+    const destLabels = draft?.[dest.key]?.labels || [];
+    if (destLabels.length > 0) {
+      setCopyMenuOpen(false);
+      setCopyConfirmTarget(dest);
+      return;
+    }
+    applyCopyToDest(dest);
+  }
+
+  function requestCopyToAll() {
+    const anyOccupied = copyDests.some((dest) => (draft?.[dest.key]?.labels || []).length > 0);
+    if (anyOccupied) {
+      setCopyMenuOpen(false);
+      setCopyConfirmTarget("all");
+      return;
+    }
+    applyCopyToAll();
+  }
+
+  function confirmCopyOverwrite() {
+    if (copyConfirmTarget === "all") {
+      applyCopyToAll();
+      return;
+    }
+    if (copyConfirmTarget) applyCopyToDest(copyConfirmTarget);
+  }
+
   if (loadError) {
     return <div className="text-[13px] text-red-400">{loadError}</div>;
   }
@@ -1388,7 +1804,7 @@ export default function PosterLayoutDesigner(props: Props) {
   return (
     <div className="space-y-4 min-w-0 overflow-x-clip">
       <p className="ui-field-description leading-relaxed">
-        Design posters as you please. Movie, TV, and Episode each have Default and Coming Soon layouts for placeholders.
+        Design placeholder posters for Movie, TV, and Episode. Each has Released and Coming Soon layouts.
       </p>
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -1400,6 +1816,7 @@ export default function PosterLayoutDesigner(props: Props) {
               onClick={() => {
                 setKind(tab.kind);
                 setSelectedId(null);
+                setCopyMenuOpen(false);
               }}
               className={`px-3 py-1.5 rounded-lg text-[13px] font-headline uppercase tracking-wider border ${
                 kind === tab.kind ? "" : "border-[#424753]/40 text-slate-400 hover:text-slate-200"
@@ -1431,6 +1848,7 @@ export default function PosterLayoutDesigner(props: Props) {
                   if (realSoon) return;
                   setAvailability(tab.availability);
                   setSelectedId(null);
+                  setCopyMenuOpen(false);
                 }}
                 className={`px-3 py-1.5 rounded-lg text-[13px] font-headline uppercase tracking-wider border ${
                   realSoon
@@ -1454,9 +1872,11 @@ export default function PosterLayoutDesigner(props: Props) {
             <button
               key={tab.variant}
               type="button"
+              title={tab.variant === "coming_soon" ? whenUsed.comingSoon : whenUsed.released}
               onClick={() => {
                 setVariant(tab.variant);
                 setSelectedId(null);
+                setCopyMenuOpen(false);
               }}
               className={`px-3 py-1.5 rounded-lg text-[13px] font-headline uppercase tracking-wider border ${
                 variant === tab.variant ? "" : "border-[#424753]/40 text-slate-400 hover:text-slate-200"
@@ -1471,30 +1891,99 @@ export default function PosterLayoutDesigner(props: Props) {
             </button>
           ))}
         </div>
-        <div className="ml-auto flex flex-wrap items-center justify-end gap-3">
-          {dirty ? <span className="text-[12px] text-amber-200/90">Unsaved changes</span> : null}
-          {saveMsg ? <span className="text-[12px] text-slate-400">{saveMsg}</span> : null}
-          {saveError ? <span className="text-[12px] text-red-400">{saveError}</span> : null}
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+          <div className="relative" ref={exportMenuRef}>
+            <button
+              type="button"
+              disabled={busy || !draft}
+              title="Download layout JSON to share or back up"
+              onClick={() => {
+                setCopyMenuOpen(false);
+                setExportMenuOpen((open) => !open);
+              }}
+              className="px-3 py-1.5 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/40 text-slate-400 hover:text-slate-200 disabled:opacity-40"
+            >
+              Export
+            </button>
+            {exportMenuOpen ? (
+              <div className="absolute right-0 top-full z-30 mt-1 min-w-[12rem] rounded-lg border border-[#424753]/40 bg-[#171c22] py-1 shadow-lg shadow-black/30">
+                <button
+                  type="button"
+                  onClick={() => exportLayouts("single")}
+                  className="block w-full px-3 py-1.5 text-left text-[13px] text-slate-300 hover:bg-white/5 hover:text-slate-100"
+                >
+                  Current layout
+                </button>
+                <button
+                  type="button"
+                  onClick={() => exportLayouts("all")}
+                  className="block w-full px-3 py-1.5 text-left text-[13px] text-slate-300 hover:bg-white/5 hover:text-slate-100"
+                >
+                  All layouts
+                </button>
+              </div>
+            ) : null}
+          </div>
           <button
             type="button"
-            disabled={busy || !dirty}
-            title="Discard unsaved edits and restore the last saved layout"
-            onClick={() => discardUnsavedProfile()}
-            className="text-[12px] uppercase tracking-wider text-slate-400 hover:text-slate-200 disabled:opacity-40"
+            disabled={busy || !draft}
+            title="Import a Placeholdarr layout JSON file"
+            onClick={() => {
+              setCopyMenuOpen(false);
+              setExportMenuOpen(false);
+              importFileRef.current?.click();
+            }}
+            className="px-3 py-1.5 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/40 text-slate-400 hover:text-slate-200 disabled:opacity-40"
           >
-            Discard unsaved
+            Import
           </button>
-          <button
-            type="button"
-            disabled={!dirty || busy}
-            onClick={() => setApplyOpen(true)}
-            className={`px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-40`}
-            style={accentFilledStyle(props.accentHex)}
-          >
-            {busy ? "Saving…" : "Save layouts"}
-          </button>
+          <input
+            ref={importFileRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={(e) => void onImportFileSelected(e.target.files?.[0] || null)}
+          />
+          <div className="relative" ref={copyMenuRef}>
+            <button
+              type="button"
+              disabled={busy || availability !== "placeholder"}
+              title="Copy this layout's labels and grayscale to another timing or media profile"
+              onClick={() => {
+                setExportMenuOpen(false);
+                setCopyMenuOpen((open) => !open);
+              }}
+              className="px-3 py-1.5 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/40 text-slate-400 hover:text-slate-200 disabled:opacity-40"
+            >
+              Copy layout to
+            </button>
+            {copyMenuOpen ? (
+              <div className="absolute right-0 top-full z-30 mt-1 min-w-[14rem] rounded-lg border border-[#424753]/40 bg-[#171c22] py-1 shadow-lg shadow-black/30">
+                <button
+                  type="button"
+                  onClick={() => requestCopyToAll()}
+                  className="block w-full px-3 py-1.5 text-left text-[13px] text-slate-200 hover:bg-white/5 hover:text-slate-100"
+                >
+                  All
+                </button>
+                <div className="my-1 border-t border-[#424753]/30" />
+                {copyDests.map((dest) => (
+                  <button
+                    key={dest.key}
+                    type="button"
+                    onClick={() => requestCopyToDest(dest)}
+                    className="block w-full px-3 py-1.5 text-left text-[13px] text-slate-300 hover:bg-white/5 hover:text-slate-100"
+                  >
+                    {dest.label}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
         </div>
       </div>
+
+      <p className="text-center text-[13px] leading-snug text-amber-200/90 -mt-1">{whenUsed.note}</p>
 
       <div className={`flex flex-col gap-4 min-w-0 ${props.compact ? "" : "xl:flex-row-reverse xl:items-start"}`}>
         <div className="w-full max-w-md shrink-0 space-y-3 xl:w-[17rem]">
@@ -1503,9 +1992,9 @@ export default function PosterLayoutDesigner(props: Props) {
               <div className="text-[13px] font-semibold text-slate-200">Grayscale</div>
               <p className="text-[12px] text-slate-500 leading-snug">
                 Applies only to this profile (
-                {kind === "tv" ? "TV" : kind === "episode" ? "Episode" : "Movie"}{" "}
+                {mediaKindLabel(kind)}{" "}
                 {availability === "real" ? "Real" : "Placeholder"}{" "}
-                {variant === "coming_soon" ? "Coming Soon" : "Default"}
+                {variantLabel(variant)}
                 ).
               </p>
             </div>
@@ -1788,8 +2277,42 @@ export default function PosterLayoutDesigner(props: Props) {
                           </label>
                           <p className="text-[11px] text-slate-500 leading-snug">
                             Use static poster tokens like <span className="font-mono">{"{Title}"}</span> and{" "}
-                            <span className="font-mono">{"{Sep}"}</span>. Empty values collapse automatically.
+                            <span className="font-mono">{"{Sep}"}</span>. Empty values collapse automatically.{" "}
+                            <span className="font-mono">{"{ComingSoonOrNewEp}"}</span> is the smart release / next
+                            episode label (same as the old Coming Soon chip).
                           </p>
+                          <div className="space-y-1.5">
+                            <div className="text-[12px] text-slate-400">Presets</div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {CUSTOM_TEXT_PRESETS.filter(
+                                (preset) => !preset.kinds || preset.kinds.includes(kind),
+                              ).map((preset) => {
+                                const active = String(selected.custom_text || "").trim() === preset.template;
+                                return (
+                                  <button
+                                    key={preset.id}
+                                    type="button"
+                                    title={preset.template}
+                                    onClick={() =>
+                                      patchSelected({
+                                        custom_text: preset.template.slice(
+                                          0,
+                                          catalog?.custom_text_max_length || CUSTOM_TEXT_MAX_LEN,
+                                        ),
+                                      })
+                                    }
+                                    className={`rounded-md border px-1.5 py-0.5 text-[11px] ${
+                                      active
+                                        ? "border-[var(--brand-accent)] text-slate-100 bg-[color:color-mix(in_srgb,var(--brand-accent)_18%,transparent)]"
+                                        : "border-[#424753]/55 text-slate-400 hover:border-[#424753] hover:text-slate-200"
+                                    }`}
+                                  >
+                                    {preset.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
                           <div className="flex flex-wrap gap-1.5">
                             {(
                               catalog?.custom_template_tokens?.[activeKey] || [
@@ -1980,6 +2503,105 @@ export default function PosterLayoutDesigner(props: Props) {
           </div>
         </div>
       </div>
+
+      {copyConfirmTarget ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setCopyConfirmTarget(null);
+          }}
+        >
+          <div className="w-full max-w-md rounded-2xl border border-[#424753]/40 bg-[#171c22] overflow-hidden">
+            <div className="px-5 py-4 border-b border-[#424753]/30">
+              <h3 className="text-[18px] font-bold text-white font-headline">Overwrite layout?</h3>
+              <p className="ui-field-description mt-1">
+                {copyConfirmTarget === "all" ? (
+                  <>
+                    One or more destination profiles already have labels. Copying will replace them with this
+                    profile&apos;s layout (incompatible chips for that media are dropped, such as &quot;next
+                    airing&quot;). Save layouts afterward to keep the change.
+                  </>
+                ) : (
+                  <>
+                    {mediaKindLabel(copyConfirmTarget.kind)} · {variantLabel(copyConfirmTarget.variant)} already has
+                    labels. Copying will replace them with this profile&apos;s layout (incompatible chips for that
+                    media are dropped, such as &quot;next airing&quot;). Save layouts afterward to keep the change.
+                  </>
+                )}
+              </p>
+            </div>
+            <div className="px-5 py-3 border-t border-[#424753]/30 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setCopyConfirmTarget(null)}
+                className="text-[14px] font-headline uppercase tracking-wider text-slate-400 hover:text-slate-200"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => confirmCopyOverwrite()}
+                className={`px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS}`}
+                style={accentFilledStyle(props.accentHex)}
+              >
+                Overwrite
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {importConfirmPayload ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setImportConfirmPayload(null);
+          }}
+        >
+          <div className="w-full max-w-md rounded-2xl border border-[#424753]/40 bg-[#171c22] overflow-hidden">
+            <div className="px-5 py-4 border-b border-[#424753]/30">
+              <h3 className="text-[18px] font-bold text-white font-headline">Overwrite layout?</h3>
+              <p className="ui-field-description mt-1">
+                {importConfirmPayload.scope === "single" && importConfirmPayload.profile_key ? (
+                  <>
+                    Importing will replace the existing labels on{" "}
+                    {(() => {
+                      const parsed = parseLayoutProfileKey(importConfirmPayload.profile_key);
+                      if (!parsed) return importConfirmPayload.profile_key;
+                      return `${mediaKindLabel(parsed.kind)} · ${variantLabel(parsed.variant)}`;
+                    })()}
+                    . Incompatible chips for that media are dropped, such as &quot;next airing&quot;. Save layouts
+                    afterward to keep the change.
+                  </>
+                ) : (
+                  <>
+                    One or more profiles in this file already have labels in your draft. Importing will replace those
+                    profiles (other profiles stay unchanged). Incompatible chips for each media are dropped, such as
+                    &quot;next airing&quot;. Save layouts afterward to keep the change.
+                  </>
+                )}
+              </p>
+            </div>
+            <div className="px-5 py-3 border-t border-[#424753]/30 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setImportConfirmPayload(null)}
+                className="text-[14px] font-headline uppercase tracking-wider text-slate-400 hover:text-slate-200"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => applyImportPayload(importConfirmPayload)}
+                className={`px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS}`}
+                style={accentFilledStyle(props.accentHex)}
+              >
+                Overwrite
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {applyOpen ? (
         <div

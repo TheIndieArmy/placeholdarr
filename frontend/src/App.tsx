@@ -394,13 +394,18 @@ const UI_INTEGRATION_CARD_SURFACE_CLASS =
 /** Stacked topic panel matching Density & Lookahead framing. */
 function SettingsDensityFrame(props: {
   legend: string;
+  /** Optional controls on the legend row (right-aligned). */
+  legendEnd?: ReactNode;
   intro?: ReactNode;
   children?: ReactNode;
   className?: string;
 }) {
   return (
     <div className={`${UI_SECTION_FRAME_CLASS} space-y-3 p-4 ${props.className ?? ""}`}>
-      <p className={SETTINGS_DENSITY_LEGEND_CLASS}>{props.legend}</p>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <p className={`${SETTINGS_DENSITY_LEGEND_CLASS} mb-0`}>{props.legend}</p>
+        {props.legendEnd ? <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-3">{props.legendEnd}</div> : null}
+      </div>
       {props.intro ? <div className="text-[14px] leading-relaxed text-slate-300">{props.intro}</div> : null}
       {props.children ? <div className="space-y-5">{props.children}</div> : null}
     </div>
@@ -7621,6 +7626,7 @@ function PosterArtOverlaysBlock(props: {
     placementControlsHot?: boolean;
   } | null>(null);
   const [previewArtControls, setPreviewArtControls] = useState<ReactNode>(null);
+  const [layoutHeaderActions, setLayoutHeaderActions] = useState<ReactNode>(null);
   const placementDragRef = useRef<((x: number, y: number) => void) | null>(null);
   const registerPlacementDrag = useCallback((handler: ((x: number, y: number) => void) | null) => {
     placementDragRef.current = handler;
@@ -7700,12 +7706,13 @@ function PosterArtOverlaysBlock(props: {
       belowPreview={previewArtControls}
       onPlacementDrag={handlePlacementDrag}
       controls={
-        <SettingsDensityFrame legend="Layout designer">
+        <SettingsDensityFrame legend="Layout designer" legendEnd={layoutHeaderActions}>
           <PosterLayoutDesigner
             accentHex={props.accentHex}
             compact={props.compact}
             onPreviewChange={handleLayoutPreviewChange}
             onPreviewArtControlsChange={setPreviewArtControls}
+            onHeaderActionsChange={setLayoutHeaderActions}
             onRegisterPlacementDrag={registerPlacementDrag}
           />
         </SettingsDensityFrame>
@@ -8200,7 +8207,7 @@ function posterPreviewMetaForProfile(profileKey: string | null | undefined): {
   const availability = parts.length >= 3 ? parts[1] : "placeholder";
   const coming = key.endsWith(".coming_soon");
   const availLabel = availability === "real" ? "Real" : "Placeholder";
-  const timing = coming ? "Coming Soon" : "Default";
+  const timing = coming ? "Coming Soon" : "Released";
   if (media === "episode") {
     return {
       kind: "episode",

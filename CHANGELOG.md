@@ -21,6 +21,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Layout profiles**: Twelve keys (`placeholder` / `real` × Default / Coming Soon); bake uses Placeholder; Real is reserved and disabled in the UI.
 - **Preview art**: TMDB id or random library pick with live sample tokens for the designer.
 - **SeriesStatus label**: Airing / Ended / Canceled / Returning from Sonarr status on TV and episode profiles.
+- **Layout import / export**: Download current or all layout JSON; import either file type into the draft (confirm before overwrite).
 
 ### Changed
 
@@ -33,6 +34,11 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Layout designer placement**: Drag the selected chip on the sticky bake preview (or keep using bake-px X/Y); crosshair guides follow the chip.
 - **Fill rectangle guides**: Sticky preview outlines the selected fill before bake.
 - **Fill rectangle drag**: Drag the selected fill on the sticky preview to slide it; width and height stay fixed.
+- **Coming Soon chip**: Removed as a placeable element; use Custom text with `{ComingSoonOrNewEp}` (legacy chips migrate on load).
+- **Custom text presets**: Quick fills for smart release / next episode, title+year, and media-specific date labels.
+- **Released layout tab**: Designer Default tab renamed to Released (profile key stays `default`).
+- **Layout when-to-use**: Centered amber note and tab hover titles explain Released vs Coming Soon (TV uses next unaired episode).
+- **Copy layout to**: Copy the current draft to another timing or media profile (or All); confirm before overwriting a non-empty destination.
 
 ### Fixed
 
