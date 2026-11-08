@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import math
 import os
 import re
 from pathlib import Path
@@ -26,7 +27,22 @@ OVERLAY_META_FILENAME = ".poster-overlay.json"
 COMPOSE_MODE = "compose"
 
 _LOGO_PATH = Path(__file__).resolve().parent / "assets" / "placeholdarr_logo_yellow.png"
+_LOGO_PATH_BLUE = Path(__file__).resolve().parent / "assets" / "placeholdarr_logo_blue.png"
 _FONT_PATH = Path(__file__).resolve().parent / "assets" / "fonts" / "SpaceGrotesk-Bold.ttf"
+_RATING_LOGO_DIR = Path(__file__).resolve().parent / "assets" / "ratings"
+_RATING_LOGO_FILES = {
+    "imdb": "imdb.png",
+    "tmdb": "tmdb.png",
+    "trakt": "trakt.png",
+    "rottentomatoes": "rottentomatoes.png",
+    "metacritic": "metacritic.png",
+}
+# Badge size medium matches legacy corner logo edge length.
+_BADGE_SIZE_BASE = "medium"
+# Layout-designer badge: dark = yellow mark on navy; light = blue mark on brand yellow.
+_BADGE_DARK_FILL = BRAND_BLUE_HEX
+_BADGE_LIGHT_FILL = "#fbbf24"
+_BADGE_LIGHT_PLATE = (251, 191, 36, 255)
 _VALID_MODES = frozenset({"off", "grayscale", "top_banner", "corner_logo", COMPOSE_MODE})
 _VALID_BANNER_POSITIONS = frozenset({"top", "bottom"})
 _VALID_BADGE_POSITIONS = frozenset({"bottom_right", "bottom_left", "top_right", "top_left"})
@@ -58,14 +74,21 @@ def logo_asset_stamp() -> str:
     full-library art rebuild when the logo bytes are unchanged.
     """
     layout_stamp = (
-        f"corner-br-v1:{_TOP_BANNER_LAYOUT}:{_CORNER_BOTTOM_BANNER_LAYOUT}:"
-        f"{_COMPOSE_LAYOUT}:prefer-local-nfo-v1"
+        f"corner-br-v4:{_TOP_BANNER_LAYOUT}:{_CORNER_BOTTOM_BANNER_LAYOUT}:"
+        f"{_COMPOSE_LAYOUT}:prefer-local-nfo-v1:chip-mm-v5"
     )
     logo_digest = _asset_digest(_LOGO_PATH)
+    logo_blue_digest = _asset_digest(_LOGO_PATH_BLUE)
     font_digest = _asset_digest(_FONT_PATH)
     parts = [layout_stamp]
     if logo_digest:
         parts.append(logo_digest)
+    if logo_blue_digest:
+        parts.append(f"blue:{logo_blue_digest}")
+    for key, name in sorted(_RATING_LOGO_FILES.items()):
+        digest = _asset_digest(_RATING_LOGO_DIR / name)
+        if digest:
+            parts.append(f"rating-{key}:{digest}")
     if font_digest:
         parts.append(f"font:{font_digest}")
     return ":".join(parts)
@@ -156,13 +179,20 @@ def poster_banner_position() -> BannerPosition:
 
 
 def poster_overlay_enabled() -> bool:
-    """True when any compositing layer is on."""
-    return (
+    """True when any compositing layer is on (legacy toggles or layout labels)."""
+    if (
         poster_grayscale_enabled()
         or poster_badge_enabled()
         or poster_placeholder_banner_enabled()
         or coming_soon_banner_enabled()
-    )
+    ):
+        return True
+    try:
+        from services.poster_layouts import layouts_have_any_labels
+
+        return layouts_have_any_labels()
+    except Exception:
+        return False
 
 
 def poster_overlay_mode() -> str:
@@ -176,8 +206,27 @@ def poster_overlay_mode() -> str:
     return "off"
 
 
-def overlay_layer_fingerprint() -> dict[str, str | bool]:
-    """Stable layer snapshot for ``.poster-overlay.json`` skip/regen."""
+def overlay_layer_fingerprint(*, profile_key: str | None = None) -> dict[str, str | bool]:
+    """Stable layer snapshot for ``.poster-overlay.json`` skip/regen.
+
+    When ``profile_key`` is set, ``layout_hash`` is that profile only so editing
+    ``movie.placeholder.default`` does not invalidate TV/episode or Real sidecars.
+    """
+    layout_hash = ""
+    try:
+        from services.poster_layouts import layout_fingerprint, profile_layout_fingerprint
+
+        key = str(profile_key or "").strip()
+        layout_hash = profile_layout_fingerprint(key) if key else layout_fingerprint()
+    except Exception:
+        layout_hash = ""
+    layout_locale = "en"
+    try:
+        from services.layout_locale import get_layout_locale
+
+        layout_locale = get_layout_locale()
+    except Exception:
+        layout_locale = "en"
     return {
         "grayscale": bool(poster_grayscale_enabled()),
         "badge": bool(poster_badge_enabled()),
@@ -185,6 +234,8 @@ def overlay_layer_fingerprint() -> dict[str, str | bool]:
         "placeholder_banner": bool(poster_placeholder_banner_enabled()),
         "coming_soon_banner": bool(coming_soon_banner_enabled()),
         "banner_position": poster_banner_position(),
+        "layout_locale": layout_locale,
+        "layout_hash": layout_hash,
     }
 
 
@@ -412,22 +463,38 @@ def _rounded_rectangle_mask(size: tuple[int, int], radius: int):
     return mask
 
 
-def _build_corner_logo_badge(badge_w: int):
-    """Square brand badge used for corner-logo mode (standalone or in the bottom banner)."""
+def _badge_logo_variant(fill_color: str | None) -> str:
+    """Map badge fill to logo variant: ``dark`` (yellow on navy) or ``light`` (blue on white)."""
+    text = str(fill_color or "").strip().lower().lstrip("#")
+    if len(text) >= 6:
+        try:
+            r, g, b = int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16)
+            # Perceptual lightness: light plates use the blue mark.
+            if (0.2126 * r + 0.7152 * g + 0.0722 * b) >= 160:
+                return "light"
+        except ValueError:
+            pass
+    return "dark"
+
+
+def _build_corner_logo_badge(badge_w: int, *, variant: str = "dark"):
+    """Square brand badge: Placeholdarr logo on a dark or light plate."""
     mods = _pillow()
     if mods is None:
         return None
     Image, _, _, _, ImageOps = mods
     badge_h = badge_w
     badge = Image.new("RGBA", (badge_w, badge_h), (0, 0, 0, 0))
-    blue_layer = Image.new("RGBA", (badge_w, badge_h), BRAND_BLUE)
+    plate = _BADGE_LIGHT_PLATE if str(variant).strip().lower() == "light" else BRAND_BLUE
+    logo_path = _LOGO_PATH_BLUE if str(variant).strip().lower() == "light" else _LOGO_PATH
+    plate_layer = Image.new("RGBA", (badge_w, badge_h), plate)
     radius = max(6, int(badge_w * 0.12))
     mask = _rounded_rectangle_mask((badge_w, badge_h), radius)
-    badge.paste(blue_layer, (0, 0), mask)
+    badge.paste(plate_layer, (0, 0), mask)
 
-    if _LOGO_PATH.is_file():
+    if logo_path.is_file():
         try:
-            logo = Image.open(_LOGO_PATH).convert("RGBA")
+            logo = Image.open(logo_path).convert("RGBA")
             inner = int(badge_w * 0.7)
             logo = ImageOps.contain(logo, (inner, inner), method=Image.Resampling.LANCZOS)
             lx = (badge_w - logo.width) // 2
@@ -464,6 +531,639 @@ def _apply_corner_logo(img, *, position: str | None = None, banner_edge: str | N
     return out
 
 
+def _parse_hex_rgba(color: str, *, alpha: int | None = None) -> tuple[int, int, int, int]:
+    text = str(color or "").strip().lstrip("#")
+    if len(text) == 6:
+        r, g, b = int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16)
+        a = 255 if alpha is None else max(0, min(255, int(alpha)))
+        return (r, g, b, a)
+    if len(text) == 8:
+        r, g, b = int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16)
+        a = int(text[6:8], 16) if alpha is None else max(0, min(255, int(alpha)))
+        return (r, g, b, a)
+    return (0, 0, 0, 255 if alpha is None else max(0, min(255, int(alpha or 255))))
+
+
+def _layout_chip_font_size(img_w: int, img_h: int, *, landscape: bool) -> int:
+    """Readable chip type sized from the poster, not from a snap cell (small tier)."""
+    if landscape:
+        return max(28, min(56, int(img_h * 0.055)))
+    return max(26, min(52, int(img_w * 0.048)))
+
+
+def _label_size_mult(size: str | float | None, size_scale: float | None = None) -> float:
+    try:
+        from services.poster_layouts import size_multiplier
+
+        if size_scale is not None:
+            return float(size_multiplier(size_scale))
+        return float(size_multiplier(size if size is not None else "small"))
+    except Exception:
+        if size_scale is not None:
+            try:
+                return max(0.5, min(2.5, float(size_scale)))
+            except (TypeError, ValueError):
+                pass
+        key = str(size or "small").strip().lower()
+        return {"small": 1.0, "medium": 1.5, "large": 2.0}.get(key, 1.0)
+
+
+def _rating_logo_path(source: str) -> Path | None:
+    key = str(source or "").strip().lower()
+    if key in ("themoviedb",):
+        key = "tmdb"
+    if key in ("rotten_tomatoes",):
+        key = "rottentomatoes"
+    name = _RATING_LOGO_FILES.get(key)
+    if not name:
+        return None
+    path = _RATING_LOGO_DIR / name
+    return path if path.is_file() else None
+
+
+def _prepare_rating_logo(source: str, icon_h: int):
+    """Load a rating mark and seat it on a brand well when the SVG is dark-on-transparent."""
+    mods = _pillow()
+    if mods is None:
+        return None
+    Image, ImageDraw, _, _, ImageOps = mods
+    path = _rating_logo_path(source)
+    if path is None:
+        return None
+    try:
+        logo = Image.open(path).convert("RGBA")
+    except Exception:
+        return None
+    key = str(source or "").strip().lower()
+    if key in ("themoviedb",):
+        key = "tmdb"
+    if key in ("rotten_tomatoes",):
+        key = "rottentomatoes"
+    # IMDb mark is near-black; give it the yellow brand plate so it reads on dark chips.
+    wells = {
+        "imdb": (245, 197, 24, 255),
+        "tmdb": (30, 36, 48, 255),
+        "trakt": (30, 36, 48, 255),
+        "rottentomatoes": (30, 36, 48, 255),
+        "metacritic": (30, 36, 48, 255),
+    }
+    well = wells.get(key)
+    inner = max(10, int(icon_h * 0.82))
+    logo = ImageOps.contain(logo, (inner, inner), method=Image.Resampling.LANCZOS)
+    if well is None:
+        return logo
+    plate = Image.new("RGBA", (icon_h, icon_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(plate)
+    radius = max(3, icon_h // 6)
+    draw.rounded_rectangle([0, 0, icon_h - 1, icon_h - 1], radius=radius, fill=well)
+    lx = (icon_h - logo.width) // 2
+    ly = (icon_h - logo.height) // 2
+    plate.paste(logo, (lx, ly), logo)
+    return plate
+
+
+def _measure_text(font, text: str) -> tuple[int, int]:
+    try:
+        bbox = font.getbbox(text)
+        if bbox:
+            return max(1, int(bbox[2] - bbox[0])), max(1, int(bbox[3] - bbox[1]))
+    except Exception:
+        pass
+    return max(1, len(text) * 10), 16
+
+
+def _clamp_box_to_image(
+    box: list[int],
+    *,
+    img_w: int,
+    img_h: int,
+    margin: int = 8,
+) -> list[int]:
+    """Shift a chip box so it stays on-canvas without changing its size."""
+    x0, y0, x1, y1 = box
+    bw = x1 - x0
+    bh = y1 - y0
+    max_w = max(margin + 1, img_w - margin)
+    max_h = max(margin + 1, img_h - margin)
+    if bw > max_w - margin:
+        x0 = margin
+        x1 = max_w
+    else:
+        if x0 < margin:
+            x1 += margin - x0
+            x0 = margin
+        if x1 > max_w:
+            shift = x1 - max_w
+            x0 -= shift
+            x1 -= shift
+    if bh > max_h - margin:
+        y0 = margin
+        y1 = max_h
+    else:
+        if y0 < margin:
+            y1 += margin - y0
+            y0 = margin
+        if y1 > max_h:
+            shift = y1 - max_h
+            y0 -= shift
+            y1 -= shift
+    return [int(x0), int(y0), int(x1), int(y1)]
+
+
+def _draw_layout_chip(
+    out,
+    *,
+    text: str,
+    anchor: tuple[int, int],
+    text_color: str,
+    fill_color: str,
+    border_color: str,
+    fill_opacity: float,
+    border_opacity: float = 0.0,
+    size: str = "small",
+    size_scale: float | None = None,
+    art_path: Path | None = None,
+    art_layout: str = "left",
+    landscape: bool = False,
+):
+    """Draw a content-sized chip centered on ``anchor`` (fractional x/y point).
+
+    Placement is independent of any snap grid. Width/height follow the label
+    text (and optional art logo). Font size scales with ``size`` / ``size_scale``.
+
+    ``art_layout`` (arted Rating): ``left`` / ``right`` of the score, ``above``,
+    ``below``, or ``fill`` (logo as background; fill color paints only the margin
+    around it; ``fill_opacity`` fades the logo). For ``above`` / ``below``, logo
+    width matches an ``8.8`` score at the chip font (percentage scores like
+    ``88%`` stay wider on purpose).
+    """
+    mods = _pillow()
+    if mods is None:
+        return out
+    Image, ImageDraw, _, _, ImageOps = mods
+    label = str(text or "").strip()
+    if not label and art_path is None:
+        return out
+
+    layout = str(art_layout or "left").strip().lower()
+    if layout == "beside":
+        layout = "left"
+    if layout not in {"left", "right", "above", "below", "fill"}:
+        layout = "left"
+
+    img_w, img_h = out.size
+    mult = _label_size_mult(size, size_scale)
+    preferred = max(16, int(round(_layout_chip_font_size(img_w, img_h, landscape=landscape) * mult)))
+    # Cap width so a long string shrinks type instead of spanning the whole poster.
+    max_text_w = max(80, int(img_w * 0.82))
+    font = _fit_banner_font(label or "0", max_width=max_text_w, preferred_size=preferred, min_size=max(12, int(14 * mult)))
+    if font is None:
+        return out
+    text_w, text_h = _measure_text(font, label) if label else (0, preferred)
+    pad_y = max(8, int(preferred * 0.32))
+    # Arted chips size to the logo+score cluster; keep side pad tight like text chips.
+    if art_path is not None:
+        pad_x = max(5, int(preferred * 0.16))
+        gap = max(3, int(preferred * 0.10)) if label else 0
+        if layout in {"above", "below"}:
+            # Logo width matches an "8.8" score at this type size (not "88%").
+            ref_w, _ = _measure_text(font, "8.8")
+            icon_h = max(12, int(ref_w))
+        else:
+            icon_h = max(12, int(round(max(text_h, preferred * 0.78))))
+            if layout == "fill":
+                # Larger mark so it reads as the chip background.
+                icon_h = max(icon_h, int(round(preferred * 1.35)))
+                pad_x = max(6, int(preferred * 0.22))
+                pad_y = max(6, int(preferred * 0.22))
+    else:
+        pad_x = max(14, int(preferred * 0.55))
+        gap = 0
+        icon_h = max(12, int(round(max(text_h, preferred * 0.85))))
+        layout = "left"
+    icon_w = 0
+    logo = None
+    if art_path is not None:
+        source_hint = ""
+        if isinstance(art_path, Path):
+            source_hint = art_path.stem
+            logo = _prepare_rating_logo(source_hint, icon_h)
+        if logo is None and isinstance(art_path, Path) and art_path.is_file():
+            try:
+                logo = Image.open(art_path).convert("RGBA")
+                logo = ImageOps.contain(logo, (icon_h, icon_h), method=Image.Resampling.LANCZOS)
+            except Exception as exc:
+                logger.debug(f"Rating logo load failed: {exc}", extra={"emoji_type": "debug"})
+                logo = None
+        if logo is not None:
+            icon_w = logo.width
+            icon_h = logo.height
+        else:
+            art_path = None
+            gap = 0
+            layout = "left"
+
+    if layout in {"above", "below"} and logo is not None:
+        chip_w = max(text_w, icon_w) + pad_x * 2
+        chip_h = text_h + icon_h + (gap if label else 0) + pad_y * 2
+    elif layout == "fill" and logo is not None:
+        # Score sits on the logo; chip hugs the logo with a thin color margin.
+        chip_w = max(icon_w, text_w) + pad_x * 2
+        chip_h = max(icon_h, text_h) + pad_y * 2
+    else:
+        chip_w = text_w + pad_x * 2 + icon_w + gap
+        chip_h = max(text_h, icon_h) + pad_y * 2
+
+    ax, ay = int(anchor[0]), int(anchor[1])
+    box = _clamp_box_to_image(
+        [ax - chip_w // 2, ay - chip_h // 2, ax - chip_w // 2 + chip_w, ay - chip_h // 2 + chip_h],
+        img_w=img_w,
+        img_h=img_h,
+    )
+
+    fill_opacity = max(0.0, min(1.0, float(fill_opacity)))
+    border_opacity = max(0.0, min(1.0, float(border_opacity)))
+    fill_rgb = _parse_hex_rgba(fill_color, alpha=255)[:3]
+    border_rgb = _parse_hex_rgba(border_color, alpha=255)[:3]
+    text_rgb = _parse_hex_rgba(text_color, alpha=255)[:3]
+    base = out.convert("RGBA") if out.mode != "RGBA" else out
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    radius = max(6, int(min(box[2] - box[0], box[3] - box[1]) * 0.22))
+    stroke = max(3, int(round(preferred * 0.09)))
+    # Fill mode: plate around the logo stays opaque; opacity fades the logo itself.
+    if layout == "fill" and logo is not None:
+        fill_a = 255
+        logo_a = int(round(255 * fill_opacity))
+    else:
+        fill_a = int(round(255 * fill_opacity))
+        logo_a = 255
+    border_a = int(round(255 * border_opacity))
+    has_border = (
+        border_a > 0
+        and box[2] - box[0] > stroke * 2
+        and box[3] - box[1] > stroke * 2
+    )
+    if has_border:
+        draw.rounded_rectangle(
+            box,
+            radius=radius,
+            fill=(*border_rgb, border_a),
+        )
+        inner = [
+            box[0] + stroke,
+            box[1] + stroke,
+            box[2] - stroke,
+            box[3] - stroke,
+        ]
+        draw.rounded_rectangle(
+            inner,
+            radius=max(1, radius - stroke),
+            fill=(*fill_rgb, fill_a),
+        )
+        content_box = inner
+    else:
+        draw.rounded_rectangle(box, radius=radius, fill=(*fill_rgb, fill_a))
+        content_box = box
+
+    content_w = content_box[2] - content_box[0]
+    content_h = content_box[3] - content_box[1]
+    mid_x = content_box[0] + content_w // 2
+    mid_y = content_box[1] + content_h // 2
+
+    def _paste_logo(lx: int, ly: int) -> None:
+        nonlocal logo
+        if logo is None:
+            return
+        if logo_a >= 255:
+            overlay.paste(logo, (lx, ly), logo)
+            return
+        faded = logo.copy()
+        # Scale only the alpha channel.
+        r, g, b, a = faded.split()
+        a = a.point(lambda p: int(p * logo_a / 255))
+        faded = Image.merge("RGBA", (r, g, b, a))
+        overlay.paste(faded, (lx, ly), faded)
+
+    if layout == "fill" and logo is not None:
+        lx = mid_x - logo.width // 2
+        ly = mid_y - logo.height // 2
+        _paste_logo(lx, ly)
+        if label:
+            draw.text((mid_x, mid_y), label, fill=(*text_rgb, 255), font=font, anchor="mm")
+    elif layout == "above" and logo is not None:
+        cluster_h = icon_h + (gap if label else 0) + text_h
+        top = content_box[1] + max(0, (content_h - cluster_h) // 2)
+        _paste_logo(mid_x - logo.width // 2, top)
+        if label:
+            ty = top + icon_h + gap + text_h // 2
+            draw.text((mid_x, ty), label, fill=(*text_rgb, 255), font=font, anchor="mm")
+    elif layout == "below" and logo is not None:
+        cluster_h = text_h + (gap if label else 0) + icon_h
+        top = content_box[1] + max(0, (content_h - cluster_h) // 2)
+        if label:
+            draw.text((mid_x, top + text_h // 2), label, fill=(*text_rgb, 255), font=font, anchor="mm")
+            _paste_logo(mid_x - logo.width // 2, top + text_h + gap)
+        else:
+            _paste_logo(mid_x - logo.width // 2, top)
+    elif layout == "right" and logo is not None:
+        cluster_w = text_w + gap + icon_w
+        cluster_x = content_box[0] + max(0, (content_w - cluster_w) // 2)
+        if label:
+            tx = cluster_x + text_w // 2
+            draw.text((tx, mid_y), label, fill=(*text_rgb, 255), font=font, anchor="mm")
+            cluster_x += text_w + gap
+        _paste_logo(cluster_x, mid_y - logo.height // 2)
+    else:
+        # left (default): logo then score
+        cluster_w = icon_w + gap + text_w
+        cluster_x = content_box[0] + max(0, (content_w - cluster_w) // 2)
+        if logo is not None:
+            _paste_logo(cluster_x, mid_y - logo.height // 2)
+            cluster_x += logo.width + gap
+        if label:
+            tx = cluster_x + text_w // 2
+            draw.text((tx, mid_y), label, fill=(*text_rgb, 255), font=font, anchor="mm")
+    return Image.alpha_composite(base, overlay)
+
+
+
+def _frac_axis_px(start: float, end: float, dim: int) -> tuple[int, int]:
+    """Map a 0..1 axis range to inclusive-start / exclusive-end bake pixels."""
+    d = max(1, int(dim))
+    a = max(0.0, min(1.0, float(start)))
+    b = max(0.0, min(1.0, float(end)))
+    if b < a:
+        a, b = b, a
+    x0 = int(round(d * a))
+    x1 = max(x0 + 1, int(round(d * b)))
+    x0 = max(0, min(d, x0))
+    x1 = max(0, min(d, x1))
+    if x1 <= x0:
+        x1 = min(d, x0 + 1)
+    return x0, x1
+
+
+def _draw_layout_banner(
+    out,
+    *,
+    fill_color: str,
+    fill_opacity: float,
+    x_start: float | None = None,
+    x_end: float | None = None,
+    y_start: float | None = None,
+    y_end: float | None = None,
+    # Legacy fields (orientation/span/depth or edge+thickness) when x/y absent.
+    orientation: str | None = None,
+    span_start: float | None = None,
+    span_end: float | None = None,
+    depth_start: float | None = None,
+    depth_end: float | None = None,
+    edge: str | None = None,
+    size: str = "medium",
+    thickness: float | None = None,
+):
+    """Draw a textless fill rectangle; chips supply copy."""
+    mods = _pillow()
+    if mods is None:
+        return out
+    Image, ImageDraw, _, _, _ = mods
+    from services.poster_layouts import _fill_rect_geometry_from_raw
+
+    base = out.convert("RGBA") if out.mode != "RGBA" else out
+    w, h = base.size
+    landscape = w > h
+    xa, xb, ya, yb = _fill_rect_geometry_from_raw(
+        {
+            "x_start": x_start,
+            "x_end": x_end,
+            "y_start": y_start,
+            "y_end": y_end,
+            "orientation": orientation,
+            "edge": edge,
+            "thickness": thickness,
+            "span_start": span_start,
+            "span_end": span_end,
+            "depth_start": depth_start,
+            "depth_end": depth_end,
+        },
+        size=str(size or "medium"),
+        landscape=landscape,
+        row=0,
+        col=0,
+        cols=1,
+        rows=1,
+    )
+    x0, x1 = _frac_axis_px(xa, xb, w)
+    y0, y1 = _frac_axis_px(ya, yb, h)
+    box = [x0, y0, x1, y1]
+
+    fill_opacity = max(0.0, min(1.0, float(fill_opacity)))
+    fill_rgb = _parse_hex_rgba(fill_color, alpha=255)[:3]
+    fill_a = int(round(255 * fill_opacity))
+    if fill_a <= 0:
+        return base
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    draw.rectangle(box, fill=(*fill_rgb, fill_a))
+    return Image.alpha_composite(base, overlay)
+
+
+def _resolve_layout_label_text(label: dict, token_map: dict) -> tuple[str, Path | None]:
+    """Return (display text, optional rating art path) for a layout label."""
+    token = str(label.get("token") or "").strip()
+    art_path = None
+    text = str(token_map.get(token, "") or "").strip()
+    if token == "Custom":
+        from services.poster_layouts import render_custom_chip_text
+
+        text = render_custom_chip_text(str(label.get("custom_text") or ""), token_map)
+    elif token == "Rating":
+        prefer = str(label.get("rating_source") or "").strip().lower()
+        arted = bool(label.get("arted")) and str(label.get("style") or "chip").strip().lower() != "banner"
+        # Arted chips pick an explicit source (default IMDb). Text chips keep Arr's preferred rating.
+        if arted:
+            if prefer in ("", "auto"):
+                prefer = "imdb"
+            keyed = str(token_map.get(f"Rating:{prefer}") or "").strip()
+            text = keyed or text
+            source = prefer
+            art_path = _rating_logo_path(source)
+        elif prefer not in ("", "auto"):
+            keyed = str(token_map.get(f"Rating:{prefer}") or "").strip()
+            if keyed:
+                text = keyed
+    return text, art_path
+
+
+def _layout_anchor_xy(
+    label: dict,
+    *,
+    width: int,
+    height: int,
+    cols: int,
+    rows: int,
+) -> tuple[int, int]:
+    """Chip/badge center in pixels from fractional ``x``/``y`` (legacy row/col fallback)."""
+    grid_cols = max(1, int(cols))
+    grid_rows = max(1, int(rows))
+    has_x = label.get("x") is not None
+    has_y = label.get("y") is not None
+    if has_x or has_y:
+        try:
+            fx = float(label.get("x")) if has_x else 0.5
+        except (TypeError, ValueError):
+            fx = 0.5
+        try:
+            fy = float(label.get("y")) if has_y else 0.5
+        except (TypeError, ValueError):
+            fy = 0.5
+        if not math.isfinite(fx):
+            fx = 0.5
+        if not math.isfinite(fy):
+            fy = 0.5
+        fx = max(0.0, min(1.0, fx))
+        fy = max(0.0, min(1.0, fy))
+        return int(round(fx * width)), int(round(fy * height))
+    row = int(label.get("row") or 0)
+    col = int(label.get("col") or 0)
+    row = max(0, min(grid_rows - 1, row))
+    col = max(0, min(grid_cols - 1, col))
+    cell_w = width / grid_cols
+    cell_h = height / grid_rows
+    return int((col + 0.5) * cell_w), int((row + 0.5) * cell_h)
+
+
+def apply_layout_overlay(
+    img,
+    *,
+    landscape: bool = False,
+    labels: list | None = None,
+    tokens: dict | None = None,
+    grayscale: bool | None = None,
+    cols: int | None = None,
+    rows: int | None = None,
+):
+    """Composite grayscale + fraction-anchored labels (banners, chips, badge)."""
+    if _pillow() is None:
+        _log_pillow_missing_once()
+        return None
+    target = LANDSCAPE_SIZE if landscape else PORTRAIT_SIZE
+    out = _fit_image(img, target)
+    gs = poster_grayscale_enabled() if grayscale is None else bool(grayscale)
+    if gs:
+        out = _apply_grayscale(out)
+    label_list = list(labels or [])
+    token_map = dict(tokens or {})
+    if not label_list:
+        return out
+    w, h = out.size
+    grid_cols = max(1, int(cols or (16 if landscape else 12)))
+    grid_rows = max(1, int(rows or (10 if landscape else 18)))
+
+    def _is_banner_label(lab: dict) -> bool:
+        token = str(lab.get("token") or "").strip()
+        style = str(lab.get("style") or "").strip().lower()
+        return token in {"FillRectangle", "Banner"} or style == "banner"
+
+    # Fill rectangles first, then chips / badge on top.
+    banners = [lab for lab in label_list if isinstance(lab, dict) and _is_banner_label(lab)]
+    chips = [lab for lab in label_list if isinstance(lab, dict) and not _is_banner_label(lab)]
+
+    for label in banners:
+        label_size = str(label.get("size") or "medium").strip().lower()
+        raw_thickness = label.get("thickness")
+        try:
+            thickness_val = float(raw_thickness) if raw_thickness is not None else None
+        except (TypeError, ValueError):
+            thickness_val = None
+        orient_raw = str(label.get("orientation") or "").strip().lower() or None
+        edge_raw = str(label.get("edge") or "").strip().lower() or None
+        out = _draw_layout_banner(
+            out,
+            fill_color=str(label.get("fill_color") or "#000000"),
+            fill_opacity=float(label.get("fill_opacity") if label.get("fill_opacity") is not None else 0.65),
+            x_start=label.get("x_start"),
+            x_end=label.get("x_end"),
+            y_start=label.get("y_start"),
+            y_end=label.get("y_end"),
+            orientation=orient_raw,
+            span_start=label.get("span_start"),
+            span_end=label.get("span_end"),
+            depth_start=label.get("depth_start"),
+            depth_end=label.get("depth_end"),
+            edge=edge_raw,
+            size=label_size,
+            thickness=thickness_val,
+        )
+
+    for label in chips:
+        token = str(label.get("token") or "").strip()
+        if token in {"FillRectangle", "Banner"}:
+            continue
+        ax, ay = _layout_anchor_xy(label, width=w, height=h, cols=grid_cols, rows=grid_rows)
+        label_size = str(label.get("size") or ("medium" if token == "Badge" else "small")).strip().lower()
+        raw_scale = label.get("size_scale")
+        try:
+            size_scale = float(raw_scale) if raw_scale is not None else None
+        except (TypeError, ValueError):
+            size_scale = None
+        if token == "Badge":
+            mods = _pillow()
+            if mods is None:
+                continue
+            # Medium matches legacy corner badge; size_scale / small/large scale from that.
+            base_mult = _label_size_mult(_BADGE_SIZE_BASE)
+            badge_w = max(
+                24,
+                int(round(_corner_badge_size(w, h) * (_label_size_mult(label_size, size_scale) / base_mult))),
+            )
+            variant = _badge_logo_variant(label.get("fill_color"))
+            badge = _build_corner_logo_badge(badge_w, variant=variant)
+            if badge is None:
+                continue
+            if out.mode != "RGBA":
+                out = out.convert("RGBA")
+            bx = ax - badge_w // 2
+            by = ay - badge_w // 2
+            # Keep badge fully on-canvas.
+            bx = max(8, min(w - badge_w - 8, bx))
+            by = max(8, min(h - badge_w - 8, by))
+            out.paste(badge, (bx, by), badge)
+            continue
+        text, art_path = _resolve_layout_label_text(label, token_map)
+        if not text and art_path is None:
+            continue
+        border_opacity = label.get("border_opacity")
+        if border_opacity is None:
+            # Legacy ``#RRGGBBAA``: alpha 00 meant no stroke.
+            legacy = _parse_hex_rgba(str(label.get("border_color") or "#00000000"))
+            border_opacity = legacy[3] / 255.0
+        art_layout = "left"
+        if token == "Rating" and art_path is not None:
+            art_layout = str(label.get("rating_art_layout") or "left").strip().lower() or "left"
+            if art_layout == "beside":
+                art_layout = "left"
+        out = _draw_layout_chip(
+            out,
+            text=text,
+            anchor=(ax, ay),
+            text_color=str(label.get("text_color") or "#ffffff"),
+            fill_color=str(label.get("fill_color") or "#000000"),
+            border_color=str(label.get("border_color") or "#000000"),
+            fill_opacity=float(label.get("fill_opacity") if label.get("fill_opacity") is not None else 0.65),
+            border_opacity=float(border_opacity),
+            size=label_size,
+            size_scale=size_scale,
+            art_path=art_path,
+            art_layout=art_layout,
+            landscape=landscape,
+        )
+    if out.mode == "RGBA":
+        out = out.convert("RGB")
+    return out
+
+
 def apply_overlay(
     img,
     mode: str | None = None,
@@ -474,16 +1174,31 @@ def apply_overlay(
     badge: bool | None = None,
     badge_position: str | None = None,
     banner_position: str | None = None,
+    layout_labels: list | None = None,
+    layout_tokens: dict | None = None,
+    layout_cols: int | None = None,
+    layout_rows: int | None = None,
 ):
     """Composite layered poster overlays.
 
-    Drawing uses independent layers (grayscale / text bar / badge). The ``mode``
-    argument is legacy: exclusive modes still work for older tests/callers when
-    layer kwargs are omitted and settings have no layers enabled.
+    When ``layout_labels`` is provided, draws the grid layout path (plus optional
+    grayscale). Otherwise uses independent layers (grayscale / text bar / badge).
+    The ``mode`` argument is legacy for exclusive modes when layer kwargs are omitted.
     """
     if _pillow() is None:
         _log_pillow_missing_once()
         return None
+
+    if layout_labels is not None:
+        return apply_layout_overlay(
+            img,
+            landscape=landscape,
+            labels=layout_labels,
+            tokens=layout_tokens,
+            grayscale=grayscale,
+            cols=layout_cols,
+            rows=layout_rows,
+        )
 
     want = str(mode or "").strip().lower()
     use_layers = (
@@ -587,6 +1302,11 @@ def composite_poster_from_url(
     *,
     landscape: bool = False,
     overlay_text: str | None = None,
+    layout_labels: list | None = None,
+    layout_tokens: dict | None = None,
+    layout_cols: int | None = None,
+    layout_rows: int | None = None,
+    grayscale: bool | None = None,
 ):
     if _pillow() is None:
         _log_pillow_missing_once()
@@ -597,13 +1317,24 @@ def composite_poster_from_url(
     img = load_image_from_bytes(data)
     if img is None:
         return None
-    return apply_overlay(img, mode, landscape=landscape, overlay_text=overlay_text)
+    return apply_overlay(
+        img,
+        mode,
+        landscape=landscape,
+        overlay_text=overlay_text,
+        layout_labels=layout_labels,
+        layout_tokens=layout_tokens,
+        layout_cols=layout_cols,
+        layout_rows=layout_rows,
+        grayscale=grayscale,
+    )
 
 
-def _preview_base_image(*, kind: str = "movie"):
+def _preview_base_image(*, kind: str = "movie", base_url: str | None = None):
     """Load a color sample for Settings live preview (not a pre-composited mode).
 
     ``kind``: ``movie`` / ``series`` (portrait) or ``episode`` (landscape thumb).
+    ``base_url``: optional remote poster/thumb URL (TMDB or library).
     """
     mods = _pillow()
     if mods is None:
@@ -613,18 +1344,23 @@ def _preview_base_image(*, kind: str = "movie"):
     want = str(kind or "movie").strip().lower()
     if want not in {"movie", "series", "episode"}:
         want = "movie"
+    target = LANDSCAPE_SIZE if want == "episode" else PORTRAIT_SIZE
+    url = str(base_url or "").strip()
+    if url:
+        data = download_poster_bytes(url)
+        if data:
+            img = load_image_from_bytes(data)
+            if img is not None:
+                return _fit_image(img, target).convert("RGB")
     if want == "episode":
         names = ("preview-episode.jpg",)
-        fallback_size = LANDSCAPE_SIZE
         fallback_color = (36, 52, 78)
     elif want == "series":
         names = ("preview-series.jpg", "preview-base.jpg")
-        fallback_size = PORTRAIT_SIZE
         fallback_color = (48, 72, 110)
     else:
         # Prefer clean color base. Never use grayscale.jpg (already desaturated).
         names = ("preview-base.jpg", "corner_logo.jpg")
-        fallback_size = PORTRAIT_SIZE
         fallback_color = (48, 72, 110)
     candidates: list[Path] = []
     for name in names:
@@ -636,7 +1372,20 @@ def _preview_base_image(*, kind: str = "movie"):
                 return Image.open(path).convert("RGB")
             except Exception:
                 continue
-    return Image.new("RGB", fallback_size, fallback_color)
+    return Image.new("RGB", target, fallback_color)
+
+
+def _dim_preview_base(img, *, amount: float = 0.42):
+    """Darken sample art before labels so chips stay readable (labels drawn after)."""
+    mods = _pillow()
+    if mods is None or img is None:
+        return img
+    ImageEnhance = mods[2]
+    factor = max(0.15, min(1.0, float(amount)))
+    try:
+        return ImageEnhance.Brightness(img.convert("RGB")).enhance(factor)
+    except Exception:
+        return img
 
 
 def render_overlay_preview_jpeg(
@@ -648,6 +1397,11 @@ def render_overlay_preview_jpeg(
     placeholder_banner: bool = False,
     coming_soon_banner: bool = False,
     banner_position: str = "top",
+    profile_key: str | None = None,
+    layout_labels: list | None = None,
+    dim_base: bool = False,
+    base_url: str | None = None,
+    sample_token_overrides: dict | None = None,
     quality: int = 85,
 ) -> bytes | None:
     """Composite a sample poster/thumb for the live Settings preview.
@@ -656,6 +1410,11 @@ def render_overlay_preview_jpeg(
     - ``movie``: portrait, Coming Soon → ``Digital - Oct 22``
     - ``series``: portrait TV title, Coming Soon → ``New Ep. - Oct 22``
     - ``episode``: landscape thumb, Coming Soon → ``Airing - Oct 22``
+
+    When ``profile_key`` or ``layout_labels`` is set, uses the grid layout path.
+    ``dim_base`` darkens the sample art before labels (designer readability).
+    ``base_url`` swaps the bundled sample for TMDB/library art.
+    ``sample_token_overrides`` merges Title/Year/dates/ratings from preview-art.
     """
     mods = _pillow()
     if mods is None:
@@ -663,30 +1422,72 @@ def render_overlay_preview_jpeg(
     want = str(kind or "movie").strip().lower()
     if want not in {"movie", "series", "episode"}:
         want = "movie"
-    base = _preview_base_image(kind=want)
+    base = _preview_base_image(kind=want, base_url=base_url)
     if base is None:
         return None
+    if dim_base:
+        base = _dim_preview_base(base, amount=0.38)
     landscape = want == "episode"
-    overlay_text = None
-    if coming_soon_banner:
-        if want == "series":
-            overlay_text = "New Ep. - Oct 22"
-        elif want == "episode":
-            overlay_text = "Airing - Oct 22"
-        else:
-            overlay_text = "Digital - Oct 22"
-    elif placeholder_banner:
-        overlay_text = "PLACEHOLDER"
-    out = apply_overlay(
-        base,
-        COMPOSE_MODE,
-        landscape=landscape,
-        overlay_text=overlay_text,
-        grayscale=grayscale,
-        badge=badge,
-        badge_position=badge_position,
-        banner_position=banner_position,
-    )
+
+    use_layout = layout_labels is not None or bool(str(profile_key or "").strip())
+    if use_layout:
+        from services.poster_layouts import (
+            get_profile,
+            grid_size_for_profile,
+            sample_tokens_for_profile,
+        )
+
+        key = str(profile_key or "").strip()
+        if not key:
+            key = (
+                f"{'episode' if want == 'episode' else ('tv' if want == 'series' else 'movie')}"
+                f".placeholder.default"
+            )
+        profile = get_profile(key)
+        labels = layout_labels if layout_labels is not None else list((profile.get("labels") or []))
+        # Draft previews pass grayscale explicitly; saved-profile previews use the profile flag.
+        gs = bool(grayscale) if layout_labels is not None else bool(profile.get("grayscale"))
+        tokens = sample_tokens_for_profile(key)
+        if isinstance(sample_token_overrides, dict):
+            for raw_key, raw_val in sample_token_overrides.items():
+                name = str(raw_key or "").strip()
+                if not name:
+                    continue
+                text = str(raw_val or "").strip()
+                if text:
+                    tokens[name] = text
+        cols, rows = grid_size_for_profile(key)
+        out = apply_overlay(
+            base,
+            COMPOSE_MODE,
+            landscape=landscape,
+            grayscale=gs,
+            layout_labels=labels,
+            layout_tokens=tokens,
+            layout_cols=cols,
+            layout_rows=rows,
+        )
+    else:
+        overlay_text = None
+        if coming_soon_banner:
+            if want == "series":
+                overlay_text = "New Ep. - Oct 22"
+            elif want == "episode":
+                overlay_text = "Airing - Oct 22"
+            else:
+                overlay_text = "Digital - Oct 22"
+        elif placeholder_banner:
+            overlay_text = "PLACEHOLDER"
+        out = apply_overlay(
+            base,
+            COMPOSE_MODE,
+            landscape=landscape,
+            overlay_text=overlay_text,
+            grayscale=grayscale,
+            badge=badge,
+            badge_position=badge_position,
+            banner_position=banner_position,
+        )
     if out is None:
         return None
     buf = io.BytesIO()

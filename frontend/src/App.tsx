@@ -10,6 +10,7 @@ import {
   useState,
   type CSSProperties,
   type FormEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } from "react-router-dom";
@@ -71,6 +72,12 @@ import { UI_SECTION_FRAME_CLASS, UI_SECTION_LEGEND_CLASS } from "./uiSectionFram
 import { TmdbAttribution } from "./TmdbAttribution";
 import { getBrandSemanticTokens, semanticTokensToCssVars, type BrandSemanticTokens } from "./brandSemanticTheme";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "./brandAccentUi";
+import {
+  DATE_FORMAT_OPTIONS,
+  STATUS_AND_LAYOUT_DATE_TOKENS,
+  formatDateToken,
+  normalizeDateFormat,
+} from "./dateFormats";
 import type {
   ActivityRow,
   ActivitySubPage,
@@ -106,6 +113,7 @@ import { useLibraryShelves } from "./library/useLibraryShelves";
 import { ConfirmModal } from "./ConfirmModal";
 import { CollectionsPanel } from "./collections/CollectionsPanel";
 import DummyMediaSettings from "./DummyMediaSettings";
+import PosterLayoutDesigner from "./settings/PosterLayoutDesigner";
 import { useActivityTasks } from "./activity/useActivityTasks";
 import { useActivityFeed } from "./activity/useActivityFeed";
 import { PlaceholdersPanel } from "./activity/PlaceholdersPanel";
@@ -287,15 +295,6 @@ const SETTINGS_SECTION_SLUGS: Record<string, string> = {
   Advanced: "advanced",
 };
 
-/** Overlay layer toggles (not poster language). */
-const POSTER_OVERLAY_LAYER_KEYS = [
-  "PLACEHOLDER_POSTER_GRAYSCALE",
-  "PLACEHOLDER_POSTER_BADGE",
-] as const;
-const POSTER_OVERLAY_BANNER_KEYS = [
-  "PLACEHOLDER_POSTER_PLACEHOLDER_BANNER",
-  "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
-] as const;
 const POSTER_LANGUAGE_FIELD_KEYS = [
   "ENABLE_PREFERRED_POSTER_LANGUAGE",
   "PREFER_ORIGINAL_POSTER_LANGUAGE",
@@ -401,13 +400,18 @@ const UI_INTEGRATION_CARD_SURFACE_CLASS =
 /** Stacked topic panel matching Density & Lookahead framing. */
 function SettingsDensityFrame(props: {
   legend: string;
+  /** Optional controls on the legend row (right-aligned). */
+  legendEnd?: ReactNode;
   intro?: ReactNode;
   children?: ReactNode;
   className?: string;
 }) {
   return (
     <div className={`${UI_SECTION_FRAME_CLASS} space-y-3 p-4 ${props.className ?? ""}`}>
-      <p className={SETTINGS_DENSITY_LEGEND_CLASS}>{props.legend}</p>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <p className={`${SETTINGS_DENSITY_LEGEND_CLASS} mb-0`}>{props.legend}</p>
+        {props.legendEnd ? <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-3">{props.legendEnd}</div> : null}
+      </div>
       {props.intro ? <div className="text-[14px] leading-relaxed text-slate-300">{props.intro}</div> : null}
       {props.children ? <div className="space-y-5">{props.children}</div> : null}
     </div>
@@ -462,12 +466,6 @@ type WizardStepDef = { key: string; name: string };
 const LOOK_AND_FEEL_FIELD_KEYS = [
   "PLACEHOLDER_STATUS_UPDATES",
   "PLACEHOLDER_STATUS_PROJECTION_MODE",
-  "PLACEHOLDER_POSTER_GRAYSCALE",
-  "PLACEHOLDER_POSTER_BADGE",
-  "PLACEHOLDER_POSTER_BADGE_POSITION",
-  "PLACEHOLDER_POSTER_PLACEHOLDER_BANNER",
-  "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
-  "PLACEHOLDER_POSTER_BANNER_POSITION",
   "ENABLE_PREFERRED_POSTER_LANGUAGE",
   "PREFER_ORIGINAL_POSTER_LANGUAGE",
   "PREFERRED_POSTER_LANGUAGE",
@@ -545,8 +543,11 @@ const SETTINGS_UI_HIDDEN_FIELD_KEYS = new Set<string>([
   // Superseded by ALWAYS + FALLBACK lists.
   "MOVIE_PLAY_PLACEHOLDER_ALSO_INSTANCES",
   "TV_PLAY_PLACEHOLDER_ALSO_INSTANCES",
-  // Inlined next to badge / Banner heading (preview shows the effect).
+  // Layout designer owns badge / banners; positions were inlined beside those toggles.
+  "PLACEHOLDER_POSTER_BADGE",
   "PLACEHOLDER_POSTER_BADGE_POSITION",
+  "PLACEHOLDER_POSTER_PLACEHOLDER_BANNER",
+  "PLACEHOLDER_POSTER_COMING_SOON_BANNER",
   "PLACEHOLDER_POSTER_BANNER_POSITION",
   // Legacy single watchlist Arr defaults (migrated into *_TARGETS_JSON).
   "WATCHLIST_RADARR_INSTANCE_KEY",
@@ -2672,13 +2673,13 @@ export function App() {
 
         {/* Sidebar: mobile drawer under the header; desktop icon rail with hover/pin expand. */}
         <div
-          className={`fixed bottom-0 left-0 top-16 z-50 w-64 shrink-0 transition-[transform,width] duration-200 ease-out md:relative md:inset-auto md:top-auto md:z-auto md:h-full md:translate-x-0 ${
+          className={`fixed bottom-0 left-0 top-16 z-50 w-64 shrink-0 transition-[transform,width] duration-200 ease-out md:relative md:inset-auto md:top-auto md:z-40 md:h-full md:translate-x-0 ${
             mobileNavOpen ? "translate-x-0 pointer-events-auto" : "-translate-x-full pointer-events-none"
           } md:pointer-events-auto ${sidebarPinned ? "md:w-64" : "md:w-16"}`}
         >
           <aside
             id="placeholdarr-sidebar-nav"
-            className={`absolute inset-y-0 left-0 z-30 flex h-full w-64 flex-col overflow-hidden pb-0 pt-0 transition-[width,box-shadow] duration-200 ease-out ${
+            className={`absolute inset-y-0 left-0 z-40 flex h-full w-64 flex-col overflow-hidden pb-0 pt-0 transition-[width,box-shadow] duration-200 ease-out ${
               sidebarExpanded ? "md:w-64" : "md:w-16"
             } ${
               (!sidebarPinned && sidebarExpanded) || (isMobile && mobileNavOpen)
@@ -3138,8 +3139,8 @@ export function App() {
           </aside>
         </div>
 
-        {/* Main area */}
-        <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        {/* Main area (z-0 so hover-expanded sidebar stays above range thumbs / controls). */}
+        <div className="relative z-0 flex-1 flex flex-col min-w-0 overflow-hidden">
           {/* Topbar */}
           <header
             className="relative z-[60] flex h-16 w-full flex-shrink-0 items-center justify-between border-b px-4 py-3 sm:px-6"
@@ -3587,8 +3588,9 @@ function TaskRunConfirmModals(props: {
       </p>
     ) : props.modal === "calendar" ? (
       <p className="ui-field-description mt-2 leading-relaxed">
-        Calendar sync refreshes release dates from ARR and updates Coming Soon / countdown placeholder status. It does
-        not pull full Arr catalogs.
+        Calendar sync refreshes release dates from ARR, updates Coming Soon / countdown placeholder status, and rebakes
+        Coming Soon / New Ep. posters when their stamped date label is stale (including day rollover). It does not pull
+        full Arr catalogs.
       </p>
     ) : (
       <p className="ui-field-description mt-2 leading-relaxed">
@@ -7534,7 +7536,8 @@ function LookAndFeelSectionIntro(props: { embedded?: boolean }) {
     <div className={wrapClass}>
       <p className="ui-field-description text-slate-300 leading-relaxed">
         Choose how placeholders look in Plex, Jellyfin, and Emby: status text in the player, optional TMDB poster
-        language, and poster overlays on library art. Overlay previews update as you change those options.
+        language, grayscale, and the poster layout designer for badge and label chips. Previews update as you change
+        those options.
       </p>
     </div>
   );
@@ -7545,16 +7548,183 @@ function PosterOverlayControlsWithPreview(props: {
   values: FieldValueMap;
   controls: ReactNode;
   compact?: boolean;
+  accentHex?: string;
+  /** Extra frames under the primary controls. */
+  belowControls?: ReactNode;
+  /** Extra content under the sticky bake preview (e.g. Preview art picker). */
+  belowPreview?: ReactNode;
+  layoutPreview?: {
+    profileKey: string;
+    labelsJson?: string;
+    grayscale?: boolean;
+    baseUrl?: string | null;
+    sampleTokens?: Record<string, string> | null;
+    sampleTokensJson?: string;
+    guide?: LayoutPreviewGuide | null;
+    markers?: Array<{ id: string; n: number; x: number; y: number }> | null;
+    listHovering?: boolean;
+    hoveredId?: string | null;
+    selectedId?: string | null;
+    placementControlsHot?: boolean;
+  } | null;
+  /** Drag-update selected chip x/y from the sticky bake preview. */
+  onPlacementDrag?: (x: number, y: number) => void;
 }) {
   return (
     <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:gap-8">
-      <div className="min-w-0 flex-1">{props.controls}</div>
-      <aside className="w-full shrink-0 lg:sticky lg:top-4 lg:w-[22.5rem]">
+      <div className="min-w-0 flex-1 space-y-6">
+        {props.controls}
+        {props.belowControls}
+      </div>
+      {/* Wider aside so the 2:3 poster + Preview art bottom roughly meets the designer Plex tip. */}
+      <aside className="w-full shrink-0 lg:sticky lg:top-4 lg:w-[28rem]">
         <div className={`mb-3 ${SETTINGS_DENSITY_LEGEND_CLASS}`}>Preview</div>
-        <PosterOverlayLivePreview values={props.values} compact={props.compact} layout="gallery" />
-        <PlexUnwatchedPreviewWarning />
+        <PosterOverlayLivePreview
+          values={props.values}
+          compact={props.compact}
+          layout="focus"
+          accentHex={props.accentHex}
+          layoutPreview={props.layoutPreview}
+          onPlacementDrag={props.onPlacementDrag}
+        />
+        {props.belowPreview ? <div className="mt-3">{props.belowPreview}</div> : null}
       </aside>
     </div>
+  );
+}
+
+/** Sticky-preview placement guides from the layout designer. */
+type LayoutPreviewGuide =
+  | { kind: "chip"; x: number; y: number }
+  | {
+      kind: "banner";
+      xStart: number;
+      xEnd: number;
+      yStart: number;
+      yEnd: number;
+    };
+
+function layoutGuideKey(guide: LayoutPreviewGuide | null | undefined): string {
+  if (!guide) return "";
+  if (guide.kind === "banner") {
+    return `b:${guide.xStart}:${guide.xEnd}:${guide.yStart}:${guide.yEnd}`;
+  }
+  return `c:${guide.x}:${guide.y}`;
+}
+
+/** Layout designer with shared sticky preview (Settings + onboarding). */
+function PosterArtOverlaysBlock(props: {
+  values: FieldValueMap;
+  accentHex: string;
+  compact?: boolean;
+}) {
+  const [layoutPreview, setLayoutPreview] = useState<{
+    profileKey: string;
+    labelsJson?: string;
+    grayscale: boolean;
+    baseUrl?: string | null;
+    sampleTokens?: Record<string, string> | null;
+    sampleTokensJson?: string;
+    guide?: LayoutPreviewGuide | null;
+    markers?: Array<{ id: string; n: number; x: number; y: number }> | null;
+    listHovering?: boolean;
+    hoveredId?: string | null;
+    selectedId?: string | null;
+    placementControlsHot?: boolean;
+  } | null>(null);
+  const [previewArtControls, setPreviewArtControls] = useState<ReactNode>(null);
+  const [layoutHeaderActions, setLayoutHeaderActions] = useState<ReactNode>(null);
+  const placementDragRef = useRef<((x: number, y: number) => void) | null>(null);
+  const registerPlacementDrag = useCallback((handler: ((x: number, y: number) => void) | null) => {
+    placementDragRef.current = handler;
+  }, []);
+  const handlePlacementDrag = useCallback((x: number, y: number) => {
+    placementDragRef.current?.(x, y);
+  }, []);
+  const handleLayoutPreviewChange = useCallback(
+    (state: {
+      profileKey: string;
+      labels: unknown[];
+      grayscale: boolean;
+      baseUrl?: string | null;
+      sampleTokens?: Record<string, string> | null;
+      guide?: LayoutPreviewGuide | null;
+      markers?: Array<{ id: string; n: number; x: number; y: number }> | null;
+      listHovering?: boolean;
+      hoveredId?: string | null;
+      selectedId?: string | null;
+      placementControlsHot?: boolean;
+    }) => {
+      const labelsJson = JSON.stringify(state.labels);
+      const baseUrl = state.baseUrl || null;
+      const sampleTokens = state.sampleTokens || null;
+      const sampleTokensJson = JSON.stringify(sampleTokens || {});
+      const guide = state.guide || null;
+      const guideKey = layoutGuideKey(guide);
+      const markers = state.markers || null;
+      const markersKey = (markers || []).map((m) => `${m.id}:${m.n}:${m.x}:${m.y}`).join("|");
+      const listHovering = Boolean(state.listHovering);
+      const hoveredId = state.hoveredId || null;
+      const selectedId = state.selectedId || null;
+      const placementControlsHot = Boolean(state.placementControlsHot);
+      setLayoutPreview((prev) => {
+        const prevGuideKey = layoutGuideKey(prev?.guide);
+        const prevMarkersKey = (prev?.markers || []).map((m) => `${m.id}:${m.n}:${m.x}:${m.y}`).join("|");
+        if (
+          prev &&
+          prev.profileKey === state.profileKey &&
+          prev.labelsJson === labelsJson &&
+          prev.grayscale === state.grayscale &&
+          (prev.baseUrl || null) === baseUrl &&
+          (prev.sampleTokensJson || "{}") === sampleTokensJson &&
+          prevGuideKey === guideKey &&
+          prevMarkersKey === markersKey &&
+          Boolean(prev.listHovering) === listHovering &&
+          (prev.hoveredId || null) === hoveredId &&
+          (prev.selectedId || null) === selectedId &&
+          Boolean(prev.placementControlsHot) === placementControlsHot
+        ) {
+          return prev;
+        }
+        return {
+          profileKey: state.profileKey,
+          labelsJson,
+          grayscale: state.grayscale,
+          baseUrl,
+          sampleTokens,
+          sampleTokensJson,
+          guide,
+          markers,
+          listHovering,
+          hoveredId,
+          selectedId,
+          placementControlsHot,
+        };
+      });
+    },
+    [],
+  );
+  return (
+    <PosterOverlayControlsWithPreview
+      values={props.values}
+      compact={props.compact}
+      accentHex={props.accentHex}
+      layoutPreview={layoutPreview}
+      belowPreview={previewArtControls}
+      onPlacementDrag={handlePlacementDrag}
+      controls={
+        <SettingsDensityFrame legend="Layout designer" legendEnd={layoutHeaderActions}>
+          <PosterLayoutDesigner
+            accentHex={props.accentHex}
+            compact={props.compact}
+            onPreviewChange={handleLayoutPreviewChange}
+            onPreviewArtControlsChange={setPreviewArtControls}
+            onHeaderActionsChange={setLayoutHeaderActions}
+            onRegisterPlacementDrag={registerPlacementDrag}
+          />
+        </SettingsDensityFrame>
+      }
+    />
   );
 }
 
@@ -7602,23 +7772,8 @@ function PosterBadgeDescription(props: { spacing: "settings" | "wizard" }) {
   const top = props.spacing === "settings" ? "mt-1" : "mb-2";
   return (
     <p className={`ui-field-description leading-relaxed ${top}`}>
-      Placeholdarr logo badge on the poster. Position is independent of the text bar.
+      Placeholdarr logo badge on the poster. Prefer the layout designer Badge label instead.
     </p>
-  );
-}
-
-/** Plex unwatched-count tip shown under the overlay preview column. */
-function PlexUnwatchedPreviewWarning() {
-  return (
-    <div className="mt-3 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-3 py-2.5 text-[13px] leading-snug text-yellow-100/95">
-      <p className="font-headline font-semibold uppercase tracking-wider text-yellow-200/90 text-[11px] mb-1">
-        Plex tip
-      </p>
-      <p>
-        On Plex, the unwatched count indicator sits in the top right and can cover Placeholdarr badge and banner text. To
-        avoid conflict, use a bottom banner and do not put the Placeholdarr badge in the top right corner.
-      </p>
-        </div>
   );
 }
 
@@ -7626,8 +7781,7 @@ function PosterPlaceholderBannerDescription(props: { spacing: "settings" | "wiza
   const top = props.spacing === "settings" ? "mt-1" : "mb-2";
     return (
       <p className={`ui-field-description leading-relaxed ${top}`}>
-      A PLACEHOLDER text bar on the poster. If Coming Soon is also enabled, unreleased titles use that
-      date bar instead.
+        Legacy PLACEHOLDER banner toggle. New installs should place a PLACEHOLDER label in the layout designer instead.
       </p>
     );
   }
@@ -7636,8 +7790,8 @@ function ComingSoonPosterBannerDescription(props: { spacing: "settings" | "wizar
   const top = props.spacing === "settings" ? "mt-1" : "mb-2";
     return (
       <p className={`ui-field-description leading-relaxed ${top}`}>
-      A date or New Ep. text bar on unreleased titles (Theatrical, Digital, Physical, or Airing; series
-      and seasons show New Ep.). Replaces the PLACEHOLDER bar on those posters when both are enabled.
+        Legacy Coming Soon banner toggle. Unreleased titles already use the Coming Soon layout profile; place a
+        Coming Soon / New Ep. label there in the designer.
       </p>
     );
   }
@@ -7654,11 +7808,28 @@ function PosterOverlayPreviewTile(props: {
   aspect: string;
   /** Fixed width class (e.g. ``w-[14rem]``). Required so absolute-fit images do not collapse. */
   widthClass: string;
+  /** Optional placement guides for the layout designer selection. */
+  guide?: (LayoutPreviewGuide & { accentHex?: string; bakeW?: number; bakeH?: number }) | null;
+  /** Number badges while hovering the designer asset list. */
+  markers?: Array<{ id: string; n: number; x: number; y: number }> | null;
+  hoveredMarkerId?: string | null;
+  accentHex?: string;
+  /** When set with a chip guide, the selected chip can be dragged on the bake preview. */
+  onPlacementDrag?: (x: number, y: number) => void;
+  /** Keep the drag handle visible while X/Y bake-px controls are in use. */
+  placementControlsHot?: boolean;
 }) {
   const [currentSrc, setCurrentSrc] = useState(props.src);
   const [nextSrc, setNextSrc] = useState<string | null>(null);
   const [nextVisible, setNextVisible] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [previewHovering, setPreviewHovering] = useState(false);
+  const [handleOpaque, setHandleOpaque] = useState(true);
   const currentSrcRef = useRef(props.src);
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const dragActiveRef = useRef(false);
+  /** Pointer minus banner center at grab (keeps strip from jumping under the cursor). */
+  const bannerGrabOffsetRef = useRef<{ dx: number; dy: number } | null>(null);
 
   useEffect(() => {
     currentSrcRef.current = currentSrc;
@@ -7701,54 +7872,573 @@ function PosterOverlayPreviewTile(props: {
     };
   }, [props.src]);
 
+  const guide = props.guide;
+  const accent = guide?.accentHex || props.accentHex || "#38bdf8";
+  const bakeW = Math.max(1, guide?.bakeW || 1000);
+  const bakeH = Math.max(1, guide?.bakeH || 1500);
+  const chipGuide = guide?.kind === "chip" ? guide : null;
+  const bannerGuide = guide?.kind === "banner" ? guide : null;
+  // Glow only at the exact bake-canvas midpoint (e.g. 500/750 or 960/540).
+  const glowX = Boolean(chipGuide && Math.round(chipGuide.x * bakeW) === bakeW / 2);
+  const glowY = Boolean(chipGuide && Math.round(chipGuide.y * bakeH) === bakeH / 2);
+  const canDrag = Boolean((chipGuide || bannerGuide) && props.onPlacementDrag);
+  const wantHandleVisible = Boolean(
+    canDrag && (previewHovering || dragging || props.placementControlsHot),
+  );
+  const bannerCenter = bannerGuide
+    ? {
+        x: (Math.max(0, Math.min(1, bannerGuide.xStart)) + Math.max(0, Math.min(1, bannerGuide.xEnd))) / 2,
+        y: (Math.max(0, Math.min(1, bannerGuide.yStart)) + Math.max(0, Math.min(1, bannerGuide.yEnd))) / 2,
+      }
+    : null;
+
+  useEffect(() => {
+    if (!canDrag) {
+      setHandleOpaque(false);
+      return;
+    }
+    if (wantHandleVisible) {
+      setHandleOpaque(true);
+      return;
+    }
+    const timer = window.setTimeout(() => setHandleOpaque(false), 1000);
+    return () => window.clearTimeout(timer);
+  }, [canDrag, wantHandleVisible]);
+
+  const fracFromClient = useCallback((clientX: number, clientY: number) => {
+    const el = stageRef.current;
+    if (!el) return null;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    const x = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const y = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+    return { x, y };
+  }, []);
+
+  useEffect(() => {
+    if (!dragging) return;
+    const onMove = (event: PointerEvent) => {
+      if (!dragActiveRef.current || !props.onPlacementDrag) return;
+      const next = fracFromClient(event.clientX, event.clientY);
+      if (!next) return;
+      const off = bannerGrabOffsetRef.current;
+      if (off) {
+        props.onPlacementDrag(next.x - off.dx, next.y - off.dy);
+      } else {
+        props.onPlacementDrag(next.x, next.y);
+      }
+    };
+    const onUp = () => {
+      dragActiveRef.current = false;
+      bannerGrabOffsetRef.current = null;
+      setDragging(false);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+  }, [dragging, fracFromClient, props.onPlacementDrag]);
+
+  const beginDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    if (!canDrag || !props.onPlacementDrag) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dragActiveRef.current = true;
+    setDragging(true);
+    const next = fracFromClient(event.clientX, event.clientY);
+    if (bannerGuide && bannerCenter && next) {
+      bannerGrabOffsetRef.current = { dx: next.x - bannerCenter.x, dy: next.y - bannerCenter.y };
+      props.onPlacementDrag(bannerCenter.x, bannerCenter.y);
+    } else {
+      bannerGrabOffsetRef.current = null;
+      if (next) props.onPlacementDrag(next.x, next.y);
+    }
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      /* ignore */
+    }
+  };
+
   return (
     <figure
       className={`shrink-0 rounded-lg overflow-hidden border border-[#424753]/40 bg-[#0f1419]/80 ${props.widthClass}`}
     >
-      <div className={`relative w-full ${props.aspect} bg-[#0b111b]`}>
+      <div
+        ref={stageRef}
+        onPointerEnter={() => setPreviewHovering(true)}
+        onPointerLeave={() => setPreviewHovering(false)}
+        className={`relative w-full ${props.aspect} bg-[#0b111b] ${canDrag ? (dragging ? "cursor-grabbing select-none" : "") : ""}`}
+      >
         <img
           src={currentSrc}
           alt={`${props.label} overlay preview`}
-          className="absolute inset-0 h-full w-full object-cover"
+          draggable={false}
+          className="pointer-events-none absolute inset-0 h-full w-full object-cover"
         />
         {nextSrc ? (
           <img
             src={nextSrc}
             alt=""
             aria-hidden
-            className={`absolute inset-0 h-full w-full object-cover transition-opacity duration-300 ease-out ${
+            draggable={false}
+            className={`pointer-events-none absolute inset-0 h-full w-full object-cover transition-opacity duration-300 ease-out ${
               nextVisible ? "opacity-100" : "opacity-0"
             }`}
           />
         ) : null}
+        {chipGuide ? (
+          <>
+            {/* Poster midlines (glow when the chip sits on the bake midpoint). */}
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-y-0 z-[4] w-px -translate-x-1/2"
+              style={{
+                left: "50%",
+                backgroundColor: glowX ? accent : "rgba(148,163,184,0.35)",
+                boxShadow: glowX
+                  ? `0 0 0 1px ${accent}55, 0 0 10px ${accent}, 0 0 18px ${accent}88`
+                  : undefined,
+              }}
+            />
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-x-0 z-[4] h-px -translate-y-1/2"
+              style={{
+                top: "50%",
+                backgroundColor: glowY ? accent : "rgba(148,163,184,0.35)",
+                boxShadow: glowY
+                  ? `0 0 0 1px ${accent}55, 0 0 10px ${accent}, 0 0 18px ${accent}88`
+                  : undefined,
+              }}
+            />
+            {/* Chip position guides while selected. */}
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-y-0 z-[5] w-px -translate-x-1/2"
+              style={{
+                left: `${Math.max(0, Math.min(1, chipGuide.x)) * 100}%`,
+                backgroundColor: `${accent}66`,
+              }}
+            />
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-x-0 z-[5] h-px -translate-y-1/2"
+              style={{
+                top: `${Math.max(0, Math.min(1, chipGuide.y)) * 100}%`,
+                backgroundColor: `${accent}66`,
+              }}
+            />
+            {canDrag ? (
+              <button
+                type="button"
+                title="Drag to place"
+                aria-label="Drag chip position"
+                tabIndex={handleOpaque ? undefined : -1}
+                aria-hidden={!handleOpaque}
+                onPointerDown={beginDrag}
+                className={`absolute z-[9] flex h-7 w-7 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-[#0b111b] shadow-md touch-none transition-opacity duration-300 ease-out ${
+                  dragging ? "cursor-grabbing" : "cursor-grab"
+                } ${handleOpaque ? "opacity-100" : "pointer-events-none opacity-0"}`}
+                style={{
+                  left: `${Math.max(0, Math.min(1, chipGuide.x)) * 100}%`,
+                  top: `${Math.max(0, Math.min(1, chipGuide.y)) * 100}%`,
+                  backgroundColor: accent,
+                  boxShadow: `0 0 0 1px ${accent}, 0 0 12px ${accent}88`,
+                }}
+              >
+                <span className="material-symbols-outlined leading-none text-[#0b111b]" style={{ fontSize: 16 }}>
+                  open_with
+                </span>
+              </button>
+            ) : null}
+          </>
+        ) : null}
+        {bannerGuide
+          ? (() => {
+              const x0 = Math.max(0, Math.min(1, bannerGuide.xStart));
+              const x1 = Math.max(0, Math.min(1, bannerGuide.xEnd));
+              const y0 = Math.max(0, Math.min(1, bannerGuide.yStart));
+              const y1 = Math.max(0, Math.min(1, bannerGuide.yEnd));
+              const left = x0 * 100;
+              const top = y0 * 100;
+              const width = Math.max(0, (x1 - x0) * 100);
+              const height = Math.max(0, (y1 - y0) * 100);
+              const right = left + width;
+              const bottom = top + height;
+              const line = (style: CSSProperties, strong = false) => (
+                <div
+                  aria-hidden
+                  className="pointer-events-none absolute z-[5]"
+                  style={{
+                    ...style,
+                    backgroundColor: strong ? accent : `${accent}aa`,
+                    boxShadow: strong ? `0 0 0 1px ${accent}55, 0 0 8px ${accent}66` : undefined,
+                  }}
+                />
+              );
+              return (
+                <>
+                  <div
+                    role={canDrag ? "button" : undefined}
+                    aria-label={canDrag ? "Drag banner position" : undefined}
+                    tabIndex={canDrag && handleOpaque ? 0 : -1}
+                    onPointerDown={canDrag ? beginDrag : undefined}
+                    className={`absolute z-[4] ${
+                      canDrag
+                        ? `touch-none ${dragging ? "cursor-grabbing" : "cursor-grab"} ${
+                            handleOpaque ? "" : "pointer-events-none"
+                          }`
+                        : "pointer-events-none"
+                    }`}
+                    style={{
+                      left: `${left}%`,
+                      top: `${top}%`,
+                      width: `${width}%`,
+                      height: `${height}%`,
+                      backgroundColor: `${accent}22`,
+                    }}
+                  />
+                  {/* Four movement edges; end lines inset 1px so overflow:hidden does not clip them. */}
+                  {line({ left: `${left}%`, top: `${top}%`, width: 1, height: `${height}%` })}
+                  {line(
+                    {
+                      left: `${right}%`,
+                      top: `${top}%`,
+                      width: 1,
+                      height: `${height}%`,
+                      transform: "translateX(-100%)",
+                    },
+                    true,
+                  )}
+                  {line({ left: `${left}%`, top: `${top}%`, width: `${width}%`, height: 1 })}
+                  {line(
+                    {
+                      left: `${left}%`,
+                      top: `${bottom}%`,
+                      width: `${width}%`,
+                      height: 1,
+                      transform: "translateY(-100%)",
+                    },
+                    true,
+                  )}
+                  {canDrag && bannerCenter ? (
+                    <button
+                      type="button"
+                      title="Drag to place"
+                      aria-label="Drag banner position"
+                      tabIndex={handleOpaque ? undefined : -1}
+                      aria-hidden={!handleOpaque}
+                      onPointerDown={beginDrag}
+                      className={`absolute z-[9] flex h-7 w-7 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-[#0b111b] shadow-md touch-none transition-opacity duration-300 ease-out ${
+                        dragging ? "cursor-grabbing" : "cursor-grab"
+                      } ${handleOpaque ? "opacity-100" : "pointer-events-none opacity-0"}`}
+                      style={{
+                        left: `${bannerCenter.x * 100}%`,
+                        top: `${bannerCenter.y * 100}%`,
+                        backgroundColor: accent,
+                        boxShadow: `0 0 0 1px ${accent}, 0 0 12px ${accent}88`,
+                      }}
+                    >
+                      <span
+                        className="material-symbols-outlined leading-none text-[#0b111b]"
+                        style={{ fontSize: 16 }}
+                      >
+                        open_with
+                      </span>
+                    </button>
+                  ) : null}
+                </>
+              );
+            })()
+          : null}
+        {props.markers && props.markers.length > 0
+          ? [...props.markers]
+              .sort((a, b) => {
+                // Paint the hovered marker last so it stays above overlapping siblings.
+                if (a.id === props.hoveredMarkerId) return 1;
+                if (b.id === props.hoveredMarkerId) return -1;
+                return 0;
+              })
+              .map((marker) => {
+              const hot = marker.id === props.hoveredMarkerId;
+              const markAccent = props.accentHex || accent;
+              // Keep the ~20px badge fully inside the frame (edge anchors used to clip).
+              const pad = 0.045;
+              const x = Math.max(pad, Math.min(1 - pad, marker.x));
+              const y = Math.max(pad, Math.min(1 - pad, marker.y));
+              return (
+                <div
+                  key={marker.id}
+                  aria-hidden
+                  className={`pointer-events-none absolute flex h-5 min-w-[1.25rem] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-md px-1 font-mono text-[11px] font-semibold shadow-sm ${
+                    hot ? "z-[8]" : "z-[5]"
+                  }`}
+                  style={{
+                    left: `${x * 100}%`,
+                    top: `${y * 100}%`,
+                    backgroundColor: hot ? markAccent : "rgba(11, 17, 27, 0.88)",
+                    color: hot ? "#0b111b" : "#e2e8f0",
+                    boxShadow: hot ? `0 0 0 1px ${markAccent}, 0 0 10px ${markAccent}88` : "0 0 0 1px rgba(148,163,184,0.35)",
+                  }}
+                >
+                  {marker.n}
+                </div>
+              );
+            })
+          : null}
       </div>
-      <figcaption className="px-2 py-1.5 text-[11px] text-slate-400 leading-snug">{props.label}</figcaption>
+      <figcaption className="px-2 py-1.5 text-[11px] text-slate-400 leading-snug">
+        {props.label}
+        {chipGuide && canDrag ? <span className="text-slate-500"> · Drag handle to place</span> : null}
+        {bannerGuide && canDrag ? (
+          <span className="text-slate-500"> · Drag fill to slide (size stays fixed)</span>
+        ) : null}
+      </figcaption>
     </figure>
+  );
+}
+
+function posterPreviewMetaForProfile(profileKey: string | null | undefined): {
+  kind: string;
+  label: string;
+  aspect: string;
+} {
+  const key = String(profileKey || "movie.placeholder.default");
+  const parts = key.split(".");
+  const media = parts[0] || "movie";
+  const availability = parts.length >= 3 ? parts[1] : "placeholder";
+  const coming = key.endsWith(".coming_soon");
+  const availLabel = availability === "real" ? "Real" : "Placeholder";
+  const timing = coming ? "Coming Soon" : "Released";
+  if (media === "episode") {
+    return {
+      kind: "episode",
+      label: `Episode · ${availLabel} · ${timing}`,
+      aspect: "aspect-video",
+    };
+  }
+  if (media === "tv") {
+    return {
+      kind: "series",
+      label: `TV title · ${availLabel} · ${timing}`,
+      aspect: "aspect-[2/3]",
+    };
+  }
+  return {
+    kind: "movie",
+    label: `Movie · ${availLabel} · ${timing}`,
+    aspect: "aspect-[2/3]",
+  };
+}
+
+/** Move selected chip/badge to the end so the bake draws it last (on top). Banners stay put. */
+function labelsWithSelectedOnTop(labels: unknown[], selectedId: string | null | undefined): unknown[] {
+  if (!selectedId || !Array.isArray(labels) || labels.length < 2) return labels;
+  const idx = labels.findIndex(
+    (lab) => lab && typeof lab === "object" && String((lab as { id?: unknown }).id || "") === selectedId,
+  );
+  if (idx < 0 || idx === labels.length - 1) return labels;
+  const picked = labels[idx];
+  if (!picked || typeof picked !== "object") return labels;
+  const token = String((picked as { token?: unknown }).token || "").trim();
+  const style = String((picked as { style?: unknown }).style || "").trim().toLowerCase();
+  // Fill rectangles always bake under chips; never promote a selected fill.
+  if (token === "FillRectangle" || token === "Banner" || style === "banner") return labels;
+  const next = labels.slice();
+  next.splice(idx, 1);
+  next.push(picked);
+  return next;
+}
+
+/** Sticky preview that POSTs the active designer draft (avoids GET query truncation). */
+function PosterOverlayFocusPreview(props: {
+  values: FieldValueMap;
+  accentHex?: string;
+  layoutPreview: {
+    profileKey: string;
+    labelsJson?: string;
+    grayscale?: boolean;
+    baseUrl?: string | null;
+    sampleTokens?: Record<string, string> | null;
+    sampleTokensJson?: string;
+    guide?: LayoutPreviewGuide | null;
+    markers?: Array<{ id: string; n: number; x: number; y: number }> | null;
+    listHovering?: boolean;
+    hoveredId?: string | null;
+    selectedId?: string | null;
+    placementControlsHot?: boolean;
+  };
+  onPlacementDrag?: (x: number, y: number) => void;
+}) {
+  const grayscale = Boolean(props.layoutPreview.grayscale);
+  const baseUrl = props.layoutPreview.baseUrl || null;
+  const sampleTokens = props.layoutPreview.sampleTokens || null;
+  const sampleTokensJson = props.layoutPreview.sampleTokensJson || "{}";
+  const selectedId = props.layoutPreview.selectedId || null;
+  const meta = posterPreviewMetaForProfile(props.layoutPreview.profileKey);
+  const [src, setSrc] = useState<string | null>(null);
+  const blobRef = useRef<string | null>(null);
+  const labelsJson = props.layoutPreview.labelsJson || "[]";
+
+  useEffect(() => {
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const csrf = getCsrfToken();
+          let labels: unknown[] = [];
+          try {
+            labels = JSON.parse(labelsJson) as unknown[];
+          } catch {
+            labels = [];
+          }
+          labels = labelsWithSelectedOnTop(labels, selectedId);
+          const response = await fetch("/api/settings/poster-overlay-preview", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+              Accept: "image/jpeg",
+              "Content-Type": "application/json",
+              ...(csrf ? { "X-CSRF-Token": csrf } : {}),
+            },
+            body: JSON.stringify({
+              kind: meta.kind,
+              grayscale,
+              profile_key: props.layoutPreview.profileKey,
+              labels,
+              dim_base: false,
+              base_url: baseUrl || undefined,
+              sample_tokens: sampleTokens || undefined,
+            }),
+          });
+          if (!response.ok) throw new Error(`Preview failed (${response.status})`);
+          const blob = await response.blob();
+          if (cancelled) return;
+          const url = URL.createObjectURL(blob);
+          if (blobRef.current) URL.revokeObjectURL(blobRef.current);
+          blobRef.current = url;
+          setSrc(url);
+        } catch {
+          if (!cancelled) setSrc(null);
+        }
+      })();
+    }, 120);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    baseUrl,
+    grayscale,
+    labelsJson,
+    meta.kind,
+    props.layoutPreview.profileKey,
+    sampleTokens,
+    sampleTokensJson,
+    selectedId,
+  ]);
+
+  useEffect(() => {
+    return () => {
+      if (blobRef.current) URL.revokeObjectURL(blobRef.current);
+    };
+  }, []);
+
+  // Fill the sticky aside (28rem) so the poster scales with the designer column.
+  const widthClass = "w-full";
+  const bakeSize = meta.kind === "episode" ? { bakeW: 1920, bakeH: 1080 } : { bakeW: 1000, bakeH: 1500 };
+  const guide = props.layoutPreview.guide
+    ? { ...props.layoutPreview.guide, accentHex: props.accentHex, ...bakeSize }
+    : null;
+  const showMarkers = Boolean(props.layoutPreview.listHovering);
+  const markers = showMarkers ? props.layoutPreview.markers || null : null;
+  if (!src) {
+    return (
+      <div className={`relative rounded-lg border border-[#424753]/40 bg-[#0b111b] ${widthClass} ${meta.aspect} flex items-center justify-center overflow-hidden`}>
+        <span className="text-[12px] text-slate-500">Loading preview…</span>
+        {guide ? (
+          <>
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-y-0 z-[4] w-px -translate-x-1/2"
+              style={{ left: "50%", backgroundColor: "rgba(148,163,184,0.35)" }}
+            />
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-x-0 z-[4] h-px -translate-y-1/2"
+              style={{ top: "50%", backgroundColor: "rgba(148,163,184,0.35)" }}
+            />
+          </>
+        ) : null}
+      </div>
+    );
+  }
+  return (
+    <PosterOverlayPreviewTile
+      src={src}
+      label={meta.label}
+      aspect={meta.aspect}
+      widthClass={widthClass}
+      guide={guide}
+      markers={markers}
+      hoveredMarkerId={props.layoutPreview.hoveredId || null}
+      accentHex={props.accentHex}
+      onPlacementDrag={guide ? props.onPlacementDrag : undefined}
+      placementControlsHot={Boolean(props.layoutPreview.placementControlsHot)}
+    />
   );
 }
 
 function PosterOverlayLivePreview(props: {
   values: FieldValueMap;
   compact?: boolean;
-  /** ``gallery``: posters side-by-side then episode; ``rail`` stacks; ``row`` wraps. */
-  layout?: "row" | "rail" | "gallery";
+  accentHex?: string;
+  /** ``gallery``: posters side-by-side then episode; ``rail`` stacks; ``row`` wraps; ``focus``: active profile only. */
+  layout?: "row" | "rail" | "gallery" | "focus";
+  /** When set, all tiles use this layout draft (designer sticky preview). */
+  layoutPreview?: {
+    profileKey: string;
+    labelsJson?: string;
+    grayscale?: boolean;
+    baseUrl?: string | null;
+    sampleTokens?: Record<string, string> | null;
+    sampleTokensJson?: string;
+    guide?: LayoutPreviewGuide | null;
+    markers?: Array<{ id: string; n: number; x: number; y: number }> | null;
+    listHovering?: boolean;
+    hoveredId?: string | null;
+    selectedId?: string | null;
+    placementControlsHot?: boolean;
+  } | null;
+  onPlacementDrag?: (x: number, y: number) => void;
 }) {
-  const grayscale = posterOverlaySettingOn(props.values.PLACEHOLDER_POSTER_GRAYSCALE);
-  const badge = posterOverlaySettingOn(props.values.PLACEHOLDER_POSTER_BADGE);
-  const badgePosition = String(props.values.PLACEHOLDER_POSTER_BADGE_POSITION ?? "bottom_right");
-  const placeholderBanner = posterOverlaySettingOn(props.values.PLACEHOLDER_POSTER_PLACEHOLDER_BANNER);
-  const comingSoonBanner = posterOverlaySettingOn(props.values.PLACEHOLDER_POSTER_COMING_SOON_BANNER);
-  const bannerPosition = String(props.values.PLACEHOLDER_POSTER_BANNER_POSITION ?? "top");
+  const draftGrayscale = props.layoutPreview?.grayscale;
   const layerQs = new URLSearchParams({
-    grayscale: grayscale ? "true" : "false",
-    badge: badge ? "true" : "false",
-    badge_position: badgePosition,
-    placeholder_banner: placeholderBanner ? "true" : "false",
-    coming_soon_banner: comingSoonBanner ? "true" : "false",
-    banner_position: bannerPosition,
+    // Prefer draft grayscale when present; otherwise the preview endpoint uses the saved profile.
+    ...(typeof draftGrayscale === "boolean"
+      ? { grayscale: draftGrayscale ? "true" : "false" }
+      : {}),
   });
+  const focus = props.layout === "focus";
   const gallery = props.layout === "gallery";
   const rail = props.layout === "rail";
+
+  if (focus && props.layoutPreview?.profileKey) {
+    return (
+      <PosterOverlayFocusPreview
+        values={props.values}
+        accentHex={props.accentHex}
+        layoutPreview={props.layoutPreview}
+        onPlacementDrag={props.onPlacementDrag}
+      />
+    );
+  }
+
   const posterW = gallery
     ? "w-[10.5rem]"
     : rail
@@ -7763,21 +8453,24 @@ function PosterOverlayLivePreview(props: {
       : props.compact
         ? "w-[16rem]"
         : "w-[20rem]";
-  const items: Array<{ kind: string; label: string; aspect: string; widthClass: string }> = [
+  const items: Array<{ kind: string; profileKey: string; label: string; aspect: string; widthClass: string }> = [
     {
       kind: "movie",
+      profileKey: "movie.placeholder.default",
       label: "Movie",
       aspect: "aspect-[2/3]",
       widthClass: posterW,
     },
     {
       kind: "series",
+      profileKey: "tv.placeholder.default",
       label: "TV title",
       aspect: "aspect-[2/3]",
       widthClass: posterW,
     },
     {
       kind: "episode",
+      profileKey: "episode.placeholder.default",
       label: "Episode",
       aspect: "aspect-video",
       widthClass: episodeW,
@@ -7786,6 +8479,24 @@ function PosterOverlayLivePreview(props: {
   const tile = (item: (typeof items)[number]) => {
     const qs = new URLSearchParams(layerQs);
     qs.set("kind", item.kind);
+    const draft = props.layoutPreview;
+    if (draft?.profileKey) {
+      qs.set("profile_key", draft.profileKey);
+      if (draft.labelsJson) qs.set("layout", draft.labelsJson);
+      const draftKind = draft.profileKey.startsWith("episode.")
+        ? "episode"
+        : draft.profileKey.startsWith("tv.")
+          ? "series"
+          : "movie";
+      if (draftKind !== item.kind && gallery) {
+        qs.set("profile_key", item.profileKey);
+        qs.delete("layout");
+      } else if (draftKind === item.kind) {
+        qs.set("kind", draftKind);
+      }
+    } else {
+      qs.set("profile_key", item.profileKey);
+    }
     const src = `/api/settings/poster-overlay-preview?${qs.toString()}`;
     return (
       <PosterOverlayPreviewTile
@@ -7797,6 +8508,11 @@ function PosterOverlayLivePreview(props: {
       />
     );
   };
+  if (focus) {
+    // No draft yet: fall back to movie default.
+    const item = items[0];
+    return <div className="flex w-full flex-col gap-3">{tile(item)}</div>;
+  }
   if (gallery) {
     const posters = items.filter((i) => i.kind !== "episode");
     const episode = items.find((i) => i.kind === "episode");
@@ -9114,27 +9830,7 @@ function SettingsPanel(props: {
                       ) : null;
                     })}
                   </SettingsDensityFrame>
-                  <PosterOverlayControlsWithPreview
-                    values={props.values}
-                    controls={
-                      <SettingsDensityFrame
-                        legend="Overlays"
-                        intro={
-                          <p>
-                            Compose grayscale, badge, and text banners independently. The preview updates as you
-                            change options. Banner position applies when either text banner is enabled.
-                          </p>
-                        }
-                      >
-                        {[...POSTER_OVERLAY_LAYER_KEYS, ...POSTER_OVERLAY_BANNER_KEYS].map((key) => {
-                          const field = active.fields.find((f) => f.key === key);
-                          return field ? (
-                            <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
-                          ) : null;
-                        })}
-                      </SettingsDensityFrame>
-                    }
-                  />
+                  <PosterArtOverlaysBlock values={props.values} accentHex={accent.hex} />
                 </div>
               ) : active.name === "Dummy Video" ? (
                 <div className="px-6 py-5 space-y-6">
@@ -9520,10 +10216,10 @@ function resolveWrapperPair(
   return { open: "[", close: "]" };
 }
 
-/** Extract `{Token}` names without `String.prototype.matchAll` (older WebViews / browsers). */
+/** Extract `{Token}` / `{DateToken:format}` names without ``matchAll`` (older WebViews). */
 function collectStatusTemplateTokenNames(template: string): string[] {
   const out: string[] = [];
-  const re = /\{([A-Za-z][A-Za-z0-9_]*)\}/g;
+  const re = /\{([A-Za-z][A-Za-z0-9_]*)(?::[A-Za-z0-9_-]+)?\}/g;
   const text = typeof template === "string" ? template : "";
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) out.push(m[1]);
@@ -9588,7 +10284,7 @@ function validateStatusMessageTemplate(
   maxLength: number,
 ): { error: string | null; warnings: string[] } {
   if (template.length > maxLength) return { error: `Template exceeds ${maxLength} characters`, warnings: [] };
-  const stripped = template.replace(/\{[A-Za-z][A-Za-z0-9_]*\}/g, "");
+  const stripped = template.replace(/\{[A-Za-z][A-Za-z0-9_]*(?::[A-Za-z0-9_-]+)?\}/g, "");
   if (stripped.includes("{") || stripped.includes("}")) {
     return { error: "Unbalanced or stray braces", warnings: [] };
   }
@@ -9612,17 +10308,34 @@ function validateStatusMessageTemplate(
 }
 
 function clientRenderStatusMessage(template: string, ctx: Record<string, string>, separator: string, caseMode: string, allTokenSamples: Record<string, string>): string {
-  const filled = template.replace(/\{([A-Za-z][A-Za-z0-9_]*)\}/g, (_match, name: string) => {
-    if (name === "Sep") return separator || "·";
-    if (name in ctx) return ctx[name] ?? "";
-    if (name in allTokenSamples) return allTokenSamples[name];
-    return "";
-  });
-  const collapsed = filled
+  const sep = separator || "·";
+  const sentinel = "\u001e";
+  const filled = template.replace(
+    /\{([A-Za-z][A-Za-z0-9_]*)(?::([A-Za-z0-9_-]+))?\}/g,
+    (_match, name: string, fmt: string | undefined) => {
+      if (name === "Sep") return sentinel;
+      const raw = name in ctx ? (ctx[name] ?? "") : name in allTokenSamples ? allTokenSamples[name] : "";
+      if (!raw) return "";
+      if (fmt && STATUS_AND_LAYOUT_DATE_TOKENS.has(name)) return formatDateToken(raw, fmt);
+      return raw;
+    },
+  );
+  let rendered = filled;
+  if (filled.includes(sentinel)) {
+    const parts = filled
+      .split(sentinel)
+      .map((p) => p.trim())
+      .filter(Boolean);
+    rendered = parts.join(` ${sep} `);
+  }
+  const collapsed = rendered
     .replace(/[ \t]+/g, " ")
     .replace(/\(\s+/g, "(")
     .replace(/\s+\)/g, ")")
+    .replace(/\(\s*\)/g, "")
+    .replace(/\[\s*\]/g, "")
     .replace(/\s+([,.;:!?])/g, "$1")
+    .replace(/[ \t]+/g, " ")
     .trim();
   if (caseMode === "upper") return collapsed.toUpperCase();
   if (caseMode === "lower") return collapsed.toLowerCase();
@@ -10497,12 +11210,14 @@ function StatusMessagesTokenModal(props: {
   const accent = getBrandAccent(props.brand, props.themeMode);
   const row = (props.payload.registry ?? []).find((r) => r.key === props.rowKey);
   const [draft, setDraft] = useState(props.currentValue);
+  const [pendingDateToken, setPendingDateToken] = useState<string | null>(null);
   const editorRef = useRef<HTMLInputElement | null>(null);
   const cursorRef = useRef<number>(props.currentValue.length);
 
   useEffect(() => {
     setDraft(props.currentValue);
     cursorRef.current = props.currentValue.length;
+    setPendingDateToken(null);
   }, [props.currentValue, props.rowKey]);
 
   if (!row) return null;
@@ -10547,6 +11262,21 @@ function StatusMessagesTokenModal(props: {
         el.setSelectionRange(cursorRef.current, cursorRef.current);
       }
     });
+  }
+
+  function insertToken(token: StatusMessageTokenSpec) {
+    if (STATUS_AND_LAYOUT_DATE_TOKENS.has(token.name)) {
+      setPendingDateToken(token.name);
+      return;
+    }
+    insert(token.placeholder || `{${token.name}}`);
+  }
+
+  function applyDateFormat(formatId: string) {
+    if (!pendingDateToken) return;
+    const fmt = normalizeDateFormat(formatId);
+    insert(`{${pendingDateToken}:${fmt}}`);
+    setPendingDateToken(null);
   }
 
   function commitAndClose() {
@@ -10620,14 +11350,19 @@ function StatusMessagesTokenModal(props: {
 
             const renderTokenChip = (token: StatusMessageTokenSpec) => {
               const isAllowed = allowed.has(token.name);
-              const tooltip = isAllowed ? token.description : `${token.description}\n\nNot available for this message.`;
+              const isDate = STATUS_AND_LAYOUT_DATE_TOKENS.has(token.name);
+              const tooltip = isAllowed
+                ? isDate
+                  ? `${token.description}\n\nOpens a date format picker.`
+                  : token.description
+                : `${token.description}\n\nNot available for this message.`;
               return (
                 <button
                   key={token.name}
                   type="button"
                   title={tooltip}
                   disabled={!isAllowed}
-                  onClick={() => isAllowed && insert(token.placeholder)}
+                  onClick={() => isAllowed && insertToken(token)}
                   className={`flex flex-col items-start gap-0.5 rounded-lg border px-3 py-1.5 text-left transition-colors ${
                     isAllowed
                       ? "border-[#424753]/60 bg-[#1e2430] hover:bg-[#252e3a] text-slate-100"
@@ -10726,6 +11461,50 @@ function StatusMessagesTokenModal(props: {
           </div>
         </div>
       </div>
+
+      {pendingDateToken ? (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setPendingDateToken(null);
+          }}
+        >
+          <div className="w-full max-w-md rounded-2xl border border-[#424753]/40 bg-[#171c22] overflow-hidden">
+            <div className="px-5 py-4 border-b border-[#424753]/30">
+              <h3 className="text-[18px] font-bold text-white font-headline">Date format</h3>
+              <p className="ui-field-description mt-1">
+                Choose a format for{" "}
+                <span className="font-mono text-slate-300">{`{${pendingDateToken}}`}</span>. It will be inserted as{" "}
+                <span className="font-mono text-slate-300">{`{${pendingDateToken}:format}`}</span>.
+              </p>
+            </div>
+            <div className="px-5 py-4 space-y-2">
+              {DATE_FORMAT_OPTIONS.map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => applyDateFormat(opt.id)}
+                  className="flex w-full items-center justify-between gap-3 rounded-lg border border-[#424753]/55 px-3 py-2.5 text-left hover:border-[#424753] hover:bg-white/[0.03]"
+                >
+                  <span className="text-[13px] font-headline uppercase tracking-wider text-slate-200">
+                    {opt.label}
+                  </span>
+                  <span className="font-mono text-[12px] text-slate-400">{opt.example}</span>
+                </button>
+              ))}
+            </div>
+            <div className="px-5 py-3 border-t border-[#424753]/30 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setPendingDateToken(null)}
+                className="text-[14px] font-headline uppercase tracking-wider text-slate-400 hover:text-slate-200"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -12764,12 +13543,6 @@ function OnboardingWizard(props: {
               const statusFields = fields.filter(
                 (f) => f.key === "PLACEHOLDER_STATUS_UPDATES" || f.key === "PLACEHOLDER_STATUS_PROJECTION_MODE",
               );
-              const layerFields = POSTER_OVERLAY_LAYER_KEYS.map((k) => fieldByKey.get(k)).filter(
-                Boolean,
-              ) as SettingsField[];
-              const bannerFields = POSTER_OVERLAY_BANNER_KEYS.map((k) => fieldByKey.get(k)).filter(
-                Boolean,
-              ) as SettingsField[];
               const languageFields = POSTER_LANGUAGE_FIELD_KEYS.map((k) => fieldByKey.get(k)).filter(
                 Boolean,
               ) as SettingsField[];
@@ -12796,25 +13569,7 @@ function OnboardingWizard(props: {
                       {languageFields.map((field) => wizardFieldRow(field, { density: true }))}
                     </SettingsDensityFrame>
                   ) : null}
-                  <PosterOverlayControlsWithPreview
-                    values={props.values}
-                    compact
-                    controls={
-                      <SettingsDensityFrame
-                        legend="Overlays"
-                        intro={
-                          <p>
-                            Compose grayscale, badge, and text banners independently. The preview updates as you
-                            change options. Banner position applies when either text banner is enabled.
-                          </p>
-                        }
-                      >
-                        {[...layerFields, ...bannerFields].map((field) =>
-                          wizardFieldRow(field, { density: true }),
-                        )}
-                      </SettingsDensityFrame>
-                    }
-                  />
+                  <PosterArtOverlaysBlock values={props.values} accentHex={accent.hex} compact />
                     </div>
               );
             })()

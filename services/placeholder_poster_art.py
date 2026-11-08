@@ -110,16 +110,28 @@ def _normalize_art_url(url: str | None) -> str:
     return str(url or "").strip()
 
 
-def _layers_stamp_from_settings() -> dict[str, Any]:
-    """Layer + logo fingerprint stored on each output entry when that JPEG is written."""
-    layers = overlay_layer_fingerprint()
+def _layers_stamp_from_settings(
+    *,
+    grayscale: bool | None = None,
+    profile_key: str | None = None,
+) -> dict[str, Any]:
+    """Layer + logo fingerprint stored on each output entry when that JPEG is written.
+
+    ``grayscale`` is the per-profile flag when baking layout art; omit to fall back
+    to the legacy global PLACEHOLDER_POSTER_GRAYSCALE setting.
+    ``profile_key`` scopes ``layout_hash`` to that profile only.
+    """
+    layers = overlay_layer_fingerprint(profile_key=profile_key)
     return {
-        "grayscale": bool(layers.get("grayscale")),
+        "grayscale": bool(layers.get("grayscale")) if grayscale is None else bool(grayscale),
         "badge": bool(layers.get("badge")),
         "badge_position": str(layers.get("badge_position") or "bottom_right"),
         "placeholder_banner": bool(layers.get("placeholder_banner")),
         "banner_position": str(layers.get("banner_position") or poster_banner_position()),
         "logo_stamp": logo_asset_stamp(),
+        "layout_hash": str(layers.get("layout_hash") or ""),
+        "layout_locale": str(layers.get("layout_locale") or "en"),
+        "layout_profile": str(profile_key or "").strip(),
     }
 
 
@@ -137,6 +149,9 @@ def _normalize_layers_stamp(raw: Any) -> dict[str, Any] | None:
             "placeholder_banner",
             "banner_position",
             "logo_stamp",
+            "layout_hash",
+            "layout_locale",
+            "layout_profile",
         )
     ):
         return None
@@ -149,6 +164,9 @@ def _normalize_layers_stamp(raw: Any) -> dict[str, Any] | None:
         "placeholder_banner": bool(raw.get("placeholder_banner")),
         "banner_position": banner_pos,
         "logo_stamp": str(raw.get("logo_stamp") or ""),
+        "layout_hash": str(raw.get("layout_hash") or ""),
+        "layout_locale": str(raw.get("layout_locale") or "en").strip().lower() or "en",
+        "layout_profile": str(raw.get("layout_profile") or "").strip(),
     }
 
 
@@ -199,6 +217,19 @@ def _effective_overlay_text(mode: str, overlay_text: str | None) -> str:
 
 def _movie_or_episode_overlay_text(mode: str | None = None, *, movie: Any = None, episode: Any = None) -> str | None:
     """Resolve draw text for movie posters / episode thumbs from banner settings."""
+    text, _coming, _cs = _movie_or_episode_banner_state(mode, movie=movie, episode=episode)
+    return text
+
+
+def _movie_or_episode_banner_state(
+    mode: str | None = None, *, movie: Any = None, episode: Any = None
+) -> tuple[str | None, bool, str | None]:
+    """Return (legacy overlay_text, coming_soon_variant, coming_soon_label).
+
+    Profile selection uses the resolved Coming Soon / Airing label whenever the
+    title is unreleased, so ``*.coming_soon`` layouts apply even after the old
+    banner toggle is retired from the UI.
+    """
     from services.poster_overlay_text import (
         lookup_active_placeholder_display_status,
         resolve_draw_overlay_text,
@@ -207,32 +238,38 @@ def _movie_or_episode_overlay_text(mode: str | None = None, *, movie: Any = None
     )
 
     if not poster_overlay_enabled() and str(mode or "").strip().lower() in {"", "off", COMPOSE_MODE}:
-        return None
-    cs_on = coming_soon_banner_enabled()
+        return (None, False, None)
     cs_label: str | None = None
-    if cs_on:
-        if movie is not None:
-            movie_id = getattr(movie, "id", None)
-            status = (
-                lookup_active_placeholder_display_status(movie_id=int(movie_id))
-                if movie_id is not None
-                else None
-            )
-            cs_label = resolve_movie_coming_soon_label(movie, display_status=status)
-        elif episode is not None:
-            episode_id = getattr(episode, "id", None)
-            status = (
-                lookup_active_placeholder_display_status(episode_id=int(episode_id))
-                if episode_id is not None
-                else None
-            )
-            cs_label = resolve_episode_coming_soon_label(episode, display_status=status)
-    return resolve_draw_overlay_text(
+    if movie is not None:
+        movie_id = getattr(movie, "id", None)
+        status = (
+            lookup_active_placeholder_display_status(movie_id=int(movie_id))
+            if movie_id is not None
+            else None
+        )
+        cs_label = resolve_movie_coming_soon_label(movie, display_status=status)
+    elif episode is not None:
+        episode_id = getattr(episode, "id", None)
+        status = (
+            lookup_active_placeholder_display_status(episode_id=int(episode_id))
+            if episode_id is not None
+            else None
+        )
+        cs_label = resolve_episode_coming_soon_label(episode, display_status=status)
+    coming_soon = bool(cs_label)
+    # Legacy overlay_text still respects the old banner toggles for meta parity
+    # until those settings are fully removed from compose.
+    text = resolve_draw_overlay_text(
         mode=mode,
-        coming_soon_banner_enabled=cs_on,
+        coming_soon_banner_enabled=coming_soon_banner_enabled() or coming_soon,
         coming_soon_label=cs_label,
         placeholder_banner_enabled=poster_placeholder_banner_enabled(),
     )
+    # Prefer storing the date label when on the coming-soon profile so date
+    # changes still invalidate sidecar meta after layouts replace banner toggles.
+    if coming_soon and cs_label:
+        text = cs_label
+    return (text, coming_soon, cs_label)
 
 
 def _series_or_season_overlay_text(
@@ -242,18 +279,77 @@ def _series_or_season_overlay_text(
     season: Any | None = None,
 ) -> str | None:
     """Resolve draw text for series/season posters (New Ep. via Coming Soon setting)."""
+    text, _coming, _cs = _series_or_season_banner_state(mode, series=series, season=season)
+    return text
+
+
+def _series_or_season_banner_state(
+    mode: str | None = None,
+    *,
+    series: Any,
+    season: Any | None = None,
+) -> tuple[str | None, bool, str | None]:
+    """Return (legacy overlay_text, coming_soon_variant, new_ep_label).
+
+    New Ep. resolution always runs for profile pick (``tv.placeholder.coming_soon``).
+    """
     from services.poster_overlay_text import resolve_draw_overlay_text, resolve_series_new_ep_label
 
     if not poster_overlay_enabled() and str(mode or "").strip().lower() in {"", "off", COMPOSE_MODE}:
-        return None
-    new_ep_on = series_new_ep_banner_enabled()
-    label = resolve_series_new_ep_label(series, season=season) if new_ep_on else None
-    return resolve_draw_overlay_text(
+        return (None, False, None)
+    label = resolve_series_new_ep_label(series, season=season)
+    coming_soon = bool(label)
+    text = resolve_draw_overlay_text(
         mode=mode,
-        coming_soon_banner_enabled=new_ep_on,
+        coming_soon_banner_enabled=series_new_ep_banner_enabled() or coming_soon,
         coming_soon_label=label,
         placeholder_banner_enabled=poster_placeholder_banner_enabled(),
     )
+    if coming_soon and label:
+        text = label
+    return (text, coming_soon, label)
+
+
+def _layout_compose_kwargs(
+    media_kind: str,
+    *,
+    coming_soon: bool,
+    coming_soon_label: str | None,
+    movie: Any = None,
+    series: Any = None,
+    season: Any = None,
+    episode: Any = None,
+) -> dict[str, Any]:
+    """Build apply_overlay layout kwargs for the active profile."""
+    from services.poster_layouts import (
+        ensure_layouts_persisted,
+        get_profile,
+        grid_size_for_profile,
+        pick_profile_key,
+        resolve_label_tokens,
+    )
+
+    ensure_layouts_persisted()
+    profile_key = pick_profile_key(media_kind, coming_soon=coming_soon)
+    profile = get_profile(profile_key)
+    labels = list(profile.get("labels") or [])
+    cols, rows = grid_size_for_profile(profile_key)
+    tokens = resolve_label_tokens(
+        media_kind=media_kind,
+        movie=movie,
+        series=series,
+        season=season,
+        episode=episode,
+        coming_soon_label=coming_soon_label,
+    )
+    return {
+        "layout_labels": labels,
+        "layout_tokens": tokens,
+        "layout_cols": cols,
+        "layout_rows": rows,
+        "profile_key": profile_key,
+        "grayscale": bool(profile.get("grayscale")),
+    }
 
 
 def _season_poster_source(season: Any, series: Any) -> tuple[str, str]:
@@ -314,10 +410,12 @@ def _write_meta(
     output_basename: str,
     source_kind: str = "",
     overlay_text: str | None = None,
+    grayscale: bool | None = None,
+    profile_key: str | None = None,
 ) -> None:
     existing = _read_meta(meta_path) or {}
     outputs = _normalize_outputs_map(existing.get("outputs"))
-    entry_layers = _layers_stamp_from_settings()
+    entry_layers = _layers_stamp_from_settings(grayscale=grayscale, profile_key=profile_key)
     entry: dict[str, Any] = {
         "file": output_basename,
         "source_url": _normalize_art_url(source_url),
@@ -362,6 +460,8 @@ def _needs_regenerate(
     meta_key: str,
     source_kind: str = "",
     overlay_text: str | None = None,
+    grayscale: bool | None = None,
+    profile_key: str | None = None,
 ) -> bool:
     source_url = _normalize_art_url(source_url)
     if not source_url:
@@ -398,7 +498,7 @@ def _needs_regenerate(
     stored_layers = _normalize_layers_stamp(entry.get("layers"))
     if stored_layers is None:
         return True
-    if stored_layers != _layers_stamp_from_settings():
+    if stored_layers != _layers_stamp_from_settings(grayscale=grayscale, profile_key=profile_key):
         return True
     desired_text = _effective_overlay_text(mode, overlay_text)
     stored_text = str(entry.get("overlay_text") or "").strip()
@@ -473,14 +573,56 @@ def _save_image_to_path(
     mode: str,
     landscape: bool,
     overlay_text: str | None = None,
+    layout_labels: list | None = None,
+    layout_tokens: dict | None = None,
+    layout_cols: int | None = None,
+    layout_rows: int | None = None,
+    grayscale: bool | None = None,
 ) -> bool:
     """Write JPEG using overlay mode (raw when off or compositing unavailable)."""
-    if mode == "off":
+    if mode == "off" and layout_labels is None:
         return save_raw_poster_from_url(url, output_path)
-    img = composite_poster_from_url(url, mode, landscape=landscape, overlay_text=overlay_text)
+    img = composite_poster_from_url(
+        url,
+        mode if mode != "off" else COMPOSE_MODE,
+        landscape=landscape,
+        overlay_text=overlay_text,
+        layout_labels=layout_labels,
+        layout_tokens=layout_tokens,
+        layout_cols=layout_cols,
+        layout_rows=layout_rows,
+        grayscale=grayscale,
+    )
     if img is not None:
         return save_jpeg(img, output_path)
     return save_raw_poster_from_url(url, output_path)
+
+
+def _active_layout_kwargs(
+    *,
+    mode: str,
+    layout_labels: list | None,
+    layout_tokens: dict | None,
+    layout_cols: int | None,
+    layout_rows: int | None,
+) -> tuple[str, list | None, dict | None, int | None, int | None]:
+    """Return (effective_mode, labels, tokens, cols, rows) for compose vs raw.
+
+    Empty layout lists do not force compositing when overlays are otherwise off.
+    """
+    labels = layout_labels
+    tokens = layout_tokens
+    cols = layout_cols
+    rows = layout_rows
+    if labels is not None and not labels and str(mode or "").strip().lower() == "off":
+        labels = None
+        tokens = None
+        cols = None
+        rows = None
+    effective_mode = mode
+    if labels is not None and str(mode or "").strip().lower() == "off":
+        effective_mode = COMPOSE_MODE
+    return effective_mode, labels, tokens, cols, rows
 
 
 def _write_art_file(
@@ -492,25 +634,40 @@ def _write_art_file(
     meta_key: str,
     source_kind: str = "",
     overlay_text: str | None = None,
+    layout_labels: list | None = None,
+    layout_tokens: dict | None = None,
+    layout_cols: int | None = None,
+    layout_rows: int | None = None,
+    grayscale: bool | None = None,
+    profile_key: str | None = None,
 ) -> bool:
     url = _normalize_art_url(source_url)
     if not url:
         return False
     meta_path = _meta_path_for_output(output_path)
+    effective_mode, layout_labels, layout_tokens, layout_cols, layout_rows = _active_layout_kwargs(
+        mode=mode,
+        layout_labels=layout_labels,
+        layout_tokens=layout_tokens,
+        layout_cols=layout_cols,
+        layout_rows=layout_rows,
+    )
     if not _needs_regenerate(
         output_path,
-        mode=mode,
+        mode=effective_mode,
         source_url=url,
         meta_key=meta_key,
         source_kind=source_kind,
         overlay_text=overlay_text,
+        grayscale=grayscale,
+        profile_key=profile_key,
     ):
         artifacts = [output_path, meta_path]
         folder = os.path.dirname(os.path.abspath(output_path))
         folder_jpg = os.path.join(folder, SERIES_FOLDER_JPEG)
         if meta_key == "series_poster" and os.path.isfile(folder_jpg):
             artifacts.append(folder_jpg)
-        if mode != "off" and meta_key in _GRID_META_KEYS:
+        if effective_mode != "off" and meta_key in _GRID_META_KEYS:
             grid_path = os.path.join(folder, POSTER_GRID_JPEG)
             if not os.path.isfile(grid_path):
                 if write_library_grid_poster(folder, url):
@@ -518,17 +675,28 @@ def _write_art_file(
         _apply_art_file_permissions(output_path, *artifacts)
         return False
     if not _save_image_to_path(
-        output_path, url, mode=mode, landscape=landscape, overlay_text=overlay_text
+        output_path,
+        url,
+        mode=effective_mode,
+        landscape=landscape,
+        overlay_text=overlay_text,
+        layout_labels=layout_labels,
+        layout_tokens=layout_tokens,
+        layout_cols=layout_cols,
+        layout_rows=layout_rows,
+        grayscale=grayscale,
     ):
         return False
     _write_meta(
         meta_path,
-        mode=mode,
+        mode=effective_mode,
         meta_key=meta_key,
         source_url=url,
         output_basename=os.path.basename(output_path),
         source_kind=source_kind,
         overlay_text=overlay_text,
+        grayscale=grayscale,
+        profile_key=profile_key,
     )
     artifacts = [output_path, meta_path]
     if meta_key == "series_poster":
@@ -536,7 +704,7 @@ def _write_art_file(
         folder_copy = os.path.join(os.path.dirname(os.path.abspath(output_path)), SERIES_FOLDER_JPEG)
         if os.path.isfile(folder_copy):
             artifacts.append(folder_copy)
-    if mode != "off" and meta_key in _GRID_META_KEYS:
+    if effective_mode != "off" and meta_key in _GRID_META_KEYS:
         grid_path = os.path.join(os.path.dirname(os.path.abspath(output_path)), POSTER_GRID_JPEG)
         if write_library_grid_poster(os.path.dirname(output_path), url):
             artifacts.append(grid_path)
@@ -685,13 +853,21 @@ def movie_art_needs_refresh(movie: Any, media_path: str) -> bool:
     folder = os.path.dirname(os.path.abspath(media_path))
     out_path = os.path.join(folder, POSTER_JPEG)
     url = effective_poster_url(movie)
-    overlay_text = _movie_or_episode_overlay_text(mode, movie=movie)
+    overlay_text, coming_soon, cs_label = _movie_or_episode_banner_state(mode, movie=movie)
+    layout_kw = _layout_compose_kwargs(
+        "movie",
+        coming_soon=coming_soon,
+        coming_soon_label=cs_label,
+        movie=movie,
+    )
     return _needs_regenerate(
         out_path,
         mode=mode,
         source_url=url or "",
         meta_key="poster",
         overlay_text=overlay_text,
+        grayscale=layout_kw.get("grayscale"),
+        profile_key=layout_kw.get("profile_key"),
     )
 
 
@@ -708,7 +884,16 @@ def season_art_needs_refresh(season: Any, series: Any, series_folder: str) -> bo
     season_number = int(getattr(season, "season_number", 0) or 0)
     out_path = os.path.join(folder, season_poster_filename(season_number))
     url, kind = _season_poster_source(season, series)
-    overlay_text = _series_or_season_overlay_text(mode, series=series, season=season)
+    overlay_text, coming_soon, cs_label = _series_or_season_banner_state(
+        mode, series=series, season=season
+    )
+    layout_kw = _layout_compose_kwargs(
+        "tv",
+        coming_soon=coming_soon,
+        coming_soon_label=cs_label,
+        series=series,
+        season=season,
+    )
     return _needs_regenerate(
         out_path,
         mode=mode,
@@ -716,6 +901,8 @@ def season_art_needs_refresh(season: Any, series: Any, series_folder: str) -> bo
         meta_key=_season_poster_meta_key(season_number),
         source_kind=kind,
         overlay_text=overlay_text,
+        grayscale=layout_kw.get("grayscale"),
+        profile_key=layout_kw.get("profile_key"),
     )
 
 
@@ -736,7 +923,13 @@ def series_art_needs_refresh(
     out_path = os.path.join(folder, POSTER_JPEG)
     url = _normalize_art_url(effective_poster_url(series))
     kind = "series" if url else "none"
-    overlay_text = _series_or_season_overlay_text(mode, series=series)
+    overlay_text, coming_soon, cs_label = _series_or_season_banner_state(mode, series=series)
+    layout_kw = _layout_compose_kwargs(
+        "tv",
+        coming_soon=coming_soon,
+        coming_soon_label=cs_label,
+        series=series,
+    )
     if _needs_regenerate(
         out_path,
         mode=mode,
@@ -744,6 +937,8 @@ def series_art_needs_refresh(
         meta_key="series_poster",
         source_kind=kind,
         overlay_text=overlay_text,
+        grayscale=layout_kw.get("grayscale"),
+        profile_key=layout_kw.get("profile_key"),
     ):
         return True
 
@@ -778,7 +973,15 @@ def episode_still_art_needs_refresh(
     thumb_name = episode_thumb_filename(media_path)
     thumb_path = os.path.join(folder, thumb_name)
     still_url, kind = _episode_thumb_source(episode, series)
-    overlay_text = _movie_or_episode_overlay_text(mode, episode=episode)
+    overlay_text, coming_soon, cs_label = _movie_or_episode_banner_state(mode, episode=episode)
+    layout_kw = _layout_compose_kwargs(
+        "episode",
+        coming_soon=coming_soon,
+        coming_soon_label=cs_label,
+        series=series,
+        season=season,
+        episode=episode,
+    )
     return _needs_regenerate(
         thumb_path,
         mode=mode,
@@ -786,6 +989,8 @@ def episode_still_art_needs_refresh(
         meta_key=episode_thumb_meta_key(thumb_name),
         source_kind=kind,
         overlay_text=overlay_text,
+        grayscale=layout_kw.get("grayscale"),
+        profile_key=layout_kw.get("profile_key"),
     )
 
 
@@ -799,7 +1004,13 @@ def ensure_movie_art(movie: Any, media_path: str) -> ArtResult:
     folder = os.path.dirname(os.path.abspath(media_path))
     out_path = os.path.join(folder, POSTER_JPEG)
     url = effective_poster_url(movie)
-    overlay_text = _movie_or_episode_overlay_text(mode, movie=movie)
+    overlay_text, coming_soon, cs_label = _movie_or_episode_banner_state(mode, movie=movie)
+    layout_kw = _layout_compose_kwargs(
+        "movie",
+        coming_soon=coming_soon,
+        coming_soon_label=cs_label,
+        movie=movie,
+    )
     if _write_art_file(
         out_path,
         url,
@@ -807,6 +1018,10 @@ def ensure_movie_art(movie: Any, media_path: str) -> ArtResult:
         landscape=False,
         meta_key="poster",
         overlay_text=overlay_text,
+        **{
+            k: layout_kw[k]
+            for k in ("layout_labels", "layout_tokens", "layout_cols", "layout_rows", "grayscale", "profile_key")
+        },
     ):
         result.local_art.poster = POSTER_JPEG
         result.wrote_any = True
@@ -833,7 +1048,16 @@ def ensure_season_art(season: Any, series: Any, series_folder: str) -> ArtResult
     filename = season_poster_filename(season_number)
     out_path = os.path.join(folder, filename)
     url, kind = _season_poster_source(season, series)
-    overlay_text = _series_or_season_overlay_text(mode, series=series, season=season)
+    overlay_text, coming_soon, cs_label = _series_or_season_banner_state(
+        mode, series=series, season=season
+    )
+    layout_kw = _layout_compose_kwargs(
+        "tv",
+        coming_soon=coming_soon,
+        coming_soon_label=cs_label,
+        series=series,
+        season=season,
+    )
     if _write_art_file(
         out_path,
         url,
@@ -842,6 +1066,10 @@ def ensure_season_art(season: Any, series: Any, series_folder: str) -> ArtResult
         meta_key=_season_poster_meta_key(season_number),
         source_kind=kind,
         overlay_text=overlay_text,
+        **{
+            k: layout_kw[k]
+            for k in ("layout_labels", "layout_tokens", "layout_cols", "layout_rows", "grayscale", "profile_key")
+        },
     ):
         result.local_art.poster = filename
         result.wrote_any = True
@@ -867,7 +1095,13 @@ def ensure_series_art(
     out_path = os.path.join(folder, POSTER_JPEG)
     url = _normalize_art_url(effective_poster_url(series))
     kind = "series" if url else "none"
-    overlay_text = _series_or_season_overlay_text(mode, series=series)
+    overlay_text, coming_soon, cs_label = _series_or_season_banner_state(mode, series=series)
+    layout_kw = _layout_compose_kwargs(
+        "tv",
+        coming_soon=coming_soon,
+        coming_soon_label=cs_label,
+        series=series,
+    )
     if _write_art_file(
         out_path,
         url,
@@ -876,6 +1110,10 @@ def ensure_series_art(
         meta_key="series_poster",
         source_kind=kind,
         overlay_text=overlay_text,
+        **{
+            k: layout_kw[k]
+            for k in ("layout_labels", "layout_tokens", "layout_cols", "layout_rows", "grayscale", "profile_key")
+        },
     ):
         result.local_art.poster = POSTER_JPEG
         result.wrote_any = True
@@ -921,7 +1159,15 @@ def ensure_episode_still_art(
     thumb_path = os.path.join(folder, thumb_name)
     still_url, kind = _episode_thumb_source(episode, series)
     meta_key = episode_thumb_meta_key(thumb_name)
-    overlay_text = _movie_or_episode_overlay_text(mode, episode=episode)
+    overlay_text, coming_soon, cs_label = _movie_or_episode_banner_state(mode, episode=episode)
+    layout_kw = _layout_compose_kwargs(
+        "episode",
+        coming_soon=coming_soon,
+        coming_soon_label=cs_label,
+        series=series,
+        season=season,
+        episode=episode,
+    )
     if _write_art_file(
         thumb_path,
         still_url,
@@ -930,6 +1176,10 @@ def ensure_episode_still_art(
         meta_key=meta_key,
         source_kind=kind,
         overlay_text=overlay_text,
+        **{
+            k: layout_kw[k]
+            for k in ("layout_labels", "layout_tokens", "layout_cols", "layout_rows", "grayscale", "profile_key")
+        },
     ):
         result.local_art.thumb = thumb_name
         result.wrote_any = True

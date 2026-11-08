@@ -118,21 +118,21 @@ _TOKEN_SPECS: tuple[TokenSpec, ...] = (
         name="TheatricalDate",
         label="Theatrical date",
         group="Movie",
-        description="Movie theatrical (in-cinemas) date from Radarr as YYYY-MM-DD. Empty when unknown.",
+        description="Movie theatrical (in-cinemas) date from Radarr. Insert opens a format picker (default ISO YYYY-MM-DD). Empty when unknown.",
         sample="2010-07-16",
     ),
     TokenSpec(
         name="DigitalDate",
         label="Digital date",
         group="Movie",
-        description="Movie digital release date from Radarr as YYYY-MM-DD. Empty when unknown.",
+        description="Movie digital release date from Radarr. Insert opens a format picker (default ISO YYYY-MM-DD). Empty when unknown.",
         sample="2010-12-07",
     ),
     TokenSpec(
         name="PhysicalDate",
         label="Physical date",
         group="Movie",
-        description="Movie physical release date from Radarr as YYYY-MM-DD. Empty when unknown.",
+        description="Movie physical release date from Radarr. Insert opens a format picker (default ISO YYYY-MM-DD). Empty when unknown.",
         sample="2010-12-07",
     ),
     # TV · Series
@@ -149,7 +149,7 @@ _TOKEN_SPECS: tuple[TokenSpec, ...] = (
         label="Series premiere date",
         group="TV",
         subgroup="Series",
-        description="Series first-aired date from Sonarr as YYYY-MM-DD. Empty when unknown.",
+        description="Series first-aired date from Sonarr. Insert opens a format picker (default ISO YYYY-MM-DD). Empty when unknown.",
         sample="2008-01-20",
     ),
     # TV · Season
@@ -167,7 +167,8 @@ _TOKEN_SPECS: tuple[TokenSpec, ...] = (
         group="TV",
         subgroup="Season",
         description=(
-            "Earliest episode air date in the season as YYYY-MM-DD. Empty when no episode dates are known."
+            "Earliest episode air date in the season. Insert opens a format picker (default ISO YYYY-MM-DD). "
+            "Empty when no episode dates are known."
         ),
         sample="2008-01-20",
     ),
@@ -201,7 +202,7 @@ _TOKEN_SPECS: tuple[TokenSpec, ...] = (
         label="Air date",
         group="TV",
         subgroup="Episode",
-        description="Episode air date as YYYY-MM-DD. Empty when unknown.",
+        description="Episode air date. Insert opens a format picker (default ISO YYYY-MM-DD). Empty when unknown.",
         sample="2008-01-20",
     ),
     # Calendar (countdown / preferred-date context)
@@ -237,9 +238,10 @@ _TOKEN_SPECS: tuple[TokenSpec, ...] = (
         label="Preferred release date",
         group="Calendar",
         description=(
-            "Coming Soon target date in YYYY-MM-DD form: preferred movie date type, or TV air date "
-            "for countdown messages. For fixed movie/TV dates on any status, use {TheatricalDate}, "
-            "{DigitalDate}, {PhysicalDate}, or {AirDate}."
+            "Coming Soon target date from the preferred movie release type, or TV air date for "
+            "countdown messages. Supports {ReleaseDate:format} like other date tokens. For a fixed "
+            "release type on any status, use {TheatricalDate}, {DigitalDate}, {PhysicalDate}, or "
+            "{AirDate}."
         ),
         sample="2026-12-25",
     ),

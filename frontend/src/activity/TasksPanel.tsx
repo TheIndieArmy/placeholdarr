@@ -407,7 +407,8 @@ export function TasksPanel(props: {
                     ) : null}
                     {task.task_key === "calendar_sync" ? (
                       <p className="text-[12px] font-normal mt-0.5 max-w-md" style={{ color: semantic.fgSubtle }}>
-                        Release date refresh and Coming Soon / countdown status updates.
+                        Release date refresh, Coming Soon / countdown status, and stale Coming Soon / New Ep. poster
+                        rebakes.
                       </p>
                     ) : null}
                     {task.task_key === "watchlist_sync" ? (

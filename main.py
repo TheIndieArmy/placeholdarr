@@ -621,6 +621,10 @@ app.include_router(collections_router)
 from routes.messages import router as messages_router
 app.include_router(messages_router)
 
+# Poster / thumb grid layout designer
+from routes.poster_layouts import router as poster_layouts_router
+app.include_router(poster_layouts_router)
+
 from routes.whats_new import router as whats_new_router
 app.include_router(whats_new_router)
 

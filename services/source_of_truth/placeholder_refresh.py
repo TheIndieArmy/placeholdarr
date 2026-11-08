@@ -30,8 +30,69 @@ def _empty_intent(*, source: str | None = None) -> dict[str, Any]:
         "templates": False,
         # Narrow art refresh: all | coming_soon | tv_new_ep | coming_soon_and_tv
         "art_scope": "all",
+        # Optional layout-designer filter (kinds/variants); full=true clears narrowing.
+        "layout_art": None,
         "source": str(source or "").strip(),
         "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _normalize_layout_art(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    kinds = sorted(
+        {
+            str(k).strip().lower()
+            for k in (raw.get("kinds") or [])
+            if str(k).strip().lower() in {"movie", "tv", "episode"}
+        }
+    )
+    variants = sorted(
+        {
+            str(v).strip().lower()
+            for v in (raw.get("variants") or [])
+            if str(v).strip().lower() in {"default", "coming_soon"}
+        }
+    )
+    full = bool(raw.get("full"))
+    if full:
+        return {
+            "full": True,
+            "kinds": ["movie", "tv", "episode"],
+            "variants": ["default", "coming_soon"],
+            "reason": str(raw.get("reason") or "full"),
+        }
+    if not kinds:
+        return None
+    return {
+        "full": False,
+        "kinds": kinds,
+        "variants": variants or ["default", "coming_soon"],
+        "reason": str(raw.get("reason") or "changed_profiles"),
+    }
+
+
+def _merge_layout_art(prior: Any, incoming: Any) -> dict[str, Any] | None:
+    left = _normalize_layout_art(prior)
+    right = _normalize_layout_art(incoming)
+    if left is None:
+        return right
+    if right is None:
+        return left
+    if left.get("full") or right.get("full"):
+        return {
+            "full": True,
+            "kinds": ["movie", "tv", "episode"],
+            "variants": ["default", "coming_soon"],
+            "reason": "merged_full",
+        }
+    kinds = sorted(set(left.get("kinds") or []) | set(right.get("kinds") or []))
+    variants = sorted(set(left.get("variants") or []) | set(right.get("variants") or []))
+    return {
+        "full": False,
+        "kinds": kinds,
+        "variants": variants or ["default", "coming_soon"],
+        "reason": "merged_profiles",
     }
 
 
@@ -78,6 +139,7 @@ def _normalize_intent(raw: Any) -> dict[str, Any]:
     out["art"] = bool(raw.get("art"))
     out["templates"] = bool(raw.get("templates"))
     out["art_scope"] = _normalize_art_scope(raw, art=bool(out["art"]))
+    out["layout_art"] = _normalize_layout_art(raw.get("layout_art"))
     if isinstance(raw.get("updated_at"), str) and str(raw.get("updated_at")).strip():
         out["updated_at"] = str(raw["updated_at"]).strip()
     return out
@@ -153,6 +215,7 @@ def merge_pending_intent(
     templates: bool = False,
     art_coming_soon_only: bool = False,
     art_scope: str | None = None,
+    layout_art: dict[str, Any] | None = None,
     source: str | None = None,
 ) -> dict[str, Any]:
     session = get_session()
@@ -177,8 +240,10 @@ def merge_pending_intent(
                 merged["art_scope"] = incoming_scope
             else:
                 merged["art_scope"] = _merge_art_scopes(prior_scope, incoming_scope)
+            merged["layout_art"] = _merge_layout_art(merged.get("layout_art"), layout_art)
         elif not merged["art"]:
             merged["art_scope"] = "all"
+            merged["layout_art"] = None
         merged["source"] = str(source or merged.get("source") or "").strip()
         merged["updated_at"] = datetime.now(timezone.utc).isoformat()
         _set_pending_intent(session, merged)
@@ -395,6 +460,7 @@ def execute_placeholder_refresh_apply_scope(
     templates: bool = False,
     art_coming_soon_only: bool = False,
     art_scope: str | None = None,
+    layout_art: dict[str, Any] | None = None,
     source: str = "settings_save",
     task_run_trigger: str | None = None,
 ) -> dict[str, Any]:
@@ -414,6 +480,7 @@ def execute_placeholder_refresh_apply_scope(
         requested_art_scope = "all"
     if not requested_art:
         requested_art_scope = "all"
+    requested_layout_art = _normalize_layout_art(layout_art) if requested_art else None
     if not requested_metadata and not requested_art:
         return {
             "ok": True,
@@ -441,6 +508,7 @@ def execute_placeholder_refresh_apply_scope(
             art=requested_art,
             templates=bool(templates),
             art_scope=requested_art_scope,
+            layout_art=requested_layout_art,
             source=source,
         )
         out.update({"ok": True, "scope": "next_full_sync", "enqueued": False, "pending": True})
@@ -508,6 +576,7 @@ def execute_placeholder_refresh_apply_scope(
             source=f"{source}:apply_now",
             art_scope=requested_art_scope,
             skip_determination=skip_art_determination,
+            layout_art=requested_layout_art,
             **enqueue_kwargs,
         )
         out["art_backfill"] = art_out
@@ -519,6 +588,21 @@ def execute_placeholder_refresh_apply_scope(
             )
         art_committed = _refresh_enqueue_committed(art_out)
         out["enqueued"] = bool(out["enqueued"] or art_committed and bool(art_out.get("enqueued")))
+        if (
+            art_committed
+            and requested_layout_art
+            and bool(requested_layout_art.get("full"))
+            and str(source or "").startswith("settings_save:poster_layouts")
+        ):
+            try:
+                from services.poster_layouts import mark_layout_art_library_synced
+
+                mark_layout_art_library_synced(True)
+            except Exception as exc:
+                logger.warning(
+                    f"Failed marking layout art library synced: {exc}",
+                    extra={"emoji_type": "warning"},
+                )
 
     clear_metadata = bool(requested_metadata and metadata_committed)
     clear_art = bool(requested_art and art_committed)
@@ -1085,14 +1169,26 @@ def run_placeholder_refresh_if_pending(*, source: str, task_run_id: int) -> dict
     if art:
         from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_backfill_all
 
+        pending_layout_art = _normalize_layout_art(intent.get("layout_art"))
         art_out = enqueue_placeholder_art_backfill_all(
             source=source,
             task_run_id=task_run_id,
             art_scope=str(intent.get("art_scope") or "all"),
+            layout_art=pending_layout_art,
         )
         out["art_backfill"] = art_out
         art_committed = _refresh_enqueue_committed(art_out)
         out["enqueued"] = bool(out["enqueued"] or art_committed and bool(art_out.get("enqueued")))
+        if art_committed and pending_layout_art and bool(pending_layout_art.get("full")):
+            try:
+                from services.poster_layouts import mark_layout_art_library_synced
+
+                mark_layout_art_library_synced(True)
+            except Exception as exc:
+                logger.warning(
+                    f"Failed marking layout art library synced after full sync: {exc}",
+                    extra={"emoji_type": "warning"},
+                )
 
     clear_metadata = bool(metadata and metadata_committed)
     clear_art = bool(art and art_committed)

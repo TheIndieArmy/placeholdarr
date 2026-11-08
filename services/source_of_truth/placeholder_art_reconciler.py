@@ -97,6 +97,34 @@ def collect_active_placeholder_ids(session) -> list[int]:
     return [int(r[0]) for r in rows if r and r[0] is not None]
 
 
+def collect_movie_placeholder_ids(session) -> list[int]:
+    """Active movie placeholders (poster art)."""
+    rows = (
+        session.query(Placeholder.id)
+        .filter(
+            Placeholder.has_placeholder == True,  # noqa: E712
+            Placeholder.movie_id.isnot(None),
+        )
+        .order_by(Placeholder.id.asc())
+        .all()
+    )
+    return [int(r[0]) for r in rows if r and r[0] is not None]
+
+
+def collect_episode_placeholder_ids(session) -> list[int]:
+    """Active episode placeholders (still/thumb art)."""
+    rows = (
+        session.query(Placeholder.id)
+        .filter(
+            Placeholder.has_placeholder == True,  # noqa: E712
+            Placeholder.episode_id.isnot(None),
+        )
+        .order_by(Placeholder.id.asc())
+        .all()
+    )
+    return [int(r[0]) for r in rows if r and r[0] is not None]
+
+
 def collect_coming_soon_placeholder_ids(session) -> list[int]:
     """Active placeholders currently in a Coming Soon display status (movies + episodes)."""
     from services.source_of_truth.calendar_phase import _COMING_SOON_STATUS_VALUES
@@ -111,6 +139,55 @@ def collect_coming_soon_placeholder_ids(session) -> list[int]:
         .all()
     )
     return [int(r[0]) for r in rows if r and r[0] is not None]
+
+
+def collect_placeholder_ids_for_layout_art(
+    session,
+    *,
+    kinds: list[str] | tuple[str, ...] | set[str] | None,
+    variants: list[str] | tuple[str, ...] | set[str] | None,
+) -> list[int]:
+    """Active placeholder ids for layout-designer art refresh filters.
+
+    ``kinds``: movie | tv | episode. ``variants``: default | coming_soon.
+    TV always includes one placeholder per series when ``tv`` is selected (New Ep.
+    vs Default cannot be cheaply split without per-series scans).
+    """
+    kind_set = {str(k).strip().lower() for k in (kinds or []) if str(k).strip()}
+    variant_set = {str(v).strip().lower() for v in (variants or []) if str(v).strip()}
+    if not kind_set:
+        return []
+    if not variant_set:
+        variant_set = {"default", "coming_soon"}
+    want_default = "default" in variant_set
+    want_cs = "coming_soon" in variant_set
+    both_variants = want_default and want_cs
+
+    coming_soon_ids: set[int] | None = None
+    if not both_variants and ("movie" in kind_set or "episode" in kind_set):
+        coming_soon_ids = set(collect_coming_soon_placeholder_ids(session))
+
+    out: set[int] = set()
+    if "movie" in kind_set:
+        movie_ids = set(collect_movie_placeholder_ids(session))
+        if both_variants:
+            out |= movie_ids
+        elif want_cs:
+            out |= movie_ids & (coming_soon_ids or set())
+        else:
+            out |= movie_ids - (coming_soon_ids or set())
+    if "episode" in kind_set:
+        episode_ids = set(collect_episode_placeholder_ids(session))
+        if both_variants:
+            out |= episode_ids
+        elif want_cs:
+            out |= episode_ids & (coming_soon_ids or set())
+        else:
+            out |= episode_ids - (coming_soon_ids or set())
+    if "tv" in kind_set:
+        # Series/season posters: include all series stubs; bake picks default vs New Ep.
+        out |= set(collect_tv_placeholder_ids(session))
+    return sorted(out)
 
 
 def collect_tv_placeholder_ids(session) -> list[int]:
@@ -162,16 +239,15 @@ def collect_tv_placeholder_ids(session) -> list[int]:
 def art_scope_writes_episode_stills(art_scope: str | None, display_status: str | None) -> bool:
     """Whether a narrow art refresh should rewrite episode thumbs.
 
-    ``tv_new_ep`` only updates series/season posters. ``coming_soon_and_tv`` stills
-    only for Coming Soon episode rows; other scopes rewrite stills as usual.
+    ``tv_new_ep`` only updates series/season posters (no stills). All other scopes
+    rewrite stills for episode ids already in the job, including
+    ``coming_soon_and_tv`` so thumbs that just left Coming Soon can rebake.
+    ``display_status`` is kept for call-site compatibility and is unused.
     """
+    _ = display_status  # call sites still pass status; scope alone decides.
     scope = str(art_scope or "all").strip().lower() or "all"
     if scope == "tv_new_ep":
         return False
-    if scope == "coming_soon_and_tv":
-        from services.source_of_truth.calendar_phase import _is_coming_soon_status
-
-        return _is_coming_soon_status(display_status)
     return True
 
 
@@ -686,6 +762,87 @@ def enqueue_art_refresh_for_calendar_date_changes(
     return enqueue_placeholder_art_refresh(unique, session=session)
 
 
+def enqueue_art_refresh_for_calendar_coming_soon(
+    *,
+    status_changed_placeholder_ids: list[int] | set[int] | None = None,
+    source: str = "calendar_sync",
+    task_run_id: int | None = None,
+) -> dict:
+    """Rebake Coming Soon / New Ep. posters whose overlay label or profile stamp is stale.
+
+    Used after calendar date refresh + calendar status so day-rollover next-unairied
+    labels update even when ARR did not change ``air_date``, and so titles that leave
+    Coming Soon are not left with a stamped CS label.
+
+    Candidates: current Coming Soon placeholders, TV series/season posters, plus any
+    placeholders whose calendar status/reason just changed. Determination uses
+    ``art_scope="all"`` so episode thumbs exiting Coming Soon stay eligible; the job
+    skips a second determination and writes with ``all`` still rules for those ids.
+    """
+    session = get_session()
+    try:
+        candidates = set(collect_placeholder_ids_for_art_scope(session, "coming_soon_and_tv"))
+        for raw in status_changed_placeholder_ids or []:
+            try:
+                candidates.add(int(raw))
+            except (TypeError, ValueError):
+                continue
+        if not candidates:
+            return {
+                "ok": True,
+                "placeholder_count": 0,
+                "enqueued": False,
+                "reason": "no_candidates",
+                "source": source,
+                "art_scope": "coming_soon_and_tv",
+            }
+        # Determine with ``all`` so episode thumbs that just left Coming Soon
+        # (status_changed) are not vetoed by the coming_soon_and_tv still gate.
+        needed = determine_art_refresh_ids(
+            session,
+            sorted(candidates),
+            art_scope="all",
+        )
+        if not needed:
+            return {
+                "ok": True,
+                "placeholder_count": 0,
+                "enqueued": False,
+                "reason": "up_to_date",
+                "source": source,
+                "art_scope": "coming_soon_and_tv",
+                "candidates": len(candidates),
+            }
+        # Job payload uses ``all`` for write-time stills (CS-exit thumbs). Candidate
+        # set was already narrowed; skip a second determination that would re-apply
+        # the coming_soon_and_tv still filter and drop those ids.
+        extras: dict[str, Any] = {
+            "art_backfill_source": source,
+            "art_scope": "all",
+            "coming_soon_only": False,
+        }
+        if task_run_id is not None:
+            tid = int(task_run_id)
+            extras[FULL_SYNC_TASK_RUN_ID_KEY] = tid
+            extras[ART_BACKFILL_TASK_RUN_ID_KEY] = tid
+        out = enqueue_placeholder_art_refresh(
+            needed,
+            session=session,
+            merge_into_pending=False,
+            payload_extras=extras,
+            skip_determination=True,
+        )
+        batch_count = int(out.get("jobs_created") or 0)
+        out["art_scope"] = "coming_soon_and_tv"
+        out["candidates"] = len(candidates)
+        out["needed"] = len(needed)
+        out["enqueued"] = bool(out.get("ok")) and batch_count > 0
+        out["source"] = source
+        return out
+    finally:
+        session.close()
+
+
 def enqueue_placeholder_art_backfill_all(
     *,
     source: str = "full_sync",
@@ -694,11 +851,16 @@ def enqueue_placeholder_art_backfill_all(
     coming_soon_only: bool = False,
     art_scope: str | None = None,
     skip_determination: bool = False,
+    layout_art: dict[str, Any] | None = None,
 ) -> dict:
     """Queue art refresh for active placeholders.
 
     ``art_scope``: ``all`` | ``coming_soon`` | ``tv_new_ep`` | ``coming_soon_and_tv``.
     Legacy ``coming_soon_only=True`` maps to ``coming_soon``.
+
+    ``layout_art`` (from the poster layout designer) narrows by media kind / variant
+    after the first full layout art migration. When ``layout_art.full`` is true, or
+    ``layout_art`` is omitted, ``art_scope`` collection is used as usual.
 
     Full-library scopes finish with a section metadata refresh. Narrow banner
     toggles use per-batch path refresh only (no whole-library Plex metadata scan).
@@ -709,9 +871,18 @@ def enqueue_placeholder_art_backfill_all(
     scope = str(art_scope or "").strip().lower()
     if not scope:
         scope = "coming_soon" if coming_soon_only else "all"
+    layout_filter = layout_art if isinstance(layout_art, dict) else None
     session = get_session()
     try:
-        ids = collect_placeholder_ids_for_art_scope(session, scope)
+        if layout_filter and not bool(layout_filter.get("full")):
+            ids = collect_placeholder_ids_for_layout_art(
+                session,
+                kinds=layout_filter.get("kinds") or [],
+                variants=layout_filter.get("variants") or [],
+            )
+            scope = "layout_filtered"
+        else:
+            ids = collect_placeholder_ids_for_art_scope(session, scope)
         if not ids:
             return {
                 "ok": True,
@@ -720,16 +891,27 @@ def enqueue_placeholder_art_backfill_all(
                 "source": source,
                 "art_scope": scope,
                 "coming_soon_only": scope == "coming_soon",
+                "layout_art": layout_filter,
             }
         run_id = uuid.uuid4().hex
-        section_completion = art_scope_uses_section_completion_refresh(scope)
+        # Kind-filtered layout refreshes still need section completion like full overlay passes.
+        section_completion = art_scope_uses_section_completion_refresh(
+            "all" if scope == "layout_filtered" else scope
+        )
         extras: dict[str, Any] = {
             ART_BACKFILL_RUN_ID_KEY: run_id,
             ART_BACKFILL_REFRESH_ON_COMPLETION_KEY: section_completion,
             "art_backfill_source": source,
-            "art_scope": scope,
+            "art_scope": scope if scope != "layout_filtered" else "all",
             "coming_soon_only": scope == "coming_soon",
         }
+        if layout_filter:
+            extras["layout_art"] = {
+                "full": bool(layout_filter.get("full")),
+                "kinds": list(layout_filter.get("kinds") or []),
+                "variants": list(layout_filter.get("variants") or []),
+                "reason": str(layout_filter.get("reason") or ""),
+            }
         if task_run_id is not None:
             tid = int(task_run_id)
             extras[FULL_SYNC_TASK_RUN_ID_KEY] = tid
@@ -781,8 +963,10 @@ def enqueue_placeholder_art_backfill_all(
         out["art_backfill_run_id"] = run_id
         out["batch_count"] = batch_count
         out["enqueued"] = bool(out.get("ok")) and batch_count > 0
-        out["art_scope"] = scope
+        out["art_scope"] = "all" if scope == "layout_filtered" else scope
         out["coming_soon_only"] = scope == "coming_soon"
+        if layout_filter:
+            out["layout_art"] = extras.get("layout_art")
         return out
     finally:
         session.close()
