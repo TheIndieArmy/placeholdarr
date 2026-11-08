@@ -9,6 +9,12 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Fixed
+
+- **Library reconcile pipeline lock**: Title Refresh defers when lite/full sync holds the shared pipeline instead of rematerializing on top of it.
+- **Arted Rating missing source**: Missing provider scores show an em dash instead of falling back to IMDb.
+- **Arted Rating decimals**: 0–10 scores keep one decimal (`5.0`); a perfect `10` stays `10`.
+
 ## Pre-release
 
 ## Released

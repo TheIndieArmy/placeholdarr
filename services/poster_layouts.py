@@ -1611,17 +1611,26 @@ def _genres_short(raw: Any) -> str:
     return ""
 
 
-def _format_rating_value(value: Any) -> str:
+_DECIMAL_RATING_SOURCES = frozenset({"imdb", "tmdb", "trakt"})
+
+
+def _format_rating_value(value: Any, *, source: str | None = None) -> str:
     if value is None:
         return ""
     try:
         num = float(value)
     except (TypeError, ValueError):
         return str(value).strip()
-    # Keep whole numbers short; one decimal otherwise (8.8, 10).
+    key = _normalize_rating_key(source) if source else ""
+    # IMDb / TMDB / Trakt (and bare Arr scores): one decimal, except a perfect 10.
+    if key in _DECIMAL_RATING_SOURCES or not key:
+        if abs(num - 10.0) < 1e-6:
+            return "10"
+        return f"{num:.1f}"
+    # RT / Metacritic stay whole when whole; keep one decimal if fractional.
     if abs(num - round(num)) < 1e-6:
         return str(int(round(num)))
-    return f"{num:.1f}".rstrip("0").rstrip(".")
+    return f"{num:.1f}"
 
 
 def _normalize_rating_key(name: str) -> str:
@@ -1636,7 +1645,7 @@ def _normalize_rating_key(name: str) -> str:
 def rating_values_by_source(raw: Any) -> dict[str, str]:
     """Map canonical source → display value from Arr ratings JSON."""
     if isinstance(raw, (int, float)):
-        text = _format_rating_value(raw)
+        text = _format_rating_value(raw, source="imdb")
         return {"imdb": text} if text else {}
     if not isinstance(raw, dict):
         text = str(raw or "").strip()
@@ -1650,15 +1659,16 @@ def rating_values_by_source(raw: Any) -> dict[str, str]:
             val = payload.get("value")
             if val is None:
                 val = payload.get("Value") or payload.get("rating") or payload.get("Rating")
-            text = _format_rating_value(val)
+            canon = _normalize_rating_key(str(name))
+            text = _format_rating_value(val, source=canon)
             if not text:
                 continue
-            by_source[_normalize_rating_key(str(name))] = text
+            by_source[canon] = text
         return by_source
 
     for key in ("value", "Value", "rating", "Rating"):
         if raw.get(key) is not None:
-            text = _format_rating_value(raw.get(key))
+            text = _format_rating_value(raw.get(key), source="imdb")
             return {"imdb": text} if text else {}
     return {}
 
@@ -1851,7 +1861,7 @@ def sample_tokens_for_profile(profile_key: str) -> dict[str, str]:
         "AirDate": "2008-01-20",
         "SeriesPremiereDate": "2008-01-20",
         "SXXEYY": "S10E24",
-        # 8.8 is as wide as typical Arr ratings; whole numbers render as "10" not "10.0".
+        # 8.8 is as wide as typical Arr ratings; 0–10 scores keep one decimal except 10.
         "Rating": "8.8",
         "RatingSource": "imdb",
         "Rating:imdb": "8.8",
@@ -1859,6 +1869,7 @@ def sample_tokens_for_profile(profile_key: str) -> dict[str, str]:
         "Rating:trakt": "8.1",
         "Rating:rottentomatoes": "91%",
         "Rating:metacritic": "78",
+
         "SeriesStatus": "Returning",
     }
     if kind == "movie":

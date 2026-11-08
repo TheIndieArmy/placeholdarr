@@ -426,6 +426,8 @@ def process_entity_materialization_job(session, job: Job) -> dict[str, Any]:
             )
 
         # Defer hard-purge when we still need to write movie-deleted activity.
+        # Do not gate on the lite/full pipeline lock (#152): ARR webhooks should
+        # claim promptly; chunked commits keep bulk lock windows short enough.
         stats_mat = run_materialization_for_entities(
             movie_ids=movie_ids or None,
             episode_ids=episode_ids or None,
