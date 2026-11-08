@@ -220,6 +220,13 @@ def overlay_layer_fingerprint(*, profile_key: str | None = None) -> dict[str, st
         layout_hash = profile_layout_fingerprint(key) if key else layout_fingerprint()
     except Exception:
         layout_hash = ""
+    layout_locale = "en"
+    try:
+        from services.layout_locale import get_layout_locale
+
+        layout_locale = get_layout_locale()
+    except Exception:
+        layout_locale = "en"
     return {
         "grayscale": bool(poster_grayscale_enabled()),
         "badge": bool(poster_badge_enabled()),
@@ -227,6 +234,7 @@ def overlay_layer_fingerprint(*, profile_key: str | None = None) -> dict[str, st
         "placeholder_banner": bool(poster_placeholder_banner_enabled()),
         "coming_soon_banner": bool(coming_soon_banner_enabled()),
         "banner_position": poster_banner_position(),
+        "layout_locale": layout_locale,
         "layout_hash": layout_hash,
     }
 
@@ -543,12 +551,19 @@ def _layout_chip_font_size(img_w: int, img_h: int, *, landscape: bool) -> int:
     return max(26, min(52, int(img_w * 0.048)))
 
 
-def _label_size_mult(size: str | None) -> float:
+def _label_size_mult(size: str | float | None, size_scale: float | None = None) -> float:
     try:
         from services.poster_layouts import size_multiplier
 
-        return float(size_multiplier(str(size or "small")))
+        if size_scale is not None:
+            return float(size_multiplier(size_scale))
+        return float(size_multiplier(size if size is not None else "small"))
     except Exception:
+        if size_scale is not None:
+            try:
+                return max(0.5, min(2.5, float(size_scale)))
+            except (TypeError, ValueError):
+                pass
         key = str(size or "small").strip().lower()
         return {"small": 1.0, "medium": 1.5, "large": 2.0}.get(key, 1.0)
 
@@ -666,13 +681,21 @@ def _draw_layout_chip(
     fill_opacity: float,
     border_opacity: float = 0.0,
     size: str = "small",
+    size_scale: float | None = None,
     art_path: Path | None = None,
+    art_layout: str = "left",
     landscape: bool = False,
 ):
     """Draw a content-sized chip centered on ``anchor`` (fractional x/y point).
 
     Placement is independent of any snap grid. Width/height follow the label
-    text (and optional art logo). Font size scales with ``size``.
+    text (and optional art logo). Font size scales with ``size`` / ``size_scale``.
+
+    ``art_layout`` (arted Rating): ``left`` / ``right`` of the score, ``above``,
+    ``below``, or ``fill`` (logo as background; fill color paints only the margin
+    around it; ``fill_opacity`` fades the logo). For ``above`` / ``below``, logo
+    width matches an ``8.8`` score at the chip font (percentage scores like
+    ``88%`` stay wider on purpose).
     """
     mods = _pillow()
     if mods is None:
@@ -682,8 +705,14 @@ def _draw_layout_chip(
     if not label and art_path is None:
         return out
 
+    layout = str(art_layout or "left").strip().lower()
+    if layout == "beside":
+        layout = "left"
+    if layout not in {"left", "right", "above", "below", "fill"}:
+        layout = "left"
+
     img_w, img_h = out.size
-    mult = _label_size_mult(size)
+    mult = _label_size_mult(size, size_scale)
     preferred = max(16, int(round(_layout_chip_font_size(img_w, img_h, landscape=landscape) * mult)))
     # Cap width so a long string shrinks type instead of spanning the whole poster.
     max_text_w = max(80, int(img_w * 0.82))
@@ -696,15 +725,25 @@ def _draw_layout_chip(
     if art_path is not None:
         pad_x = max(5, int(preferred * 0.16))
         gap = max(3, int(preferred * 0.10)) if label else 0
-        icon_h = max(12, int(round(max(text_h, preferred * 0.78))))
+        if layout in {"above", "below"}:
+            # Logo width matches an "8.8" score at this type size (not "88%").
+            ref_w, _ = _measure_text(font, "8.8")
+            icon_h = max(12, int(ref_w))
+        else:
+            icon_h = max(12, int(round(max(text_h, preferred * 0.78))))
+            if layout == "fill":
+                # Larger mark so it reads as the chip background.
+                icon_h = max(icon_h, int(round(preferred * 1.35)))
+                pad_x = max(6, int(preferred * 0.22))
+                pad_y = max(6, int(preferred * 0.22))
     else:
         pad_x = max(14, int(preferred * 0.55))
         gap = 0
         icon_h = max(12, int(round(max(text_h, preferred * 0.85))))
+        layout = "left"
     icon_w = 0
     logo = None
     if art_path is not None:
-        # ``art_path`` may be a Path or a source key resolved earlier.
         source_hint = ""
         if isinstance(art_path, Path):
             source_hint = art_path.stem
@@ -722,8 +761,19 @@ def _draw_layout_chip(
         else:
             art_path = None
             gap = 0
-    chip_w = text_w + pad_x * 2 + icon_w + gap
-    chip_h = max(text_h, icon_h) + pad_y * 2
+            layout = "left"
+
+    if layout in {"above", "below"} and logo is not None:
+        chip_w = max(text_w, icon_w) + pad_x * 2
+        chip_h = text_h + icon_h + (gap if label else 0) + pad_y * 2
+    elif layout == "fill" and logo is not None:
+        # Score sits on the logo; chip hugs the logo with a thin color margin.
+        chip_w = max(icon_w, text_w) + pad_x * 2
+        chip_h = max(icon_h, text_h) + pad_y * 2
+    else:
+        chip_w = text_w + pad_x * 2 + icon_w + gap
+        chip_h = max(text_h, icon_h) + pad_y * 2
+
     ax, ay = int(anchor[0]), int(anchor[1])
     box = _clamp_box_to_image(
         [ax - chip_w // 2, ay - chip_h // 2, ax - chip_w // 2 + chip_w, ay - chip_h // 2 + chip_h],
@@ -736,13 +786,18 @@ def _draw_layout_chip(
     fill_rgb = _parse_hex_rgba(fill_color, alpha=255)[:3]
     border_rgb = _parse_hex_rgba(border_color, alpha=255)[:3]
     text_rgb = _parse_hex_rgba(text_color, alpha=255)[:3]
-    # Fit / grayscale paths often leave RGB; alpha_composite requires RGBA.
     base = out.convert("RGBA") if out.mode != "RGBA" else out
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     radius = max(6, int(min(box[2] - box[0], box[3] - box[1]) * 0.22))
     stroke = max(3, int(round(preferred * 0.09)))
-    fill_a = int(round(255 * fill_opacity))
+    # Fill mode: plate around the logo stays opaque; opacity fades the logo itself.
+    if layout == "fill" and logo is not None:
+        fill_a = 255
+        logo_a = int(round(255 * fill_opacity))
+    else:
+        fill_a = int(round(255 * fill_opacity))
+        logo_a = 255
     border_a = int(round(255 * border_opacity))
     has_border = (
         border_a > 0
@@ -773,18 +828,64 @@ def _draw_layout_chip(
 
     content_w = content_box[2] - content_box[0]
     content_h = content_box[3] - content_box[1]
-    cluster_w = icon_w + gap + text_w
-    cluster_x = content_box[0] + max(0, (content_w - cluster_w) // 2)
+    mid_x = content_box[0] + content_w // 2
     mid_y = content_box[1] + content_h // 2
-    if logo is not None:
-        lx = cluster_x
+
+    def _paste_logo(lx: int, ly: int) -> None:
+        nonlocal logo
+        if logo is None:
+            return
+        if logo_a >= 255:
+            overlay.paste(logo, (lx, ly), logo)
+            return
+        faded = logo.copy()
+        # Scale only the alpha channel.
+        r, g, b, a = faded.split()
+        a = a.point(lambda p: int(p * logo_a / 255))
+        faded = Image.merge("RGBA", (r, g, b, a))
+        overlay.paste(faded, (lx, ly), faded)
+
+    if layout == "fill" and logo is not None:
+        lx = mid_x - logo.width // 2
         ly = mid_y - logo.height // 2
-        overlay.paste(logo, (lx, ly), logo)
-        cluster_x += logo.width + gap
-    if label:
-        tx = cluster_x + text_w // 2
-        draw.text((tx, mid_y), label, fill=(*text_rgb, 255), font=font, anchor="mm")
+        _paste_logo(lx, ly)
+        if label:
+            draw.text((mid_x, mid_y), label, fill=(*text_rgb, 255), font=font, anchor="mm")
+    elif layout == "above" and logo is not None:
+        cluster_h = icon_h + (gap if label else 0) + text_h
+        top = content_box[1] + max(0, (content_h - cluster_h) // 2)
+        _paste_logo(mid_x - logo.width // 2, top)
+        if label:
+            ty = top + icon_h + gap + text_h // 2
+            draw.text((mid_x, ty), label, fill=(*text_rgb, 255), font=font, anchor="mm")
+    elif layout == "below" and logo is not None:
+        cluster_h = text_h + (gap if label else 0) + icon_h
+        top = content_box[1] + max(0, (content_h - cluster_h) // 2)
+        if label:
+            draw.text((mid_x, top + text_h // 2), label, fill=(*text_rgb, 255), font=font, anchor="mm")
+            _paste_logo(mid_x - logo.width // 2, top + text_h + gap)
+        else:
+            _paste_logo(mid_x - logo.width // 2, top)
+    elif layout == "right" and logo is not None:
+        cluster_w = text_w + gap + icon_w
+        cluster_x = content_box[0] + max(0, (content_w - cluster_w) // 2)
+        if label:
+            tx = cluster_x + text_w // 2
+            draw.text((tx, mid_y), label, fill=(*text_rgb, 255), font=font, anchor="mm")
+            cluster_x += text_w + gap
+        _paste_logo(cluster_x, mid_y - logo.height // 2)
+    else:
+        # left (default): logo then score
+        cluster_w = icon_w + gap + text_w
+        cluster_x = content_box[0] + max(0, (content_w - cluster_w) // 2)
+        if logo is not None:
+            _paste_logo(cluster_x, mid_y - logo.height // 2)
+            cluster_x += logo.width + gap
+        if label:
+            tx = cluster_x + text_w // 2
+            draw.text((tx, mid_y), label, fill=(*text_rgb, 255), font=font, anchor="mm")
     return Image.alpha_composite(base, overlay)
+
 
 
 def _frac_axis_px(start: float, end: float, dim: int) -> tuple[int, int]:
@@ -1002,13 +1103,21 @@ def apply_layout_overlay(
             continue
         ax, ay = _layout_anchor_xy(label, width=w, height=h, cols=grid_cols, rows=grid_rows)
         label_size = str(label.get("size") or ("medium" if token == "Badge" else "small")).strip().lower()
+        raw_scale = label.get("size_scale")
+        try:
+            size_scale = float(raw_scale) if raw_scale is not None else None
+        except (TypeError, ValueError):
+            size_scale = None
         if token == "Badge":
             mods = _pillow()
             if mods is None:
                 continue
-            # Medium matches legacy corner badge; small/large scale from that.
+            # Medium matches legacy corner badge; size_scale / small/large scale from that.
             base_mult = _label_size_mult(_BADGE_SIZE_BASE)
-            badge_w = max(24, int(round(_corner_badge_size(w, h) * (_label_size_mult(label_size) / base_mult))))
+            badge_w = max(
+                24,
+                int(round(_corner_badge_size(w, h) * (_label_size_mult(label_size, size_scale) / base_mult))),
+            )
             variant = _badge_logo_variant(label.get("fill_color"))
             badge = _build_corner_logo_badge(badge_w, variant=variant)
             if badge is None:
@@ -1030,6 +1139,11 @@ def apply_layout_overlay(
             # Legacy ``#RRGGBBAA``: alpha 00 meant no stroke.
             legacy = _parse_hex_rgba(str(label.get("border_color") or "#00000000"))
             border_opacity = legacy[3] / 255.0
+        art_layout = "left"
+        if token == "Rating" and art_path is not None:
+            art_layout = str(label.get("rating_art_layout") or "left").strip().lower() or "left"
+            if art_layout == "beside":
+                art_layout = "left"
         out = _draw_layout_chip(
             out,
             text=text,
@@ -1040,7 +1154,9 @@ def apply_layout_overlay(
             fill_opacity=float(label.get("fill_opacity") if label.get("fill_opacity") is not None else 0.65),
             border_opacity=float(border_opacity),
             size=label_size,
+            size_scale=size_scale,
             art_path=art_path,
+            art_layout=art_layout,
             landscape=landscape,
         )
     if out.mode == "RGBA":

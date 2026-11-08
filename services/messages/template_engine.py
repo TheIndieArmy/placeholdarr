@@ -37,6 +37,7 @@ _DATE_TOKENS: frozenset[str] = frozenset(
         "AirDate",
         "SeriesPremiereDate",
         "SeasonPremiereDate",
+        "ReleaseDate",
     }
 )
 

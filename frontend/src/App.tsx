@@ -10308,21 +10308,34 @@ function validateStatusMessageTemplate(
 }
 
 function clientRenderStatusMessage(template: string, ctx: Record<string, string>, separator: string, caseMode: string, allTokenSamples: Record<string, string>): string {
+  const sep = separator || "·";
+  const sentinel = "\u001e";
   const filled = template.replace(
     /\{([A-Za-z][A-Za-z0-9_]*)(?::([A-Za-z0-9_-]+))?\}/g,
     (_match, name: string, fmt: string | undefined) => {
-      if (name === "Sep") return separator || "·";
+      if (name === "Sep") return sentinel;
       const raw = name in ctx ? (ctx[name] ?? "") : name in allTokenSamples ? allTokenSamples[name] : "";
       if (!raw) return "";
       if (fmt && STATUS_AND_LAYOUT_DATE_TOKENS.has(name)) return formatDateToken(raw, fmt);
       return raw;
     },
   );
-  const collapsed = filled
+  let rendered = filled;
+  if (filled.includes(sentinel)) {
+    const parts = filled
+      .split(sentinel)
+      .map((p) => p.trim())
+      .filter(Boolean);
+    rendered = parts.join(` ${sep} `);
+  }
+  const collapsed = rendered
     .replace(/[ \t]+/g, " ")
     .replace(/\(\s+/g, "(")
     .replace(/\s+\)/g, ")")
+    .replace(/\(\s*\)/g, "")
+    .replace(/\[\s*\]/g, "")
     .replace(/\s+([,.;:!?])/g, "$1")
+    .replace(/[ \t]+/g, " ")
     .trim();
   if (caseMode === "upper") return collapsed.toUpperCase();
   if (caseMode === "lower") return collapsed.toLowerCase();

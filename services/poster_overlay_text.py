@@ -6,8 +6,14 @@ from datetime import date, datetime
 from typing import Any
 
 from services.app_timezone import local_today
+from services.layout_locale import (
+    coerce_layout_date,
+    format_layout_month_day,
+    layout_string,
+    release_type_label,
+)
 
-# Hardcoded English for v1 (same as today's hardcoded PLACEHOLDER banner).
+# Hardcoded English aliases for older imports / tests; prefer layout_string().
 OVERLAY_BANNER_PLACEHOLDER = "PLACEHOLDER"
 OVERLAY_BANNER_COMING_SOON = "Coming Soon"
 OVERLAY_BANNER_NEW_EP_PREFIX = "New Ep."
@@ -23,48 +29,18 @@ _COMING_SOON_STATUSES = frozenset(
     }
 )
 
-_RELEASE_TYPE_LABELS = {
-    "inCinemas": "Theatrical",
-    "digitalRelease": "Digital",
-    "physicalRelease": "Physical",
-}
-
 
 def is_coming_soon_overlay_status(status: str | None) -> bool:
     return str(status or "").strip() in _COMING_SOON_STATUSES
 
 
-def release_type_label(release_type: str | None) -> str:
-    key = str(release_type or "").strip()
-    return _RELEASE_TYPE_LABELS.get(key, "Release")
-
-
-_MONTH_ABBREV = (
-    "Jan",
-    "Feb",
-    "Mar",
-    "Apr",
-    "May",
-    "Jun",
-    "Jul",
-    "Aug",
-    "Sep",
-    "Oct",
-    "Nov",
-    "Dec",
-)
-
-
 def format_overlay_date(value: date | datetime | None) -> str | None:
-    """Locale-light absolute date for banners, e.g. ``Oct 22`` (no year)."""
-    if value is None:
+    """Locale-table absolute date for banners, e.g. ``Oct 22`` (no year)."""
+    parsed = coerce_layout_date(value)
+    if parsed is None:
         return None
-    if isinstance(value, datetime):
-        value = value.date()
-    if not isinstance(value, date):
-        return None
-    # Fixed English abbrevs so container locales cannot change the banner string.
-    return f"{_MONTH_ABBREV[value.month - 1]} {value.day}"
+    # Setting-owned locale tables; never process/container LANG.
+    return format_layout_month_day(parsed)
 
 
 def coming_soon_overlay_label(
@@ -84,11 +60,11 @@ def coming_soon_overlay_label(
 
     date_str = format_overlay_date(target_date)
     if not date_str:
-        return OVERLAY_BANNER_COMING_SOON
+        return layout_string("coming_soon")
 
     kind = str(media_type or "").strip().lower()
     if kind in ("episode", "tv", "show"):
-        return f"Airing - {date_str}"
+        return f"{layout_string('airing')} - {date_str}"
     label = release_type_label(release_type)
     return f"{label} - {date_str}"
 
@@ -107,7 +83,7 @@ def overlay_banner_text(
         target_date=target_date,
         release_type=release_type,
     )
-    return label or OVERLAY_BANNER_PLACEHOLDER
+    return label or layout_string("placeholder")
 
 
 def resolve_draw_overlay_text(
@@ -132,7 +108,7 @@ def resolve_draw_overlay_text(
     if ph_on is None:
         ph_on = want == "top_banner"
     if ph_on:
-        return OVERLAY_BANNER_PLACEHOLDER
+        return layout_string("placeholder")
     return None
 
 
@@ -141,7 +117,7 @@ def new_ep_overlay_label(target_date: date | datetime | None) -> str | None:
     date_str = format_overlay_date(target_date)
     if not date_str:
         return None
-    return f"{OVERLAY_BANNER_NEW_EP_PREFIX} - {date_str}"
+    return f"{layout_string('new_ep_prefix')} - {date_str}"
 
 
 def next_unaired_episode_air_date(
@@ -199,13 +175,7 @@ def resolve_series_new_ep_label(
 
 
 def _coerce_date(value: Any) -> date | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    return None
+    return coerce_layout_date(value)
 
 
 def resolve_movie_coming_soon_label(movie: Any, *, display_status: str | None = None) -> str | None:
@@ -249,7 +219,9 @@ def resolve_episode_coming_soon_label(
 
 # Backward-compatible aliases used by earlier Coming Soon overlay work.
 def resolve_movie_overlay_banner_text(movie: Any, *, display_status: str | None = None) -> str:
-    return resolve_movie_coming_soon_label(movie, display_status=display_status) or OVERLAY_BANNER_PLACEHOLDER
+    return resolve_movie_coming_soon_label(movie, display_status=display_status) or layout_string(
+        "placeholder"
+    )
 
 
 def resolve_episode_overlay_banner_text(
@@ -260,7 +232,7 @@ def resolve_episode_overlay_banner_text(
 ) -> str:
     return (
         resolve_episode_coming_soon_label(episode, display_status=display_status, session=session)
-        or OVERLAY_BANNER_PLACEHOLDER
+        or layout_string("placeholder")
     )
 
 

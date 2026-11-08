@@ -238,9 +238,10 @@ _TOKEN_SPECS: tuple[TokenSpec, ...] = (
         label="Preferred release date",
         group="Calendar",
         description=(
-            "Coming Soon target date in YYYY-MM-DD form: preferred movie date type, or TV air date "
-            "for countdown messages. For fixed movie/TV dates on any status, use {TheatricalDate}, "
-            "{DigitalDate}, {PhysicalDate}, or {AirDate}."
+            "Coming Soon target date from the preferred movie release type, or TV air date for "
+            "countdown messages. Supports {ReleaseDate:format} like other date tokens. For a fixed "
+            "release type on any status, use {TheatricalDate}, {DigitalDate}, {PhysicalDate}, or "
+            "{AirDate}."
         ),
         sample="2026-12-25",
     ),

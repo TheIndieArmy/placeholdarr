@@ -14,7 +14,7 @@ export const DATE_FORMAT_OPTIONS: DateFormatOption[] = [
 
 const DATE_FORMAT_ALIASES: Record<string, string> = { numeric: "mdy" };
 
-/** Status Updates + poster Text templates. */
+/** Status Updates + poster Text templates (ISO values that accept ``:format``). */
 export const STATUS_AND_LAYOUT_DATE_TOKENS = new Set([
   "TheatricalDate",
   "DigitalDate",
@@ -22,7 +22,11 @@ export const STATUS_AND_LAYOUT_DATE_TOKENS = new Set([
   "AirDate",
   "SeriesPremiereDate",
   "SeasonPremiereDate",
+  "ReleaseDate",
 ]);
+
+/** Layout stamp: ``Label - date`` (preferred release / next air). Format rewrites the date half. */
+export const LAYOUT_STAMPED_DATE_TOKENS = new Set(["ComingSoonOrNewEp"]);
 
 export function normalizeDateFormat(fmt: string | null | undefined): string {
   let key = String(fmt || "iso").trim().toLowerCase() || "iso";

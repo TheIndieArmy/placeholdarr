@@ -12,6 +12,7 @@ import { fetchJson } from "../api/client";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
 import {
   DATE_FORMAT_OPTIONS,
+  LAYOUT_STAMPED_DATE_TOKENS,
   STATUS_AND_LAYOUT_DATE_TOKENS,
   formatDateToken,
   normalizeDateFormat,
@@ -49,6 +50,10 @@ export type PosterLayoutLabel = {
   fill_opacity: number;
   border_opacity: number;
   size: LabelSize;
+  /** Continuous chip/badge scale (1 = small, 1.5 = medium, 2 = large). */
+  size_scale?: number;
+  /** Arted Rating logo placement: left / right / above / below / fill. */
+  rating_art_layout?: "left" | "right" | "above" | "below" | "fill";
   /** Legacy single depth; prefer y_end - y_start. */
   thickness: number;
   /** Horizontal coverage start/end (0..1). */
@@ -91,9 +96,23 @@ export type PosterLayoutCatalog = {
   custom_text_max_length?: number;
   custom_date_tokens?: string[];
   custom_date_formats?: Array<{ id: string; label: string; example: string }>;
+  rating_art_layouts?: Array<"left" | "right" | "above" | "below" | "fill">;
+  size_scale_min?: number;
+  size_scale_max?: number;
+  size_scale_presets?: Record<string, number>;
 };
 
 const LABEL_SIZES: LabelSize[] = ["small", "medium", "large"];
+const SIZE_SCALE_PRESETS: Record<LabelSize, number> = { small: 1, medium: 1.5, large: 2 };
+const SIZE_SCALE_MIN = 0.5;
+const SIZE_SCALE_MAX = 2.5;
+const RATING_ART_LAYOUTS: Array<{ id: "left" | "right" | "above" | "below" | "fill"; label: string }> = [
+  { id: "left", label: "Left" },
+  { id: "right", label: "Right" },
+  { id: "above", label: "Above" },
+  { id: "below", label: "Below" },
+  { id: "fill", label: "Fill" },
+];
 const FILL_RECTANGLE_TOKEN = "FillRectangle";
 const FILL_RECTANGLE_LABEL = "Fill rectangle";
 /** Invisible Custom chip used so the empty editor matches the tallest selected layout. */
@@ -108,6 +127,8 @@ const EDITOR_HEIGHT_PROBE: PosterLayoutLabel = {
   fill_opacity: 0.65,
   border_opacity: 0,
   size: "medium",
+  size_scale: 1.5,
+  rating_art_layout: "left",
   thickness: 0.12,
   x_start: 0,
   x_end: 1,
@@ -268,6 +289,7 @@ const CUSTOM_DATE_TOKENS = new Set([
   "PhysicalDate",
   "AirDate",
   "SeriesPremiereDate",
+  "ComingSoonOrNewEp",
 ]);
 const LEGACY_SINGLE_TOKEN_CHIPS = new Set([
   "ComingSoonOrNewEp",
@@ -310,7 +332,23 @@ const POSTER_TEXT_TOKEN_GROUP_ORDER = ["Media", "Movie", "TV"];
 
 /** Fresh regex each call (global flag must not share ``lastIndex``). */
 function customDateTokenRe(): RegExp {
-  return /\{(TheatricalDate|DigitalDate|PhysicalDate|AirDate|SeriesPremiereDate)(?::([A-Za-z0-9_-]+))?\}/g;
+  return /\{(TheatricalDate|DigitalDate|PhysicalDate|AirDate|SeriesPremiereDate|ComingSoonOrNewEp)(?::([A-Za-z0-9_-]+))?\}/g;
+}
+
+function formatStampedComingSoonToken(
+  label: string,
+  dateIso: string,
+  fmt: string | undefined,
+): string {
+  const text = String(label || "").trim();
+  if (!text) return "";
+  if (!fmt) return text;
+  const iso = String(dateIso || "").trim();
+  if (!iso) return text;
+  const formatted = formatDateToken(iso, fmt);
+  if (!formatted) return text;
+  if (text.includes(" - ")) return `${text.split(" - ")[0]} - ${formatted}`;
+  return formatted;
 }
 
 type MediaKind = "movie" | "tv" | "episode";
@@ -526,6 +564,35 @@ function normalizeLabelSize(raw: unknown, token: string): LabelSize {
   return token === "Badge" || token === FILL_RECTANGLE_TOKEN || token === "Banner" ? "medium" : "small";
 }
 
+function normalizeSizeScale(raw: unknown, size: LabelSize): number {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (Number.isFinite(n)) return Math.max(SIZE_SCALE_MIN, Math.min(SIZE_SCALE_MAX, n));
+  return SIZE_SCALE_PRESETS[size] ?? 1;
+}
+
+function nearestSizePreset(scale: number, presets: Record<string, number> = SIZE_SCALE_PRESETS): LabelSize {
+  let best: LabelSize = "small";
+  let bestDist = Infinity;
+  for (const key of LABEL_SIZES) {
+    const dist = Math.abs((presets[key] ?? SIZE_SCALE_PRESETS[key]) - scale);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = key;
+    }
+  }
+  return best;
+}
+
+function normalizeRatingArtLayout(raw: unknown): "left" | "right" | "above" | "below" | "fill" {
+  const key = String(raw || "").trim().toLowerCase();
+  if (key === "left" || key === "right" || key === "above" || key === "below" || key === "fill") return key;
+  if (key === "beside" || key === "inline" || key === "side") return "left";
+  if (key === "top") return "above";
+  if (key === "bottom") return "below";
+  if (key === "background" || key === "bg") return "fill";
+  return "left";
+}
+
 function normalizeLabelStyle(raw: unknown, token: string): LabelStyle {
   if (
     token === FILL_RECTANGLE_TOKEN ||
@@ -706,6 +773,9 @@ function renderCustomChipText(template: string, tokenMap: Record<string, string>
       if (name === "Sep") return sentinel;
       const raw = String(tokenMap[name] ?? "").trim();
       if (!raw) return "";
+      if (LAYOUT_STAMPED_DATE_TOKENS.has(name) || name === "ComingSoonOrNewEp") {
+        return formatStampedComingSoonToken(raw, String(tokenMap.ComingSoonOrNewEpDate || ""), fmt);
+      }
       if (CUSTOM_DATE_TOKENS.has(name) || STATUS_AND_LAYOUT_DATE_TOKENS.has(name)) {
         return formatDateToken(raw, fmt);
       }
@@ -1092,14 +1162,90 @@ function BakePxAxisControl(props: {
   );
 }
 
+/** Continuous chip/badge size with S/M/L presets (same row pattern as Center on X/Y). */
+function SizeScaleControl(props: {
+  scale: number;
+  min?: number;
+  max?: number;
+  presets?: Record<string, number>;
+  onChange: (scale: number, size: LabelSize) => void;
+}) {
+  const min = props.min ?? SIZE_SCALE_MIN;
+  const max = props.max ?? SIZE_SCALE_MAX;
+  const presets: Record<string, number> = { ...SIZE_SCALE_PRESETS, ...(props.presets || {}) };
+  const scale = Math.max(min, Math.min(max, props.scale));
+  const setScale = (raw: number) => {
+    if (!Number.isFinite(raw)) return;
+    const next = Math.max(min, Math.min(max, Math.round(raw * 100) / 100));
+    props.onChange(next, nearestSizePreset(next, presets));
+  };
+  const applyPreset = (key: LabelSize) => {
+    const next = Number(presets[key] ?? SIZE_SCALE_PRESETS[key]);
+    if (!Number.isFinite(next)) return;
+    props.onChange(Math.max(min, Math.min(max, next)), key);
+  };
+  return (
+    <div className="space-y-1 text-[12px] text-slate-400 min-w-0">
+      <div className="flex items-center gap-2">
+        <span className="shrink-0">Size</span>
+        <div className="ml-auto flex items-center gap-1.5 shrink-0">
+          {LABEL_SIZES.map((key) => {
+            const presetVal = Number(presets[key] ?? SIZE_SCALE_PRESETS[key]);
+            const active = Math.abs(scale - presetVal) < 0.001;
+            return (
+              <button
+                key={key}
+                type="button"
+                title={`${key} (${presetVal})`}
+                aria-label={`Size ${key}`}
+                onClick={() => applyPreset(key)}
+                className={`rounded-md border px-1.5 py-0.5 text-[10px] font-headline uppercase tracking-wider ${
+                  active
+                    ? "border-[var(--brand-accent)] text-slate-100 bg-[color:color-mix(in_srgb,var(--brand-accent)_18%,transparent)]"
+                    : "border-[#424753]/55 text-slate-400 hover:border-[#424753] hover:text-slate-200"
+                }`}
+              >
+                {key === "small" ? "S" : key === "medium" ? "M" : "L"}
+              </button>
+            );
+          })}
+          <input
+            type="number"
+            inputMode="decimal"
+            min={min}
+            max={max}
+            step={0.05}
+            value={Number(scale.toFixed(2))}
+            aria-label="Size scale"
+            onChange={(e) => setScale(Number(e.target.value))}
+            className="w-[4.25rem] shrink-0 rounded-lg border border-[#424753]/55 bg-[#0b111b] px-2 py-1 font-mono text-[12px] tabular-nums text-slate-100 outline-none focus:border-[color:var(--brand-accent)]"
+          />
+        </div>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={0.05}
+        value={scale}
+        aria-label="Size scale"
+        onChange={(e) => setScale(Number(e.target.value))}
+        className="w-full accent-[var(--brand-accent)]"
+      />
+    </div>
+  );
+}
+
 /** Lift legacy ``#RRGGBBAA`` into RGB + opacity (alpha 00 meant border off). */
 function normalizeLabelColors(label: PosterLayoutLabel, landscape = false): PosterLayoutLabel {
   const border = hexOr(label.border_color, "#000000");
   const size = normalizeLabelSize(label.size, label.token);
+  const sizeScale = normalizeSizeScale(label.size_scale, size);
   const style = normalizeLabelStyle(label.style, label.token);
   const arted = Boolean(label.arted) && label.token === "Rating" && style !== "banner";
   let ratingSource = String(label.rating_source || "auto").trim().toLowerCase() || "auto";
   if (arted && (ratingSource === "auto" || !ratingSource)) ratingSource = "imdb";
+  const ratingArtLayout = arted ? normalizeRatingArtLayout(label.rating_art_layout) : "left";
   const borderOpacity =
     style === "banner"
       ? 0
@@ -1148,7 +1294,8 @@ function normalizeLabelColors(label: PosterLayoutLabel, landscape = false): Post
     border_color: border.length === 9 ? border.slice(0, 7) : solidHex(label.border_color, "#000000"),
     border_opacity: Math.max(0, Math.min(1, borderOpacity)),
     fill_opacity: typeof label.fill_opacity === "number" ? label.fill_opacity : 0.65,
-    size,
+    size: label.size_scale != null ? nearestSizePreset(sizeScale) : size,
+    size_scale: sizeScale,
     thickness,
     x_start: xStart,
     x_end: xEnd,
@@ -1157,6 +1304,7 @@ function normalizeLabelColors(label: PosterLayoutLabel, landscape = false): Post
     style,
     arted,
     rating_source: ratingSource,
+    rating_art_layout: ratingArtLayout,
     custom_text: normalizeCustomText(customTextRaw, token),
   };
 }
@@ -1191,21 +1339,13 @@ function EditorHeightLock(props: {
   return (
     <div className="space-y-3">
       <div className="text-[13px] font-semibold text-slate-200 truncate">Custom</div>
-      <div className="space-y-2">
-        <div className="text-[12px] text-slate-400">Size</div>
-        <div className="flex flex-wrap gap-2">
-          {(props.catalog?.sizes?.length ? props.catalog.sizes : LABEL_SIZES).map((opt) => (
-            <button
-              key={opt}
-              type="button"
-              tabIndex={-1}
-              className="rounded-lg border border-[#424753]/55 px-3 py-1.5 text-[12px] font-headline uppercase tracking-wider text-slate-400"
-            >
-              {opt}
-            </button>
-          ))}
-        </div>
-      </div>
+      <SizeScaleControl
+        scale={normalizeSizeScale(label.size_scale, label.size)}
+        min={props.catalog?.size_scale_min}
+        max={props.catalog?.size_scale_max}
+        presets={props.catalog?.size_scale_presets}
+        onChange={() => {}}
+      />
       <div className="grid grid-cols-1 gap-3 min-w-0 sm:grid-cols-2">
         <BakePxAxisControl label="X" frac={label.x} dim={bake.w} onChange={noop} />
         <BakePxAxisControl label="Y" frac={label.y} dim={bake.h} onChange={noop} />
@@ -1761,6 +1901,8 @@ export default function PosterLayoutDesigner(props: Props) {
       border_opacity: 0,
       fill_opacity: 0.65,
       size: "medium",
+      size_scale: SIZE_SCALE_PRESETS.medium,
+      rating_art_layout: "left",
       thickness: yEnd,
       x_start: 0,
       x_end: 1,
@@ -1806,14 +1948,16 @@ export default function PosterLayoutDesigner(props: Props) {
       border_opacity: 0,
       fill_opacity: placeToken === "Badge" ? 1 : 0.65,
       size: placeToken === "Badge" ? "medium" : "small",
+      size_scale: placeToken === "Badge" ? SIZE_SCALE_PRESETS.medium : SIZE_SCALE_PRESETS.small,
+      rating_art_layout: "left",
       thickness: chipDepth,
       x_start: 0,
       x_end: 1,
       y_start: 0,
       y_end: chipDepth,
       style: "chip",
-      arted: false,
-      rating_source: "auto",
+      arted: placeToken === "Rating",
+      rating_source: placeToken === "Rating" ? "imdb" : "auto",
       custom_text: placeToken === "Custom" ? "{Title} {Sep} {Year}" : "",
     };
     updateActiveLabels([...labels, next]);
@@ -2516,28 +2660,13 @@ export default function PosterLayoutDesigner(props: Props) {
                     </>
                   ) : (
                     <>
-                      <div className="space-y-2">
-                        <div className="text-[12px] text-slate-400">Size</div>
-                        <div className="flex flex-wrap gap-2">
-                          {(catalog?.sizes?.length ? catalog.sizes : LABEL_SIZES).map((opt) => {
-                            const active = normalizeLabelSize(selected.size, selected.token) === opt;
-                            return (
-                              <button
-                                key={opt}
-                                type="button"
-                                onClick={() => patchSelected({ size: opt })}
-                                className={`rounded-lg border px-3 py-1.5 text-[12px] font-headline uppercase tracking-wider ${
-                                  active
-                                    ? "border-[var(--brand-accent)] text-slate-100 bg-[color:color-mix(in_srgb,var(--brand-accent)_18%,transparent)]"
-                                    : "border-[#424753]/55 text-slate-400 hover:border-[#424753] hover:text-slate-200"
-                                }`}
-                              >
-                                {opt}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
+                      <SizeScaleControl
+                        scale={normalizeSizeScale(selected.size_scale, normalizeLabelSize(selected.size, selected.token))}
+                        min={catalog?.size_scale_min}
+                        max={catalog?.size_scale_max}
+                        presets={catalog?.size_scale_presets}
+                        onChange={(size_scale, size) => patchSelected({ size_scale, size })}
+                      />
                       {(() => {
                         const bake = bakeSizeForKind(kind);
                         return (
@@ -2672,8 +2801,8 @@ export default function PosterLayoutDesigner(props: Props) {
                           <div className="text-[12px] text-slate-400">Chip look</div>
                           <div className="flex flex-wrap gap-2">
                             {([
-                              { id: false, label: "Text" },
                               { id: true, label: "Arted" },
+                              { id: false, label: "Text" },
                             ] as const).map((opt) => {
                               const active = Boolean(selected.arted) === opt.id;
                               return (
@@ -2686,10 +2815,16 @@ export default function PosterLayoutDesigner(props: Props) {
                                         selected.rating_source && selected.rating_source !== "auto"
                                           ? selected.rating_source
                                           : "imdb";
-                                      patchSelected({ arted: true, rating_source: source });
+                                      patchSelected({
+                                        arted: true,
+                                        rating_source: source,
+                                        rating_art_layout: normalizeRatingArtLayout(
+                                          selected.rating_art_layout,
+                                        ),
+                                      });
                                       return;
                                     }
-                                    patchSelected({ arted: false });
+                                    patchSelected({ arted: false, rating_art_layout: "left" });
                                   }}
                                   className={`rounded-lg border px-3 py-1.5 text-[12px] font-headline uppercase tracking-wider ${
                                     active
@@ -2743,6 +2878,42 @@ export default function PosterLayoutDesigner(props: Props) {
                               ))}
                             </select>
                           </label>
+                          <div
+                            className={`space-y-2 ${
+                              selected.arted
+                                ? ""
+                                : "pointer-events-none opacity-40"
+                            }`}
+                            aria-hidden={!selected.arted}
+                          >
+                            <div className="text-[12px] text-slate-400">Logo placement</div>
+                            <div className="flex flex-wrap gap-2">
+                              {(
+                                (catalog?.rating_art_layouts || RATING_ART_LAYOUTS.map((o) => o.id)).map(
+                                  (id) => RATING_ART_LAYOUTS.find((o) => o.id === id) || { id, label: id },
+                                )
+                              ).map((opt) => {
+                                const active =
+                                  normalizeRatingArtLayout(selected.rating_art_layout) === opt.id;
+                                return (
+                                  <button
+                                    key={opt.id}
+                                    type="button"
+                                    disabled={!selected.arted}
+                                    tabIndex={selected.arted ? undefined : -1}
+                                    onClick={() => patchSelected({ rating_art_layout: opt.id })}
+                                    className={`rounded-lg border px-3 py-1.5 text-[12px] font-headline uppercase tracking-wider ${
+                                      active
+                                        ? "border-[var(--brand-accent)] text-slate-100 bg-[color:color-mix(in_srgb,var(--brand-accent)_18%,transparent)]"
+                                        : "border-[#424753]/55 text-slate-400 hover:border-[#424753] hover:text-slate-200"
+                                    }`}
+                                  >
+                                    {opt.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
                         </div>
                       ) : null}
                       {selected.token !== "Badge" ? (
@@ -2767,7 +2938,13 @@ export default function PosterLayoutDesigner(props: Props) {
                             }}
                           />
                           <label className="space-y-1 text-[12px] text-slate-400 min-w-0">
-                            <span>Fill opacity ({Math.round((selected.fill_opacity ?? 0.65) * 100)}%)</span>
+                            <span>
+                              {selected.arted &&
+                              normalizeRatingArtLayout(selected.rating_art_layout) === "fill"
+                                ? "Logo opacity"
+                                : "Fill opacity"}{" "}
+                              ({Math.round((selected.fill_opacity ?? 0.65) * 100)}%)
+                            </span>
                             <input
                               type="range"
                               min={0}

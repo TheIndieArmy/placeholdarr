@@ -130,6 +130,7 @@ def _layers_stamp_from_settings(
         "banner_position": str(layers.get("banner_position") or poster_banner_position()),
         "logo_stamp": logo_asset_stamp(),
         "layout_hash": str(layers.get("layout_hash") or ""),
+        "layout_locale": str(layers.get("layout_locale") or "en"),
         "layout_profile": str(profile_key or "").strip(),
     }
 
@@ -149,6 +150,7 @@ def _normalize_layers_stamp(raw: Any) -> dict[str, Any] | None:
             "banner_position",
             "logo_stamp",
             "layout_hash",
+            "layout_locale",
             "layout_profile",
         )
     ):
@@ -163,6 +165,7 @@ def _normalize_layers_stamp(raw: Any) -> dict[str, Any] | None:
         "banner_position": banner_pos,
         "logo_stamp": str(raw.get("logo_stamp") or ""),
         "layout_hash": str(raw.get("layout_hash") or ""),
+        "layout_locale": str(raw.get("layout_locale") or "en").strip().lower() or "en",
         "layout_profile": str(raw.get("layout_profile") or "").strip(),
     }
 
