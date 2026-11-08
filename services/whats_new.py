@@ -337,8 +337,9 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         body=(
             "Placeholder poster overlays are yours to design. Build separate Released and Coming Soon overlays "
             "for Movie, TV, and Episode: fill rectangles, metadata chips, Custom text (including the "
-            "smart release / next-episode label), ratings, and the Placeholdarr badge. Drag on the "
-            "live preview, copy a layout across profiles, or import and export JSON to share a look. "
+            "smart release / next-episode label), ratings, and the Placeholdarr badge. Drag elements "
+            "on the live preview to place them exactly where you want them. Copy a layout across "
+            "profiles, or import and export JSON to share a look. "
             "Series with a known unaired episode use Coming Soon; otherwise they use Released.\n\n"
             "Support for overlays on real file posters is coming in a future update."
         ),
