@@ -968,8 +968,8 @@ export function App() {
       }
     },
     onTaskRunsVersion: () => {
-      // Keep task live progress fresh for sidebar pills on every route.
-        void refreshTasksRef.current();
+      // Lifecycle only (SSE excludes live seq). Full refresh on start/finish.
+      void refreshTasksRef.current();
     },
   });
 
@@ -1795,8 +1795,8 @@ export function App() {
       setLeaveConfirm({ path, kind: "recipe" });
       return false;
     }
-    navigate(path);
     setMobileNavOpen(false);
+    navigate(path);
     return true;
   }
 

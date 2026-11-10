@@ -499,9 +499,10 @@ class Settings(BaseSettings):
     MATERIALIZATION_JOB_BATCH_SIZE: int = int(
         os.getenv("MATERIALIZATION_JOB_BATCH_SIZE", "100").split("#")[0].strip() or "100"
     )
-    # Commit every N movie+episode ids during large scoped/lite materialization.
+    # Commit every N movie+episode ids during large scoped/lite/full materialization.
+    # Smaller chunks shorten DB/FS lock windows so import-grace and webhooks can finish sooner.
     MATERIALIZATION_COMMIT_CHUNK_SIZE: int = int(
-        os.getenv("MATERIALIZATION_COMMIT_CHUNK_SIZE", "200").split("#")[0].strip() or "200"
+        os.getenv("MATERIALIZATION_COMMIT_CHUNK_SIZE", "50").split("#")[0].strip() or "50"
     )
     # Fail-fast on materializer persist instead of waiting hours on row locks.
     MATERIALIZATION_COMMIT_LOCK_TIMEOUT_SECONDS: int = int(

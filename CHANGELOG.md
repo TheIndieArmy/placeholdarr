@@ -9,9 +9,33 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Changed
+
+- **Full-sync materialization chunks**: Library-wide mat commits in batches with lock timeouts so import-grace and webhooks can finish between chunks.
+- **Materialization commit size**: Default `MATERIALIZATION_COMMIT_CHUNK_SIZE` is 50 (was 200) for shorter lock windows between bites.
+- **Live materialization progress**: Full/lite/startup mat and calendar phases publish running counts during each commit chunk (~3s), not only after each batch finishes.
+- **Title Refresh Arr wait**: Polls Arr briefly then defers the worker instead of holding a claim for up to 300s.
+- **Worker claim capacity**: Per-type caps, an interactive reserved lane, and higher playback priority over bulk Arr webhooks.
+- **Media-server refresh broker**: Coalesces and rate-limits full-section scans; single-title reconcile uses path refresh only.
+- **Event-loop offload**: Never/policy/tag-clear and manual Tasks run off the FastAPI loop via `asyncio.to_thread`.
+
 ### Fixed
 
+- **Worker finish after lock timeout**: DONE/FAILED/deferred is retried after finish-commit `lock_timeout` instead of leaving the row CLAIMED until the stale reaper.
+- **Import before catalog row**: Movie/episode import webhooks defer ~30s when the Arr row is not in DB yet, instead of failing 10 times in a tight loop during full sync.
+- **Job failure backoff**: Retriable job failures set `run_after` with exponential backoff instead of immediate PENDING reclaim.
+- **ARR live progress writes**: Mid-phase progress updates live only (no durable phases persist per tick) and ARR emits are throttled to ~3s so catalog sync is not paced by task_run row locks.
+- **Nav during live tasks**: Sidebar/task live ticks no longer full-refetch Activity on every progress seq, which could leave the URL on Logs while the UI stayed on Tasks.
+- **Router transitions**: `BrowserRouter` uses `useTransitions={false}` so always-on task polls cannot interrupt SPA navigations (URL change with stuck page body).
+- **Live progress cadence**: Tasks UI polls ~1s for short sync phases and ~5s during materialization/calendar, instead of on every SSE seq tick.
+- **Stopped sync stats**: Stopping a full/lite sync keeps partial materialization counts on the stopped phase instead of zeros.
 - **Never cancels Title Refresh**: Setting Never fails in-flight reconcile jobs for that title and skips new refreshes while Never is set.
+- **Import-grace under sync**: Finalize fails fast on row locks and requeues in seconds instead of staying CLAIMED for hours.
+- **Claim lifecycle**: Revoke is claim-token scoped; deferrals do not burn `max_attempts`; long handlers heartbeat `updated_at`.
+- **Lite/calendar pipeline leak**: Pipeline lock is always released; skipped runs queue a one-shot rerun after full sync.
+- **Startup full sync coordination**: Uses the same full-sync flag and pipeline contract as scheduled full sync.
+- **Idempotency retries**: Failed media/art/NFO jobs release processed keys so retries are not skipped.
+- **Webhook accept**: Persist ingest before returning 200 (off the event loop).
 
 ## Pre-release
 

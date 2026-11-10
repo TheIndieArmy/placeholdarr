@@ -326,8 +326,12 @@ def _set_job_step(
     session.commit()
 
 
+def _reconcile_group_id(entity_type: str, entity_id: int) -> str:
+    return f"entity_reconcile:{str(entity_type).strip().lower()}:{int(entity_id)}"
+
+
 def _find_active_reconcile_job(session, entity_type: str, entity_id: int) -> Job | None:
-    rows = _iter_active_reconcile_jobs(session, entity_type, entity_id, limit=50)
+    rows = _iter_active_reconcile_jobs(session, entity_type, entity_id, limit=5)
     return rows[0] if rows else None
 
 
@@ -338,20 +342,36 @@ def _iter_active_reconcile_jobs(
     *,
     limit: int = 100,
 ) -> list[Job]:
+    gid = _reconcile_group_id(entity_type, entity_id)
     rows = (
         session.query(Job)
         .filter(
             Job.job_type == ENTITY_RECONCILE_JOB_TYPE,
             Job.status.in_(tuple(ACTIVE_JOB_STATUSES)),
+            Job.group_id == gid,
         )
         .order_by(Job.id.desc())
         .limit(max(1, int(limit)))
         .all()
     )
+    if rows:
+        return list(rows)
+    # Legacy rows without group_id: narrow payload scan (bounded).
     want_type = str(entity_type).strip().lower()
     want_id = int(entity_id)
+    legacy = (
+        session.query(Job)
+        .filter(
+            Job.job_type == ENTITY_RECONCILE_JOB_TYPE,
+            Job.status.in_(tuple(ACTIVE_JOB_STATUSES)),
+            or_(Job.group_id.is_(None), Job.group_id == ""),
+        )
+        .order_by(Job.id.desc())
+        .limit(max(1, min(int(limit), 25)))
+        .all()
+    )
     matched: list[Job] = []
-    for row in rows:
+    for row in legacy:
         payload = _payload_dict(row)
         if str(payload.get("entity_type") or "").strip().lower() != want_type:
             continue
@@ -915,10 +935,28 @@ def enqueue_entity_reconcile(
             status="PENDING",
             max_attempts=3,
             priority=PRIORITY_INTERACTIVE,
-            group_id=f"entity_reconcile:{body['entity_type']}:{body['entity_id']}",
+            group_id=_reconcile_group_id(body["entity_type"], body["entity_id"]),
         )
         session.add(job)
-        session.commit()
+        try:
+            session.commit()
+        except Exception as commit_exc:
+            session.rollback()
+            # Race: another worker inserted the same active group_id.
+            existing = _find_active_reconcile_job(session, kind, eid)
+            if existing is not None:
+                payload = _payload_dict(existing)
+                return {
+                    "ok": True,
+                    "job_id": int(existing.id),
+                    "reused": True,
+                    "followup_job_id": None,
+                    "step": payload.get("step") or STEP_QUEUED,
+                    "step_label": payload.get("step_label") or _step_label_for(STEP_QUEUED),
+                    "display_title": str(payload.get("display_title") or display_title),
+                    "live": payload.get("live") if isinstance(payload.get("live"), dict) else None,
+                }
+            raise commit_exc
         _log_reconcile_info(kind, display_title, "Queued from library", job_id=int(job.id))
         return {
             "ok": True,
@@ -993,6 +1031,7 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
     refresh_paths: set[str] = set()
     placeholders: list[Placeholder] = []
     pipeline_held = False
+    entity_lock_held = False
     try:
         # Never means placeholders stay gone; do not Arr-refresh / rematerialize the title.
         try:
@@ -1042,50 +1081,176 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
                 extra={"emoji_type": "debug"},
             )
 
+        from services.source_of_truth.sync_coordinator import (
+            is_full_sync_active,
+            release_pipeline,
+            try_acquire_pipeline,
+        )
+
+        # Check library gates BEFORE Arr wait so we do not burn a worker for 300s
+        # only to defer rematerialize. Resume skips Arr when arr_done is set.
+        arr_done = bool(payload.get("arr_done"))
+        if not arr_done:
+            if is_full_sync_active():
+                _set_job_step(session, job, "waiting_pipeline", arr_label=targets.arr_label)
+                _log_reconcile_info(
+                    entity_type,
+                    title,
+                    "Deferred: full sync active (before Arr refresh)",
+                    job_id=int(job.id),
+                )
+                return {
+                    "ok": True,
+                    "defer": True,
+                    "skipped": "full_sync_active",
+                    "defer_seconds": 90,
+                }
+            if not try_acquire_pipeline():
+                _set_job_step(session, job, "waiting_pipeline", arr_label=targets.arr_label)
+                _log_reconcile_info(
+                    entity_type,
+                    title,
+                    "Deferred: library sync pipeline busy (before Arr refresh)",
+                    job_id=int(job.id),
+                )
+                return {
+                    "ok": True,
+                    "defer": True,
+                    "skipped": "pipeline_busy",
+                    "defer_seconds": 90,
+                }
+            # Probe only: release until rematerialize phase.
+            release_pipeline()
+
         _log_reconcile_info(entity_type, title, "Started scan & refresh", job_id=int(job.id))
-        if targets.arr_kind == "radarr":
-            _step("arr_refresh")
-            refresh_cmd = trigger_refresh_movie(
-                base_url=targets.base_url, api_key=targets.api_key, movie_id=targets.arr_id
-            )
+        if not arr_done:
+            payload = _payload_dict(job)
+            arr_cmd_id = payload.get("arr_command_id")
+            try:
+                arr_cmd_id = int(arr_cmd_id) if arr_cmd_id is not None else None
+            except (TypeError, ValueError):
+                arr_cmd_id = None
+
+            if arr_cmd_id is None:
+                _step("arr_refresh")
+                if targets.arr_kind == "radarr":
+                    arr_cmd_id = trigger_refresh_movie(
+                        base_url=targets.base_url, api_key=targets.api_key, movie_id=targets.arr_id
+                    )
+                else:
+                    arr_cmd_id = trigger_refresh_series(
+                        base_url=targets.base_url, api_key=targets.api_key, series_id=targets.arr_id
+                    )
+                payload["arr_command_id"] = int(arr_cmd_id)
+                job.payload = payload
+                session.add(job)
+                session.commit()
+
             _step("arr_wait_refresh")
 
             def _on_refresh_tick(_statuses: dict[int, str]) -> None:
                 _set_job_step(session, job, "arr_wait_refresh", arr_label=targets.arr_label)
 
-            wait_arr_commands(
-                base_url=targets.base_url,
-                api_key=targets.api_key,
-                command_ids=[refresh_cmd],
-                on_tick=_on_refresh_tick,
-            )
+            # Short poll only: release the worker between Arr ticks via defer.
+            try:
+                wait_arr_commands(
+                    base_url=targets.base_url,
+                    api_key=targets.api_key,
+                    command_ids=[int(arr_cmd_id)],
+                    timeout_s=8.0,
+                    poll_s=2.0,
+                    on_tick=_on_refresh_tick,
+                )
+            except ArrCommandError as wait_exc:
+                msg = str(wait_exc or "")
+                if "Timed out" in msg:
+                    _log_reconcile_info(
+                        entity_type,
+                        title,
+                        "Deferred: waiting for Arr refresh command",
+                        job_id=int(job.id),
+                    )
+                    return {
+                        "ok": True,
+                        "defer": True,
+                        "skipped": "arr_command_pending",
+                        "defer_seconds": 5,
+                    }
+                raise
 
             _step("sync_catalog")
-            sync_radarr_movies_by_ids(
-                [targets.arr_id],
-                base_url=targets.base_url,
-                api_key=targets.api_key,
-                instance_key=targets.instance_key,
-            )
+            if targets.arr_kind == "radarr":
+                sync_radarr_movies_by_ids(
+                    [targets.arr_id],
+                    base_url=targets.base_url,
+                    api_key=targets.api_key,
+                    instance_key=targets.instance_key,
+                )
+            else:
+                sync_sonarr_series_by_ids(
+                    [targets.arr_id],
+                    base_url=targets.base_url,
+                    api_key=targets.api_key,
+                    instance_key=targets.instance_key,
+                )
+                if entity_type == "series":
+                    targets = _ReconcileTargets(
+                        entity_type=targets.entity_type,
+                        entity_id=targets.entity_id,
+                        display_title=targets.display_title,
+                        arr_kind=targets.arr_kind,
+                        arr_id=targets.arr_id,
+                        base_url=targets.base_url,
+                        api_key=targets.api_key,
+                        instance_key=targets.instance_key,
+                        movie_row_ids=[],
+                        episode_row_ids=_episode_row_ids_for_series(session, entity_id),
+                        arr_label=targets.arr_label,
+                    )
+
+            # Persist Arr completion so a later pipeline defer resumes at rematerialize.
+            payload = _payload_dict(job)
+            payload["arr_done"] = True
+            payload.pop("arr_command_id", None)
+            job.payload = payload
+            session.add(job)
+            session.commit()
+
+            # Tags may have changed during Arr refresh/sync; apply Never/Pinned before
+            # determination so a concurrent lite sync cannot leave policy on Auto.
+            try:
+                from services.source_of_truth.tag_placeholder_policy import apply_arr_tag_placeholder_policies
+
+                tag_movie_ids = list(targets.movie_row_ids or [])
+                tag_series_ids: list[int] = []
+                if targets.arr_kind == "sonarr":
+                    if entity_type == "series":
+                        tag_series_ids = [int(entity_id)]
+                    elif entity_type == "episode":
+                        ep = session.query(Episode).filter(Episode.id == int(entity_id)).first()
+                        season = session.query(Season).get(ep.season_id) if ep and ep.season_id else None
+                        if season and season.series_id is not None:
+                            tag_series_ids = [int(season.series_id)]
+                if tag_movie_ids or tag_series_ids:
+                    apply_arr_tag_placeholder_policies(
+                        movie_row_ids=tag_movie_ids,
+                        series_row_ids=tag_series_ids,
+                    )
+            except Exception as tag_exc:
+                _log_reconcile_warning(
+                    entity_type,
+                    title,
+                    f"Arr tag policy apply after catalog sync failed: {tag_exc}",
+                    job_id=int(job.id),
+                )
         else:
-            _step("arr_refresh")
-            refresh_cmd = trigger_refresh_series(
-                base_url=targets.base_url, api_key=targets.api_key, series_id=targets.arr_id
+            _log_reconcile_info(
+                entity_type,
+                title,
+                "Resuming after Arr (pipeline was busy)",
+                job_id=int(job.id),
             )
-            _step("arr_wait_refresh")
-            wait_arr_commands(
-                base_url=targets.base_url,
-                api_key=targets.api_key,
-                command_ids=[refresh_cmd],
-            )
-            _step("sync_catalog")
-            sync_sonarr_series_by_ids(
-                [targets.arr_id],
-                base_url=targets.base_url,
-                api_key=targets.api_key,
-                instance_key=targets.instance_key,
-            )
-            if entity_type == "series":
+            if entity_type == "series" and targets.arr_kind == "sonarr":
                 targets = _ReconcileTargets(
                     entity_type=targets.entity_type,
                     entity_id=targets.entity_id,
@@ -1100,43 +1265,7 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
                     arr_label=targets.arr_label,
                 )
 
-        # Tags may have changed during Arr refresh/sync; apply Never/Pinned before
-        # determination so a concurrent lite sync cannot leave policy on Auto.
-        try:
-            from services.source_of_truth.tag_placeholder_policy import apply_arr_tag_placeholder_policies
-
-            tag_movie_ids = list(targets.movie_row_ids or [])
-            tag_series_ids: list[int] = []
-            if targets.arr_kind == "sonarr":
-                if entity_type == "series":
-                    tag_series_ids = [int(entity_id)]
-                elif entity_type == "episode":
-                    ep = session.query(Episode).filter(Episode.id == int(entity_id)).first()
-                    season = session.query(Season).get(ep.season_id) if ep and ep.season_id else None
-                    if season and season.series_id is not None:
-                        tag_series_ids = [int(season.series_id)]
-            if tag_movie_ids or tag_series_ids:
-                apply_arr_tag_placeholder_policies(
-                    movie_row_ids=tag_movie_ids,
-                    series_row_ids=tag_series_ids,
-                )
-        except Exception as tag_exc:
-            _log_reconcile_warning(
-                entity_type,
-                title,
-                f"Arr tag policy apply after catalog sync failed: {tag_exc}",
-                job_id=int(job.id),
-            )
-
-        # Same pipeline lock as lite/full sync and density Apply now: do not
-        # rematerialize while a library-wide mat is already holding the lock.
-        # Arr refresh above stays outside so a long Sonarr wait does not block sync.
-        from services.source_of_truth.sync_coordinator import (
-            release_pipeline,
-            try_acquire_pipeline,
-        )
-
-        if not try_acquire_pipeline():
+        if is_full_sync_active() or not try_acquire_pipeline():
             _set_job_step(session, job, "waiting_pipeline", arr_label=targets.arr_label)
             _log_reconcile_info(
                 entity_type,
@@ -1147,10 +1276,33 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
             return {
                 "ok": True,
                 "defer": True,
-                "skipped": "pipeline_busy",
+                "skipped": "pipeline_busy" if not is_full_sync_active() else "full_sync_active",
                 "defer_seconds": 90,
             }
         pipeline_held = True
+        from services.source_of_truth.entity_locks import (
+            release_entity_lock,
+            try_acquire_entity_lock,
+        )
+
+        entity_lock_held = bool(
+            try_acquire_entity_lock(session, entity_type=entity_type, entity_id=int(entity_id))
+        )
+        if not entity_lock_held:
+            release_pipeline()
+            pipeline_held = False
+            _log_reconcile_info(
+                entity_type,
+                title,
+                "Deferred: entity rematerialize lock busy",
+                job_id=int(job.id),
+            )
+            return {
+                "ok": True,
+                "defer": True,
+                "skipped": "entity_lock_busy",
+                "defer_seconds": 15,
+            }
         _log_reconcile_info(
             entity_type,
             title,
@@ -1266,6 +1418,12 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
                     episode_row_ids=targets.episode_row_ids,
                 )
         finally:
+            if entity_lock_held:
+                try:
+                    release_entity_lock(session, entity_type=entity_type, entity_id=int(entity_id))
+                except Exception:
+                    pass
+                entity_lock_held = False
             if pipeline_held:
                 release_pipeline()
                 pipeline_held = False
@@ -1374,6 +1532,13 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
         )
         raise ValueError(str(exc)) from exc
     finally:
+        if entity_lock_held:
+            try:
+                from services.source_of_truth.entity_locks import release_entity_lock as _rel_ent
+
+                _rel_ent(session, entity_type=entity_type, entity_id=int(entity_id))
+            except Exception:
+                pass
         if pipeline_held:
             try:
                 from services.source_of_truth.sync_coordinator import release_pipeline

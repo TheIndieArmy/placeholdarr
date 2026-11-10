@@ -224,6 +224,62 @@ def _run_self_healing_pipeline_inner(run_id: str, *, include_calendar_date_refre
     return stats
 
 
+
+_PENDING_RERUN: set[str] = set()
+
+
+def _mark_sync_pending_rerun(task_key: str) -> None:
+    """Remember that a scheduled sync was skipped so we can run once after pipeline frees."""
+    key = str(task_key or "").strip()
+    if key:
+        _PENDING_RERUN.add(key)
+
+
+def _consume_sync_pending_rerun(task_key: str) -> bool:
+    key = str(task_key or "").strip()
+    if key in _PENDING_RERUN:
+        _PENDING_RERUN.discard(key)
+        return True
+    return False
+
+
+def kick_pending_sync_reruns() -> None:
+    """Run one queued lite/calendar pass after full sync or pipeline release (best-effort)."""
+    import threading
+
+    pending = [k for k in ("lite_sync", "calendar_sync") if k in _PENDING_RERUN]
+    if not pending:
+        return
+
+    def _run() -> None:
+        try:
+            if _consume_sync_pending_rerun("lite_sync"):
+                logger.info(
+                    "Running queued lite sync after pipeline freed",
+                    extra={"emoji_type": "info"},
+                )
+                run_lite_sync(trigger="manual")
+        except Exception as exc:
+            logger.warning(
+                f"Queued lite sync rerun failed: {exc}",
+                extra={"emoji_type": "warning"},
+            )
+        try:
+            if _consume_sync_pending_rerun("calendar_sync"):
+                logger.info(
+                    "Running queued calendar sync after pipeline freed",
+                    extra={"emoji_type": "info"},
+                )
+                run_calendar_only_maintenance(trigger="manual")
+        except Exception as exc:
+            logger.warning(
+                f"Queued calendar sync rerun failed: {exc}",
+                extra={"emoji_type": "warning"},
+            )
+
+    threading.Thread(target=_run, name="pending-sync-rerun", daemon=True).start()
+
+
 def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, Any]:
     """Full ARR sync for all instances, then blocking self-heal pipeline."""
     if is_full_sync_active():
@@ -278,6 +334,8 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
         "trigger": trigger,
         "task_run_started_at": started_at.isoformat(),
     }
+    pipeline_stats: dict[str, Any] = {"run_id": run_id}
+    mat_live: dict[str, Any] = {"done": 0, "total": 0, "stats": {}}
     try:
         from services.task_live_progress import FULL_SYNC_CORE_PHASES, seed_sync_live_phases
 
@@ -323,6 +381,8 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
             }
             phases.progress("arr_sync", units=list(arr_units), unit_label="titles")
 
+            _arr_progress_published_at = [0.0]
+
             def _on_arr_progress(done: int, total: int, *, _idx: int = inst_idx) -> None:
                 arr_units[_idx] = {
                     **arr_units[_idx],
@@ -330,6 +390,18 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
                     "done": max(0, int(done or 0)),
                     "total": max(0, int(total or 0)),
                 }
+                # Extra throttle on top of sync_runner's emit cadence: live publish
+                # takes a task_run row lock and must not pace catalog upserts.
+                now = time.monotonic()
+                total_i = max(0, int(total or 0))
+                done_i = max(0, int(done or 0))
+                if (
+                    total_i > 0
+                    and done_i not in (0, total_i)
+                    and (now - _arr_progress_published_at[0]) < 3.0
+                ):
+                    return
+                _arr_progress_published_at[0] = now
                 phases.progress("arr_sync", units=list(arr_units), unit_label="titles")
 
             key = _run_full_sync_with_deadlock_retry(
@@ -371,7 +443,6 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
         )
         ensure_task_run_not_cancelled(task_run_id)
 
-        pipeline_stats: dict[str, Any] = {"run_id": run_id}
         acquire_pipeline_blocking()
         try:
             ensure_task_run_not_cancelled(task_run_id)
@@ -417,7 +488,33 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
 
             ensure_task_run_not_cancelled(task_run_id)
             phases.begin("materialization", "Placeholder materialization")
-            pipeline_stats["materialization"] = run_materialization_pass()
+
+            _mat_progress_published_at = [0.0]
+
+            def _on_mat_progress(done: int, total: int, stats=None) -> None:
+                mat_stats = stats if isinstance(stats, dict) else {}
+                mat_live["done"] = int(done or 0)
+                mat_live["total"] = max(int(total or 0), 1)
+                mat_live["stats"] = mat_stats
+                # Keep stop/cancel stats current; throttle DB live publishes.
+                now = time.monotonic()
+                total_i = max(int(total or 0), 1)
+                done_i = int(done or 0)
+                if (
+                    done_i not in (0, total_i)
+                    and (now - _mat_progress_published_at[0]) < 3.0
+                ):
+                    return
+                _mat_progress_published_at[0] = now
+                phases.progress(
+                    "materialization",
+                    done=done_i,
+                    total=total_i,
+                    unit_label="entities",
+                    metrics=metrics_from_pipeline({"materialization": mat_stats}).get("materialization"),
+                )
+
+            pipeline_stats["materialization"] = run_materialization_pass(on_progress=_on_mat_progress)
             from services.source_of_truth.tag_placeholder_policy import (
                 merge_tag_policy_materialization_into,
                 sum_tag_policy_counts_from_arr_instance_stats,
@@ -427,7 +524,20 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
                 pipeline_stats.get("materialization") if isinstance(pipeline_stats.get("materialization"), dict) else {},
                 sum_tag_policy_counts_from_arr_instance_stats(sync_stats),
             )
-            phases.end("materialization", metrics=metrics_from_pipeline(pipeline_stats).get("materialization"))
+            mat_end = pipeline_stats.get("materialization") if isinstance(pipeline_stats.get("materialization"), dict) else {}
+            mat_done = (
+                int(mat_end.get("created") or 0)
+                + int(mat_end.get("deleted") or 0)
+                + int(mat_end.get("noop") or 0)
+                + int(mat_end.get("errors") or 0)
+            )
+            phases.end(
+                "materialization",
+                metrics=metrics_from_pipeline(pipeline_stats).get("materialization"),
+                done=mat_done,
+                total=max(mat_done, 1),
+                unit_label="placeholders",
+            )
 
             try:
                 from services.source_of_truth.tv_density_rematerialize import (
@@ -482,11 +592,18 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
 
             ensure_task_run_not_cancelled(task_run_id)
             phases.begin("calendar", "Calendar status")
-            phases.progress(
-                "calendar",
-                metrics=metrics_from_pipeline({"calendar": {}}).get("calendar"),
-            )
-            pipeline_stats["calendar"] = run_calendar_phase()
+
+            def _on_calendar_progress(done: int, total: int, stats=None) -> None:
+                cal_stats = stats if isinstance(stats, dict) else {}
+                phases.progress(
+                    "calendar",
+                    done=int(done or 0),
+                    total=max(int(total or 0), 1),
+                    unit_label="placeholders",
+                    metrics=metrics_from_pipeline({"calendar": cal_stats}).get("calendar"),
+                )
+
+            pipeline_stats["calendar"] = run_calendar_phase(on_progress=_on_calendar_progress)
             pipeline_stats["orphan_placeholders"] = run_orphan_placeholder_cleanup()
             phases.end("calendar", metrics=metrics_from_pipeline(pipeline_stats).get("calendar"))
 
@@ -582,16 +699,57 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
         else:
             try_complete_full_sync_task_run(task_run_id)
         return result
-    except TaskRunCancelled:
+    except TaskRunCancelled as cancel_exc:
         logger.warning(
             "Full sync stopped by user run_id=%s task_run_id=%s",
             run_id,
             task_run_id,
             extra={"emoji_type": "warning"},
         )
+        partial = getattr(cancel_exc, "partial", None)
+        if isinstance(partial, dict) and isinstance(partial.get("materialization"), dict):
+            pipeline_stats["materialization"] = partial["materialization"]
+            result["materialization"] = partial["materialization"]
+        elif isinstance(mat_live.get("stats"), dict) and mat_live["stats"]:
+            pipeline_stats["materialization"] = mat_live["stats"]
+            result["materialization"] = mat_live["stats"]
         for key in list(phases._open.keys()):
-            phases.end(key, failed=True, status="failed")
+            phase = next((p for p in phases.phases() if p.get("key") == key), None)
+            metrics = list((phase or {}).get("metrics") or [])
+            done = None
+            total = None
+            unit_label = None
+            if key == "materialization":
+                mat_stats = (
+                    pipeline_stats.get("materialization")
+                    if isinstance(pipeline_stats.get("materialization"), dict)
+                    else {}
+                )
+                if mat_stats:
+                    metrics = metrics_from_pipeline({"materialization": mat_stats}).get(
+                        "materialization"
+                    ) or metrics
+                done = int(
+                    mat_live.get("done")
+                    or (partial.get("done") if isinstance(partial, dict) else 0)
+                    or 0
+                )
+                total = int(
+                    mat_live.get("total")
+                    or (partial.get("total") if isinstance(partial, dict) else 0)
+                    or max(done, 1)
+                )
+                unit_label = "entities"
+            phases.end(
+                key,
+                status="stopped",
+                metrics=metrics,
+                done=done,
+                total=total,
+                unit_label=unit_label,
+            )
         result["cancelled"] = True
+        result["pipeline"] = pipeline_stats
         result["phases"] = phases.phases()
         update_task_run_summary(task_run_id, result)
         return result
@@ -617,6 +775,7 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
             trigger=trigger,
             skip_reason="full_sync_in_progress",
         )
+        _mark_sync_pending_rerun("lite_sync")
         logger.info(
             "Lite sync skipped: full sync in progress",
             extra={"emoji_type": "info"},
@@ -629,6 +788,7 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
             trigger=trigger,
             skip_reason="pipeline_busy",
         )
+        _mark_sync_pending_rerun("lite_sync")
         logger.warning("Lite sync skipped: pipeline busy", extra={"emoji_type": "warning"})
         return {"skipped": True, "reason": "pipeline_busy", "task_run_id": skip_id}
 
@@ -643,27 +803,27 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
         metrics_from_pipeline,
     )
 
-    own_run = task_run_id is None
-    if own_run:
-        task_run_id = begin_task_run(task_key="lite_sync", trigger=trigger)
-
-    started_at = datetime.now(timezone.utc)
-    result: dict[str, Any] = {"task_run_id": task_run_id}
-    phases = TaskRunPhaseTracker(int(task_run_id), started_at=started_at)
-
     try:
-        from services.task_live_progress import LITE_SYNC_CORE_PHASES, seed_sync_live_phases
+      own_run = task_run_id is None
+      if own_run:
+          task_run_id = begin_task_run(task_key="lite_sync", trigger=trigger)
 
-        seed_sync_live_phases(
-            int(task_run_id),
-            kind="lite_sync",
-            label="Lite sync",
-            phase_defs=LITE_SYNC_CORE_PHASES,
-        )
-    except Exception as live_exc:
-        logger.debug("lite_sync live seed skipped: %s", live_exc, extra={"emoji_type": "debug"})
+      started_at = datetime.now(timezone.utc)
+      result: dict[str, Any] = {"task_run_id": task_run_id}
+      phases = TaskRunPhaseTracker(int(task_run_id), started_at=started_at)
 
-    try:
+      try:
+          from services.task_live_progress import LITE_SYNC_CORE_PHASES, seed_sync_live_phases
+
+          seed_sync_live_phases(
+              int(task_run_id),
+              kind="lite_sync",
+              label="Lite sync",
+              phase_defs=LITE_SYNC_CORE_PHASES,
+          )
+      except Exception as live_exc:
+          logger.debug("lite_sync live seed skipped: %s", live_exc, extra={"emoji_type": "debug"})
+
       with task_run_cancel_scope(task_run_id):
         instances = [
             inst
@@ -785,11 +945,23 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
 
         ensure_task_run_not_cancelled(task_run_id)
         phases.begin("materialization", "Placeholder materialization")
+
+        def _on_lite_mat_progress(done: int, total: int, stats=None) -> None:
+            mat_stats = stats if isinstance(stats, dict) else {}
+            phases.progress(
+                "materialization",
+                done=int(done or 0),
+                total=max(int(total or 0), 1),
+                unit_label="entities",
+                metrics=metrics_from_pipeline({"materialization": mat_stats}).get("materialization"),
+            )
+
         if movie_row_ids or episode_row_ids:
             materialization_stats = run_materialization_for_entities(
                 movie_ids=movie_row_ids,
                 episode_ids=episode_row_ids,
                 observation_source="scheduled_lite_materialization",
+                on_progress=_on_lite_mat_progress,
             )
         else:
             materialization_stats = {"skipped": True, "reason": "no_lite_changes_detected"}
@@ -854,13 +1026,25 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
             finish_task_run(task_run_id, status="done", summary=result)
             _apply_schedule_after_success("lite_sync", trigger)
         return result
-    except TaskRunCancelled:
+    except TaskRunCancelled as cancel_exc:
         logger.warning(
             "Lite sync stopped by user task_run_id=%s",
             task_run_id,
             extra={"emoji_type": "warning"},
         )
+        partial = getattr(cancel_exc, "partial", None)
+        if isinstance(partial, dict) and isinstance(partial.get("materialization"), dict):
+            result["materialization"] = partial["materialization"]
+        for key in list(phases._open.keys()):
+            phase = next((p for p in phases.phases() if p.get("key") == key), None)
+            metrics = list((phase or {}).get("metrics") or [])
+            if key == "materialization" and isinstance(result.get("materialization"), dict):
+                metrics = metrics_from_pipeline({"materialization": result["materialization"]}).get(
+                    "materialization"
+                ) or metrics
+            phases.end(key, status="stopped", metrics=metrics)
         result["cancelled"] = True
+        result["phases"] = phases.phases()
         if own_run:
             # Abandon already marked stopped; keep that outcome.
             update_task_run_summary(int(task_run_id), result)
@@ -879,6 +1063,10 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
         raise
     finally:
         release_pipeline()
+        try:
+            kick_pending_sync_reruns()
+        except Exception:
+            pass
 
 
 def run_calendar_only_maintenance(*, trigger: TaskTrigger = "manual") -> dict[str, Any]:
@@ -889,6 +1077,7 @@ def run_calendar_only_maintenance(*, trigger: TaskTrigger = "manual") -> dict[st
             trigger=trigger,
             skip_reason="full_sync_in_progress",
         )
+        _mark_sync_pending_rerun("calendar_sync")
         return {"skipped": True, "reason": "full_sync_in_progress", "task_run_id": skip_id}
 
     if not try_acquire_pipeline():
@@ -897,6 +1086,7 @@ def run_calendar_only_maintenance(*, trigger: TaskTrigger = "manual") -> dict[st
             trigger=trigger,
             skip_reason="pipeline_busy",
         )
+        _mark_sync_pending_rerun("calendar_sync")
         return {"skipped": True, "reason": "pipeline_busy", "task_run_id": skip_id}
 
     from services.task_run_phases import (
@@ -905,12 +1095,11 @@ def run_calendar_only_maintenance(*, trigger: TaskTrigger = "manual") -> dict[st
         metrics_from_pipeline,
     )
 
-    task_run_id = begin_task_run(task_key="calendar_sync", trigger=trigger)
-    started_at = datetime.now(timezone.utc)
-    result: dict[str, Any] = {"task_run_id": task_run_id}
-    phases = TaskRunPhaseTracker(int(task_run_id), started_at=started_at)
-
     try:
+        task_run_id = begin_task_run(task_key="calendar_sync", trigger=trigger)
+        started_at = datetime.now(timezone.utc)
+        result: dict[str, Any] = {"task_run_id": task_run_id}
+        phases = TaskRunPhaseTracker(int(task_run_id), started_at=started_at)
         try:
             from services.task_live_progress import CALENDAR_ONLY_PHASES, seed_sync_live_phases
 
@@ -940,7 +1129,18 @@ def run_calendar_only_maintenance(*, trigger: TaskTrigger = "manual") -> dict[st
         )
 
         phases.begin("calendar", "Calendar status")
-        result["calendar"] = run_calendar_phase()
+
+        def _on_cal_only_progress(done: int, total: int, stats=None) -> None:
+            cal_stats = stats if isinstance(stats, dict) else {}
+            phases.progress(
+                "calendar",
+                done=int(done or 0),
+                total=max(int(total or 0), 1),
+                unit_label="placeholders",
+                metrics=metrics_from_pipeline({"calendar": cal_stats}).get("calendar"),
+            )
+
+        result["calendar"] = run_calendar_phase(on_progress=_on_cal_only_progress)
         result["orphan_placeholders"] = run_orphan_placeholder_cleanup()
         cal_metrics = metrics_from_pipeline({"calendar": result.get("calendar") or {}}).get("calendar")
         cal_total = 0
@@ -1003,3 +1203,7 @@ def run_calendar_only_maintenance(*, trigger: TaskTrigger = "manual") -> dict[st
         raise
     finally:
         release_pipeline()
+        try:
+            kick_pending_sync_reruns()
+        except Exception:
+            pass

@@ -56,6 +56,11 @@ from services.source_of_truth.media_refresh_handler import (
     enqueue_media_refresh_job,
     use_job_driven_refresh,
 )
+from services.source_of_truth.refresh_broker import (
+    observation_source_skips_bulk_section_refresh,
+    prepare_bulk_section_refresh,
+    reset_bulk_intent_after_dispatch,
+)
 from services.source_of_truth.refresh_throttle import try_acquire_refresh_lease
 from services.source_of_truth.status_orchestrator import StatusOrchestrator
 from services.messages.context import build_projection_context_from_session
@@ -65,7 +70,7 @@ from services.status_projection import projected_status_display
 def materialization_commit_chunk_size() -> int:
     return max(
         1,
-        int(getattr(settings, "MATERIALIZATION_COMMIT_CHUNK_SIZE", 200) or 200),
+        int(getattr(settings, "MATERIALIZATION_COMMIT_CHUNK_SIZE", 50) or 50),
     )
 
 
@@ -85,6 +90,7 @@ def _enqueue_media_refresh_via_new_session(
     kind: str,
     payload: dict[str, Any] | None,
     delay_seconds: float,
+    coalesce: bool | None = None,
 ) -> bool:
     """Enqueue a media_refresh Job using a fresh short-lived session.
 
@@ -100,6 +106,7 @@ def _enqueue_media_refresh_via_new_session(
             kind=kind,
             payload=payload or {},
             delay_seconds=delay_seconds,
+            coalesce=coalesce,
         )
         s.commit()
         return True
@@ -127,6 +134,7 @@ def _schedule_media_refresh(
     kind: str,
     payload: dict[str, Any] | None,
     log_message: str | None = None,
+    coalesce: bool | None = None,
 ) -> None:
     """Either enqueue a media_refresh Job (Phase 3) or fall back to threading.Timer.
 
@@ -139,6 +147,7 @@ def _schedule_media_refresh(
             kind=kind,
             payload=payload,
             delay_seconds=delay_seconds,
+            coalesce=coalesce,
         ):
             if log_message:
                 logger.info(log_message, extra={"emoji_type": "info"})
@@ -1028,6 +1037,8 @@ def _run_materialization_for_ids(
     episode_ids: list[int],
     observation_source: str,
     density_scope_episode_ids: list[int] | None = None,
+    skip_density: bool = False,
+    on_item_progress=None,
 ) -> dict[str, Any]:
     """Shared materialization core for full-sync and event-scoped runs.
 
@@ -1035,6 +1046,12 @@ def _run_materialization_for_ids(
     series-density stubs. Defaults to ``episode_ids``. Event callers should pass the
     original entity ids (before NEEDS/OBSOLETE filtering) so series stubs still update
     when density short-circuits episode rows to not_needed.
+
+    ``skip_density``: when True, omit TV density (used by chunked full sync so density
+    runs in its own short commit batches after movie/episode chunks).
+
+    ``on_item_progress(done_in_call, stats)``: optional mid-chunk Activity callback.
+    Called after each entity (throttled ~3s) so the UI is not stuck until commit.
     """
     stats: dict[str, Any] = {
         "movies_considered": 0,
@@ -1098,6 +1115,25 @@ def _run_materialization_for_ids(
     last_episode_periodic_refresh_mono: float | None = None
     bulk_initial_non_plex_refresh_done = False
     scoped_core_started = time.monotonic()
+    items_completed = 0
+    last_item_progress_mono = 0.0
+
+    def _note_item_progress(n: int = 1, *, force: bool = False) -> None:
+        nonlocal items_completed, last_item_progress_mono
+        if n > 0:
+            items_completed += int(n)
+        if not callable(on_item_progress):
+            return
+        if items_completed <= 0 and not force:
+            return
+        now = time.monotonic()
+        if not force and (now - last_item_progress_mono) < 3.0:
+            return
+        last_item_progress_mono = now
+        try:
+            on_item_progress(items_completed, stats)
+        except Exception:
+            pass
 
     def _scoped_phase(label: str) -> None:
         if is_full_sync:
@@ -1116,33 +1152,52 @@ def _run_materialization_for_ids(
         nonlocal bulk_initial_non_plex_refresh_done
         if bulk_initial_non_plex_refresh_done:
             return
-        
+        if observation_source_skips_bulk_section_refresh(observation_source):
+            bulk_initial_non_plex_refresh_done = True
+            return
+
+        broker_out = prepare_bulk_section_refresh(
+            observation_source=observation_source,
+            has_movies=bool(movie_ids),
+            has_episodes=bool(episode_ids),
+            resolve_section_ids=_target_refresh_section_ids,
+        )
+        if not bool(broker_out.get("allow_schedule", False)):
+            return
+
+        refresh_has_movies = bool(broker_out.get("has_movies"))
+        refresh_has_episodes = bool(broker_out.get("has_episodes"))
+
         def _delayed_media_server_refresh():
-            refresh_stats = refresh_selected_sections(
-                has_movies=bool(movie_ids),
-                has_episodes=bool(episode_ids),
-                include_plex=True,
-                include_jellyfin=True,
-                include_emby=True,
-            )
-            logger.info(
-                f"Completed delayed media server library refresh: refreshed={refresh_stats.get('refreshed', 0)} "
-                f"failed={refresh_stats.get('failed', 0)}",
-                extra={"emoji_type": "success"},
-            )
+            try:
+                refresh_stats = refresh_selected_sections(
+                    has_movies=refresh_has_movies,
+                    has_episodes=refresh_has_episodes,
+                    include_plex=True,
+                    include_jellyfin=True,
+                    include_emby=True,
+                )
+                logger.info(
+                    f"Completed delayed media server library refresh: refreshed={refresh_stats.get('refreshed', 0)} "
+                    f"failed={refresh_stats.get('failed', 0)}",
+                    extra={"emoji_type": "success"},
+                )
+            finally:
+                reset_bulk_intent_after_dispatch()
 
         _schedule_media_refresh(
             _delayed_media_server_refresh,
             delay_seconds=20.0,
             kind=KIND_BULK_INITIAL,
             payload={
-                "has_movies": bool(movie_ids),
-                "has_episodes": bool(episode_ids),
+                "has_movies": refresh_has_movies,
+                "has_episodes": refresh_has_episodes,
                 "include_plex": True,
                 "include_jellyfin": True,
                 "include_emby": True,
             },
             log_message="Bulk sync scheduled initial media server library refresh in 20 seconds.",
+            coalesce=True,
         )
         bulk_initial_non_plex_refresh_done = True
 
@@ -1369,6 +1424,7 @@ def _run_materialization_for_ids(
     for idx, movie_id in enumerate(movie_obsolete_ids, start=1):
         maybe_check_active_cancel(idx)
         _process_single_movie_materialization(movie_id)
+        _note_item_progress()
     if movie_obsolete_ids:
         run_determination_for_entities_in_session(session, movie_ids=list(movie_obsolete_ids), episode_ids=[])
     _scoped_phase(
@@ -1386,7 +1442,9 @@ def _run_materialization_for_ids(
     for idx, movie_id in enumerate(pending_movie_needs, start=1):
         maybe_check_active_cancel(idx)
         _process_single_movie_materialization(movie_id)
+        _note_item_progress()
     _scoped_phase("needs-placeholder movie pass done")
+    _note_item_progress(0, force=True)
 
     if is_full_sync and movie_phase_start_mono is not None:
         def _final_movie_refresh():
@@ -1533,6 +1591,7 @@ def _run_materialization_for_ids(
         if not series:
             for episode_id in ids:
                 _process_single_episode_materialization(episode_id)
+                _note_item_progress()
             return
         # Quick delete-then-readd: another worker may have cleared is_deleted already.
         if not bool(getattr(series, "is_deleted", False)):
@@ -1543,6 +1602,7 @@ def _run_materialization_for_ids(
             )
             for episode_id in ids:
                 _process_single_episode_materialization(episode_id)
+                _note_item_progress()
             return
 
         candidate_paths = _mark_placeholder_rows_deleted_for_episodes(
@@ -1599,6 +1659,7 @@ def _run_materialization_for_ids(
             f"dirs_deleted={int(cleanup_result.get('directories_deleted', 0) or 0)}",
             extra={"emoji_type": "delete"},
         )
+        _note_item_progress(len(ids), force=True)
 
     episode_obsolete_ids, _episode_needs_seed = _split_episode_ids_by_determination(session, episode_ids)
     bulk_deleted_series_map: dict[int, list[int]] = {}
@@ -1622,6 +1683,7 @@ def _run_materialization_for_ids(
         if episode_id in bulk_episode_ids:
             continue
         _process_single_episode_materialization(episode_id)
+        _note_item_progress()
     if episode_obsolete_ids:
         run_determination_for_entities_in_session(session, movie_ids=[], episode_ids=list(episode_obsolete_ids))
     if episode_ids:
@@ -1636,93 +1698,98 @@ def _run_materialization_for_ids(
     for idx, episode_id in enumerate(pending_episode_needs, start=1):
         maybe_check_active_cancel(idx)
         _process_single_episode_materialization(episode_id)
+        _note_item_progress()
     _scoped_phase("episode obsolete + needs passes done")
+    _note_item_progress(0, force=True)
 
     # TV density stubs: series and/or season (also clears leftovers after switching away).
-    try:
-        from services.source_of_truth.series_density_materializer import (
-            all_active_series_ids,
-            run_series_density_for_series_ids,
-            series_ids_for_episode_ids,
-            series_ids_with_density_stubs,
-        )
-        from services.source_of_truth.season_density_materializer import (
-            run_season_density_for_series_ids,
-            series_ids_with_season_density_stubs,
-        )
-        from services.source_of_truth.tv_density import tv_placeholder_density
+    if skip_density:
+        _scoped_phase("tv density skipped (caller batches density separately)")
+    else:
+        try:
+            from services.source_of_truth.series_density_materializer import (
+                all_active_series_ids,
+                run_series_density_for_series_ids,
+                series_ids_for_episode_ids,
+                series_ids_with_density_stubs,
+            )
+            from services.source_of_truth.season_density_materializer import (
+                run_season_density_for_series_ids,
+                series_ids_with_season_density_stubs,
+            )
+            from services.source_of_truth.tv_density import tv_placeholder_density
 
-        density = tv_placeholder_density()
-        density_series_ids: list[int] = []
-        scope_episode_ids = (
-            density_scope_episode_ids if density_scope_episode_ids is not None else episode_ids
-        )
-        if is_full_sync and density in ("series", "season"):
-            density_series_ids = all_active_series_ids(session)
-        else:
-            density_series_ids = series_ids_for_episode_ids(session, scope_episode_ids or [])
-            leftover: set[int] = set()
-            if density != "series":
-                leftover |= set(series_ids_with_density_stubs(session))
-            if density != "season":
-                leftover |= set(series_ids_with_season_density_stubs(session))
-            if leftover:
-                density_series_ids = sorted(set(density_series_ids) | leftover)
+            density = tv_placeholder_density()
+            density_series_ids: list[int] = []
+            scope_episode_ids = (
+                density_scope_episode_ids if density_scope_episode_ids is not None else episode_ids
+            )
+            if is_full_sync and density in ("series", "season"):
+                density_series_ids = all_active_series_ids(session)
+            else:
+                density_series_ids = series_ids_for_episode_ids(session, scope_episode_ids or [])
+                leftover: set[int] = set()
+                if density != "series":
+                    leftover |= set(series_ids_with_density_stubs(session))
+                if density != "season":
+                    leftover |= set(series_ids_with_season_density_stubs(session))
+                if leftover:
+                    density_series_ids = sorted(set(density_series_ids) | leftover)
 
-        if density_series_ids:
-            series_stats = run_series_density_for_series_ids(
-                session,
-                density_series_ids,
-                activity_reason=activity_reason or "series_density",
-            )
-            stats["series_density"] = series_stats
-            logger.info(
-                f"Series density pass: considered={series_stats.get('series_considered', 0)} "
-                f"created={series_stats.get('created', 0)} "
-                f"retired={series_stats.get('retired', 0)} "
-                f"errors={series_stats.get('errors', 0)}",
-                extra={"emoji_type": "info"},
-            )
-            season_stats = run_season_density_for_series_ids(
-                session,
-                density_series_ids,
-                activity_reason=activity_reason or "season_density",
-            )
-            stats["season_density"] = season_stats
-            logger.info(
-                f"Season density pass: series={season_stats.get('series_considered', 0)} "
-                f"seasons={season_stats.get('seasons_considered', 0)} "
-                f"created={season_stats.get('created', 0)} "
-                f"retired={season_stats.get('retired', 0)} "
-                f"errors={season_stats.get('errors', 0)}",
-                extra={"emoji_type": "info"},
-            )
-            for path in list(series_stats.get("created_paths") or []) + list(
-                season_stats.get("created_paths") or []
-            ):
-                if path:
-                    changed_paths.add(str(path))
-            for path in list(series_stats.get("deleted_paths") or []) + list(
-                season_stats.get("deleted_paths") or []
-            ):
-                if path:
-                    delete_refresh_paths.add(str(path))
-            try:
-                from services.series_episode_stats_hooks import refresh_series_stats_after_bulk
-
-                refresh_series_stats_after_bulk(
+            if density_series_ids:
+                series_stats = run_series_density_for_series_ids(
                     session,
-                    series_ids={int(sid) for sid in density_series_ids},
+                    density_series_ids,
+                    activity_reason=activity_reason or "series_density",
                 )
-            except Exception as stats_exc:
-                logger.debug(
-                    f"TV density series stats refresh skipped: {stats_exc}",
-                    extra={"emoji_type": "debug"},
+                stats["series_density"] = series_stats
+                logger.info(
+                    f"Series density pass: considered={series_stats.get('series_considered', 0)} "
+                    f"created={series_stats.get('created', 0)} "
+                    f"retired={series_stats.get('retired', 0)} "
+                    f"errors={series_stats.get('errors', 0)}",
+                    extra={"emoji_type": "info"},
                 )
-            _scoped_phase("tv density passes done")
-    except Exception as exc:
-        logger.error(f"TV density pass failed: {exc}", extra={"emoji_type": "error"})
-        stats["tv_density_error"] = str(exc)
+                season_stats = run_season_density_for_series_ids(
+                    session,
+                    density_series_ids,
+                    activity_reason=activity_reason or "season_density",
+                )
+                stats["season_density"] = season_stats
+                logger.info(
+                    f"Season density pass: series={season_stats.get('series_considered', 0)} "
+                    f"seasons={season_stats.get('seasons_considered', 0)} "
+                    f"created={season_stats.get('created', 0)} "
+                    f"retired={season_stats.get('retired', 0)} "
+                    f"errors={season_stats.get('errors', 0)}",
+                    extra={"emoji_type": "info"},
+                )
+                for path in list(series_stats.get("created_paths") or []) + list(
+                    season_stats.get("created_paths") or []
+                ):
+                    if path:
+                        changed_paths.add(str(path))
+                for path in list(series_stats.get("deleted_paths") or []) + list(
+                    season_stats.get("deleted_paths") or []
+                ):
+                    if path:
+                        delete_refresh_paths.add(str(path))
+                try:
+                    from services.series_episode_stats_hooks import refresh_series_stats_after_bulk
+
+                    refresh_series_stats_after_bulk(
+                        session,
+                        series_ids={int(sid) for sid in density_series_ids},
+                    )
+                except Exception as stats_exc:
+                    logger.debug(
+                        f"TV density series stats refresh skipped: {stats_exc}",
+                        extra={"emoji_type": "debug"},
+                    )
+                _scoped_phase("tv density passes done")
+        except Exception as exc:
+            logger.error(f"TV density pass failed: {exc}", extra={"emoji_type": "error"})
+            stats["tv_density_error"] = str(exc)
 
     if is_full_sync and episode_phase_start_mono is not None:
         def _final_episode_refresh():
@@ -1829,19 +1896,172 @@ def _run_materialization_for_ids(
     return stats
 
 
-def run_materialization_pass() -> dict[str, Any]:
+def _apply_materialization_lock_timeout(session) -> None:
+    """Bound row-lock waits for the whole mat transaction (not only commit)."""
+    try:
+        timeout_s = int(getattr(settings, "MATERIALIZATION_COMMIT_LOCK_TIMEOUT_SECONDS", 15) or 15)
+        if timeout_s > 0:
+            session.execute(text(f"SET LOCAL lock_timeout = '{int(timeout_s)}s'"))
+    except Exception:
+        pass
+
+
+def _run_full_sync_density_batches(
+    *,
+    activity_reason: str = "full_sync_density",
+    on_progress=None,
+    progress_base: int = 0,
+) -> dict[str, Any]:
+    """Run TV density in short commit batches; defer TMDB poster language to jobs."""
+    from services.poster_language import defer_tmdb_poster_resolve
+    from services.source_of_truth.season_density_materializer import run_season_density_for_series_ids
+    from services.source_of_truth.series_density_materializer import (
+        all_active_series_ids,
+        run_series_density_for_series_ids,
+    )
+    from services.source_of_truth.tv_density import tv_placeholder_density
+
+    density = tv_placeholder_density()
+    if density not in ("series", "season", "episode"):
+        return {"skipped": True, "reason": "density_off"}
+
+    probe = get_session()
+    try:
+        series_ids = all_active_series_ids(probe)
+    finally:
+        try:
+            probe.close()
+        except Exception:
+            pass
+
+    chunk_size = materialization_commit_chunk_size()
+    total = len(series_ids)
+    merged: dict[str, Any] = {
+        "series_considered": total,
+        "created": 0,
+        "retired": 0,
+        "skipped": 0,
+        "errors": 0,
+        "seasons_considered": 0,
+        "chunks": 0,
+    }
+    if not series_ids:
+        return merged
+
+    def _emit(done_series: int) -> None:
+        if not callable(on_progress):
+            return
+        overall_done = int(progress_base) + int(done_series)
+        overall_total = max(int(progress_base) + int(total), 1)
+        try:
+            on_progress(overall_done, overall_total, merged)
+        except TypeError:
+            try:
+                on_progress(overall_done, overall_total)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    started = time.monotonic()
+    done = 0
+    logger.info(
+        f"Full sync TV density starting: series={total} commit_chunk_size={chunk_size} "
+        f"density={density} (TMDB poster language deferred to background jobs)",
+        extra={"emoji_type": "info"},
+    )
+    _emit(0)
+    from services.task_run_cancel import ensure_active_task_run_not_cancelled
+
+    with defer_tmdb_poster_resolve():
+        for offset in range(0, total, chunk_size):
+            ensure_active_task_run_not_cancelled()
+            chunk = series_ids[offset : offset + chunk_size]
+            merged["chunks"] += 1
+            logger.debug(
+                f"Full sync TV density chunk {merged['chunks']}: "
+                f"series={len(chunk)} offset={offset}",
+                extra={"emoji_type": "debug"},
+            )
+            session = get_session()
+            try:
+                _apply_materialization_lock_timeout(session)
+                series_stats = run_series_density_for_series_ids(
+                    session,
+                    chunk,
+                    activity_reason=activity_reason,
+                )
+                season_stats = run_season_density_for_series_ids(
+                    session,
+                    chunk,
+                    activity_reason=activity_reason,
+                )
+                session.commit()
+            except Exception:
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
+                raise
+            finally:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+
+            done += len(chunk)
+            merged["created"] += int(series_stats.get("created") or 0) + int(
+                season_stats.get("created") or 0
+            )
+            merged["retired"] += int(series_stats.get("retired") or 0) + int(
+                season_stats.get("retired") or 0
+            )
+            merged["skipped"] += int(series_stats.get("skipped") or 0) + int(
+                season_stats.get("skipped") or 0
+            )
+            merged["errors"] += int(series_stats.get("errors") or 0) + int(
+                season_stats.get("errors") or 0
+            )
+            merged["seasons_considered"] += int(season_stats.get("seasons_considered") or 0)
+            elapsed = max(0.001, time.monotonic() - started)
+            logger.info(
+                f"Full sync TV density: {done}/{total} series done · "
+                f"created={merged['created']} retired={merged['retired']} "
+                f"errors={merged['errors']} · elapsed_s={elapsed:.1f} · "
+                f"rows_per_s={done / elapsed:.2f}",
+                extra={"emoji_type": "processing"},
+            )
+            _emit(done)
+
+    try:
+        from services.source_of_truth.poster_language_job import enqueue_poster_language_resolve_stale
+
+        poster_out = enqueue_poster_language_resolve_stale(source="full_sync_materialization")
+        merged["poster_language_resolve"] = poster_out
+        logger.info(
+            f"Full sync poster language resolve enqueued after density: {poster_out}",
+            extra={"emoji_type": "info"},
+        )
+    except Exception as poster_exc:
+        logger.warning(
+            f"Full sync poster language enqueue failed: {poster_exc}",
+            extra={"emoji_type": "warning"},
+        )
+        merged["poster_language_resolve"] = {"ok": False, "reason": str(poster_exc)}
+
+    return merged
+
+
+def run_materialization_pass(*, on_progress=None) -> dict[str, Any]:
     """Apply file/DB side effects for needs/obsolete determinations.
 
-    Creates all placeholder files first, then runs one observation sweep.
-    Bulk sync skips immediate Plex path refresh fanout and repeated overlap
-    refreshes; Emby and Jellyfin get one library refresh when hybrid
-    continuation is first queued and one more after materialization while
-    hybrid observation owns Plex follow-up refresh decisions during the
-    unresolved tail.
+    Creates placeholder files in commit chunks (same size as scoped mats) so
+    interactive jobs can acquire row locks between bites. TV density runs in
+    separate series-id commit batches with TMDB poster language deferred to jobs.
+    Bulk sync still skips continuous scan churn from placeholder fanout.
 
-    This single-pass approach is far faster than per-batch cycling for large
-    first-run syncs (tens of thousands of items) while avoiding continuous scan
-    churn from placeholder fanout.
+    ``on_progress(done, total, stats=None)`` is optional; called at start and after
+    each entity / density chunk so Activity can show live counts.
     """
     session = get_session()
     try:
@@ -1857,32 +2077,115 @@ def run_materialization_pass() -> dict[str, Any]:
             .filter(Episode.determination.in_([DETERMINATION_NEEDS, DETERMINATION_OBSOLETE]))
             .all()
         ]
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
 
-        total = len(movie_ids) + len(episode_ids)
-        logger.info(
-            f"Materialization pass: {len(movie_ids)} movies + {len(episode_ids)} episodes = {total} total",
-            extra={"emoji_type": "info"},
-        )
+    entity_total = len(movie_ids) + len(episode_ids)
+    chunk_size = materialization_commit_chunk_size()
+    logger.info(
+        f"Materialization pass: {len(movie_ids)} movies + {len(episode_ids)} episodes = {entity_total} total "
+        f"(commit_chunk_size={chunk_size})",
+        extra={"emoji_type": "info"},
+    )
 
-        stats = _run_materialization_for_ids(
-            session,
-            movie_ids=movie_ids,
-            episode_ids=episode_ids,
-            observation_source="full_sync_materialization",
-        )
-        session.commit()
-        logger.info(f"Materialization phase complete: {stats}", extra={"emoji_type": "success"})
-        return stats
+    def _emit(done: int, total: int, stats: dict[str, Any] | None = None) -> None:
+        if not callable(on_progress):
+            return
+        try:
+            on_progress(int(done), int(total), stats)
+        except TypeError:
+            # Older callers that only accept (done, total).
+            try:
+                on_progress(int(done), int(total))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    try:
+        from services.poster_language import defer_tmdb_poster_resolve
+
+        started = time.monotonic()
+        remaining_movies = list(movie_ids)
+        remaining_episodes = list(episode_ids)
+        merged: dict[str, Any] = {}
+        chunk_index = 0
+        done_ids = 0
+        _emit(0, max(entity_total, 1), merged)
+        try:
+            from services.task_run_cancel import (
+                TaskRunCancelled,
+                ensure_active_task_run_not_cancelled,
+            )
+
+            with defer_tmdb_poster_resolve():
+                while remaining_movies or remaining_episodes:
+                    ensure_active_task_run_not_cancelled()
+                    chunk_movies: list[int] = []
+                    chunk_episodes: list[int] = []
+                    while remaining_movies and (len(chunk_movies) + len(chunk_episodes)) < chunk_size:
+                        chunk_movies.append(remaining_movies.pop(0))
+                    while remaining_episodes and (len(chunk_movies) + len(chunk_episodes)) < chunk_size:
+                        chunk_episodes.append(remaining_episodes.pop(0))
+                    chunk_index += 1
+                    logger.debug(
+                        f"Full sync materialization chunk {chunk_index}: "
+                        f"movies={len(chunk_movies)} episodes={len(chunk_episodes)}",
+                        extra={"emoji_type": "debug"},
+                    )
+                    progress_base = done_ids
+
+                    def _on_chunk_items(done_in_chunk: int, chunk_stats: dict[str, Any]) -> None:
+                        preview = dict(merged)
+                        _merge_materialization_stats(preview, chunk_stats)
+                        _emit(progress_base + int(done_in_chunk or 0), max(entity_total, 1), preview)
+
+                    part = _run_materialization_entity_chunk(
+                        movie_ids=chunk_movies,
+                        episode_ids=chunk_episodes,
+                        observation_source="full_sync_materialization",
+                        subject_part="",
+                        density_scope_episode_ids=[],
+                        skip_density=True,
+                        on_item_progress=_on_chunk_items,
+                    )
+                    _merge_materialization_stats(merged, part)
+                    done_ids += len(chunk_movies) + len(chunk_episodes)
+                    elapsed = max(0.001, time.monotonic() - started)
+                    logger.info(
+                        f"Full sync materialization: {done_ids}/{entity_total} entities done · "
+                        f"chunk={chunk_index} · elapsed_s={elapsed:.1f} · "
+                        f"rows_per_s={done_ids / elapsed:.2f}",
+                        extra={"emoji_type": "processing"},
+                    )
+                    _emit(done_ids, max(entity_total, 1), merged)
+
+            density_stats = _run_full_sync_density_batches(
+                on_progress=on_progress,
+                progress_base=done_ids,
+            )
+            merged["tv_density"] = density_stats
+            density_series = int(density_stats.get("series_considered") or 0)
+            final_total = max(entity_total + density_series, done_ids, 1)
+            _emit(final_total, final_total, merged)
+            logger.info(f"Materialization phase complete: {merged}", extra={"emoji_type": "success"})
+            return merged
+        except TaskRunCancelled as cancel_exc:
+            _emit(done_ids, max(entity_total, 1), merged)
+            raise TaskRunCancelled(
+                str(cancel_exc) or "materialization cancelled",
+                partial={"materialization": dict(merged), "done": done_ids, "total": entity_total},
+            ) from cancel_exc
     except Exception as e:
         from services.task_run_cancel import TaskRunCancelled
 
-        session.rollback()
         if isinstance(e, TaskRunCancelled):
             raise
         logger.error(f"Materialization phase failed: {e}", extra={"emoji_type": "error"})
         raise
-    finally:
-        session.close()
 
 
 def _run_materialization_entity_chunk(
@@ -1892,30 +2195,28 @@ def _run_materialization_entity_chunk(
     observation_source: str,
     subject_part: str,
     density_scope_episode_ids: list[int] | None,
+    skip_density: bool = False,
+    on_item_progress=None,
 ) -> dict[str, Any]:
     """Materialize one id chunk in its own session/transaction (short lock window)."""
     session = get_session()
     try:
+        _apply_materialization_lock_timeout(session)
         stats = run_materialization_for_entities_in_session(
             session,
             movie_ids=movie_ids,
             episode_ids=episode_ids,
             observation_source=observation_source,
             density_scope_episode_ids=density_scope_episode_ids,
+            skip_density=skip_density,
+            on_item_progress=on_item_progress,
         )
         if movie_ids or episode_ids:
-            logger.info(
+            logger.debug(
                 f"Scoped materialization persisting{subject_part}: observation_source={observation_source} "
-                f"chunk_movies={len(movie_ids)} chunk_episodes={len(episode_ids)} "
-                f"(if this line is followed by a long silence, commit is usually waiting on a row lock)",
-                extra={"emoji_type": "info"},
+                f"chunk_movies={len(movie_ids)} chunk_episodes={len(episode_ids)}",
+                extra={"emoji_type": "debug"},
             )
-        try:
-            timeout_s = int(getattr(settings, "MATERIALIZATION_COMMIT_LOCK_TIMEOUT_SECONDS", 15) or 15)
-            if timeout_s > 0:
-                session.execute(text(f"SET LOCAL lock_timeout = '{timeout_s}s'"))
-        except Exception:
-            pass
         v_hb = start_verbose_stall_heartbeat(
             f"scoped_materialization.session.commit source={observation_source}",
         )
@@ -1944,6 +2245,7 @@ def run_materialization_for_entities(
     log_subject: str | None = None,
     *,
     purge_catalog_tombstones: bool = True,
+    on_progress=None,
 ) -> dict[str, Any]:
     """Run materialization only for targeted entities.
 
@@ -1956,6 +2258,8 @@ def run_materialization_for_entities(
     When ``purge_catalog_tombstones`` is False, soft-deleted catalog rows are
     left in place after placeholder teardown so callers can still write
     activity history (or other FK-bound rows) before hard-purge.
+
+    ``on_progress(done, total, stats=None)`` is optional for live Activity updates.
     """
     movie_ids = [int(mid) for mid in (movie_ids or []) if mid is not None]
     episode_ids = [int(eid) for eid in (episode_ids or []) if eid is not None]
@@ -1963,6 +2267,19 @@ def run_materialization_for_entities(
     subject_part = f" · {subject}" if subject else ""
     chunk_size = materialization_commit_chunk_size()
     total_ids = len(movie_ids) + len(episode_ids)
+
+    def _emit(done: int, stats: dict[str, Any] | None = None) -> None:
+        if not callable(on_progress):
+            return
+        try:
+            on_progress(int(done), max(int(total_ids), 1), stats)
+        except TypeError:
+            try:
+                on_progress(int(done), max(int(total_ids), 1))
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     stop_scoped_hb = threading.Event()
     scoped_started = time.monotonic()
@@ -2002,6 +2319,9 @@ def run_materialization_for_entities(
         density_scope = list(episode_ids) if episode_ids else None
         merged: dict[str, Any] = {}
         chunk_index = 0
+        done_ids = 0
+        scoped_chunk_started = time.monotonic()
+        _emit(0, merged)
         while remaining_movies or remaining_episodes:
             chunk_movies: list[int] = []
             chunk_episodes: list[int] = []
@@ -2010,21 +2330,38 @@ def run_materialization_for_entities(
             while remaining_episodes and (len(chunk_movies) + len(chunk_episodes)) < chunk_size:
                 chunk_episodes.append(remaining_episodes.pop(0))
             chunk_index += 1
-            if total_ids > chunk_size:
-                logger.info(
-                    f"Scoped materialization chunk {chunk_index}{subject_part}: "
-                    f"movies={len(chunk_movies)} episodes={len(chunk_episodes)} "
-                    f"remaining={len(remaining_movies) + len(remaining_episodes)}",
-                    extra={"emoji_type": "processing"},
-                )
+            logger.debug(
+                f"Scoped materialization chunk {chunk_index}{subject_part}: "
+                f"movies={len(chunk_movies)} episodes={len(chunk_episodes)} "
+                f"remaining={len(remaining_movies) + len(remaining_episodes)}",
+                extra={"emoji_type": "debug"},
+            )
+            progress_base = done_ids
+
+            def _on_scoped_chunk_items(done_in_chunk: int, chunk_stats: dict[str, Any]) -> None:
+                preview = dict(merged)
+                _merge_materialization_stats(preview, chunk_stats)
+                _emit(progress_base + int(done_in_chunk or 0), preview)
+
             part = _run_materialization_entity_chunk(
                 movie_ids=chunk_movies,
                 episode_ids=chunk_episodes,
                 observation_source=observation_source,
                 subject_part=subject_part,
                 density_scope_episode_ids=density_scope,
+                on_item_progress=_on_scoped_chunk_items,
             )
             _merge_materialization_stats(merged, part)
+            done_ids += len(chunk_movies) + len(chunk_episodes)
+            _emit(done_ids, merged)
+            if total_ids > chunk_size:
+                elapsed = max(0.001, time.monotonic() - scoped_chunk_started)
+                logger.info(
+                    f"Scoped materialization{subject_part}: {done_ids}/{total_ids} done · "
+                    f"chunk={chunk_index} · elapsed_s={elapsed:.1f} · "
+                    f"rows_per_s={done_ids / elapsed:.2f}",
+                    extra={"emoji_type": "processing"},
+                )
 
         logger.info(
             f"Scoped materialization complete{subject_part}: {merged}",
@@ -2062,6 +2399,9 @@ def run_materialization_for_entities_in_session(
     episode_ids: list[int] | None = None,
     observation_source: str = "event_materialization",
     density_scope_episode_ids: list[int] | None = None,
+    *,
+    skip_density: bool = False,
+    on_item_progress=None,
 ) -> dict[str, Any]:
     movie_ids = [int(mid) for mid in (movie_ids or []) if mid is not None]
     episode_ids = [int(eid) for eid in (episode_ids or []) if eid is not None]
@@ -2091,4 +2431,6 @@ def run_materialization_for_entities_in_session(
         episode_ids=actionable_episode_ids,
         observation_source=observation_source,
         density_scope_episode_ids=density_ids,
+        skip_density=skip_density,
+        on_item_progress=on_item_progress,
     )

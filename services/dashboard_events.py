@@ -46,10 +46,11 @@ def _dashboard_state_events() -> list[dict[str, Any]]:
 
 
 def _task_runs_fingerprint() -> str:
-    """Cheap change-detection token for task runs: latest row id/status/update marker.
+    """Cheap change-detection token for task run lifecycle (start/finish only).
 
-    Changes whenever a run starts, finishes, or updates its summary, so the
-    frontend knows to re-fetch /api/tasks/* without duplicating payloads here.
+    Live phase ``seq`` updates are intentionally excluded: the Tasks UI polls for
+    progress on its own. Including seq here forced a dashboard refetch storm that
+    starved React Router navigations during long materialization.
     """
     from sqlalchemy import func as sa_func
 
@@ -78,14 +79,7 @@ def _task_runs_fingerprint() -> str:
     if row is None:
         return "none"
     ended = row.ended_at.isoformat() if row.ended_at else ""
-    live_seq = "none"
-    try:
-        from services.task_live_progress import working_live_progress_seq_fingerprint
-
-        live_seq = working_live_progress_seq_fingerprint()
-    except Exception:
-        live_seq = "none"
-    return f"{row.id}:{row.status}:{ended}:w{working_count}:live:{live_seq}"
+    return f"{row.id}:{row.status}:{ended}:w{working_count}"
 
 
 def _state_fingerprint(events: list[dict[str, Any]]) -> str:
