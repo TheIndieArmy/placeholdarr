@@ -1195,17 +1195,23 @@ def _process_claimed_job(session, job: Job):
 # ----------------------------------------------------------------
 
 
-def _start_handler_watchdog(job_id: int, job_type: str) -> threading.Event:
-    """Start a one-shot watchdog that logs an ERROR if a handler exceeds the timeout.
+def _start_handler_watchdog(
+    job_id: int,
+    job_type: str,
+    claim_token: str | None = None,
+) -> threading.Event:
+    """Start a one-shot watchdog if a handler exceeds the timeout.
 
-    Does NOT kill the thread; this is purely an observability hook so operators
-    can see hung handlers before the stale-CLAIMED reaper requeues them.
+    Does NOT kill the thread (FS/NFS hangs cannot be safely aborted). On timeout
+    the job row is marked FAILED for this claim_token so the stale-CLAIMED reaper
+    cannot recycle it to PENDING forever.
 
     A firing watchdog means the handler is still running (often blocked on HTTP to a
-    media server or on Postgres), not that long runtime is expected for that job type.
+    media server, Postgres, or disk), not that long runtime is expected for that job type.
     """
     timeout = _job_handler_timeout_seconds()
     cancel = threading.Event()
+    token = str(claim_token or "").strip() or None
 
     def _watchdog():
         if cancel.wait(timeout):
@@ -1213,12 +1219,28 @@ def _start_handler_watchdog(job_id: int, job_type: str) -> threading.Event:
         logger.error(
             f"Job handler still running after {timeout}s (watchdog; thread not stopped) "
             f"job_id={job_id} job_type={job_type} — "
-            f"often blocked on media-server API or DB; check logs for "
-            f"'Plex: loading full' / 'section.all() still in progress' or batch progress lines. "
-            f"Increase JOB_HANDLER_TIMEOUT_SECONDS only if work is legitimately slower; "
-            f"stale CLAIMED jobs reset via WORKER_STALE_CLAIMED_RESET_SECONDS.",
+            f"often blocked on media-server API, DB, or disk; check logs for "
+            f"'Plex: loading full' / 'section.all() still in progress' / scoped mat phase lines. "
+            f"Increase JOB_HANDLER_TIMEOUT_SECONDS only if work is legitimately slower.",
             extra={'emoji_type': 'error'},
         )
+        if token:
+            try:
+                from services.job_fail_active import (
+                    WATCHDOG_TIMEOUT_REASON,
+                    fail_claimed_job_for_watchdog,
+                )
+
+                fail_claimed_job_for_watchdog(
+                    job_id,
+                    token,
+                    reason=WATCHDOG_TIMEOUT_REASON,
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"Watchdog could not fail job_id={job_id}: {exc}",
+                    extra={"emoji_type": "warning"},
+                )
 
     t = threading.Thread(target=_watchdog, name=f'job-watchdog-{job_id}', daemon=True)
     t.start()
@@ -1248,7 +1270,11 @@ def _process_one_descriptor(descriptor: ClaimedJobDescriptor) -> None:
     block so operators can see which work classes dominate runtime.
     """
     started = time.monotonic()
-    watchdog_cancel = _start_handler_watchdog(descriptor.id, descriptor.job_type)
+    watchdog_cancel = _start_handler_watchdog(
+        descriptor.id,
+        descriptor.job_type,
+        getattr(descriptor, "claim_token", None),
+    )
     handler_outcome = "unknown"
     handler_error: Optional[Exception] = None
     heartbeat_stop = threading.Event()

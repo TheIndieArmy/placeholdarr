@@ -1047,6 +1047,7 @@ def _run_materialization_for_ids(
     density_scope_episode_ids: list[int] | None = None,
     skip_density: bool = False,
     on_item_progress=None,
+    stall_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Shared materialization core for full-sync and event-scoped runs.
 
@@ -1060,6 +1061,9 @@ def _run_materialization_for_ids(
 
     ``on_item_progress(done_in_call, stats)``: optional mid-chunk Activity callback.
     Called after each entity (throttled ~3s) so the UI is not stuck until commit.
+
+    ``stall_state``: optional mutable dict updated with ``phase`` / ``series_id`` for
+    scoped-mat stall heartbeats.
     """
     stats: dict[str, Any] = {
         "movies_considered": 0,
@@ -1144,6 +1148,8 @@ def _run_materialization_for_ids(
             pass
 
     def _scoped_phase(label: str) -> None:
+        if isinstance(stall_state, dict):
+            stall_state["phase"] = str(label)
         if is_full_sync:
             return
         logger.info(
@@ -1744,7 +1750,53 @@ def _run_materialization_for_ids(
                 if leftover:
                     density_series_ids = sorted(set(density_series_ids) | leftover)
 
-            if density_series_ids:
+            if density_series_ids and event_scoped:
+                # Commit episode/movie placeholder work first, then density in
+                # per-series short sessions so FS/art cannot hold catalog locks.
+                try:
+                    session.commit()
+                    _scoped_phase("committed core before tv density short sessions")
+                    _apply_materialization_lock_timeout(session)
+                except Exception:
+                    try:
+                        session.rollback()
+                    except Exception:
+                        pass
+                    raise
+                series_stats, season_stats = _run_event_scoped_tv_density_short_sessions(
+                    density_series_ids,
+                    activity_reason=activity_reason or "series_density",
+                    stall_state=stall_state,
+                )
+                stats["series_density"] = series_stats
+                stats["season_density"] = season_stats
+                logger.info(
+                    f"Series density pass: considered={series_stats.get('series_considered', 0)} "
+                    f"created={series_stats.get('created', 0)} "
+                    f"retired={series_stats.get('retired', 0)} "
+                    f"errors={series_stats.get('errors', 0)}",
+                    extra={"emoji_type": "info"},
+                )
+                logger.info(
+                    f"Season density pass: series={season_stats.get('series_considered', 0)} "
+                    f"seasons={season_stats.get('seasons_considered', 0)} "
+                    f"created={season_stats.get('created', 0)} "
+                    f"retired={season_stats.get('retired', 0)} "
+                    f"errors={season_stats.get('errors', 0)}",
+                    extra={"emoji_type": "info"},
+                )
+                for path in list(series_stats.get("created_paths") or []) + list(
+                    season_stats.get("created_paths") or []
+                ):
+                    if path:
+                        changed_paths.add(str(path))
+                for path in list(series_stats.get("deleted_paths") or []) + list(
+                    season_stats.get("deleted_paths") or []
+                ):
+                    if path:
+                        delete_refresh_paths.add(str(path))
+                _scoped_phase("tv density passes done")
+            elif density_series_ids:
                 series_stats = run_series_density_for_series_ids(
                     session,
                     density_series_ids,
@@ -1912,6 +1964,123 @@ def _apply_materialization_lock_timeout(session) -> None:
             session.execute(text(f"SET LOCAL lock_timeout = '{int(timeout_s)}s'"))
     except Exception:
         pass
+
+
+def _run_event_scoped_tv_density_short_sessions(
+    series_ids: list[int],
+    *,
+    activity_reason: str,
+    stall_state: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run series+season density per series in its own short commit.
+
+    Import-grace finalize previously kept ``library_catalog_version`` / ``series``
+    bumps open across FS/art in season density, which could freeze ARR sync for hours.
+    """
+    from services.series_episode_stats_hooks import refresh_series_stats_after_bulk
+    from services.source_of_truth.season_density_materializer import run_season_density_for_series_ids
+    from services.source_of_truth.series_density_materializer import run_series_density_for_series_ids
+
+    ids = sorted({int(sid) for sid in (series_ids or []) if sid is not None})
+    series_stats: dict[str, Any] = {
+        "series_considered": len(ids),
+        "created": 0,
+        "retired": 0,
+        "skipped": 0,
+        "errors": 0,
+        "created_paths": [],
+        "deleted_paths": [],
+    }
+    season_stats: dict[str, Any] = {
+        "series_considered": len(ids),
+        "seasons_considered": 0,
+        "created": 0,
+        "retired": 0,
+        "skipped": 0,
+        "errors": 0,
+        "created_paths": [],
+        "deleted_paths": [],
+    }
+    if not ids:
+        return series_stats, season_stats
+
+    def _merge_paths(into: dict[str, Any], part: dict[str, Any], key: str) -> None:
+        for path in list(part.get(key) or []):
+            if path:
+                into.setdefault(key, []).append(str(path))
+
+    for sid in ids:
+        if isinstance(stall_state, dict):
+            stall_state["phase"] = f"tv_density_series_{sid}"
+            stall_state["series_id"] = int(sid)
+        sess = get_session()
+        try:
+            _apply_materialization_lock_timeout(sess)
+            one_series = run_series_density_for_series_ids(
+                sess,
+                [sid],
+                activity_reason=activity_reason,
+            )
+            series_stats["created"] += int(one_series.get("created") or 0)
+            series_stats["retired"] += int(one_series.get("retired") or 0)
+            series_stats["skipped"] += int(one_series.get("skipped") or 0)
+            series_stats["errors"] += int(one_series.get("errors") or 0)
+            _merge_paths(series_stats, one_series, "created_paths")
+            _merge_paths(series_stats, one_series, "deleted_paths")
+            try:
+                refresh_series_stats_after_bulk(sess, series_ids={int(sid)})
+            except Exception as stats_exc:
+                logger.debug(
+                    f"Event-scoped series density stats refresh skipped series_id={sid}: {stats_exc}",
+                    extra={"emoji_type": "debug"},
+                )
+            # Release catalog/series locks before season density FS/art.
+            sess.commit()
+
+            if isinstance(stall_state, dict):
+                stall_state["phase"] = f"tv_density_season_{sid}"
+            _apply_materialization_lock_timeout(sess)
+            one_season = run_season_density_for_series_ids(
+                sess,
+                [sid],
+                activity_reason=activity_reason,
+            )
+            season_stats["seasons_considered"] += int(one_season.get("seasons_considered") or 0)
+            season_stats["created"] += int(one_season.get("created") or 0)
+            season_stats["retired"] += int(one_season.get("retired") or 0)
+            season_stats["skipped"] += int(one_season.get("skipped") or 0)
+            season_stats["errors"] += int(one_season.get("errors") or 0)
+            _merge_paths(season_stats, one_season, "created_paths")
+            _merge_paths(season_stats, one_season, "deleted_paths")
+            try:
+                refresh_series_stats_after_bulk(sess, series_ids={int(sid)})
+            except Exception as stats_exc:
+                logger.debug(
+                    f"Event-scoped season density stats refresh skipped series_id={sid}: {stats_exc}",
+                    extra={"emoji_type": "debug"},
+                )
+            sess.commit()
+        except Exception as exc:
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            series_stats["errors"] += 1
+            season_stats["errors"] += 1
+            logger.error(
+                f"Event-scoped TV density short session failed series_id={sid}: {exc}",
+                extra={"emoji_type": "error"},
+            )
+        finally:
+            try:
+                sess.close()
+            except Exception:
+                pass
+
+    if isinstance(stall_state, dict):
+        stall_state["phase"] = "tv_density_short_sessions_done"
+        stall_state["series_id"] = None
+    return series_stats, season_stats
 
 
 def _run_full_sync_density_batches(
@@ -2205,6 +2374,7 @@ def _run_materialization_entity_chunk(
     density_scope_episode_ids: list[int] | None,
     skip_density: bool = False,
     on_item_progress=None,
+    stall_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Materialize one id chunk in its own session/transaction (short lock window)."""
     session = get_session()
@@ -2218,6 +2388,7 @@ def _run_materialization_entity_chunk(
             density_scope_episode_ids=density_scope_episode_ids,
             skip_density=skip_density,
             on_item_progress=on_item_progress,
+            stall_state=stall_state,
         )
         if movie_ids or episode_ids:
             logger.debug(
@@ -2291,17 +2462,34 @@ def run_materialization_for_entities(
 
     stop_scoped_hb = threading.Event()
     scoped_started = time.monotonic()
+    stall_state: dict[str, Any] = {
+        "phase": "starting",
+        "series_id": None,
+        "movie_ids": list(movie_ids[:8]),
+        "episode_ids": list(episode_ids[:8]),
+    }
     _scoped_hb_interval = max(
         3.0, float(getattr(settings, "STALL_HEARTBEAT_INTERVAL_SEC", 10.0) or 10.0)
     )
 
     def _scoped_materialization_stall_heartbeat():
         while not stop_scoped_hb.wait(_scoped_hb_interval):
+            phase = str(stall_state.get("phase") or "?")
+            sid = stall_state.get("series_id")
+            sid_part = f" series_id={sid}" if sid is not None else ""
+            ep_ids = stall_state.get("episode_ids") or []
+            mv_ids = stall_state.get("movie_ids") or []
+            id_part = ""
+            if ep_ids:
+                id_part += f" episode_ids={list(ep_ids)[:5]}"
+            if mv_ids:
+                id_part += f" movie_ids={list(mv_ids)[:5]}"
             logger.verbose(
                 f"Scoped materialization still running: observation_source={observation_source} "
                 f"movies={len(movie_ids)} episodes={len(episode_ids)} "
+                f"last_phase={phase}{sid_part}{id_part} "
                 f"elapsed_s={time.monotonic() - scoped_started:.1f} "
-                f"(long stall often means PostgreSQL lock wait or a large chunk still running)",
+                f"(long stall often means PostgreSQL lock wait, density FS/art, or a large chunk still running)",
                 extra={"emoji_type": "processing"},
             )
 
@@ -2309,7 +2497,9 @@ def run_materialization_for_entities(
     if movie_ids or episode_ids:
         logger.info(
             f"Scoped materialization starting{subject_part}: observation_source={observation_source} "
-            f"movies={len(movie_ids)} episodes={len(episode_ids)} commit_chunk_size={chunk_size}",
+            f"movies={len(movie_ids)} episodes={len(episode_ids)} commit_chunk_size={chunk_size}"
+            f"{f' episode_ids={episode_ids[:5]}' if episode_ids else ''}"
+            f"{f' movie_ids={movie_ids[:5]}' if movie_ids else ''}",
             extra={"emoji_type": "info"},
         )
         _scoped_t = threading.Thread(
@@ -2338,6 +2528,7 @@ def run_materialization_for_entities(
             while remaining_episodes and (len(chunk_movies) + len(chunk_episodes)) < chunk_size:
                 chunk_episodes.append(remaining_episodes.pop(0))
             chunk_index += 1
+            stall_state["phase"] = f"chunk_{chunk_index}"
             logger.debug(
                 f"Scoped materialization chunk {chunk_index}{subject_part}: "
                 f"movies={len(chunk_movies)} episodes={len(chunk_episodes)} "
@@ -2358,6 +2549,7 @@ def run_materialization_for_entities(
                 subject_part=subject_part,
                 density_scope_episode_ids=density_scope,
                 on_item_progress=_on_scoped_chunk_items,
+                stall_state=stall_state,
             )
             _merge_materialization_stats(merged, part)
             done_ids += len(chunk_movies) + len(chunk_episodes)
@@ -2410,6 +2602,7 @@ def run_materialization_for_entities_in_session(
     *,
     skip_density: bool = False,
     on_item_progress=None,
+    stall_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     movie_ids = [int(mid) for mid in (movie_ids or []) if mid is not None]
     episode_ids = [int(eid) for eid in (episode_ids or []) if eid is not None]
@@ -2441,4 +2634,5 @@ def run_materialization_for_entities_in_session(
         density_scope_episode_ids=density_ids,
         skip_density=skip_density,
         on_item_progress=on_item_progress,
+        stall_state=stall_state,
     )
