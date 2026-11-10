@@ -79,8 +79,16 @@ def _merge_materialization_stats(into: dict[str, Any], part: dict[str, Any] | No
         return into
     for key, value in part.items():
         if isinstance(value, (int, float)) and not isinstance(value, bool):
-            into[key] = into.get(key, 0) + value
-        elif key not in into:
+            # Chunk stats seed nullable counters (e.g. overlap_first_checkpoint_at_seconds=None).
+            # into.get(key, 0) still returns None when the key exists, so coerce before +.
+            prev = into.get(key)
+            if not isinstance(prev, (int, float)) or isinstance(prev, bool):
+                prev = 0
+            into[key] = prev + value
+        elif value is None:
+            if key not in into:
+                into[key] = None
+        elif key not in into or into.get(key) is None:
             into[key] = value
     return into
 
