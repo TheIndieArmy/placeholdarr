@@ -396,6 +396,19 @@ export function restartApp(): Promise<{ status: string }> {
   return postJson<{ status: string }>("/api/system/restart");
 }
 
+export type FailActiveJobsResponse = {
+  ok: boolean;
+  failed_count: number;
+  job_ids?: number[];
+  reason?: string;
+  status?: string;
+  delay_seconds?: number;
+};
+
+export function failActiveJobs(): Promise<FailActiveJobsResponse> {
+  return postJson<FailActiveJobsResponse>("/api/system/jobs/fail-active");
+}
+
 export type NfoBackfillApplyScope = "now" | "next_full_sync" | "future";
 
 export async function saveSettings(

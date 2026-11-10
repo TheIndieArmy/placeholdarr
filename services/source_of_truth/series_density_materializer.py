@@ -349,6 +349,8 @@ def apply_series_density_materialization(
     series_id: int,
     session=None,
     activity_reason: str | None = None,
+    *,
+    ensure_art: bool = True,
 ) -> dict[str, Any]:
     owns_session = session is None
     session = session or get_session()
@@ -416,10 +418,11 @@ def apply_series_density_materialization(
                 series_nfo_written = ensure_series_nfo(series, folder=series_folder)
             except Exception:
                 series_nfo_written = False
-            try:
-                ensure_series_art(series, series_folder=series_folder)
-            except Exception:
-                pass
+            if ensure_art:
+                try:
+                    ensure_series_art(series, series_folder=series_folder)
+                except Exception:
+                    pass
 
             if not series_folder:
                 series.placeholder_folder = os.path.dirname(os.path.dirname(target_path))
@@ -502,6 +505,7 @@ def run_series_density_for_series_ids(
     series_ids: list[int] | None,
     *,
     activity_reason: str | None = None,
+    ensure_art: bool = True,
 ) -> dict[str, Any]:
     ids = sorted({int(sid) for sid in (series_ids or []) if sid is not None})
     stats: dict[str, Any] = {
@@ -528,6 +532,7 @@ def run_series_density_for_series_ids(
             sid,
             session=session,
             activity_reason=activity_reason,
+            ensure_art=ensure_art,
         )
         if not out.get("ok"):
             stats["errors"] += 1
