@@ -951,6 +951,7 @@ export function App() {
   const refreshLibraryShelvesRef = useRef<(options?: { force?: boolean }) => Promise<void>>(async () => {});
   const invalidateLibraryShelvesRef = useRef<() => void>(() => {});
   const refreshTasksRef = useRef<() => Promise<void>>(async () => {});
+  const refreshWorkingLiveRef = useRef<() => Promise<void>>(async () => {});
 
   const { eventsConnected } = useDashboardEvents({
     enabled: authReady,
@@ -968,8 +969,8 @@ export function App() {
       }
     },
     onTaskRunsVersion: () => {
-      // Lifecycle only (SSE excludes live seq). Full refresh on start/finish.
-      void refreshTasksRef.current();
+      // Lifecycle only (SSE excludes live seq). Prefer status patch over a heavy history reload.
+      void refreshWorkingLiveRef.current();
     },
   });
 
@@ -1020,6 +1021,7 @@ export function App() {
     scheduledTasks,
     taskHistory,
     refreshTasks,
+    refreshWorkingLive,
   } = useActivityTasks({
     // Always on when authed so sidebar live pills update outside /activity/tasks.
     enabled: authReady,
@@ -1034,6 +1036,12 @@ export function App() {
       await refreshTasks();
     };
   }, [refreshTasks]);
+
+  useEffect(() => {
+    refreshWorkingLiveRef.current = async () => {
+      await refreshWorkingLive();
+    };
+  }, [refreshWorkingLive]);
 
   const { placeholderActivity, hasMore, loadingOlder, loadOlder } = useActivityFeed({
     subPage: activitySubPage === "operations" ? "placeholders" : activitySubPage,

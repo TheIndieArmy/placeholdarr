@@ -238,12 +238,19 @@ async def tasks_history(
 
 @router.get("/api/tasks/status")
 async def tasks_status():
-    reconcile_stuck_art_backfill_tasks()
-    reconcile_stuck_placeholder_refresh_tasks()
-    working = get_working_run()
-    if not working:
-        return {"working": False, "run": None}
-    return {"working": True, "run": _serialize_run(working)}
+    """Hot path for Tasks live bars. Keep this cheap: no stuck-task reconcile.
+
+    Reconcile stays on ``/api/tasks/history`` so 1s polls do not fight lite/full
+    sync for DB pool slots or block the event loop.
+    """
+
+    def _load() -> dict[str, Any]:
+        working = get_working_run()
+        if not working:
+            return {"working": False, "run": None}
+        return {"working": True, "run": _serialize_run(working)}
+
+    return await asyncio.to_thread(_load)
 
 
 @router.post("/api/tasks/abandon")

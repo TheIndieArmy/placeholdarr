@@ -21,6 +21,8 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ### Fixed
 
+- **Tasks live poll**: Active tasks poll `/api/tasks/status` every 1s again (no 5s mat slowdown); SSE start/finish uses the status patch path; status stays off the stuck-task reconcile hot path.
+- **Lite catalog discovery bars**: Discovery publishes progress during Arr catalog fetch heartbeats and targeted title sync so bars move without a manual refresh.
 - **Chunked mat stats merge**: Merging per-chunk materialization stats no longer crashes when a prior chunk left a numeric field as `None` (lite sync TypeError mid-run).
 - **Worker finish after lock timeout**: DONE/FAILED/deferred is retried after finish-commit `lock_timeout` instead of leaving the row CLAIMED until the stale reaper.
 - **Import before catalog row**: Movie/episode import webhooks defer ~30s when the Arr row is not in DB yet, instead of failing 10 times in a tight loop during full sync.
