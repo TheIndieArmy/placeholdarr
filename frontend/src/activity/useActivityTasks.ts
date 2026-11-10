@@ -1,29 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getStats } from "../api/dashboard";
 import { getTasksHistory, getTasksScheduled, getTasksStatus } from "../api/tasks";
-import {
-  TAB_HIDDEN_POLL_MS,
-  TAB_IDLE_POLL_MS,
-  TASKS_ACTIVE_POLL_MS,
-  TASKS_ACTIVE_SLOW_POLL_MS,
-  TASKS_SLOW_POLL_PHASE_KEYS,
-} from "../dashboard/pollIntervals";
+import { TAB_HIDDEN_POLL_MS, TAB_IDLE_POLL_MS, TASKS_ACTIVE_POLL_MS } from "../dashboard/pollIntervals";
 import type { ScheduledTaskRow, StatsResponse, TaskRunRow, TaskRunStatusResponse } from "../types/api";
-
-function workingPhaseKey(status: TaskRunStatusResponse): string {
-  const live = status.run?.live;
-  if (!live || !Array.isArray(live.phases)) return "";
-  const working = live.phases.find((phase) => String(phase.status || "").toLowerCase() === "working");
-  return String(working?.key || "").trim().toLowerCase();
-}
-
-function activePollMs(status: TaskRunStatusResponse): number {
-  const key = workingPhaseKey(status);
-  if (key && TASKS_SLOW_POLL_PHASE_KEYS.has(key)) {
-    return TASKS_ACTIVE_SLOW_POLL_MS;
-  }
-  return TASKS_ACTIVE_POLL_MS;
-}
 
 /** Start/finish/idle only. Live seq is polled separately and must not full-refetch. */
 function taskLifecycleFingerprint(status: TaskRunStatusResponse): string {
@@ -115,7 +94,7 @@ export function useActivityTasks(opts: {
 
   /**
    * Patch the working run from /api/tasks/status.
-   * Used by the active poll (and rare SSE lifecycle handlers), not on every live seq.
+   * Used by the active poll and SSE lifecycle handlers.
    */
   const refreshWorkingLive = useCallback(async () => {
     try {
@@ -137,6 +116,8 @@ export function useActivityTasks(opts: {
 
       if (lifecycleChanged) {
         await refreshTasks({ showChrome: chromeOnRefreshRef.current });
+        // History can lag the status payload; re-apply live after the full reload.
+        setTaskHistory((prev) => mergeWorkingRun(prev, status.run as TaskRunRow));
         return;
       }
 
@@ -169,6 +150,7 @@ export function useActivityTasks(opts: {
         return;
       }
 
+      let nextDelay = TAB_IDLE_POLL_MS;
       try {
         const status = await getTasksStatus();
         if (stopped) return;
@@ -184,21 +166,28 @@ export function useActivityTasks(opts: {
         if (status.working) {
           if (lifecycleChanged) {
             await refreshTasks({ showChrome: chromeOnRefreshRef.current });
+            if (status.run) {
+              setTaskHistory((prev) => mergeWorkingRun(prev, status.run as TaskRunRow));
+            }
           } else if (liveChanged && status.run) {
             setTaskHistory((prev) => mergeWorkingRun(prev, status.run as TaskRunRow));
           }
-          schedule(activePollMs(status));
+          nextDelay = TASKS_ACTIVE_POLL_MS;
         } else {
           await refreshTasks({
             showChrome: lifecycleChanged ? chromeOnRefreshRef.current : false,
           });
-          schedule(TAB_IDLE_POLL_MS);
+          nextDelay = TAB_IDLE_POLL_MS;
         }
       } catch (err) {
         if (!stopped) {
           onErrorRef.current?.(err instanceof Error ? err.message : "Tasks refresh failed");
         }
-        schedule(TAB_IDLE_POLL_MS);
+        nextDelay = TAB_IDLE_POLL_MS;
+      } finally {
+        if (!stopped) {
+          schedule(nextDelay);
+        }
       }
     };
 
@@ -213,7 +202,10 @@ export function useActivityTasks(opts: {
         workingRef.current = status.working;
         lifecycleFingerprintRef.current = taskLifecycleFingerprint(status);
         liveFingerprintRef.current = taskLiveFingerprint(status);
-        schedule(status.working ? activePollMs(status) : TAB_IDLE_POLL_MS);
+        if (status.working && status.run) {
+          setTaskHistory((prev) => mergeWorkingRun(prev, status.run as TaskRunRow));
+        }
+        schedule(status.working ? TASKS_ACTIVE_POLL_MS : TAB_IDLE_POLL_MS);
       } catch {
         schedule(TAB_IDLE_POLL_MS);
       }

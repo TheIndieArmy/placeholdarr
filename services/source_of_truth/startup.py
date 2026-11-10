@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import os
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -688,6 +689,24 @@ def _run_startup_lite_snapshot_for_instances(
         except Exception:
             pass
 
+    def _start_instance_heartbeat(index: int, done_ref: list[int], total_ref: list[int]):
+        """Keep live.seq moving during long Arr catalog fetches (no mid-fetch counts)."""
+        if not callable(on_instance_progress):
+            return None, None
+        stop = threading.Event()
+
+        def _beat() -> None:
+            while not stop.wait(2.0):
+                _emit_instance(index, "working", done=int(done_ref[0] or 0), total=int(total_ref[0] or 0))
+
+        thread = threading.Thread(
+            target=_beat,
+            name=f"lite-discovery-hb-{index}",
+            daemon=True,
+        )
+        thread.start()
+        return stop, thread
+
     try:
         for inst_idx, instance in enumerate(instances):
             stats['instances'] += 1
@@ -695,6 +714,9 @@ def _run_startup_lite_snapshot_for_instances(
             _emit_instance(inst_idx, "working", done=0, total=0)
             instance_done = 0
             instance_total = 0
+            done_ref = [0]
+            total_ref = [0]
+            hb_stop = None
             try:
                 row = _get_or_create_arr_state(session, instance_key, instance['arr_type'])
                 t0 = time.monotonic()
@@ -703,6 +725,7 @@ def _run_startup_lite_snapshot_for_instances(
                     extra={'emoji_type': 'info'},
                 )
 
+                hb_stop, _hb_thread = _start_instance_heartbeat(inst_idx, done_ref, total_ref)
                 if instance['arr_type'] == 'radarr':
                     api_movies = fetch_radarr_movies(instance['base_url'], instance['api_key'], bypass_cache=True)
                     if api_movies is None:
@@ -711,10 +734,15 @@ def _run_startup_lite_snapshot_for_instances(
                             f"skipping catalog diff (will not treat titles as removed)",
                             extra={'emoji_type': 'warning'},
                         )
+                        if hb_stop is not None:
+                            hb_stop.set()
+                            hb_stop = None
                         _emit_instance(inst_idx, "failed", done=0, total=0)
                         continue
                     stats['snapshot_rows_seen'] += len(api_movies)
                     instance_total = len(api_movies)
+                    total_ref[0] = instance_total
+                    done_ref[0] = 0
                     _emit_instance(inst_idx, "working", done=0, total=instance_total)
                     drift_ids = _radarr_path_drift_movie_ids(session, instance_key=instance_key, api_movies=api_movies)
                     removed_ids = _radarr_movie_ids_removed_from_catalog(session, instance_key=instance_key, api_movies=api_movies)
@@ -792,11 +820,25 @@ def _run_startup_lite_snapshot_for_instances(
                         prep_elapsed_s=time.monotonic() - t0,
                     )
                     if target_ids:
+                        sync_base = max(0, int(instance_total) - len(target_ids))
+
+                        def _on_movie_sync_progress(done: int, total: int) -> None:
+                            synced = max(0, int(done or 0))
+                            done_ref[0] = min(int(instance_total), sync_base + synced)
+                            total_ref[0] = int(instance_total)
+                            _emit_instance(
+                                inst_idx,
+                                "working",
+                                done=done_ref[0],
+                                total=total_ref[0],
+                            )
+
                         sync_stats = sync_radarr_movies_by_ids(
                             target_ids,
                             base_url=instance['base_url'],
                             api_key=instance['api_key'],
                             instance_key=instance_key,
+                            on_progress=_on_movie_sync_progress,
                         )
                         stats['targeted_sync_runs'] += 1
                         stats['movies_seen'] += int(sync_stats.get('movies_seen', 0) or 0)
@@ -823,9 +865,13 @@ def _run_startup_lite_snapshot_for_instances(
                         seen = int(sync_stats.get("movies_seen", 0) or 0)
                         instance_done = seen if seen else len(target_ids)
                         instance_total = max(instance_total, instance_done)
+                        done_ref[0] = instance_done
+                        total_ref[0] = instance_total
                         _emit_instance(inst_idx, "working", done=instance_done, total=instance_total)
                     else:
                         instance_done = instance_total
+                        done_ref[0] = instance_done
+                        total_ref[0] = instance_total
                         _emit_instance(inst_idx, "working", done=instance_done, total=instance_total)
                 else:
                     api_series = fetch_sonarr_series(instance['base_url'], instance['api_key'], bypass_cache=True)
@@ -835,10 +881,15 @@ def _run_startup_lite_snapshot_for_instances(
                             f"skipping catalog diff (will not treat series as removed)",
                             extra={'emoji_type': 'warning'},
                         )
+                        if hb_stop is not None:
+                            hb_stop.set()
+                            hb_stop = None
                         _emit_instance(inst_idx, "failed", done=0, total=0)
                         continue
                     stats['snapshot_rows_seen'] += len(api_series)
                     instance_total = len(api_series)
+                    total_ref[0] = instance_total
+                    done_ref[0] = 0
                     _emit_instance(inst_idx, "working", done=0, total=instance_total)
                     drift_ids = _sonarr_path_drift_series_ids(session, instance_key=instance_key, api_series=api_series)
                     removed_ids = _sonarr_series_ids_removed_from_catalog(session, instance_key=instance_key, api_series=api_series)
@@ -1024,11 +1075,25 @@ def _run_startup_lite_snapshot_for_instances(
                         prep_elapsed_s=time.monotonic() - t0,
                     )
                     if target_ids:
+                        sync_base = max(0, int(instance_total) - len(target_ids))
+
+                        def _on_series_sync_progress(done: int, total: int) -> None:
+                            synced = max(0, int(done or 0))
+                            done_ref[0] = min(int(instance_total), sync_base + synced)
+                            total_ref[0] = int(instance_total)
+                            _emit_instance(
+                                inst_idx,
+                                "working",
+                                done=done_ref[0],
+                                total=total_ref[0],
+                            )
+
                         sync_stats = sync_sonarr_series_by_ids(
                             target_ids,
                             base_url=instance['base_url'],
                             api_key=instance['api_key'],
                             instance_key=instance_key,
+                            on_progress=_on_series_sync_progress,
                         )
                         stats['targeted_sync_runs'] += 1
                         stats['series_seen'] += int(sync_stats.get('series_seen', 0) or 0)
@@ -1066,19 +1131,29 @@ def _run_startup_lite_snapshot_for_instances(
                         )
                         instance_done = seen if seen else len(target_ids)
                         instance_total = max(instance_total, instance_done)
+                        done_ref[0] = instance_done
+                        total_ref[0] = instance_total
                         _emit_instance(inst_idx, "working", done=instance_done, total=instance_total)
                     else:
                         instance_done = instance_total
+                        done_ref[0] = instance_done
+                        total_ref[0] = instance_total
                         _emit_instance(inst_idx, "working", done=instance_done, total=instance_total)
 
                 row.last_history_checked_at = datetime.now(timezone.utc)
                 row.updated_at = datetime.now(timezone.utc)
                 session.add(row)
                 session.commit()
+                if hb_stop is not None:
+                    hb_stop.set()
+                    hb_stop = None
                 final_done = max(instance_done, instance_total)
                 final_total = max(final_done, instance_total)
                 _emit_instance(inst_idx, "done", done=final_total, total=final_total)
             except Exception as e:
+                if hb_stop is not None:
+                    hb_stop.set()
+                    hb_stop = None
                 session.rollback()
                 stats['instances_failed'] += 1
                 logger.warning(
