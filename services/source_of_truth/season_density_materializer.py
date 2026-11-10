@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import date
 from types import SimpleNamespace
 from typing import Any
@@ -602,7 +603,10 @@ def run_season_density_for_series_ids(
     if density not in ("series", "episode", "season"):
         return stats
 
-    for sid in ids:
+    started = time.monotonic()
+    last_info = started
+    total = len(ids)
+    for idx, sid in enumerate(ids, start=1):
         out = apply_season_density_for_series(
             sid,
             session=session,
@@ -622,6 +626,21 @@ def run_season_density_for_series_ids(
         stats["deleted_paths"].extend(
             [str(p).strip() for p in (out.get("deleted_paths") or []) if str(p).strip()]
         )
+        now = time.monotonic()
+        if total > 25 and (idx == total or (now - last_info) >= 30.0):
+            elapsed = max(0.001, now - started)
+            logger.info(
+                f"Season density: {idx}/{total} series done · "
+                f"created={stats['created']} retired={stats['retired']} · "
+                f"elapsed_s={elapsed:.1f} · rows_per_s={idx / elapsed:.2f}",
+                extra={"emoji_type": "processing"},
+            )
+            last_info = now
+        elif idx % 10 == 0:
+            logger.debug(
+                f"Season density tick: {idx}/{total} series_id={sid}",
+                extra={"emoji_type": "debug"},
+            )
     return stats
 
 

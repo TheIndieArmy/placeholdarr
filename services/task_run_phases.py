@@ -267,7 +267,12 @@ class TaskRunPhaseTracker:
         metrics: list[dict[str, Any]] | None = None,
         units: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Mid-phase live counts (does not end the phase)."""
+        """Mid-phase live counts (does not end the phase).
+
+        Updates in-memory phase state and publishes ``summary.live`` only.
+        Durable ``summary.phases`` writes stay on begin/end so ARR/catalog
+        ticks do not double-commit the task_run row on every progress emit.
+        """
         key = str(key).strip().lower()
         phase = next((p for p in self._phases if p.get("key") == key), None)
         name = str((phase or {}).get("name") or key)
@@ -276,8 +281,6 @@ class TaskRunPhaseTracker:
                 phase["metrics"] = metrics
             if units is not None:
                 phase["units"] = units
-            if metrics is not None or units is not None:
-                self._persist()
         self._publish_live(
             key,
             name,

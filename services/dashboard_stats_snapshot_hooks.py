@@ -20,6 +20,8 @@ from services.postgres.models import (
 )
 from services.library_future_semantics import sql_episode_future_outside_lookahead, sql_movie_future_outside_lookahead
 
+import threading
+
 _hooks_registered = False
 _DIRTY_KEY = "dashboard_stats_snapshot_dirty"
 # Serialize snapshot refreshes across processes (Postgres session advisory lock).
@@ -27,6 +29,12 @@ _DIRTY_KEY = "dashboard_stats_snapshot_dirty"
 # UPDATE dashboard_stats_snapshot WHERE id=1, wedging the DB behind one
 # long-lived idle-in-transaction elsewhere (transactionid / tuple waits).
 _DASHBOARD_STATS_ADVISORY_LOCK_KEY = 8_729_0001
+# Debounce synchronous after_commit work onto a background timer so commits
+# never wait on the aggregate refresh.
+_SNAPSHOT_DEBOUNCE_SECONDS = 1.5
+_snapshot_timer_lock = threading.Lock()
+_snapshot_timer: threading.Timer | None = None
+_snapshot_pending = False
 
 
 def _utc_now() -> datetime:
@@ -205,10 +213,43 @@ def _refresh_dashboard_stats_in_new_session() -> None:
             pass
 
 
+def _schedule_debounced_snapshot_refresh() -> None:
+    """Queue a background snapshot refresh; coalesce bursts of commits."""
+    global _snapshot_timer, _snapshot_pending
+    with _snapshot_timer_lock:
+        _snapshot_pending = True
+
+        def _fire() -> None:
+            global _snapshot_timer, _snapshot_pending
+            with _snapshot_timer_lock:
+                _snapshot_timer = None
+                if not _snapshot_pending:
+                    return
+                _snapshot_pending = False
+            try:
+                _refresh_dashboard_stats_in_new_session()
+            except Exception as exc:
+                logger.debug(
+                    "debounced dashboard_stats_snapshot refresh failed: %s",
+                    exc,
+                    extra={"emoji_type": "debug"},
+                )
+
+        if _snapshot_timer is not None:
+            try:
+                _snapshot_timer.cancel()
+            except Exception:
+                pass
+        timer = threading.Timer(_SNAPSHOT_DEBOUNCE_SECONDS, _fire)
+        timer.daemon = True
+        _snapshot_timer = timer
+        timer.start()
+
+
 def _after_commit(session: Session) -> None:
     if not session.info.pop(_DIRTY_KEY, False):
         return
-    _refresh_dashboard_stats_in_new_session()
+    _schedule_debounced_snapshot_refresh()
 
 
 def _after_rollback(session: Session) -> None:

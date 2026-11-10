@@ -245,19 +245,32 @@ def _nfo_refresh_completion_scan_if_last_batch(
     ``only_if`` / ``after_refresh`` are optional hooks used by template backfill so superseded runs
     never trigger a library refresh, and the active run clears its marker after the final batch.
     """
-    pending_same_run = (
-        session.query(Job.id)
-        .filter(
-            Job.job_type == NFO_REFRESH_JOB_TYPE,
-            Job.status.in_(["PENDING", "CLAIMED", "WORKING"]),
-            Job.id != job.id,
-            Job.payload[payload_run_id_key].as_string() == run_id,
-        )
-        .first()
-    )
-    if pending_same_run:
-        return
     if only_if is not None and not only_if():
+        return
+
+    payload = job.payload if isinstance(job.payload, dict) else {}
+    task_run_id = None
+    try:
+        raw_tid = (
+            payload.get("full_sync_task_run_id")
+            or payload.get("placeholder_refresh_task_run_id")
+        )
+        if raw_tid is not None:
+            task_run_id = int(raw_tid)
+    except Exception:
+        task_run_id = None
+
+    from services.source_of_truth.batch_completion_gate import try_claim_backfill_library_completion
+
+    if not try_claim_backfill_library_completion(
+        session,
+        job,
+        run_id=run_id,
+        job_type=NFO_REFRESH_JOB_TYPE,
+        payload_run_id_key=payload_run_id_key,
+        task_run_id=task_run_id,
+        summary_meta_key="nfo_backfill",
+    ):
         return
 
     # Phase 1 connection-lifecycle: ``refresh_all_sections`` is a multi-second Plex
@@ -308,9 +321,12 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
     if not ids:
         return {"ok": False, "reason": "no_placeholder_ids"}
 
+    idem_key: str | None = None
+    idem_claim_committed = False
     try:
         from services.source_of_truth.idempotency import (
             nfo_refresh_idempotency_key,
+            release_idempotency_after_failed_claim,
             try_claim_processed_key,
         )
 
@@ -323,6 +339,12 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
                     extra={"emoji_type": "info"},
                 )
                 return {"ok": True, "skipped": "already_processed"}
+            try:
+                session.commit()
+                idem_claim_committed = True
+            except Exception:
+                session.rollback()
+                idem_key = None
     except Exception as exc:
         logger.debug(
             f"nfo_refresh: idempotency claim skipped due to error: {exc}",
@@ -440,6 +462,13 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
             f"progress={loop_pos[0]}/{n_total} nfo_refreshed={refreshed}",
             extra={"emoji_type": "info"},
         )
+    except Exception:
+        if idem_claim_committed and idem_key:
+            from services.source_of_truth.idempotency import release_idempotency_after_failed_claim
+
+            release_idempotency_after_failed_claim(session, idem_key)
+            idem_claim_committed = False
+        raise
     finally:
         stop_nfo_hb.set()
 

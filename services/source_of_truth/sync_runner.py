@@ -596,8 +596,18 @@ def _upsert_movie(session, fields: Dict) -> Tuple[Any, bool, bool]:
         )
     if existing:
         changed = False
+        skip_live = False
+        try:
+            from services.source_of_truth.live_catalog_touch import was_touched_during_sync
+
+            skip_live = was_touched_during_sync("movie", int(existing.id))
+        except Exception:
+            skip_live = False
         for key, value in fields.items():
             if not hasattr(existing, key):
+                continue
+            # Live import/webhook already updated file presence; do not clobber from stale Arr snapshot.
+            if skip_live and key in ("has_file", "radarr_filepath"):
                 continue
             if _field_values_differ(getattr(existing, key), value):
                 setattr(existing, key, value)
@@ -697,8 +707,17 @@ def _upsert_episode(session, fields: Dict) -> Tuple[Any, bool, bool]:
         )
     if existing:
         changed = False
+        skip_live = False
+        try:
+            from services.source_of_truth.live_catalog_touch import was_touched_during_sync
+
+            skip_live = was_touched_during_sync("episode", int(existing.id))
+        except Exception:
+            skip_live = False
         for key, value in fields.items():
             if not hasattr(existing, key):
+                continue
+            if skip_live and key in ("has_file", "sonarr_filepath"):
                 continue
             if _field_values_differ(getattr(existing, key), value):
                 setattr(existing, key, value)
@@ -807,7 +826,10 @@ def run_full_sync(
         if not callable(on_progress):
             return
         now = time.monotonic()
-        if not force and (now - last_live_mono[0]) < 1.5 and progress_done % max(1, int(batch_size or 50)) != 0:
+        # Time-throttle only (do not also fire on every batch commit). Progress
+        # callbacks often take a DB lock on scheduled_task_run; coupling them to
+        # every batch made ARR catalog sync stall under concurrent workers.
+        if not force and (now - last_live_mono[0]) < 3.0:
             return
         last_live_mono[0] = now
         try:

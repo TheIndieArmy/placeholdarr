@@ -1331,6 +1331,26 @@ def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
         )
         from services.task_live_progress import STARTUP_FULL_SYNC_CORE_PHASES, seed_sync_live_phases
 
+        from services.source_of_truth.sync_coordinator import (
+            acquire_pipeline_blocking,
+            end_full_sync,
+            release_pipeline,
+            try_begin_full_sync,
+        )
+        _startup_full_coord = True
+
+        if not try_begin_full_sync():
+            logger.warning(
+                "Startup full sync skipped: another full sync is already active",
+                extra={"emoji_type": "warning"},
+            )
+            return {
+                "ok": False,
+                "skipped": True,
+                "reason": "full_sync_in_progress",
+                "mode": selected_mode,
+            }
+
         startup_task_run_id = begin_task_run(task_key="full_sync", trigger="startup")
         try:
             seed_sync_live_phases(
@@ -1453,7 +1473,22 @@ def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
         primer_stats = {"skipped": True, "reason": "deprecated"}
         phase_started = time.monotonic()
         phases.begin("materialization", "Placeholder materialization")
-        materialization_stats = run_materialization_pass()
+
+        def _on_startup_mat_progress(done: int, total: int, stats=None) -> None:
+            mat_stats = stats if isinstance(stats, dict) else {}
+            phases.progress(
+                "materialization",
+                done=int(done or 0),
+                total=max(int(total or 0), 1),
+                unit_label="entities",
+                metrics=metrics_from_pipeline({"materialization": mat_stats}).get("materialization"),
+            )
+
+        acquire_pipeline_blocking()
+        try:
+            materialization_stats = run_materialization_pass(on_progress=_on_startup_mat_progress)
+        finally:
+            release_pipeline()
         try:
             from services.source_of_truth.tv_density_rematerialize import (
                 clear_tv_density_rematerialize_pending,
@@ -1582,8 +1617,20 @@ def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
         from services.source_of_truth.scheduler import reschedule_after_full_sync_success
 
         reschedule_after_full_sync_success()
+        try:
+            from services.source_of_truth.sync_coordinator import end_full_sync as _end_fs
+
+            _end_fs()
+        except Exception:
+            pass
         return result
     except Exception as exc:
+        try:
+            from services.source_of_truth.sync_coordinator import end_full_sync as _end_fs
+
+            _end_fs()
+        except Exception:
+            pass
         try:
             if phases is not None:
                 for key in list(phases._open.keys()):

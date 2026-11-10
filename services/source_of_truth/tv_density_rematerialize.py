@@ -101,20 +101,32 @@ def run_tv_density_rematerialize(*, source: str = "settings_save") -> dict[str, 
     from services.source_of_truth.determiner import run_determination_pass
     from services.source_of_truth.materializer import run_materialization_pass
     from services.source_of_truth.sync_coordinator import (
-        acquire_pipeline_blocking,
+        is_full_sync_active,
         release_pipeline,
+        try_acquire_pipeline,
     )
 
+    if is_full_sync_active():
+        logger.info(
+            f"TV density rematerialize deferred: full sync active ({source})",
+            extra={"emoji_type": "info"},
+        )
+        mark_tv_density_rematerialize_pending(True)
+        return {"ok": True, "deferred": True, "reason": "full_sync_active", "source": source}
+
+    if not try_acquire_pipeline():
+        logger.info(
+            f"TV density rematerialize deferred: pipeline busy ({source})",
+            extra={"emoji_type": "info"},
+        )
+        mark_tv_density_rematerialize_pending(True)
+        return {"ok": True, "deferred": True, "reason": "pipeline_busy", "source": source}
+
     logger.info(
-        f"TV density rematerialize waiting for pipeline ({source})",
+        f"TV density rematerialize starting ({source})",
         extra={"emoji_type": "gear"},
     )
-    acquire_pipeline_blocking()
     try:
-        logger.info(
-            f"TV density rematerialize starting ({source})",
-            extra={"emoji_type": "gear"},
-        )
         determination = run_determination_pass()
         materialization = run_materialization_pass()
         try:

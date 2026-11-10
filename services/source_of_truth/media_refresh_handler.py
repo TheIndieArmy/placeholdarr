@@ -29,6 +29,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm.attributes import flag_modified
 
 from core.config import settings
@@ -38,6 +39,7 @@ from services.media_servers.refresh import (
     refresh_real_library_paths,
     refresh_selected_sections,
 )
+from services.source_of_truth.refresh_broker import reset_bulk_intent_after_dispatch
 from services.postgres.models import Job
 
 
@@ -62,7 +64,19 @@ KIND_ARR_REAL_LIBRARY = "arr_real_library"
 _MAX_REENQUEUE_ATTEMPTS = 5
 
 # Path-batch refresh kinds that should merge into one pending job instead of fanning out.
-_COALESCE_KINDS = frozenset({KIND_DELAYED_FINAL, KIND_OVERLAP_PATH_BATCH, KIND_ARR_REAL_LIBRARY})
+_COALESCE_KINDS = frozenset(
+    {KIND_BULK_INITIAL, KIND_DELAYED_FINAL, KIND_OVERLAP_PATH_BATCH, KIND_ARR_REAL_LIBRARY}
+)
+
+
+def _media_refresh_coalesce_max_debounce_seconds() -> float:
+    try:
+        return max(
+            30.0,
+            float(getattr(settings, "MEDIA_REFRESH_COALESCE_MAX_DEBOUNCE_SECONDS", 300) or 300),
+        )
+    except Exception:
+        return 300.0
 
 
 def _coalesce_group_id(kind: str) -> str:
@@ -188,6 +202,7 @@ def enqueue_media_refresh_job(
                 Job.group_id == resolved_group_id,
             )
             .order_by(Job.id.desc())
+            .with_for_update()
             .first()
         )
         if existing is not None:
@@ -200,6 +215,11 @@ def enqueue_media_refresh_job(
             prev_run_after = existing.run_after
             if prev_run_after is None or prev_run_after < run_after:
                 existing.run_after = run_after
+            debounce_cap = datetime.now(timezone.utc) + timedelta(
+                seconds=_media_refresh_coalesce_max_debounce_seconds()
+            )
+            if existing.run_after is not None and existing.run_after > debounce_cap:
+                existing.run_after = debounce_cap
             existing.updated_at = datetime.now(timezone.utc)
             session.add(existing)
             logger.info(
@@ -220,6 +240,33 @@ def enqueue_media_refresh_job(
         priority=default_priority_for(MEDIA_REFRESH_JOB_TYPE),
     )
     session.add(job)
+    if should_coalesce and resolved_group_id:
+        try:
+            session.flush()
+        except IntegrityError:
+            session.rollback()
+            existing = (
+                session.query(Job)
+                .filter(
+                    Job.job_type == MEDIA_REFRESH_JOB_TYPE,
+                    Job.status == "PENDING",
+                    Job.group_id == resolved_group_id,
+                )
+                .order_by(Job.id.desc())
+                .with_for_update()
+                .first()
+            )
+            if existing is not None:
+                return enqueue_media_refresh_job(
+                    session,
+                    kind=kind,
+                    payload=payload,
+                    delay_seconds=delay_seconds,
+                    group_id=group_id,
+                    max_attempts=max_attempts,
+                    coalesce=coalesce,
+                )
+            raise
     return job
 
 
@@ -277,6 +324,8 @@ def process_media_refresh_job(session, job: Job) -> dict[str, Any]:
         return {"ok": False, "reason": "invalid_payload"}
     payload = dict(raw_payload)
     job_id = getattr(job, "id", "?")
+    idem_key: str | None = None
+    idem_claim_committed = False
 
     # Phase 4: claim idempotency key BEFORE releasing the session (the claim
     # uses the worker's session, then commits). On duplicate-claim we skip
@@ -287,28 +336,29 @@ def process_media_refresh_job(session, job: Job) -> dict[str, Any]:
             try_claim_processed_key,
         )
 
-        idem_key = media_refresh_idempotency_key(job_id=int(job_id) if isinstance(job_id, int) else 0)
-        if isinstance(job_id, int) and not try_claim_processed_key(
-            session, idem_key, job_type=MEDIA_REFRESH_JOB_TYPE
-        ):
+        if isinstance(job_id, int):
+            idem_key = media_refresh_idempotency_key(job_id=int(job_id))
+            if not try_claim_processed_key(session, idem_key, job_type=MEDIA_REFRESH_JOB_TYPE):
+                try:
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                try:
+                    session.close()
+                except Exception:
+                    pass
+                logger.info(
+                    f"media_refresh job_id={job_id} skipped — idempotency key already claimed "
+                    "(stale-CLAIMED reaper requeued or duplicate enqueue)",
+                    extra={"emoji_type": "info"},
+                )
+                return {"ok": True, "skipped": "already_processed"}
             try:
                 session.commit()
+                idem_claim_committed = True
             except Exception:
                 session.rollback()
-            try:
-                session.close()
-            except Exception:
-                pass
-            logger.info(
-                f"media_refresh job_id={job_id} skipped — idempotency key already claimed "
-                "(stale-CLAIMED reaper requeued or duplicate enqueue)",
-                extra={"emoji_type": "info"},
-            )
-            return {"ok": True, "skipped": "already_processed"}
-        try:
-            session.commit()
-        except Exception:
-            session.rollback()
+                idem_key = None
     except Exception as exc:
         logger.debug(
             f"media_refresh: idempotency claim skipped due to error: {exc}",
@@ -324,6 +374,10 @@ def process_media_refresh_job(session, job: Job) -> dict[str, Any]:
 
     kind = str(payload.get("kind") or "").strip()
     if not kind:
+        if idem_claim_committed and idem_key:
+            from services.source_of_truth.idempotency import release_idempotency_after_failed_claim
+
+            release_idempotency_after_failed_claim(None, idem_key)
         return {"ok": False, "reason": "missing_kind"}
 
     has_movies = _coerce_bool(payload.get("has_movies"), default=False)
@@ -338,19 +392,22 @@ def process_media_refresh_job(session, job: Job) -> dict[str, Any]:
     stop_v = start_verbose_stall_heartbeat(log_prefix)
     try:
         if kind == KIND_BULK_INITIAL:
-            stats = refresh_selected_sections(
-                has_movies=has_movies,
-                has_episodes=has_episodes,
-                include_plex=include_plex,
-                include_jellyfin=include_jellyfin,
-                include_emby=include_emby,
-            )
-            logger.info(
-                f"{log_prefix} completed bulk initial media server library refresh: "
-                f"refreshed={stats.get('refreshed', 0)} failed={stats.get('failed', 0)}",
-                extra={"emoji_type": "success"},
-            )
-            return {"ok": True, "kind": kind, "stats": stats}
+            try:
+                stats = refresh_selected_sections(
+                    has_movies=has_movies,
+                    has_episodes=has_episodes,
+                    include_plex=include_plex,
+                    include_jellyfin=include_jellyfin,
+                    include_emby=include_emby,
+                )
+                logger.info(
+                    f"{log_prefix} completed bulk initial media server library refresh: "
+                    f"refreshed={stats.get('refreshed', 0)} failed={stats.get('failed', 0)}",
+                    extra={"emoji_type": "success"},
+                )
+                return {"ok": True, "kind": kind, "stats": stats}
+            finally:
+                reset_bulk_intent_after_dispatch()
 
         if kind == KIND_PHASE_INITIAL_MOVIE or kind == KIND_PHASE_FINAL_MOVIE:
             stats = refresh_selected_sections(
@@ -497,6 +554,11 @@ def process_media_refresh_job(session, job: Job) -> dict[str, Any]:
         )
         return {"ok": True, "kind": kind, "skipped": "unknown_kind"}
     except Exception as exc:
+        if idem_claim_committed and idem_key:
+            from services.source_of_truth.idempotency import release_idempotency_after_failed_claim
+
+            release_idempotency_after_failed_claim(None, idem_key)
+            idem_claim_committed = False
         logger.error(
             f"{log_prefix} failed: {exc}",
             extra={"emoji_type": "error"},

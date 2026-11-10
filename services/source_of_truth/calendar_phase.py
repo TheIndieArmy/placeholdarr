@@ -646,7 +646,7 @@ def _placeholder_target(session, placeholder: Placeholder) -> tuple[str | None, 
     return None, None, False, None, False
 
 
-def run_calendar_phase() -> dict[str, Any]:
+def run_calendar_phase(*, on_progress=None) -> dict[str, Any]:
     """Evaluate placeholder release-window statuses and apply updates in batches.
 
     Each batch of CALENDAR_PHASE_BATCH_SIZE placeholders is loaded, evaluated,
@@ -657,6 +657,8 @@ def run_calendar_phase() -> dict[str, Any]:
     Phase 5 class-singleton gate: if another worker is already running this
     phase (e.g. scheduled and webhook-triggered overlap), we skip cleanly so
     two instances cannot fight over the same placeholder rows.
+
+    ``on_progress(done, total, stats=None)`` is optional for live Activity updates.
     """
     import os
     import threading
@@ -698,7 +700,7 @@ def run_calendar_phase() -> dict[str, Any]:
         return stats
     _hb_thread, _hb_stop = start_heartbeat_thread("calendar_phase", owner=owner)
     try:
-        return _run_calendar_phase_inner(stats)
+        return _run_calendar_phase_inner(stats, on_progress=on_progress)
     finally:
         try:
             _hb_stop.set()
@@ -707,7 +709,7 @@ def run_calendar_phase() -> dict[str, Any]:
         release_class_singleton("calendar_phase", owner=owner)
 
 
-def _run_calendar_phase_inner(stats: dict[str, Any]) -> dict[str, Any]:
+def _run_calendar_phase_inner(stats: dict[str, Any], *, on_progress=None) -> dict[str, Any]:
     """Inner body of ``run_calendar_phase``; the outer wrapper owns the
     class-singleton gate + heartbeat lifecycle."""
     lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
@@ -879,6 +881,18 @@ def _run_calendar_phase_inner(stats: dict[str, Any]) -> dict[str, Any]:
             stats["status_skipped"] += chunk_status_skipped
             stats["variant_switched"] += chunk_variant_switched
             stats["chunks_committed"] += 1
+
+            done_ph = min(total_ph, chunk_offset + len(chunk_ids))
+            if callable(on_progress):
+                try:
+                    on_progress(done_ph, max(total_ph, 1), stats)
+                except TypeError:
+                    try:
+                        on_progress(done_ph, max(total_ph, 1))
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
 
             logger.info(
                 f"Calendar phase: chunk {chunk_idx}/{chunk_total} committed "

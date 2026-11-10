@@ -25,7 +25,15 @@ DEFAULT_CANCEL_CHECK_EVERY = 1
 
 
 class TaskRunCancelled(Exception):
-    """Raised when a task run should stop after Stop / abandon was requested."""
+    """Raised when a task run should stop after Stop / abandon was requested.
+
+    Optional ``partial`` carries best-effort stats gathered before the stop
+    (e.g. materialization created/deleted) so Activity can show work already done.
+    """
+
+    def __init__(self, message: str = "", *, partial: dict | None = None):
+        super().__init__(message)
+        self.partial = partial if isinstance(partial, dict) else None
 
 
 def request_task_run_cancel(task_run_id: int) -> None:

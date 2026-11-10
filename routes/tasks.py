@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from datetime import datetime, timezone
 from typing import Any
@@ -277,73 +278,79 @@ async def tasks_run(body: TaskRunRequest):
     }:
         raise HTTPException(status_code=400, detail=f"Unknown task_key: {key}")
 
-    if key == "full_sync":
-        if get_working_run("full_sync") or get_working_run("lite_sync") or is_full_sync_active():
-            raise HTTPException(
-                status_code=409,
-                detail="Task already running: lite or full sync in progress",
-            )
-    elif key == "lite_sync":
-        if (
-            get_working_run("lite_sync")
-            or get_working_run("full_sync")
-            or is_full_sync_active()
-        ):
-            raise HTTPException(status_code=409, detail="Task already running: lite or full sync in progress")
-    elif key == "calendar_sync":
-        if (
-            get_working_run("calendar_sync")
-            or get_working_run("calendar_only")
-            or get_working_run("full_sync")
-            or is_full_sync_active()
-        ):
-            raise HTTPException(status_code=409, detail="Task already running: calendar or full sync in progress")
-    elif key == "placeholder_refresh":
-        if get_working_run("placeholder_refresh") or get_working_run("full_sync") or is_full_sync_active():
-            raise HTTPException(
-                status_code=409,
-                detail="Task already running: placeholder refresh or full sync in progress",
-            )
-    elif key == "collections_sync":
-        if get_working_run("collections_sync"):
-            raise HTTPException(status_code=409, detail="Task already running: collections sync in progress")
-    elif key == "watchlist_sync":
-        if get_working_run("watchlist_sync"):
-            raise HTTPException(status_code=409, detail="Task already running: watchlist sync in progress")
-    else:
-        if get_working_run() or get_working_run("full_sync"):
-            raise HTTPException(status_code=409, detail="Another maintenance task is already running")
+    metadata = bool(True if body.metadata is None else body.metadata)
+    art = bool(True if body.art is None else body.art)
 
-    def _runner():
-        try:
-            if key == "full_sync":
-                run_scheduled_full_sync(trigger="manual")
-            elif key == "lite_sync":
-                run_lite_sync(trigger="manual")
-            elif key == "calendar_sync":
-                run_calendar_only_maintenance(trigger="manual")
-            elif key == "placeholder_refresh":
-                run_placeholder_refresh_task(
-                    trigger="manual",
-                    source="manual_task",
-                    metadata=bool(True if body.metadata is None else body.metadata),
-                    art=bool(True if body.art is None else body.art),
+    def _start_manual_task():
+        if key == "full_sync":
+            if get_working_run("full_sync") or get_working_run("lite_sync") or is_full_sync_active():
+                raise HTTPException(
+                    status_code=409,
+                    detail="Task already running: lite or full sync in progress",
                 )
-            elif key == "collections_sync":
-                from services.collections.scheduled import run_collections_sync
+        elif key == "lite_sync":
+            if (
+                get_working_run("lite_sync")
+                or get_working_run("full_sync")
+                or is_full_sync_active()
+            ):
+                raise HTTPException(status_code=409, detail="Task already running: lite or full sync in progress")
+        elif key == "calendar_sync":
+            if (
+                get_working_run("calendar_sync")
+                or get_working_run("calendar_only")
+                or get_working_run("full_sync")
+                or is_full_sync_active()
+            ):
+                raise HTTPException(status_code=409, detail="Task already running: calendar or full sync in progress")
+        elif key == "placeholder_refresh":
+            if get_working_run("placeholder_refresh") or get_working_run("full_sync") or is_full_sync_active():
+                raise HTTPException(
+                    status_code=409,
+                    detail="Task already running: placeholder refresh or full sync in progress",
+                )
+        elif key == "collections_sync":
+            if get_working_run("collections_sync"):
+                raise HTTPException(status_code=409, detail="Task already running: collections sync in progress")
+        elif key == "watchlist_sync":
+            if get_working_run("watchlist_sync"):
+                raise HTTPException(status_code=409, detail="Task already running: watchlist sync in progress")
+        else:
+            if get_working_run() or get_working_run("full_sync"):
+                raise HTTPException(status_code=409, detail="Another maintenance task is already running")
 
-                run_collections_sync(trigger="manual")
-            elif key == "watchlist_sync":
-                from services.watchlist.sync import run_watchlist_sync
-                from services.source_of_truth.scheduler import reschedule_task_after_completion
+        def _runner():
+            try:
+                if key == "full_sync":
+                    run_scheduled_full_sync(trigger="manual")
+                elif key == "lite_sync":
+                    run_lite_sync(trigger="manual")
+                elif key == "calendar_sync":
+                    run_calendar_only_maintenance(trigger="manual")
+                elif key == "placeholder_refresh":
+                    run_placeholder_refresh_task(
+                        trigger="manual",
+                        source="manual_task",
+                        metadata=metadata,
+                        art=art,
+                    )
+                elif key == "collections_sync":
+                    from services.collections.scheduled import run_collections_sync
 
-                run_watchlist_sync(trigger="manual")
-                try:
-                    reschedule_task_after_completion("watchlist_sync")
-                except Exception:
-                    pass
-        except Exception as exc:
-            logger.error("Manual task run failed task_key=%s: %s", key, exc, extra={"emoji_type": "error"})
+                    run_collections_sync(trigger="manual")
+                elif key == "watchlist_sync":
+                    from services.watchlist.sync import run_watchlist_sync
+                    from services.source_of_truth.scheduler import reschedule_task_after_completion
 
-    threading.Thread(target=_runner, name=f"manual-task-{key}", daemon=True).start()
-    return {"ok": True, "task_key": key, "message": "Task started"}
+                    run_watchlist_sync(trigger="manual")
+                    try:
+                        reschedule_task_after_completion("watchlist_sync")
+                    except Exception:
+                        pass
+            except Exception as exc:
+                logger.error("Manual task run failed task_key=%s: %s", key, exc, extra={"emoji_type": "error"})
+
+        threading.Thread(target=_runner, name=f"manual-task-{key}", daemon=True).start()
+        return {"ok": True, "task_key": key, "message": "Task started"}
+
+    return await asyncio.to_thread(_start_manual_task)

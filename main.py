@@ -711,9 +711,11 @@ async def webhook(request: Request):
             )
             raise HTTPException(status_code=400, detail=reason)
 
-        from services.webhook_ingest import enqueue_webhook_persist
+        import asyncio
 
-        enqueue_webhook_persist(payload, canonical_instance)
+        from services.webhook_ingest import persist_webhook_before_accept
+
+        await asyncio.to_thread(persist_webhook_before_accept, payload, canonical_instance)
         return {"status": "accepted"}
     except HTTPException:
         raise

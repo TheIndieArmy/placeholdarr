@@ -137,6 +137,47 @@ def arr_search_idempotency_key(*, job_type: str, job_id: int) -> str:
     return f"arr_search:{job_type}:job={int(job_id)}"
 
 
+def backfill_run_completion_idempotency_key(*, job_type: str, run_id: str) -> str:
+    return f"backfill_run_completion:{job_type}:{run_id}"
+
+
+def release_idempotency_after_failed_claim(session, key: str | None) -> None:
+    """Release a claimed processed key after handler failure (fresh session if needed)."""
+    if not key:
+        return
+    try:
+        if session is not None:
+            release_processed_key(session, key)
+            session.commit()
+            return
+    except Exception:
+        try:
+            if session is not None:
+                session.rollback()
+        except Exception:
+            pass
+    from services.postgres.db import get_session
+
+    s = get_session()
+    try:
+        release_processed_key(s, key)
+        s.commit()
+    except Exception as exc:
+        try:
+            s.rollback()
+        except Exception:
+            pass
+        logger.debug(
+            f"idempotency: release after failure failed key={key!r}: {exc}",
+            extra={"emoji_type": "debug"},
+        )
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
 __all__ = [
     "try_claim_processed_key",
     "release_processed_key",
@@ -145,4 +186,6 @@ __all__ = [
     "placeholder_art_refresh_idempotency_key",
     "media_refresh_idempotency_key",
     "arr_search_idempotency_key",
+    "backfill_run_completion_idempotency_key",
+    "release_idempotency_after_failed_claim",
 ]

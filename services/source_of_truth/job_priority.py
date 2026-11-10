@@ -18,6 +18,7 @@ from __future__ import annotations
 
 # Symbolic constants kept in one place so callers (enqueue helpers, tests)
 # agree with the worker.
+PRIORITY_PLAYBACK = 120
 PRIORITY_INTERACTIVE = 100
 PRIORITY_SEMI_INTERACTIVE = 50
 PRIORITY_BACKGROUND_LIGHT = 10
@@ -25,11 +26,12 @@ PRIORITY_BACKGROUND = 0
 
 
 _PRIORITY_BY_TYPE: dict[str, int] = {
+    # Playback above bulk Arr webhook floods so search/fallback stays snappy.
+    "playback_fallback": PRIORITY_PLAYBACK,
     "webhook_event": PRIORITY_INTERACTIVE,
-    "playback_fallback": PRIORITY_INTERACTIVE,
     "entity_reconcile": PRIORITY_INTERACTIVE,
-    # Same tier as playback so countdown ticks aren't stuck behind NFO/art batches.
-    "import_grace": PRIORITY_INTERACTIVE,
+    # Slightly below live webhooks so grace ticks do not drown imports/playback.
+    "import_grace": PRIORITY_SEMI_INTERACTIVE + 10,
     "nfo_refresh": PRIORITY_SEMI_INTERACTIVE,
     "placeholder_art_refresh": PRIORITY_SEMI_INTERACTIVE,
     "queue_monitor": PRIORITY_SEMI_INTERACTIVE,
@@ -53,6 +55,7 @@ def default_priority_for(job_type: str) -> int:
 
 
 __all__ = [
+    "PRIORITY_PLAYBACK",
     "PRIORITY_INTERACTIVE",
     "PRIORITY_SEMI_INTERACTIVE",
     "PRIORITY_BACKGROUND_LIGHT",

@@ -8,7 +8,7 @@ export function useDashboardEvents(opts: {
   onDisconnected?: () => void;
   onStartupSyncComplete?: (value: boolean) => void;
   onLibraryVersion?: (versions: LibraryVersionResponse) => void;
-  /** Fires only when the task-runs fingerprint actually changes (a run started/finished). */
+  /** Fires when the task-runs fingerprint changes (start/finish lifecycle). */
   onTaskRunsVersion?: (version: string) => void;
 }) {
   const [eventsConnected, setEventsConnected] = useState(false);

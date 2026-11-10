@@ -4890,278 +4890,302 @@ def _placeholder_policy_set_response(snapshot: dict, out: dict) -> dict:
 
 @router.post("/api/library/movie/{movie_id}/placeholder-policy")
 async def movie_placeholder_policy_set(movie_id: int, request: Request):
-    from services.source_of_truth.entity_reconcile import enqueue_entity_reconcile
-    from services.source_of_truth.placeholder_policy import (
-        apply_movie_placeholder_policy_fast,
-        apply_placeholder_policy,
-    )
-
     payload = await request.json()
-    policy = str(payload.get("policy") or "auto").strip().lower()
-    if policy not in ("auto", "pinned", "never"):
-        return JSONResponse({"ok": False, "message": "Invalid placeholder policy."}, status_code=400)
 
-    session = get_session()
-    try:
-        movie = session.query(Movie).filter(Movie.id == int(movie_id), Movie.is_deleted == False).first()  # noqa: E712
-        if not movie:
-            return JSONResponse({"ok": False, "message": "Movie not found"}, status_code=404)
-        if bool(movie.is_deleted) and policy != "auto":
-            return JSONResponse(
-                {"ok": False, "message": "Cannot set placeholder policy for a removed title."},
-                status_code=400,
+    def _work():
+        from services.source_of_truth.entity_reconcile import enqueue_entity_reconcile
+        from services.source_of_truth.placeholder_policy import (
+            apply_movie_placeholder_policy_fast,
+            apply_placeholder_policy,
+        )
+
+        policy = str(payload.get("policy") or "auto").strip().lower()
+        if policy not in ("auto", "pinned", "never"):
+            return JSONResponse({"ok": False, "message": "Invalid placeholder policy."}, status_code=400)
+
+        session = get_session()
+        try:
+            movie = session.query(Movie).filter(Movie.id == int(movie_id), Movie.is_deleted == False).first()  # noqa: E712
+            if not movie:
+                return JSONResponse({"ok": False, "message": "Movie not found"}, status_code=404)
+            if bool(movie.is_deleted) and policy != "auto":
+                return JSONResponse(
+                    {"ok": False, "message": "Cannot set placeholder policy for a removed title."},
+                    status_code=400,
+                )
+            apply_placeholder_policy(movie, policy=policy, source="manual")
+            session.add(movie)
+            session.commit()
+            snapshot = _placeholder_policy_snapshot(movie)
+        finally:
+            session.close()
+
+        if policy == "auto":
+            out = enqueue_entity_reconcile(
+                entity_type="movie",
+                entity_id=int(movie_id),
+                source=f"library_movie_policy:{movie_id}",
             )
-        apply_placeholder_policy(movie, policy=policy, source="manual")
-        session.add(movie)
-        session.commit()
-        snapshot = _placeholder_policy_snapshot(movie)
-    finally:
-        session.close()
+            return _placeholder_policy_set_response(snapshot, out)
 
-    if policy == "auto":
-        out = enqueue_entity_reconcile(
-            entity_type="movie",
-            entity_id=int(movie_id),
-            source=f"library_movie_policy:{movie_id}",
-        )
-        return _placeholder_policy_set_response(snapshot, out)
+        if policy == "never":
+            from services.source_of_truth.entity_reconcile import cancel_active_reconcile_for_entity
 
-    if policy == "never":
-        from services.source_of_truth.entity_reconcile import cancel_active_reconcile_for_entity
+            cancel_active_reconcile_for_entity(
+                entity_type="movie",
+                entity_id=int(movie_id),
+                reason="superseded_by_never_policy",
+            )
 
-        cancel_active_reconcile_for_entity(
-            entity_type="movie",
-            entity_id=int(movie_id),
-            reason="superseded_by_never_policy",
-        )
+        fast = apply_movie_placeholder_policy_fast(int(movie_id))
+        if not fast.get("ok", False):
+            return JSONResponse(
+                {"ok": False, "message": fast.get("message") or "Placeholder update failed", **snapshot},
+                status_code=500,
+            )
+        return _placeholder_policy_set_response(snapshot, fast)
 
-    fast = apply_movie_placeholder_policy_fast(int(movie_id))
-    if not fast.get("ok", False):
-        return JSONResponse(
-            {"ok": False, "message": fast.get("message") or "Placeholder update failed", **snapshot},
-            status_code=500,
-        )
-    return _placeholder_policy_set_response(snapshot, fast)
+    return await asyncio.to_thread(_work)
 
 
 @router.post("/api/library/movie/{movie_id}/arr-policy-tags/clear")
 async def movie_arr_policy_tags_clear(movie_id: int, request: Request):
     """Remove matching Never and/or Pinned Arr tags from a movie, then re-apply policy."""
-    from services.source_of_truth.tag_placeholder_policy import clear_arr_policy_tags_for_movie
-
     payload = await request.json()
     remove_never = bool(payload.get("remove_never"))
     remove_pinned = bool(payload.get("remove_pinned"))
-    out = clear_arr_policy_tags_for_movie(
-        int(movie_id),
-        remove_never=remove_never,
-        remove_pinned=remove_pinned,
-    )
-    if not out.get("ok"):
-        return JSONResponse(out, status_code=400)
-    return out
+
+    def _work():
+        from services.source_of_truth.tag_placeholder_policy import clear_arr_policy_tags_for_movie
+
+        out = clear_arr_policy_tags_for_movie(
+            int(movie_id),
+            remove_never=remove_never,
+            remove_pinned=remove_pinned,
+        )
+        if not out.get("ok"):
+            return JSONResponse(out, status_code=400)
+        return out
+
+    return await asyncio.to_thread(_work)
 
 
 @router.post("/api/library/episode/{episode_id}/placeholder-policy")
 async def episode_placeholder_policy_set(episode_id: int, request: Request):
-    from services.source_of_truth.entity_reconcile import enqueue_entity_reconcile
-    from services.source_of_truth.placeholder_policy import (
-        apply_episode_placeholder_policy_fast,
-        apply_placeholder_policy,
-        load_series_for_episode,
-        series_gate_active,
-    )
-
     payload = await request.json()
-    policy = str(payload.get("policy") or "auto").strip().lower()
-    if policy not in ("auto", "pinned", "never"):
-        return JSONResponse({"ok": False, "message": "Invalid placeholder policy."}, status_code=400)
 
-    session = get_session()
-    try:
-        episode = session.query(Episode).filter(Episode.id == int(episode_id), Episode.is_deleted == False).first()  # noqa: E712
-        if not episode:
-            return JSONResponse({"ok": False, "message": "Episode not found"}, status_code=404)
-        if bool(episode.is_deleted) and policy != "auto":
-            return JSONResponse(
-                {"ok": False, "message": "Cannot set placeholder policy for a removed episode."},
-                status_code=400,
+    def _work():
+        from services.source_of_truth.entity_reconcile import enqueue_entity_reconcile
+        from services.source_of_truth.placeholder_policy import (
+            apply_episode_placeholder_policy_fast,
+            apply_placeholder_policy,
+            load_series_for_episode,
+            series_gate_active,
+        )
+
+        policy = str(payload.get("policy") or "auto").strip().lower()
+        if policy not in ("auto", "pinned", "never"):
+            return JSONResponse({"ok": False, "message": "Invalid placeholder policy."}, status_code=400)
+
+        session = get_session()
+        try:
+            episode = session.query(Episode).filter(Episode.id == int(episode_id), Episode.is_deleted == False).first()  # noqa: E712
+            if not episode:
+                return JSONResponse({"ok": False, "message": "Episode not found"}, status_code=404)
+            if bool(episode.is_deleted) and policy != "auto":
+                return JSONResponse(
+                    {"ok": False, "message": "Cannot set placeholder policy for a removed episode."},
+                    status_code=400,
+                )
+            _, series = load_series_for_episode(session, episode)
+            if series is not None and series_gate_active(series):
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "message": "Series policy locks episode chips. Change the series Auto / Never / Pinned chip first.",
+                    },
+                    status_code=400,
+                )
+            apply_placeholder_policy(episode, policy=policy)
+            session.add(episode)
+            session.commit()
+            snapshot = _placeholder_policy_snapshot(episode)
+        finally:
+            session.close()
+
+        if policy == "auto":
+            out = enqueue_entity_reconcile(
+                entity_type="episode",
+                entity_id=int(episode_id),
+                source=f"library_episode_policy:{episode_id}",
             )
-        _, series = load_series_for_episode(session, episode)
-        if series is not None and series_gate_active(series):
-            return JSONResponse(
-                {
-                    "ok": False,
-                    "message": "Series policy locks episode chips. Change the series Auto / Never / Pinned chip first.",
-                },
-                status_code=400,
+            return _placeholder_policy_set_response(snapshot, out)
+
+        if policy == "never":
+            from services.source_of_truth.entity_reconcile import cancel_active_reconcile_for_entity
+
+            cancel_active_reconcile_for_entity(
+                entity_type="episode",
+                entity_id=int(episode_id),
+                reason="superseded_by_never_policy",
             )
-        apply_placeholder_policy(episode, policy=policy)
-        session.add(episode)
-        session.commit()
-        snapshot = _placeholder_policy_snapshot(episode)
-    finally:
-        session.close()
 
-    if policy == "auto":
-        out = enqueue_entity_reconcile(
-            entity_type="episode",
-            entity_id=int(episode_id),
-            source=f"library_episode_policy:{episode_id}",
-        )
-        return _placeholder_policy_set_response(snapshot, out)
+        fast = apply_episode_placeholder_policy_fast(int(episode_id))
+        if not fast.get("ok", False):
+            return JSONResponse(
+                {"ok": False, "message": fast.get("message") or "Placeholder update failed", **snapshot},
+                status_code=500,
+            )
+        return _placeholder_policy_set_response(snapshot, fast)
 
-    if policy == "never":
-        from services.source_of_truth.entity_reconcile import cancel_active_reconcile_for_entity
-
-        cancel_active_reconcile_for_entity(
-            entity_type="episode",
-            entity_id=int(episode_id),
-            reason="superseded_by_never_policy",
-        )
-
-    fast = apply_episode_placeholder_policy_fast(int(episode_id))
-    if not fast.get("ok", False):
-        return JSONResponse(
-            {"ok": False, "message": fast.get("message") or "Placeholder update failed", **snapshot},
-            status_code=500,
-        )
-    return _placeholder_policy_set_response(snapshot, fast)
+    return await asyncio.to_thread(_work)
 
 
 @router.post("/api/library/series/{series_id}/placeholder-policy")
 async def series_placeholder_policy_set(series_id: int, request: Request):
-    from services.source_of_truth.entity_reconcile import enqueue_entity_reconcile
-    from services.source_of_truth.placeholder_policy import (
-        apply_placeholder_policy,
-        apply_series_gate_fast,
-    )
-
     payload = await request.json()
-    policy = str(payload.get("policy") or "auto").strip().lower()
-    if policy not in ("auto", "pinned", "never"):
-        return JSONResponse({"ok": False, "message": "Invalid placeholder policy."}, status_code=400)
 
-    session = get_session()
-    try:
-        series = session.query(Series).filter(Series.id == int(series_id), Series.is_deleted == False).first()  # noqa: E712
-        if not series:
-            return JSONResponse({"ok": False, "message": "Series not found"}, status_code=404)
-        if bool(series.is_deleted) and policy != "auto":
-            return JSONResponse(
-                {"ok": False, "message": "Cannot set placeholder policy for a removed series."},
-                status_code=400,
+    def _work():
+        from services.source_of_truth.entity_reconcile import enqueue_entity_reconcile
+        from services.source_of_truth.placeholder_policy import (
+            apply_placeholder_policy,
+            apply_series_gate_fast,
+        )
+
+        policy = str(payload.get("policy") or "auto").strip().lower()
+        if policy not in ("auto", "pinned", "never"):
+            return JSONResponse({"ok": False, "message": "Invalid placeholder policy."}, status_code=400)
+
+        session = get_session()
+        try:
+            series = session.query(Series).filter(Series.id == int(series_id), Series.is_deleted == False).first()  # noqa: E712
+            if not series:
+                return JSONResponse({"ok": False, "message": "Series not found"}, status_code=404)
+            if bool(series.is_deleted) and policy != "auto":
+                return JSONResponse(
+                    {"ok": False, "message": "Cannot set placeholder policy for a removed series."},
+                    status_code=400,
+                )
+            apply_placeholder_policy(series, policy=policy, source="manual")
+            session.add(series)
+            session.commit()
+            snapshot = _placeholder_policy_snapshot(series)
+        finally:
+            session.close()
+
+        if policy == "auto":
+            out = enqueue_entity_reconcile(
+                entity_type="series",
+                entity_id=int(series_id),
+                source=f"library_series_policy:{series_id}",
             )
-        apply_placeholder_policy(series, policy=policy, source="manual")
-        session.add(series)
-        session.commit()
-        snapshot = _placeholder_policy_snapshot(series)
-    finally:
-        session.close()
+            return _placeholder_policy_set_response(snapshot, out)
 
-    if policy == "auto":
-        out = enqueue_entity_reconcile(
-            entity_type="series",
-            entity_id=int(series_id),
-            source=f"library_series_policy:{series_id}",
-        )
-        return _placeholder_policy_set_response(snapshot, out)
+        if policy == "never":
+            from services.source_of_truth.entity_reconcile import cancel_active_reconcile_for_entity
 
-    if policy == "never":
-        from services.source_of_truth.entity_reconcile import cancel_active_reconcile_for_entity
+            cancel_active_reconcile_for_entity(
+                entity_type="series",
+                entity_id=int(series_id),
+                reason="superseded_by_never_policy",
+            )
 
-        cancel_active_reconcile_for_entity(
-            entity_type="series",
-            entity_id=int(series_id),
-            reason="superseded_by_never_policy",
-        )
+        fast = apply_series_gate_fast(int(series_id), policy=policy)
+        if not fast.get("ok", False):
+            return JSONResponse(
+                {"ok": False, "message": fast.get("message") or "Placeholder update failed", **snapshot},
+                status_code=500,
+            )
+        return _placeholder_policy_set_response(snapshot, fast)
 
-    fast = apply_series_gate_fast(int(series_id), policy=policy)
-    if not fast.get("ok", False):
-        return JSONResponse(
-            {"ok": False, "message": fast.get("message") or "Placeholder update failed", **snapshot},
-            status_code=500,
-        )
-    return _placeholder_policy_set_response(snapshot, fast)
+    return await asyncio.to_thread(_work)
 
 
 @router.post("/api/library/series/{series_id}/arr-policy-tags/clear")
 async def series_arr_policy_tags_clear(series_id: int, request: Request):
     """Remove matching Never and/or Pinned Arr tags from a series, then re-apply policy."""
-    from services.source_of_truth.tag_placeholder_policy import clear_arr_policy_tags_for_series
-
     payload = await request.json()
     remove_never = bool(payload.get("remove_never"))
     remove_pinned = bool(payload.get("remove_pinned"))
-    out = clear_arr_policy_tags_for_series(
-        int(series_id),
-        remove_never=remove_never,
-        remove_pinned=remove_pinned,
-    )
-    if not out.get("ok"):
-        return JSONResponse(out, status_code=400)
-    return out
+
+    def _work():
+        from services.source_of_truth.tag_placeholder_policy import clear_arr_policy_tags_for_series
+
+        out = clear_arr_policy_tags_for_series(
+            int(series_id),
+            remove_never=remove_never,
+            remove_pinned=remove_pinned,
+        )
+        if not out.get("ok"):
+            return JSONResponse(out, status_code=400)
+        return out
+
+    return await asyncio.to_thread(_work)
 
 
 @router.post("/api/library/season/{season_id}/placeholder-policy")
 async def season_placeholder_policy_set(season_id: int, request: Request):
-    from services.source_of_truth.entity_reconcile import enqueue_entity_reconcile
-    from services.source_of_truth.placeholder_policy import (
-        apply_placeholder_policy,
-        apply_season_stamp_fast,
-        series_gate_active,
-    )
-
     payload = await request.json()
-    policy = str(payload.get("policy") or "auto").strip().lower()
-    if policy not in ("auto", "pinned", "never"):
-        return JSONResponse({"ok": False, "message": "Invalid placeholder policy."}, status_code=400)
 
-    series_id_for_reconcile: int | None = None
-    session = get_session()
-    try:
-        season = session.query(Season).filter(Season.id == int(season_id), Season.is_deleted == False).first()  # noqa: E712
-        if not season:
-            return JSONResponse({"ok": False, "message": "Season not found"}, status_code=404)
-        series = session.query(Series).filter(Series.id == int(season.series_id)).first() if season.series_id else None
-        if series is not None and series_gate_active(series):
-            return JSONResponse(
-                {
-                    "ok": False,
-                    "message": "Series policy locks season chips. Change the series Auto / Never / Pinned chip first.",
-                },
-                status_code=400,
-            )
-        if bool(getattr(season, "is_deleted", False)) and policy != "auto":
-            return JSONResponse(
-                {"ok": False, "message": "Cannot set placeholder policy for a removed season."},
-                status_code=400,
-            )
-        if season.series_id is not None:
-            series_id_for_reconcile = int(season.series_id)
-        apply_placeholder_policy(season, policy=policy)
-        session.add(season)
-        session.commit()
-        snapshot = _placeholder_policy_snapshot(season)
-    finally:
-        session.close()
-
-    fast = apply_season_stamp_fast(int(season_id), policy=policy)
-    if not fast.get("ok", False):
-        return JSONResponse(
-            {"ok": False, "message": fast.get("message") or "Placeholder update failed", **snapshot},
-            status_code=500,
+    def _work():
+        from services.source_of_truth.entity_reconcile import enqueue_entity_reconcile
+        from services.source_of_truth.placeholder_policy import (
+            apply_placeholder_policy,
+            apply_season_stamp_fast,
+            series_gate_active,
         )
 
-    if policy == "auto" and series_id_for_reconcile is not None:
-        out = enqueue_entity_reconcile(
-            entity_type="series",
-            entity_id=int(series_id_for_reconcile),
-            source=f"library_season_policy:{season_id}",
-        )
-        return _placeholder_policy_set_response(snapshot, {**fast, **out})
+        policy = str(payload.get("policy") or "auto").strip().lower()
+        if policy not in ("auto", "pinned", "never"):
+            return JSONResponse({"ok": False, "message": "Invalid placeholder policy."}, status_code=400)
 
-    return _placeholder_policy_set_response(snapshot, fast)
+        series_id_for_reconcile: int | None = None
+        session = get_session()
+        try:
+            season = session.query(Season).filter(Season.id == int(season_id), Season.is_deleted == False).first()  # noqa: E712
+            if not season:
+                return JSONResponse({"ok": False, "message": "Season not found"}, status_code=404)
+            series = session.query(Series).filter(Series.id == int(season.series_id)).first() if season.series_id else None
+            if series is not None and series_gate_active(series):
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "message": "Series policy locks season chips. Change the series Auto / Never / Pinned chip first.",
+                    },
+                    status_code=400,
+                )
+            if bool(getattr(season, "is_deleted", False)) and policy != "auto":
+                return JSONResponse(
+                    {"ok": False, "message": "Cannot set placeholder policy for a removed season."},
+                    status_code=400,
+                )
+            if season.series_id is not None:
+                series_id_for_reconcile = int(season.series_id)
+            apply_placeholder_policy(season, policy=policy)
+            session.add(season)
+            session.commit()
+            snapshot = _placeholder_policy_snapshot(season)
+        finally:
+            session.close()
+
+        fast = apply_season_stamp_fast(int(season_id), policy=policy)
+        if not fast.get("ok", False):
+            return JSONResponse(
+                {"ok": False, "message": fast.get("message") or "Placeholder update failed", **snapshot},
+                status_code=500,
+            )
+
+        if policy == "auto" and series_id_for_reconcile is not None:
+            out = enqueue_entity_reconcile(
+                entity_type="series",
+                entity_id=int(series_id_for_reconcile),
+                source=f"library_season_policy:{season_id}",
+            )
+            return _placeholder_policy_set_response(snapshot, {**fast, **out})
+
+        return _placeholder_policy_set_response(snapshot, fast)
+
+    return await asyncio.to_thread(_work)
 
 
 @router.get("/api/library/reconcile-jobs/{job_id}")

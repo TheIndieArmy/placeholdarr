@@ -212,6 +212,15 @@ def _execute_refresh_batch(batch: _RefreshBatch) -> bool:
             pass
 
 
+_WAKE_STATS = threading.Event()
+
+
+def wake_stats_refresh_worker() -> None:
+    """Nudge the retry worker after full sync ends so dirty rows flush promptly."""
+    _WAKE_STATS.set()
+    _ensure_refresh_retry_worker()
+
+
 def _ensure_refresh_retry_worker() -> None:
     global _retry_worker
 
@@ -219,8 +228,11 @@ def _ensure_refresh_retry_worker() -> None:
         global _retry_worker
         backoff_s = 2.0
         while True:
+            if _WAKE_STATS.is_set():
+                _WAKE_STATS.clear()
             if _full_sync_is_active():
-                time.sleep(30)
+                # Wait for end_full_sync wake or timeout; avoid tight spin.
+                _WAKE_STATS.wait(timeout=min(60.0, max(5.0, backoff_s)))
                 continue
             batch = _take_pending_refresh()
             if batch is None or batch.is_empty():

@@ -15,12 +15,22 @@ from services.postgres.models import Episode, Job, Movie, Placeholder, Season, S
 from services.source_of_truth.arr_api import fetch_radarr_movie, fetch_sonarr_episode_item
 from services.source_of_truth.arr_share_guard import expand_determination_entity_ids
 from services.source_of_truth.determiner import run_determination_for_entities_in_session
+from services.source_of_truth.live_catalog_touch import mark_live_catalog_touch
 from services.source_of_truth.materializer import run_materialization_for_entities
-from services.source_of_truth.materializer import run_materialization_for_entities_in_session
 from services.source_of_truth.status_intent import DisplayStatus, StatusIntent, StatusSource
 from services.source_of_truth.status_orchestrator import StatusOrchestrator
 from services.source_of_truth.status_reconciler import NFO_REFRESH_JOB_TYPE
 from services.status_projection import projected_status_display
+
+_PG_LOCK_NOT_AVAILABLE = "55P03"
+
+
+def _is_lock_timeout_error(exc: Exception) -> bool:
+    pgcode = getattr(getattr(exc, "orig", None), "pgcode", None)
+    if str(pgcode or "") == _PG_LOCK_NOT_AVAILABLE:
+        return True
+    text = str(exc or "").lower()
+    return "lock timeout" in text or "locknotavailable" in text.replace(" ", "")
 
 IMPORT_GRACE_JOB_TYPE = "import_grace"
 IMPORT_GRACE_REASON = "import_grace_countdown"
@@ -540,18 +550,22 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
             extra={'emoji_type': 'info'}
         )
         if content_type == "movie":
-            logger.debug(f"Finalize: Looking up movie with id={entity_id}", extra={'emoji_type': 'debug'})
             movie_row = session.query(Movie).filter(Movie.id == entity_id).first()
             if not movie_row:
                 logger.warning(f"Finalize: Movie not found with id={entity_id}", extra={'emoji_type': 'warning'})
                 return {"done": True, "ok": False, "reason": f"movie_not_found:{entity_id}"}
-            logger.debug(f"Finalize: Found movie, setting has_file=True, file_path={file_path}", extra={'emoji_type': 'debug'})
             movie_row.has_file = True
             if file_path:
                 movie_row.radarr_filepath = str(file_path)
             session.add(movie_row)
+            mark_live_catalog_touch(session, movie_ids=[entity_id])
             session.flush()
-            logger.debug(f"Finalize: Movie flushed, running determination for movie_id={entity_id}", extra={'emoji_type': 'debug'})
+            # Persist has_file before mat so a short lock-busy retry does not lose it.
+            try:
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
             mat_movie_ids, _mat_episode_ids = expand_determination_entity_ids(
                 session,
                 movie_ids=[entity_id],
@@ -560,14 +574,55 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
                 session,
                 movie_ids=mat_movie_ids,
             )
-            logger.debug(f"Finalize: Determination complete for movie_id={entity_id}: {determination}", extra={'emoji_type': 'debug'})
-            logger.debug(f"Finalize: Running in-session materialization for movie_id={entity_id}", extra={'emoji_type': 'debug'})
-            materialization = run_materialization_for_entities_in_session(
-                session,
-                movie_ids=mat_movie_ids,
-                observation_source="event_movie_imported_grace_finalize",
+            try:
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+            from services.source_of_truth.entity_locks import (
+                release_entity_lock,
+                try_acquire_entity_lock,
             )
-            logger.debug(f"Finalize: Materialization complete for movie_id={entity_id}: {materialization}", extra={'emoji_type': 'debug'})
+
+            if not try_acquire_entity_lock(session, entity_type="movie", entity_id=int(entity_id)):
+                logger.info(
+                    f"Import grace finalize deferred (entity lock busy): movie_id={entity_id}",
+                    extra={"emoji_type": "info"},
+                )
+                return {
+                    "done": False,
+                    "ok": True,
+                    "defer": True,
+                    "defer_seconds": 5,
+                    "skipped": "entity_lock_busy",
+                    "phase": "finalize_deferred",
+                    "content_type": content_type,
+                    "entity_id": entity_id,
+                }
+            try:
+                materialization = run_materialization_for_entities(
+                    movie_ids=mat_movie_ids,
+                    observation_source="event_movie_imported_grace_finalize",
+                )
+            except Exception as mat_exc:
+                if _is_lock_timeout_error(mat_exc):
+                    logger.info(
+                        f"Import grace finalize deferred (row lock busy): movie_id={entity_id}",
+                        extra={"emoji_type": "info"},
+                    )
+                    return {
+                        "done": False,
+                        "ok": True,
+                        "defer": True,
+                        "defer_seconds": 5,
+                        "skipped": "lock_busy",
+                        "phase": "finalize_deferred",
+                        "content_type": content_type,
+                        "entity_id": entity_id,
+                    }
+                raise
+            finally:
+                release_entity_lock(session, entity_type="movie", entity_id=int(entity_id))
             movie_ref = session.query(Movie).filter(Movie.id == entity_id).first()
             mat = materialization_stats_dict(materialization)
             result_reason, status_label = outcome_reason_and_status_from_materialization(
@@ -603,18 +658,31 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
                 },
             )
         elif content_type == "episode":
-            logger.debug(f"Finalize: Looking up episode with id={entity_id}", extra={'emoji_type': 'debug'})
             episode_row = session.query(Episode).filter(Episode.id == entity_id).first()
             if not episode_row:
                 logger.warning(f"Finalize: Episode not found with id={entity_id}", extra={'emoji_type': 'warning'})
                 return {"done": True, "ok": False, "reason": f"episode_not_found:{entity_id}"}
-            logger.debug(f"Finalize: Found episode, setting has_file=True, file_path={file_path}", extra={'emoji_type': 'debug'})
             episode_row.has_file = True
             if file_path:
                 episode_row.sonarr_filepath = str(file_path)
             session.add(episode_row)
+            season_id = int(getattr(episode_row, "season_id", 0) or 0)
+            series_id_for_touch = None
+            if season_id:
+                season_row = session.query(Season).filter(Season.id == season_id).first()
+                if season_row is not None:
+                    series_id_for_touch = int(getattr(season_row, "series_id", 0) or 0) or None
+            mark_live_catalog_touch(
+                session,
+                episode_ids=[entity_id],
+                series_ids=[series_id_for_touch] if series_id_for_touch else None,
+            )
             session.flush()
-            logger.debug(f"Finalize: Episode flushed, running determination for episode_id={entity_id}", extra={'emoji_type': 'debug'})
+            try:
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
             _mat_movie_ids, mat_episode_ids = expand_determination_entity_ids(
                 session,
                 episode_ids=[entity_id],
@@ -623,14 +691,55 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
                 session,
                 episode_ids=mat_episode_ids,
             )
-            logger.debug(f"Finalize: Determination complete for episode_id={entity_id}: {determination}", extra={'emoji_type': 'debug'})
-            logger.debug(f"Finalize: Running in-session materialization for episode_id={entity_id}", extra={'emoji_type': 'debug'})
-            materialization = run_materialization_for_entities_in_session(
-                session,
-                episode_ids=mat_episode_ids,
-                observation_source="event_episode_imported_grace_finalize",
+            try:
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+            from services.source_of_truth.entity_locks import (
+                release_entity_lock,
+                try_acquire_entity_lock,
             )
-            logger.debug(f"Finalize: Materialization complete for episode_id={entity_id}: {materialization}", extra={'emoji_type': 'debug'})
+
+            if not try_acquire_entity_lock(session, entity_type="episode", entity_id=int(entity_id)):
+                logger.info(
+                    f"Import grace finalize deferred (entity lock busy): episode_id={entity_id}",
+                    extra={"emoji_type": "info"},
+                )
+                return {
+                    "done": False,
+                    "ok": True,
+                    "defer": True,
+                    "defer_seconds": 5,
+                    "skipped": "entity_lock_busy",
+                    "phase": "finalize_deferred",
+                    "content_type": content_type,
+                    "entity_id": entity_id,
+                }
+            try:
+                materialization = run_materialization_for_entities(
+                    episode_ids=mat_episode_ids,
+                    observation_source="event_episode_imported_grace_finalize",
+                )
+            except Exception as mat_exc:
+                if _is_lock_timeout_error(mat_exc):
+                    logger.info(
+                        f"Import grace finalize deferred (row lock busy): episode_id={entity_id}",
+                        extra={"emoji_type": "info"},
+                    )
+                    return {
+                        "done": False,
+                        "ok": True,
+                        "defer": True,
+                        "defer_seconds": 5,
+                        "skipped": "lock_busy",
+                        "phase": "finalize_deferred",
+                        "content_type": content_type,
+                        "entity_id": entity_id,
+                    }
+                raise
+            finally:
+                release_entity_lock(session, entity_type="episode", entity_id=int(entity_id))
             ctx = (
                 session.query(Episode, Season, Series)
                 .join(Season, Episode.season_id == Season.id)
@@ -674,7 +783,6 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
                         "placeholder_ids": placeholder_ids,
                     },
                 )
-                # Next-unaired may advance after import; refresh series/season New Ep. banners.
                 try:
                     from services.source_of_truth.placeholder_art_reconciler import (
                         enqueue_art_refresh_for_calendar_date_changes,

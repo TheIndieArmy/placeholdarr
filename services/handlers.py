@@ -172,15 +172,22 @@ def _infer_event_meta(payload: Dict[str, Any], instance: str | None = None) -> d
 
 
 def _enqueue_event_job(session, event_log_id: int, event_type: str):
-    from services.source_of_truth.job_priority import default_priority_for
+    from services.source_of_truth.job_priority import PRIORITY_PLAYBACK, default_priority_for
 
+    et = str(event_type or "").strip().lower()
+    # Playback path above bulk Arr webhook floods.
+    priority = (
+        PRIORITY_PLAYBACK
+        if et in {"playback_start", "playback.start", "playbackstart"}
+        else default_priority_for("webhook_event")
+    )
     session.add(
         Job(
             job_type='webhook_event',
             payload={'event_log_id': event_log_id, 'event_type': event_type},
             status='PENDING',
             max_attempts=10,
-            priority=default_priority_for('webhook_event'),
+            priority=priority,
         )
     )
 
