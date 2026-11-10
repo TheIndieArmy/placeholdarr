@@ -17,6 +17,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 - **Handler watchdog timeout**: When `JOB_HANDLER_TIMEOUT_SECONDS` fires, the claim is marked FAILED (not log-only) so the stale-CLAIMED reaper cannot recycle that hang forever.
 - **Event-scoped TV density**: Import-grace and other event mats finish core placeholders, then run series/season density in per-series short sessions so filesystem/art work cannot hold `library_catalog_version` / series row locks.
+- **Import/event mats skip poster ensure**: Webhook and import-grace materialization keep/retire placeholders and density stubs without `ensure_*_art`; poster work stays on full/lite mat, calendar Coming Soon art, and art refresh.
 - **Scoped mat stall heartbeats**: Heartbeats include `last_phase` plus series/episode/movie ids so hangs self-identify without a full log dump.
 - **Full-sync materialization chunks**: Library-wide mat commits in batches with lock timeouts so import-grace and webhooks can finish between chunks.
 - **Materialization commit size**: Default `MATERIALIZATION_COMMIT_CHUNK_SIZE` is 50 (was 200) for shorter lock windows between bites.

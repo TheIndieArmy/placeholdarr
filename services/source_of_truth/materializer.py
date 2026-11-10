@@ -724,6 +724,7 @@ def apply_movie_materialization(
     activity_reason: str | None = None,
     *,
     defer_empty_folder_delete: bool = False,
+    ensure_art: bool = True,
 ) -> dict[str, Any]:
     owns_session = session is None
     session = session or get_session()
@@ -762,10 +763,11 @@ def apply_movie_materialization(
                     event_type="creation",
                     activity_reason=activity_reason,
                 )
-            try:
-                ensure_movie_art(movie, target_path)
-            except Exception:
-                pass
+            if ensure_art:
+                try:
+                    ensure_movie_art(movie, target_path)
+                except Exception:
+                    pass
             placeholder_id = int(placeholder_row.id) if placeholder_row and getattr(placeholder_row, "id", None) else None
 
             # Persist canonical determination so the next materialization pass does not
@@ -867,7 +869,13 @@ def apply_movie_materialization(
             session.close()
 
 
-def apply_episode_materialization(episode_id: int, session=None, activity_reason: str | None = None) -> dict[str, Any]:
+def apply_episode_materialization(
+    episode_id: int,
+    session=None,
+    activity_reason: str | None = None,
+    *,
+    ensure_art: bool = True,
+) -> dict[str, Any]:
     owns_session = session is None
     session = session or get_session()
     try:
@@ -921,11 +929,12 @@ def apply_episode_materialization(episode_id: int, session=None, activity_reason
                     event_type="creation",
                     activity_reason=activity_reason,
                 )
-            try:
-                ensure_series_art(series, series_folder=series_folder)
-                ensure_episode_still_art(episode, season, series, target_path)
-            except Exception:
-                pass
+            if ensure_art:
+                try:
+                    ensure_series_art(series, series_folder=series_folder)
+                    ensure_episode_still_art(episode, season, series, target_path)
+                except Exception:
+                    pass
             placeholder_id = int(placeholder_row.id) if placeholder_row and getattr(placeholder_row, "id", None) else None
 
             if bool(getattr(episode, "has_file", False)) or bool(getattr(episode, "is_deleted", False)):
@@ -1121,6 +1130,9 @@ def _run_materialization_for_ids(
     }
     is_full_sync = (observation_source == "full_sync_materialization")
     event_scoped = (not is_full_sync) and str(observation_source or "").startswith("event_")
+    # Import grace / webhook event mats: placeholders and density stubs only.
+    # Poster ensure stays on full/lite mat, calendar Coming Soon art, and art refresh.
+    ensure_art = not event_scoped
     movie_phase_start_mono: float | None = None
     last_movie_periodic_refresh_mono: float | None = None
     episode_phase_start_mono: float | None = None
@@ -1330,6 +1342,7 @@ def _run_materialization_for_ids(
             session=session,
             activity_reason=activity_reason,
             defer_empty_folder_delete=not is_full_sync,
+            ensure_art=ensure_art,
         )
         if not result.get("ok"):
             stats["errors"] += 1
@@ -1490,7 +1503,12 @@ def _run_materialization_for_ids(
 
     def _process_single_episode_materialization(episode_id: int) -> None:
         nonlocal stats, changed_paths, delete_refresh_paths, episode_phase_start_mono, last_episode_periodic_refresh_mono
-        result = apply_episode_materialization(episode_id, session=session, activity_reason=activity_reason)
+        result = apply_episode_materialization(
+            episode_id,
+            session=session,
+            activity_reason=activity_reason,
+            ensure_art=ensure_art,
+        )
         if not result.get("ok"):
             stats["errors"] += 1
             logger.error(
@@ -1767,6 +1785,7 @@ def _run_materialization_for_ids(
                     density_series_ids,
                     activity_reason=activity_reason or "series_density",
                     stall_state=stall_state,
+                    ensure_art=ensure_art,
                 )
                 stats["series_density"] = series_stats
                 stats["season_density"] = season_stats
@@ -1971,11 +1990,13 @@ def _run_event_scoped_tv_density_short_sessions(
     *,
     activity_reason: str,
     stall_state: dict[str, Any] | None = None,
+    ensure_art: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run series+season density per series in its own short commit.
 
     Import-grace finalize previously kept ``library_catalog_version`` / ``series``
     bumps open across FS/art in season density, which could freeze ARR sync for hours.
+    Event-scoped runs default ``ensure_art=False`` so poster work stays off the import path.
     """
     from services.series_episode_stats_hooks import refresh_series_stats_after_bulk
     from services.source_of_truth.season_density_materializer import run_season_density_for_series_ids
@@ -2020,6 +2041,7 @@ def _run_event_scoped_tv_density_short_sessions(
                 sess,
                 [sid],
                 activity_reason=activity_reason,
+                ensure_art=ensure_art,
             )
             series_stats["created"] += int(one_series.get("created") or 0)
             series_stats["retired"] += int(one_series.get("retired") or 0)
@@ -2034,7 +2056,7 @@ def _run_event_scoped_tv_density_short_sessions(
                     f"Event-scoped series density stats refresh skipped series_id={sid}: {stats_exc}",
                     extra={"emoji_type": "debug"},
                 )
-            # Release catalog/series locks before season density FS/art.
+            # Release catalog/series locks before season density FS work.
             sess.commit()
 
             if isinstance(stall_state, dict):
@@ -2044,6 +2066,7 @@ def _run_event_scoped_tv_density_short_sessions(
                 sess,
                 [sid],
                 activity_reason=activity_reason,
+                ensure_art=ensure_art,
             )
             season_stats["seasons_considered"] += int(one_season.get("seasons_considered") or 0)
             season_stats["created"] += int(one_season.get("created") or 0)
