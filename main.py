@@ -357,69 +357,24 @@ async def lifespan(app: FastAPI):
             session.commit()
             logger.info("Reset QUEUED movies/series/episodes to PENDING", extra={'emoji_type': 'info'})
 
-            # TEMPORARY (tester branch fix/152): default FAIL stranded jobs on boot so a
-            # wedged install (e.g. multi-hour entity_reconcile + lite mat) does not
-            # resurrect the same CLAIMED→PENDING work after restart.
-            # Set FAIL_ACTIVE_JOBS_ON_STARTUP=0 after one clean boot to restore normal
-            # CLAIMED→PENDING reclaim behavior.
+            # Reset CLAIMED jobs back to PENDING on startup so crashed/restarted
+            # workers do not leave jobs stranded in a non-runnable state.
             try:
-                fail_active = str(os.getenv("FAIL_ACTIVE_JOBS_ON_STARTUP", "1")).strip().lower() in (
-                    "1",
-                    "true",
-                    "yes",
-                    "on",
-                )
-                if fail_active:
-                    active_q = session.query(Job).filter(
-                        Job.status.in_(("PENDING", "CLAIMED", "WORKING"))
+                claimed_q = session.query(Job).filter(Job.status == 'CLAIMED')
+                claimed_count = claimed_q.count()
+                if claimed_count:
+                    claimed_q.update({Job.status: 'PENDING', Job.updated_at: sa.func.now()}, synchronize_session=False)
+                    session.commit()
+                    logger.info(
+                        f"Reset {claimed_count} CLAIMED jobs -> PENDING on startup",
+                        extra={'emoji_type': 'info'},
                     )
-                    active_count = int(active_q.count() or 0)
-                    if active_count:
-                        active_q.update(
-                            {
-                                Job.status: "FAILED",
-                                Job.error_message: "startup_fail_active_jobs_temporary",
-                                Job.claim_token: None,
-                                Job.updated_at: sa.func.now(),
-                            },
-                            synchronize_session=False,
-                        )
-                        session.commit()
-                        logger.warning(
-                            f"TEMPORARY: failed {active_count} PENDING/CLAIMED/WORKING job(s) on startup "
-                            f"(FAIL_ACTIVE_JOBS_ON_STARTUP). Set FAIL_ACTIVE_JOBS_ON_STARTUP=0 after a clean boot.",
-                            extra={"emoji_type": "warning"},
-                        )
-                    else:
-                        session.rollback()
-                        logger.info(
-                            "TEMPORARY: FAIL_ACTIVE_JOBS_ON_STARTUP enabled; no active jobs to fail",
-                            extra={"emoji_type": "info"},
-                        )
                 else:
-                    # Normal: reset CLAIMED jobs back to PENDING on startup so crashed/restarted
-                    # workers do not leave jobs stranded in a non-runnable state.
-                    claimed_q = session.query(Job).filter(Job.status == "CLAIMED")
-                    claimed_count = claimed_q.count()
-                    if claimed_count:
-                        claimed_q.update(
-                            {Job.status: "PENDING", Job.updated_at: sa.func.now()},
-                            synchronize_session=False,
-                        )
-                        session.commit()
-                        logger.info(
-                            f"Reset {claimed_count} CLAIMED jobs -> PENDING on startup",
-                            extra={"emoji_type": "info"},
-                        )
-                    else:
-                        session.rollback()
+                    session.rollback()
             except Exception as e:
-                # Do not fail startup because of requeue / fail-active logic; log and continue.
+                # Do not fail startup because of requeue logic; log and continue.
                 try:
-                    logger.debug(
-                        f"Failed to reclaim/fail active jobs on startup: {e}",
-                        extra={"emoji_type": "debug"},
-                    )
+                    logger.debug(f"Failed to reset CLAIMED jobs on startup: {e}", extra={'emoji_type': 'debug'})
                 except Exception:
                     pass
 
