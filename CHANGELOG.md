@@ -9,6 +9,23 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+## Pre-release
+
+## Released
+
+## [0.13.2] - 2026-11-11
+
+### Summary
+
+- **Layout designer rotation**: Angle presets and a free slider for fills and chips.
+- **Fill shape size**: Center plus Shape width/height before angle; oversized shapes for full diagonals.
+- **Fill frame border**: Color, opacity, and thickness on all four sides.
+- **Fill edge fade**: Per-edge fade depth; faded edges skip their border.
+- **Custom text vertical**: Stack characters for vertical chip orientation.
+- **Fail active jobs and restart**: Advanced Settings control to fail wedged jobs and restart Placeholdarr.
+- **Materialization lock fairness**: Chunked mats, shorter lock windows, and stall heartbeats so import/webhooks can finish (#152).
+- **Lite sync localized poster lock**: Scoped/lite mat defers TMDB localized poster resolve so art ensure cannot self-block (#170).
+
 ### Added
 
 - **Fail active jobs and restart**: Advanced Settings confirmed control and `POST /api/system/jobs/fail-active` mark every PENDING/CLAIMED/WORKING worker job FAILED, then restart Placeholdarr so wedged handler threads drop locks.
@@ -54,10 +71,6 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Startup full sync coordination**: Uses the same full-sync flag and pipeline contract as scheduled full sync.
 - **Idempotency retries**: Failed media/art/NFO jobs release processed keys so retries are not skipped.
 - **Webhook accept**: Persist ingest before returning 200 (off the event loop).
-
-## Pre-release
-
-## Released
 
 ## [0.13.1] - 2026-11-08
 
