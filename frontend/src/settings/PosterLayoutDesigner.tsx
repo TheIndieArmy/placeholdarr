@@ -118,9 +118,9 @@ export type PosterLayoutCatalog = {
 };
 
 const LABEL_SIZES: LabelSize[] = ["small", "medium", "large"];
-const SIZE_SCALE_PRESETS: Record<LabelSize, number> = { small: 1, medium: 1.5, large: 2 };
+const SIZE_SCALE_PRESETS: Record<LabelSize, number> = { small: 0.85, medium: 1.1, large: 1.4 };
 const SIZE_SCALE_MIN = 0.5;
-const SIZE_SCALE_MAX = 2.5;
+const SIZE_SCALE_MAX = 2.0;
 /** Common angle presets (slider allows any degree). */
 const ROTATION_STEPS = [-135, -90, -45, 0, 45, 90, 135, 180] as const;
 
@@ -2098,6 +2098,69 @@ export default function PosterLayoutDesigner(props: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [previewArtControls]);
 
+  const discardUnsavedProfile = useCallback(() => {
+    if (!catalog) return;
+    setDraft(cloneProfiles(catalog.profiles || {}));
+    setSelectedId(null);
+    setSaveError(null);
+    setSaveMsg("Discarded unsaved edits. Layout restored to the last saved version.");
+  }, [catalog]);
+
+  const runPreviewBake = useCallback(async () => {
+    if (!draft) return;
+    const bakeKind = kind;
+    const bakeKey = profileKey(bakeKind, availability, variant);
+    const bakeLabels = draft[bakeKey]?.labels || [];
+    const bakeGrayscale = Boolean(draft[bakeKey]?.grayscale);
+    setBakeReviewOpen(true);
+    setBakeReviewBusy(true);
+    setBakeReviewError(null);
+    if (bakeReviewUrlRef.current) {
+      URL.revokeObjectURL(bakeReviewUrlRef.current);
+      bakeReviewUrlRef.current = null;
+      setBakeReviewUrl(null);
+    }
+    try {
+      const csrf = getCsrfToken();
+      const response = await fetch("/api/settings/poster-overlay-preview", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          Accept: "image/jpeg",
+          "Content-Type": "application/json",
+          ...(csrf ? { "X-CSRF-Token": csrf } : {}),
+        },
+        body: JSON.stringify({
+          kind: previewKind(bakeKind),
+          grayscale: bakeGrayscale,
+          profile_key: bakeKey,
+          labels: bakeLabels,
+          dim_base: false,
+          base_url: previewBaseUrl || undefined,
+          sample_tokens: sampleTokens || undefined,
+        }),
+      });
+      if (!response.ok) {
+        let message = `Bake failed (${response.status})`;
+        try {
+          const errBody = (await response.json()) as { message?: string };
+          if (errBody?.message) message = errBody.message;
+        } catch {
+          /* keep status message */
+        }
+        throw new Error(message);
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      bakeReviewUrlRef.current = url;
+      setBakeReviewUrl(url);
+    } catch (err) {
+      setBakeReviewError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBakeReviewBusy(false);
+    }
+  }, [availability, draft, kind, previewBaseUrl, sampleTokens, variant]);
+
   const headerActions = useMemo(
     () => (
       <>
@@ -2133,9 +2196,17 @@ export default function PosterLayoutDesigner(props: Props) {
         </button>
       </>
     ),
-    // discardUnsavedProfile / runPreviewBake close over draft state; messages drive the UI.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [bakeReviewBusy, busy, dirty, draft, props.accentHex, saveError, saveMsg, catalog],
+    [
+      bakeReviewBusy,
+      busy,
+      discardUnsavedProfile,
+      dirty,
+      draft,
+      props.accentHex,
+      runPreviewBake,
+      saveError,
+      saveMsg,
+    ],
   );
 
   useLayoutEffect(() => {
@@ -2362,14 +2433,6 @@ export default function PosterLayoutDesigner(props: Props) {
     }
   }
 
-  function discardUnsavedProfile() {
-    if (!catalog) return;
-    setDraft(cloneProfiles(catalog.profiles || {}));
-    setSelectedId(null);
-    setSaveError(null);
-    setSaveMsg("Discarded unsaved edits. Layout restored to the last saved version.");
-  }
-
   function closeBakeReview() {
     setBakeReviewOpen(false);
     setBakeReviewBusy(false);
@@ -2379,57 +2442,6 @@ export default function PosterLayoutDesigner(props: Props) {
       bakeReviewUrlRef.current = null;
     }
     setBakeReviewUrl(null);
-  }
-
-  async function runPreviewBake() {
-    if (!draft) return;
-    setBakeReviewOpen(true);
-    setBakeReviewBusy(true);
-    setBakeReviewError(null);
-    if (bakeReviewUrlRef.current) {
-      URL.revokeObjectURL(bakeReviewUrlRef.current);
-      bakeReviewUrlRef.current = null;
-      setBakeReviewUrl(null);
-    }
-    try {
-      const csrf = getCsrfToken();
-      const response = await fetch("/api/settings/poster-overlay-preview", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: {
-          Accept: "image/jpeg",
-          "Content-Type": "application/json",
-          ...(csrf ? { "X-CSRF-Token": csrf } : {}),
-        },
-        body: JSON.stringify({
-          kind: previewKind(kind),
-          grayscale: profileGrayscale,
-          profile_key: activeKey,
-          labels,
-          dim_base: false,
-          base_url: previewBaseUrl || undefined,
-          sample_tokens: sampleTokens || undefined,
-        }),
-      });
-      if (!response.ok) {
-        let message = `Bake failed (${response.status})`;
-        try {
-          const errBody = (await response.json()) as { message?: string };
-          if (errBody?.message) message = errBody.message;
-        } catch {
-          /* keep status message */
-        }
-        throw new Error(message);
-      }
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      bakeReviewUrlRef.current = url;
-      setBakeReviewUrl(url);
-    } catch (err) {
-      setBakeReviewError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBakeReviewBusy(false);
-    }
   }
 
   useEffect(() => {
@@ -3764,7 +3776,7 @@ export default function PosterLayoutDesigner(props: Props) {
             if (e.target === e.currentTarget && !bakeReviewBusy) closeBakeReview();
           }}
         >
-          <div className="flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-[#424753]/40 bg-[#171c22]">
+          <div className="flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-[#424753]/40 bg-[#171c22]">
             <div className="shrink-0 border-b border-[#424753]/30 px-5 py-4">
               <h3 className="text-[18px] font-bold text-white font-headline">Preview bake</h3>
               <p className="ui-field-description mt-1">
@@ -3782,13 +3794,50 @@ export default function PosterLayoutDesigner(props: Props) {
                 <p className="text-[13px] text-red-400">{bakeReviewError}</p>
               ) : null}
               {bakeReviewUrl ? (
-                <img
-                  src={bakeReviewUrl}
-                  alt="Preview bake"
-                  className={`mx-auto max-h-[70vh] w-auto max-w-full rounded-lg border border-[#424753]/40 ${
-                    kind === "episode" ? "aspect-video object-contain" : "aspect-[2/3] object-contain"
-                  }`}
-                />
+                <div className="flex flex-col items-center justify-center gap-5 sm:flex-row sm:items-end sm:justify-center sm:gap-5">
+                  <div className="flex min-w-0 flex-col items-center gap-2">
+                    <img
+                      src={bakeReviewUrl}
+                      alt="Preview bake large"
+                      className={`max-h-[70vh] w-auto max-w-full rounded-lg border border-[#424753]/40 ${
+                        kind === "episode" ? "aspect-video object-contain" : "aspect-[2/3] object-contain"
+                      }`}
+                    />
+                    <span className="text-[11px] font-headline uppercase tracking-wider text-slate-500">
+                      Large
+                    </span>
+                  </div>
+                  <div className="flex flex-col items-center gap-4">
+                    <div className="flex flex-col items-center gap-2">
+                      <img
+                        src={bakeReviewUrl}
+                        alt="Preview bake small"
+                        className={`h-auto rounded-lg border border-[#424753]/40 ${
+                          kind === "episode"
+                            ? "w-[min(100%,10rem)] max-h-[22vh] aspect-video object-contain"
+                            : "w-[min(100%,6.5rem)] max-h-[22vh] aspect-[2/3] object-contain"
+                        }`}
+                      />
+                      <span className="text-[11px] font-headline uppercase tracking-wider text-slate-500">
+                        Small
+                      </span>
+                    </div>
+                    <div className="flex flex-col items-center gap-2">
+                      <img
+                        src={bakeReviewUrl}
+                        alt="Preview bake medium"
+                        className={`h-auto rounded-lg border border-[#424753]/40 ${
+                          kind === "episode"
+                            ? "w-[min(100%,16rem)] max-h-[36vh] aspect-video object-contain"
+                            : "w-[min(100%,10.5rem)] max-h-[36vh] aspect-[2/3] object-contain"
+                        }`}
+                      />
+                      <span className="text-[11px] font-headline uppercase tracking-wider text-slate-500">
+                        Medium
+                      </span>
+                    </div>
+                  </div>
+                </div>
               ) : null}
             </div>
             <div className="flex shrink-0 justify-end border-t border-[#424753]/30 px-5 py-3">

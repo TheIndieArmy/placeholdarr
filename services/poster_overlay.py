@@ -547,8 +547,8 @@ def _parse_hex_rgba(color: str, *, alpha: int | None = None) -> tuple[int, int, 
 def _layout_chip_font_size(img_w: int, img_h: int, *, landscape: bool) -> int:
     """Readable chip type sized from the poster, not from a snap cell (small tier)."""
     if landscape:
-        return max(28, min(56, int(img_h * 0.055)))
-    return max(26, min(52, int(img_w * 0.048)))
+        return max(22, min(42, int(img_h * 0.042)))
+    return max(20, min(38, int(img_w * 0.036)))
 
 
 def _label_size_mult(size: str | float | None, size_scale: float | None = None) -> float:
@@ -561,11 +561,11 @@ def _label_size_mult(size: str | float | None, size_scale: float | None = None) 
     except Exception:
         if size_scale is not None:
             try:
-                return max(0.5, min(2.5, float(size_scale)))
+                return max(0.5, min(2.0, float(size_scale)))
             except (TypeError, ValueError):
                 pass
         key = str(size or "small").strip().lower()
-        return {"small": 1.0, "medium": 1.5, "large": 2.0}.get(key, 1.0)
+        return {"small": 0.85, "medium": 1.1, "large": 1.4}.get(key, 0.85)
 
 
 def _rating_logo_path(source: str) -> Path | None:
@@ -622,35 +622,158 @@ def _prepare_rating_logo(source: str, icon_h: int):
     return plate
 
 
+def _font_line_height(font) -> int:
+    """Line box height used by multiline draw (ascent+descent), not ink-only getbbox."""
+    try:
+        ascent, descent = font.getmetrics()
+        return max(1, int(ascent) + int(descent))
+    except Exception:
+        pass
+    try:
+        bbox = font.getbbox("Hg")
+        if bbox:
+            return max(1, int(bbox[3] - bbox[1]))
+    except Exception:
+        pass
+    return 16
+
+
 def _measure_text(font, text: str, *, line_spacing: int = 2) -> tuple[int, int]:
+    """Measure text for chip layout; multiline height matches Pillow multiline_text."""
     raw = str(text or "")
     if "\n" not in raw:
         try:
             bbox = font.getbbox(raw)
             if bbox:
-                return max(1, int(bbox[2] - bbox[0])), max(1, int(bbox[3] - bbox[1]))
+                # Prefer metric line height so vertical padding matches drawn glyphs.
+                return max(1, int(bbox[2] - bbox[0])), max(_font_line_height(font), int(bbox[3] - bbox[1]))
         except Exception:
             pass
-        return max(1, len(raw) * 10), 16
+        return max(1, len(raw) * 10), _font_line_height(font)
     lines = raw.split("\n")
     width = 1
-    height = 0
     gap = max(0, int(line_spacing))
-    for i, line in enumerate(lines):
+    line_h = _font_line_height(font)
+    for line in lines:
         try:
             bbox = font.getbbox(line if line else " ")
             if bbox:
                 lw = max(1, int(bbox[2] - bbox[0]))
-                lh = max(1, int(bbox[3] - bbox[1]))
             else:
-                lw, lh = 1, 16
+                lw = 1
         except Exception:
-            lw, lh = max(1, len(line) * 10), 16
+            lw = max(1, len(line) * 10)
         width = max(width, lw)
-        height += lh
-        if i < len(lines) - 1:
-            height += gap
+    n = max(1, len(lines))
+    height = line_h * n + gap * max(0, n - 1)
     return width, max(1, height)
+
+
+def _vertical_font_size(font) -> int:
+    try:
+        return max(1, int(getattr(font, "size", 16) or 16))
+    except Exception:
+        return 16
+
+
+def _glyph_ink_bbox(font, ch: str) -> tuple[int, int, int, int]:
+    """Return ``(left, top, right, bottom)`` ink box for one glyph (or a space slot)."""
+    size = _vertical_font_size(font)
+    # Word break: advance a readable blank slot; do not paint a space glyph.
+    if ch and ch.isspace():
+        slot = max(6, int(round(size * 0.62)))
+        return (0, 0, max(1, size // 3), slot)
+    try:
+        bbox = font.getbbox(ch if ch else " ")
+        if bbox:
+            return (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
+    except Exception:
+        pass
+    return (0, 0, max(1, size // 2), max(1, size))
+
+
+def _measure_vertical_stack(font, text: str, *, gap: int = 1) -> tuple[int, int]:
+    """Ink-based width/height for a vertical stack with letter and word gaps."""
+    lines = str(text or "").split("\n")
+    if not lines:
+        return 1, 1
+    width = 1
+    height = 0
+    g = max(0, int(gap))
+    for i, line in enumerate(lines):
+        left, top, right, bottom = _glyph_ink_bbox(font, line)
+        # Width from painted glyphs only; spaces are vertical separators.
+        if not (line and line.isspace()):
+            width = max(width, max(1, right - left))
+        height += max(1, bottom - top)
+        if i < len(lines) - 1 and not (line and line.isspace()):
+            # Letter gap after glyphs; word slots already include their own advance.
+            next_line = lines[i + 1]
+            if not (next_line and next_line.isspace()):
+                height += g
+    return width, max(1, height)
+
+
+def _draw_vertical_stack(
+    draw,
+    *,
+    mid_x: int,
+    top_y: int,
+    text: str,
+    font,
+    fill,
+    gap: int = 1,
+) -> None:
+    """Paint stacked glyphs from ink boxes with readable letter/word spacing."""
+    lines = str(text or "").split("\n")
+    y = int(top_y)
+    g = max(0, int(gap))
+    for i, line in enumerate(lines):
+        left, top, right, bottom = _glyph_ink_bbox(font, line)
+        ink_h = max(1, bottom - top)
+        is_space = bool(line and line.isspace())
+        if not is_space:
+            # Pen so the ink box is centered on mid_x and starts at y.
+            pen_x = int(mid_x - (left + right) / 2)
+            pen_y = int(y - top)
+            draw.text((pen_x, pen_y), line, fill=fill, font=font)
+        y += ink_h
+        if i < len(lines) - 1 and not is_space:
+            next_line = lines[i + 1]
+            if not (next_line and next_line.isspace()):
+                y += g
+
+
+def _fit_layout_chip_font(
+    text: str,
+    *,
+    preferred_size: int,
+    min_size: int,
+    max_width: int,
+    max_height: int | None = None,
+    line_gap_ratio: float = 0.06,
+    vertical: bool = False,
+):
+    """Shrink chip type until measured width/height fit the poster budget."""
+    size = max(min_size, int(preferred_size))
+    font = _load_font(size)
+    if font is None:
+        return font
+    limit_w = max(1, int(max_width))
+    limit_h = max(1, int(max_height)) if max_height is not None else None
+    while size > min_size:
+        line_gap = max(2 if vertical else 1, int(round(size * line_gap_ratio)))
+        if vertical:
+            tw, th = _measure_vertical_stack(font, text, gap=line_gap)
+        else:
+            tw, th = _measure_text(font, text, line_spacing=line_gap)
+        if tw <= limit_w and (limit_h is None or th <= limit_h):
+            break
+        size = max(min_size, size - 2)
+        font = _load_font(size)
+        if font is None:
+            break
+    return font
 
 
 def _verticalize_chip_text(text: str) -> str:
@@ -762,47 +885,68 @@ def _draw_layout_chip(
 
     img_w, img_h = out.size
     mult = _label_size_mult(size, size_scale)
-    preferred = max(16, int(round(_layout_chip_font_size(img_w, img_h, landscape=landscape) * mult)))
-    # Grow the fit budget with size so the slider raises type, not only padding.
-    max_text_w = max(80, int(img_w * min(0.95, 0.50 + 0.20 * mult)))
-    # Keep at least ~85% of preferred so size_scale always moves the glyphs.
-    min_font = max(12, int(round(preferred * 0.85)))
-    if vertical:
-        # Vertical stacks are height-bound; load preferred (soft-fit by chip later).
-        font = _load_font(preferred) or _fit_banner_font(
-            "0", max_width=max_text_w, preferred_size=preferred, min_size=min_font
-        )
-    else:
-        font = _fit_banner_font(
-            label or "0",
-            max_width=max_text_w,
+    preferred = max(14, int(round(_layout_chip_font_size(img_w, img_h, landscape=landscape) * mult)))
+    # Keep type on-poster: width budget grows slowly with size; height caps vertical stacks.
+    max_text_w = max(56, int(img_w * min(0.72, 0.36 + 0.12 * mult)))
+    max_text_h = max(56, int(img_h * min(0.86, 0.48 + 0.14 * mult)))
+    # Allow shrink for long copy; preferred still tracks size_scale so S/M/L move glyphs.
+    min_font = max(11, int(round(preferred * 0.55)))
+    # Vertical: ink boxes + letter gap (avoid metric line slots that inflate end pad).
+    line_gap_ratio = 0.16 if vertical else 0.06
+    if label:
+        font = _fit_layout_chip_font(
+            label,
             preferred_size=preferred,
             min_size=min_font,
+            max_width=max_text_w if not vertical else max(24, int(max_text_w * 0.35)),
+            max_height=max_text_h if vertical else None,
+            line_gap_ratio=line_gap_ratio,
+            vertical=vertical,
         )
+    else:
+        font = _load_font(preferred)
     if font is None:
         return out, None
-    line_gap = max(2, int(round(preferred * 0.08)))
-    text_w, text_h = _measure_text(font, label, line_spacing=line_gap) if label else (0, preferred)
-    pad_y = max(8, int(preferred * 0.32))
+    # Use the fitted font size for padding/gaps so the plate hugs the glyphs.
+    try:
+        fitted_size = int(getattr(font, "size", preferred) or preferred)
+    except Exception:
+        fitted_size = preferred
+    fitted_size = max(min_font, fitted_size)
+    line_gap = max(2 if vertical else 1, int(round(fitted_size * line_gap_ratio)))
+    if label and vertical:
+        text_w, text_h = _measure_vertical_stack(font, label, gap=line_gap)
+    elif label:
+        text_w, text_h = _measure_text(font, label, line_spacing=line_gap)
+    else:
+        text_w, text_h = 0, fitted_size
+    # Vertical spines use less end-cap pad so the plate hugs the stack like horizontal side pad.
+    if vertical:
+        pad_y = max(3, int(fitted_size * 0.10))
+        pad_x = max(7, int(fitted_size * 0.32))
+    else:
+        pad_y = max(6, int(fitted_size * 0.28))
+        pad_x = max(10, int(fitted_size * 0.38))
     # Arted chips size to the logo+score cluster; keep side pad tight like text chips.
     if art_path is not None:
-        pad_x = max(5, int(preferred * 0.16))
-        gap = max(3, int(preferred * 0.10)) if label else 0
+        pad_x = max(5, int(fitted_size * 0.16))
+        gap = max(3, int(fitted_size * 0.10)) if label else 0
         if layout in {"above", "below"}:
             # Logo width matches an "8.8" score at this type size (not "88%").
             ref_w, _ = _measure_text(font, "8.8")
             icon_h = max(12, int(ref_w))
         else:
-            icon_h = max(12, int(round(max(text_h, preferred * 0.78))))
+            icon_h = max(12, int(round(max(text_h, fitted_size * 0.78))))
             if layout == "fill":
                 # Larger mark so it reads as the chip background.
-                icon_h = max(icon_h, int(round(preferred * 1.35)))
-                pad_x = max(6, int(preferred * 0.22))
-                pad_y = max(6, int(preferred * 0.22))
+                icon_h = max(icon_h, int(round(fitted_size * 1.35)))
+                pad_x = max(6, int(fitted_size * 0.22))
+                pad_y = max(6, int(fitted_size * 0.22))
+        if vertical and layout != "fill":
+            pad_y = max(3, int(fitted_size * 0.10))
     else:
-        pad_x = max(14, int(preferred * 0.55))
         gap = 0
-        icon_h = max(12, int(round(max(text_h, preferred * 0.85))))
+        icon_h = max(12, int(round(max(text_h, fitted_size * 0.85))))
         layout = "left"
     icon_w = 0
     logo = None
@@ -857,7 +1001,7 @@ def _draw_layout_chip(
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     radius = max(6, int(min(box[2] - box[0], box[3] - box[1]) * 0.22))
-    auto_stroke = max(3, int(round(preferred * 0.09)))
+    auto_stroke = max(2, int(round(fitted_size * 0.09)))
     if border_thickness is None:
         stroke = auto_stroke
     else:
@@ -923,7 +1067,17 @@ def _draw_layout_chip(
     def _draw_label(cx: int, cy: int) -> None:
         if not label:
             return
-        if "\n" in label:
+        if vertical:
+            _draw_vertical_stack(
+                draw,
+                mid_x=cx,
+                top_y=cy - text_h // 2,
+                text=label,
+                font=font,
+                fill=text_fill,
+                gap=line_gap,
+            )
+        elif "\n" in label:
             draw.multiline_text(
                 (cx, cy),
                 label,

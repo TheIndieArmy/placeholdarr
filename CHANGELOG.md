@@ -9,6 +9,20 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Changed
+
+- **Layout chip size scale**: S/M/L presets and max scale are more compact so Large type stays on-poster for typical Text chips.
+
+### Added
+
+- **Preview bake sizes**: Large, Medium, and Small views of the same bake in the Preview bake modal.
+
+### Fixed
+
+- **Vertical chip text clip**: Stacked Custom text uses font metrics and a poster height budget so glyphs no longer clip inside the plate.
+- **Vertical chip end pad**: Vertical stacks size and draw from glyph ink boxes so ascent/descent no longer inflate top/bottom fill.
+- **Preview bake after tab switch**: Preview bake uses the active Movie/TV/Episode profile instead of a stale header closure.
+
 ## Pre-release
 
 ## Released
