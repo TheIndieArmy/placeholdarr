@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import date
 from types import SimpleNamespace
 from typing import Any
@@ -334,6 +335,8 @@ def apply_season_density_materialization(
     season_id: int,
     session=None,
     activity_reason: str | None = None,
+    *,
+    ensure_art: bool = True,
 ) -> dict[str, Any]:
     owns_session = session is None
     session = session or get_session()
@@ -393,10 +396,11 @@ def apply_season_density_materialization(
                 series_nfo_written = ensure_series_nfo(series, folder=series_folder)
             except Exception:
                 series_nfo_written = False
-            try:
-                ensure_series_art(series, series_folder=series_folder)
-            except Exception:
-                pass
+            if ensure_art:
+                try:
+                    ensure_series_art(series, series_folder=series_folder)
+                except Exception:
+                    pass
 
             if not series_folder:
                 series.placeholder_folder = os.path.dirname(os.path.dirname(target_path))
@@ -483,6 +487,8 @@ def apply_season_density_for_series(
     series_id: int,
     session=None,
     activity_reason: str | None = None,
+    *,
+    ensure_art: bool = True,
 ) -> dict[str, Any]:
     """Create/retire season stubs for every season under a series (or clear when density≠season)."""
     owns_session = session is None
@@ -538,6 +544,7 @@ def apply_season_density_for_series(
                 int(season.id),
                 session=session,
                 activity_reason=activity_reason,
+                ensure_art=ensure_art,
             )
             if not out.get("ok"):
                 stats["errors"] += 1
@@ -583,6 +590,7 @@ def run_season_density_for_series_ids(
     series_ids: list[int] | None,
     *,
     activity_reason: str | None = None,
+    ensure_art: bool = True,
 ) -> dict[str, Any]:
     ids = sorted({int(sid) for sid in (series_ids or []) if sid is not None})
     stats: dict[str, Any] = {
@@ -602,11 +610,15 @@ def run_season_density_for_series_ids(
     if density not in ("series", "episode", "season"):
         return stats
 
-    for sid in ids:
+    started = time.monotonic()
+    last_info = started
+    total = len(ids)
+    for idx, sid in enumerate(ids, start=1):
         out = apply_season_density_for_series(
             sid,
             session=session,
             activity_reason=activity_reason,
+            ensure_art=ensure_art,
         )
         if not out.get("ok"):
             stats["errors"] += 1
@@ -622,6 +634,21 @@ def run_season_density_for_series_ids(
         stats["deleted_paths"].extend(
             [str(p).strip() for p in (out.get("deleted_paths") or []) if str(p).strip()]
         )
+        now = time.monotonic()
+        if total > 25 and (idx == total or (now - last_info) >= 30.0):
+            elapsed = max(0.001, now - started)
+            logger.info(
+                f"Season density: {idx}/{total} series done · "
+                f"created={stats['created']} retired={stats['retired']} · "
+                f"elapsed_s={elapsed:.1f} · rows_per_s={idx / elapsed:.2f}",
+                extra={"emoji_type": "processing"},
+            )
+            last_info = now
+        elif idx % 10 == 0:
+            logger.debug(
+                f"Season density tick: {idx}/{total} series_id={sid}",
+                extra={"emoji_type": "debug"},
+            )
     return stats
 
 

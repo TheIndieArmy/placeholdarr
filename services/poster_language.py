@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+import threading
+import time
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 from core.config import settings
 from core.logger import logger
@@ -19,6 +22,25 @@ from services.tmdb_client import (
     tmdb_configured,
     tmdb_poster_cdn_url,
 )
+
+# When set, skip TMDB HTTP during art writes so bulk mat/density can commit without
+# holding row locks across network calls. Callers enqueue poster_language_resolve after.
+_defer_tmdb_resolve = threading.local()
+
+
+@contextmanager
+def defer_tmdb_poster_resolve() -> Iterator[None]:
+    """Skip inline TMDB language resolve (Arr remote_poster still applies)."""
+    prev = getattr(_defer_tmdb_resolve, "active", False)
+    _defer_tmdb_resolve.active = True
+    try:
+        yield
+    finally:
+        _defer_tmdb_resolve.active = prev
+
+
+def tmdb_poster_resolve_deferred() -> bool:
+    return bool(getattr(_defer_tmdb_resolve, "active", False))
 
 
 def preferred_poster_language() -> str:
@@ -419,6 +441,8 @@ def ensure_localized_poster_current(entity: Any, *, series: Any | None = None) -
         return
     # Arr remote_poster first: TMDB language resolve needs ids, and art write uses DB URLs only.
     ensure_arr_remote_poster_current(entity, series=series)
+    if tmdb_poster_resolve_deferred():
+        return
     if isinstance(entity, Movie) or getattr(entity, "__tablename__", None) == "movie":
         resolve_localized_poster_for_movie(entity)
         return
@@ -468,7 +492,10 @@ def _persist_entity_localized(kind: str, entity_id: int, url: str, lang: str) ->
 def resolve_movies_by_ids(session, movie_ids: list[int]) -> dict[str, int]:
     resolved = 0
     skipped = 0
-    for mid in movie_ids:
+    total = len(movie_ids)
+    started = time.monotonic()
+    last_info = started
+    for idx, mid in enumerate(movie_ids, start=1):
         movie = session.query(Movie).get(int(mid))
         if not movie:
             skipped += 1
@@ -478,6 +505,20 @@ def resolve_movies_by_ids(session, movie_ids: list[int]) -> dict[str, int]:
             resolved += 1
         else:
             skipped += 1
+        now = time.monotonic()
+        if idx == total or (now - last_info) >= 30.0:
+            elapsed = max(0.001, now - started)
+            logger.info(
+                f"Poster language · movies: {idx}/{total} done · resolved={resolved} "
+                f"skipped={skipped} · elapsed_s={elapsed:.1f} · rows_per_s={idx / elapsed:.2f}",
+                extra={"emoji_type": "processing"},
+            )
+            last_info = now
+        elif idx % 10 == 0:
+            logger.debug(
+                f"Poster language · movies chunk tick: {idx}/{total}",
+                extra={"emoji_type": "debug"},
+            )
     return {"resolved": resolved, "skipped": skipped}
 
 
@@ -485,7 +526,10 @@ def resolve_series_by_ids(session, series_ids: list[int], *, include_seasons: bo
     resolved = 0
     skipped = 0
     seasons_resolved = 0
-    for sid in series_ids:
+    total = len(series_ids)
+    started = time.monotonic()
+    last_info = started
+    for idx, sid in enumerate(series_ids, start=1):
         series = session.query(Series).get(int(sid))
         if not series:
             skipped += 1
@@ -505,6 +549,21 @@ def resolve_series_by_ids(session, series_ids: list[int], *, include_seasons: bo
                 if resolve_localized_poster_for_season(season, series, persist=False):
                     session.add(season)
                     seasons_resolved += 1
+        now = time.monotonic()
+        if idx == total or (now - last_info) >= 30.0:
+            elapsed = max(0.001, now - started)
+            logger.info(
+                f"Poster language · series: {idx}/{total} done · resolved={resolved} "
+                f"seasons_resolved={seasons_resolved} skipped={skipped} · "
+                f"elapsed_s={elapsed:.1f} · rows_per_s={idx / elapsed:.2f}",
+                extra={"emoji_type": "processing"},
+            )
+            last_info = now
+        else:
+            logger.debug(
+                f"Poster language · series tick: {idx}/{total} sid={sid}",
+                extra={"emoji_type": "debug"},
+            )
     return {"resolved": resolved, "skipped": skipped, "seasons_resolved": seasons_resolved}
 
 

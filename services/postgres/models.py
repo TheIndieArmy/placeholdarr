@@ -389,6 +389,15 @@ class Job(Base):
     Index('ux_job_enrichment_groupid', 'group_id', unique=True, postgresql_where=text("job_type='enrichment' AND status IN ('PENDING','CLAIMED','WORKING')")),
     # Partial unique index for Plex-busy deferred observation trail jobs.
     Index('ux_job_obs_hybrid_slice_groupid', 'group_id', unique=True, postgresql_where=text("job_type='placeholder_observation_hybrid_slice' AND status IN ('PENDING','CLAIMED','WORKING')")),
+    # One active Title Refresh (entity_reconcile) per group_id.
+    Index(
+        'ux_job_entity_reconcile_groupid',
+        'group_id',
+        unique=True,
+        postgresql_where=text(
+            "job_type='entity_reconcile' AND status IN ('PENDING','CLAIMED','WORKING')"
+        ),
+    ),
     )
 
     def __repr__(self):

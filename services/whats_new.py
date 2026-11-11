@@ -351,6 +351,39 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         requires_ack=True,
     ),
     WhatsNewNotice(
+        id="layout-designer-board-tools-0-13-2",
+        since_version="0.13.2",
+        title="Layout designer board tools",
+        body=(
+            "Fill rectangles and chips can rotate with angle presets or a free slider. Shape width and height "
+            "size the rectangle before angle, and can go past the poster edge so a diagonal band covers corner "
+            "to corner.\n\n"
+            "Fills support a full-frame border (color, opacity, thickness) and per-edge fade. A faded edge "
+            "drops its border automatically. Custom text can stack vertically.\n\n"
+            "Open Poster Art to try the new controls on your placeholder layouts."
+        ),
+        cta_label="Open Poster Art",
+        cta_path="/settings/poster-art",
+        requires_ack=True,
+    ),
+    WhatsNewNotice(
+        id="sync-worker-reliability-0-13-2",
+        since_version="0.13.2",
+        title="Sync and worker reliability",
+        body=(
+            "Library materialization commits in smaller chunks with shorter lock windows so import-grace and "
+            "webhooks can finish between bites. Stall heartbeats name the phase and title when a mat hangs. "
+            "Wedged PENDING, CLAIMED, or WORKING jobs can be failed from Advanced Settings, then Placeholdarr "
+            "restarts so handler threads drop locks.\n\n"
+            "Lite sync no longer self-blocks on localized poster resolve during scoped materialization. Tasks "
+            "live polling, claim finish after lock timeout, and several webhook/import race fixes are included "
+            "in this release."
+        ),
+        cta_label="Open Advanced Settings",
+        cta_path="/settings/advanced",
+        requires_ack=True,
+    ),
+    WhatsNewNotice(
         id="sonarr-season-playback-search-0-13-1",
         since_version="0.13.1",
         title="Season playback search with Sonarr",

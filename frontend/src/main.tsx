@@ -8,7 +8,13 @@ import "./styles.css";
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ViewportModeProvider>
-      <BrowserRouter>
+      {/*
+        RR7 defaults to startTransition for location updates. Always-on task
+        polls / SSE setState in App can interrupt those transitions so the
+        address bar moves while the shell stays on the old page. Keep router
+        updates synchronous for this dashboard.
+      */}
+      <BrowserRouter useTransitions={false}>
         <App />
       </BrowserRouter>
     </ViewportModeProvider>

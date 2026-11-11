@@ -35,6 +35,24 @@ def end_full_sync() -> None:
     global _full_sync_active
     with _coordinator_lock:
         _full_sync_active = False
+    try:
+        from services.source_of_truth.live_catalog_touch import clear_live_catalog_touches
+
+        clear_live_catalog_touches()
+    except Exception:
+        pass
+    try:
+        from services.series_episode_stats_hooks import wake_stats_refresh_worker
+
+        wake_stats_refresh_worker()
+    except Exception:
+        pass
+    try:
+        from services.source_of_truth.scheduled_sync import kick_pending_sync_reruns
+
+        kick_pending_sync_reruns()
+    except Exception:
+        pass
 
 
 def should_skip_lite_or_calendar() -> bool:

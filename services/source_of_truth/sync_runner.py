@@ -596,8 +596,18 @@ def _upsert_movie(session, fields: Dict) -> Tuple[Any, bool, bool]:
         )
     if existing:
         changed = False
+        skip_live = False
+        try:
+            from services.source_of_truth.live_catalog_touch import was_touched_during_sync
+
+            skip_live = was_touched_during_sync("movie", int(existing.id))
+        except Exception:
+            skip_live = False
         for key, value in fields.items():
             if not hasattr(existing, key):
+                continue
+            # Live import/webhook already updated file presence; do not clobber from stale Arr snapshot.
+            if skip_live and key in ("has_file", "radarr_filepath"):
                 continue
             if _field_values_differ(getattr(existing, key), value):
                 setattr(existing, key, value)
@@ -697,8 +707,17 @@ def _upsert_episode(session, fields: Dict) -> Tuple[Any, bool, bool]:
         )
     if existing:
         changed = False
+        skip_live = False
+        try:
+            from services.source_of_truth.live_catalog_touch import was_touched_during_sync
+
+            skip_live = was_touched_during_sync("episode", int(existing.id))
+        except Exception:
+            skip_live = False
         for key, value in fields.items():
             if not hasattr(existing, key):
+                continue
+            if skip_live and key in ("has_file", "sonarr_filepath"):
                 continue
             if _field_values_differ(getattr(existing, key), value):
                 setattr(existing, key, value)
@@ -807,7 +826,10 @@ def run_full_sync(
         if not callable(on_progress):
             return
         now = time.monotonic()
-        if not force and (now - last_live_mono[0]) < 1.5 and progress_done % max(1, int(batch_size or 50)) != 0:
+        # Time-throttle only (do not also fire on every batch commit). Progress
+        # callbacks often take a DB lock on scheduled_task_run; coupling them to
+        # every batch made ARR catalog sync stall under concurrent workers.
+        if not force and (now - last_live_mono[0]) < 3.0:
             return
         last_live_mono[0] = now
         try:
@@ -1160,6 +1182,7 @@ def sync_radarr_movies_by_ids(
     base_url: str,
     api_key: str,
     instance_key: str | None = None,
+    on_progress=None,
 ) -> dict:
     """Targeted movie sync for a specific Radarr instance and movie IDs."""
     ids = sorted({int(mid) for mid in (movie_ids or []) if mid})
@@ -1175,11 +1198,27 @@ def sync_radarr_movies_by_ids(
         return stats
 
     effective_instance_key = str(instance_key or _default_instance_key('movie')).strip().lower()
+    total = len(ids)
+    last_progress_mono = 0.0
+
+    def _emit_progress(done: int, *, force: bool = False) -> None:
+        nonlocal last_progress_mono
+        if not callable(on_progress):
+            return
+        now = time.monotonic()
+        if not force and done not in (0, total) and (now - last_progress_mono) < 1.0:
+            return
+        last_progress_mono = now
+        try:
+            on_progress(int(done), int(total))
+        except Exception:
+            pass
 
     session = get_session()
     touched_movie_row_ids: list[int] = []
     try:
-        for movie_id in ids:
+        _emit_progress(0, force=True)
+        for idx, movie_id in enumerate(ids, start=1):
             movie = fetch_radarr_movie(movie_id, base_url, api_key, bypass_cache=True)
             if not isinstance(movie, dict):
                 tomb_mids = [
@@ -1196,10 +1235,12 @@ def sync_radarr_movies_by_ids(
                     .update({'is_deleted': True}, synchronize_session=False)
                 )
                 stats['movies_marked_deleted'] += int(marked or 0)
+                _emit_progress(idx)
                 continue
 
             fields = _movie_fields(movie, effective_instance_key)
             if not fields['tmdbid']:
+                _emit_progress(idx)
                 continue
             stats['movies_seen'] += 1
             row, created, changed = _upsert_movie(session, fields)
@@ -1210,9 +1251,11 @@ def sync_radarr_movies_by_ids(
             if created or changed:
                 session.flush()
                 touched_movie_row_ids.append(int(row.id))
+            _emit_progress(idx)
 
         session.commit()
         stats['touched_movie_row_ids'] = touched_movie_row_ids
+        _emit_progress(total, force=True)
         return stats
     except Exception:
         session.rollback()
@@ -1474,6 +1517,7 @@ def sync_sonarr_series_by_ids(
     base_url: str,
     api_key: str,
     instance_key: str | None = None,
+    on_progress=None,
 ) -> dict:
     """Targeted series+episode sync for a specific Sonarr instance and series IDs."""
     ids = sorted({int(sid) for sid in (series_ids or []) if sid})
@@ -1499,14 +1543,29 @@ def sync_sonarr_series_by_ids(
         return stats
 
     effective_instance_key = str(instance_key or _default_instance_key('series')).strip().lower()
+    total_series = len(ids)
+    last_progress_mono = 0.0
+
+    def _emit_progress(done: int, *, force: bool = False) -> None:
+        nonlocal last_progress_mono
+        if not callable(on_progress):
+            return
+        now = time.monotonic()
+        if not force and done not in (0, total_series) and (now - last_progress_mono) < 1.0:
+            return
+        last_progress_mono = now
+        try:
+            on_progress(int(done), int(total_series))
+        except Exception:
+            pass
 
     session = get_session()
     touched_episode_ids: set[int] = set()
     allow_episode_detail = _episode_detail_fetches_enabled()
     try:
-        total_series = len(ids)
         _ep_log_every = 100
         _ep_log_min_interval_s = 25.0
+        _emit_progress(0, force=True)
         for series_idx, series_id in enumerate(ids, start=1):
             t_series = time.monotonic()
             series_entry = fetch_sonarr_series_item(series_id, base_url, api_key, bypass_cache=True)
@@ -1554,6 +1613,7 @@ def sync_sonarr_series_by_ids(
                             .update({'is_deleted': True}, synchronize_session=False)
                         )
                         stats['episodes_marked_deleted'] += int(marked_episodes or 0)
+                _emit_progress(series_idx)
                 continue
 
             s_fields = _series_fields(series_entry, effective_instance_key)
@@ -1563,6 +1623,7 @@ def sync_sonarr_series_by_ids(
                     f'Series {series_idx}/{total_series} — {label} — skipped (no TVDB id) · {time.monotonic() - t_series:.1f}s',
                     extra={'emoji_type': 'info'},
                 )
+                _emit_progress(series_idx)
                 continue
 
             stats['series_seen'] += 1
@@ -1724,9 +1785,11 @@ def sync_sonarr_series_by_ids(
                 f'{int(series_episodes_done or 0)}/{episodes_to_process} checked · {time.monotonic() - t_series:.1f}s',
                 extra={'emoji_type': 'info'},
             )
+            _emit_progress(series_idx)
 
         session.commit()
         stats['touched_episode_row_ids'] = sorted(touched_episode_ids)
+        _emit_progress(total_series, force=True)
         return stats
     except Exception:
         session.rollback()

@@ -13,6 +13,65 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## Released
 
+## [0.13.2] - 2026-11-11
+
+### Summary
+
+- **Layout designer rotation**: Angle presets and a free slider for fills and chips.
+- **Fill shape size**: Center plus Shape width/height before angle; oversized shapes for full diagonals.
+- **Fill frame border**: Color, opacity, and thickness on all four sides.
+- **Fill edge fade**: Per-edge fade depth; faded edges skip their border.
+- **Custom text vertical**: Stack characters for vertical chip orientation.
+- **Fail active jobs and restart**: Advanced Settings control to fail wedged jobs and restart Placeholdarr.
+- **Materialization lock fairness**: Chunked mats, shorter lock windows, and stall heartbeats so import/webhooks can finish (#152).
+- **Lite sync localized poster lock**: Scoped/lite mat defers TMDB localized poster resolve so art ensure cannot self-block (#170).
+
+### Added
+
+- **Fail active jobs and restart**: Advanced Settings confirmed control and `POST /api/system/jobs/fail-active` mark every PENDING/CLAIMED/WORKING worker job FAILED, then restart Placeholdarr so wedged handler threads drop locks.
+- **Layout designer rotation**: Angle presets and a free slider (−180…180) for fills and chips; bake and desk stay in sync.
+- **Fill shape size**: Center plus Shape width/height before angle; size can exceed the poster so diagonals cover corner to corner.
+- **Fill frame border**: Color, opacity, and thickness on all four sides of the unrotated shape.
+- **Fill edge fade**: Per-edge fade depth; a faded edge skips its border automatically.
+- **Custom text vertical**: Stack characters for vertical chip orientation.
+- **Layout label sprite API**: Bake-accurate cropped PNG for desk chip ghosts.
+
+### Changed
+
+- **Handler watchdog timeout**: When `JOB_HANDLER_TIMEOUT_SECONDS` fires, the claim is marked FAILED (not log-only) so the stale-CLAIMED reaper cannot recycle that hang forever.
+- **Event-scoped TV density**: Import-grace and other event mats finish core placeholders, then run series/season density in per-series short sessions so filesystem/art work cannot hold `library_catalog_version` / series row locks.
+- **Import/event mats skip poster ensure**: Webhook and import-grace materialization keep/retire placeholders and density stubs without `ensure_*_art`; poster work stays on full/lite mat, calendar Coming Soon art, and art refresh.
+- **Scoped mat stall heartbeats**: Heartbeats include `last_phase` plus series/episode/movie ids so hangs self-identify without a full log dump.
+- **Full-sync materialization chunks**: Library-wide mat commits in batches with lock timeouts so import-grace and webhooks can finish between chunks.
+- **Materialization commit size**: Default `MATERIALIZATION_COMMIT_CHUNK_SIZE` is 50 (was 200) for shorter lock windows between bites.
+- **Live materialization progress**: Full/lite/startup mat and calendar phases publish running counts during each commit chunk (~3s), not only after each batch finishes.
+- **Title Refresh Arr wait**: Polls Arr briefly then defers the worker instead of holding a claim for up to 300s.
+- **Worker claim capacity**: Per-type caps, an interactive reserved lane, and higher playback priority over bulk Arr webhooks.
+- **Media-server refresh broker**: Coalesces and rate-limits full-section scans; single-title reconcile uses path refresh only.
+- **Event-loop offload**: Never/policy/tag-clear and manual Tasks run off the FastAPI loop via `asyncio.to_thread`.
+
+### Fixed
+
+- **Lite sync localized poster lock**: Scoped/lite materialization defers TMDB `localized_poster` resolve until after commits (then the existing poster-language job), so art ensure cannot self-block on `UPDATE series` while idle-in-transaction (#170).
+- **Tasks live poll**: Active tasks poll `/api/tasks/status` every 1s again (no 5s mat slowdown); SSE start/finish uses the status patch path; status stays off the stuck-task reconcile hot path.
+- **Lite catalog discovery bars**: Discovery publishes progress during Arr catalog fetch heartbeats and targeted title sync so bars move without a manual refresh.
+- **Chunked mat stats merge**: Merging per-chunk materialization stats no longer crashes when a prior chunk left a numeric field as `None` (lite sync TypeError mid-run).
+- **Worker finish after lock timeout**: DONE/FAILED/deferred is retried after finish-commit `lock_timeout` instead of leaving the row CLAIMED until the stale reaper.
+- **Import before catalog row**: Movie/episode import webhooks defer ~30s when the Arr row is not in DB yet, instead of failing 10 times in a tight loop during full sync.
+- **Job failure backoff**: Retriable job failures set `run_after` with exponential backoff instead of immediate PENDING reclaim.
+- **ARR live progress writes**: Mid-phase progress updates live only (no durable phases persist per tick) and ARR emits are throttled to ~3s so catalog sync is not paced by task_run row locks.
+- **Nav during live tasks**: Sidebar/task live ticks no longer full-refetch Activity on every progress seq, which could leave the URL on Logs while the UI stayed on Tasks.
+- **Router transitions**: `BrowserRouter` uses `useTransitions={false}` so always-on task polls cannot interrupt SPA navigations (URL change with stuck page body).
+- **Live progress cadence**: Tasks UI polls ~1s for short sync phases and ~5s during materialization/calendar, instead of on every SSE seq tick.
+- **Stopped sync stats**: Stopping a full/lite sync keeps partial materialization counts on the stopped phase instead of zeros.
+- **Never cancels Title Refresh**: Setting Never fails in-flight reconcile jobs for that title and skips new refreshes while Never is set.
+- **Import-grace under sync**: Finalize fails fast on row locks and requeues in seconds instead of staying CLAIMED for hours.
+- **Claim lifecycle**: Revoke is claim-token scoped; deferrals do not burn `max_attempts`; long handlers heartbeat `updated_at`.
+- **Lite/calendar pipeline leak**: Pipeline lock is always released; skipped runs queue a one-shot rerun after full sync.
+- **Startup full sync coordination**: Uses the same full-sync flag and pipeline contract as scheduled full sync.
+- **Idempotency retries**: Failed media/art/NFO jobs release processed keys so retries are not skipped.
+- **Webhook accept**: Persist ingest before returning 200 (off the event loop).
+
 ## [0.13.1] - 2026-11-08
 
 ### Summary

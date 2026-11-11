@@ -25,8 +25,13 @@ from services.placeholder_poster_art import (
 )
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Job, Movie, Placeholder, Season, Series
+from services.source_of_truth.batch_completion_gate import (
+    should_finalize_backfill_run,
+    try_claim_backfill_library_completion,
+)
 from services.source_of_truth.idempotency import (
     placeholder_art_refresh_idempotency_key,
+    release_idempotency_after_failed_claim,
     try_claim_processed_key,
 )
 from services.source_of_truth.placeholder_job_enqueue import enqueue_batched_placeholder_job
@@ -973,18 +978,16 @@ def enqueue_placeholder_art_backfill_all(
 
 
 def _art_refresh_pending_same_run(session, job: Job, *, run_id: str) -> bool:
-    job_id = int(job.id)
-    pending_same_run = (
-        session.query(Job.id)
-        .filter(
-            Job.job_type == PLACEHOLDER_ART_REFRESH_JOB_TYPE,
-            Job.status.in_(["PENDING", "CLAIMED", "WORKING"]),
-            Job.id != job_id,
-            Job.payload[ART_BACKFILL_RUN_ID_KEY].as_string() == run_id,
-        )
-        .first()
+    task_run_id = _art_task_run_id_from_payload(job.payload if isinstance(job.payload, dict) else {})
+    return not should_finalize_backfill_run(
+        session,
+        job,
+        run_id=run_id,
+        job_type=PLACEHOLDER_ART_REFRESH_JOB_TYPE,
+        payload_run_id_key=ART_BACKFILL_RUN_ID_KEY,
+        task_run_id=task_run_id,
+        summary_meta_key="art_backfill",
     )
-    return bool(pending_same_run)
 
 
 def _art_refresh_bust_ui_library_cache(*, run_id: str, log_prefix: str) -> None:
@@ -1030,21 +1033,18 @@ def _art_refresh_completion_scan_if_last_batch(
     # Capture before commit/close: expire_on_commit would detach Job and make
     # later ``job.id`` access raise DetachedInstanceError (fails the whole batch).
     job_id = int(job.id)
-    if _art_refresh_pending_same_run(session, job, run_id=run_id):
+    payload = job.payload if isinstance(job.payload, dict) else {}
+    task_run_id = _art_task_run_id_from_payload(payload)
+    if not try_claim_backfill_library_completion(
+        session,
+        job,
+        run_id=run_id,
+        job_type=PLACEHOLDER_ART_REFRESH_JOB_TYPE,
+        payload_run_id_key=ART_BACKFILL_RUN_ID_KEY,
+        task_run_id=task_run_id,
+        summary_meta_key="art_backfill",
+    ):
         return
-
-    task_run_id = None
-    try:
-        payload = job.payload if isinstance(job.payload, dict) else {}
-        raw_tid = (
-            payload.get(FULL_SYNC_TASK_RUN_ID_KEY)
-            or payload.get(ART_BACKFILL_TASK_RUN_ID_KEY)
-            or payload.get("placeholder_refresh_task_run_id")
-        )
-        if raw_tid is not None:
-            task_run_id = int(raw_tid)
-    except Exception:
-        task_run_id = None
 
     # Close the worker DB session before long media-server HTTP (same pattern as nfo_refresh).
     try:
@@ -1091,6 +1091,8 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
     if not ids:
         return {"ok": False, "reason": "no_placeholder_ids"}
 
+    idem_key: str | None = None
+    idem_claim_committed = False
     try:
         job_id_val = getattr(job, "id", None)
         if isinstance(job_id_val, int):
@@ -1101,6 +1103,12 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
                     extra={"emoji_type": "info"},
                 )
                 return {"ok": True, "skipped": "already_processed"}
+            try:
+                session.commit()
+                idem_claim_committed = True
+            except Exception:
+                session.rollback()
+                idem_key = None
     except Exception as exc:
         logger.debug(f"placeholder_art_refresh idempotency skipped: {exc}", extra={"emoji_type": "debug"})
 
@@ -1246,6 +1254,11 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
             f"progress={loop_pos[0]}/{n_total} wrote={wrote}",
             extra={"emoji_type": "info"},
         )
+    except Exception:
+        if idem_claim_committed and idem_key:
+            release_idempotency_after_failed_claim(session, idem_key)
+            idem_claim_committed = False
+        raise
     finally:
         stop_hb.set()
 

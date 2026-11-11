@@ -366,6 +366,38 @@ def init_db(engine=None, convert_ts: bool | None = None):
     except Exception as ex:
         logger.debug(f"Could not ensure ux_job_obs_hybrid_slice_groupid index exists: {ex}", extra={'emoji_type': 'debug'})
 
+    # Coalesce concurrent media_refresh producers on the same group_id.
+    try:
+        idx_sql_media_refresh = text(
+            "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ux_job_media_refresh_groupid "
+            "ON job(group_id) "
+            "WHERE job_type='media_refresh' AND status IN ('PENDING','CLAIMED','WORKING')"
+        )
+        with engine.connect() as conn:
+            conn = conn.execution_options(isolation_level='AUTOCOMMIT')
+            conn.execute(idx_sql_media_refresh)
+    except Exception as ex:
+        logger.debug(
+            f"Could not ensure ux_job_media_refresh_groupid index exists: {ex}",
+            extra={'emoji_type': 'debug'},
+        )
+
+    # One active Title Refresh per entity group_id.
+    try:
+        idx_sql_entity_reconcile = text(
+            "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ux_job_entity_reconcile_groupid "
+            "ON job(group_id) "
+            "WHERE job_type='entity_reconcile' AND status IN ('PENDING','CLAIMED','WORKING')"
+        )
+        with engine.connect() as conn:
+            conn = conn.execution_options(isolation_level='AUTOCOMMIT')
+            conn.execute(idx_sql_entity_reconcile)
+    except Exception as ex:
+        logger.debug(
+            f"Could not ensure ux_job_entity_reconcile_groupid index exists: {ex}",
+            extra={'emoji_type': 'debug'},
+        )
+
     # Ensure unique partial index to prevent multiple active SubFlows for same (movie_id, action, branch)
     try:
         idx_sql2 = text(
