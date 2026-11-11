@@ -2457,12 +2457,19 @@ def run_materialization_for_entities(
     Large id sets are processed in commit chunks (``MATERIALIZATION_COMMIT_CHUNK_SIZE``)
     so one lite sync cannot hold row locks across the whole library.
 
+    Preferred poster language (TMDB ``localized_poster``) is deferred for the whole
+    scoped run so art ensure cannot open a second session to UPDATE series while this
+    task still holds those rows idle-in-transaction (#170). Callers such as lite sync
+    enqueue ``poster_language_resolve`` after materialization.
+
     When ``purge_catalog_tombstones`` is False, soft-deleted catalog rows are
     left in place after placeholder teardown so callers can still write
     activity history (or other FK-bound rows) before hard-purge.
 
     ``on_progress(done, total, stats=None)`` is optional for live Activity updates.
     """
+    from services.poster_language import defer_tmdb_poster_resolve
+
     movie_ids = [int(mid) for mid in (movie_ids or []) if mid is not None]
     episode_ids = [int(eid) for eid in (episode_ids or []) if eid is not None]
     subject = str(log_subject or "").strip()
@@ -2543,48 +2550,51 @@ def run_materialization_for_entities(
         done_ids = 0
         scoped_chunk_started = time.monotonic()
         _emit(0, merged)
-        while remaining_movies or remaining_episodes:
-            chunk_movies: list[int] = []
-            chunk_episodes: list[int] = []
-            while remaining_movies and (len(chunk_movies) + len(chunk_episodes)) < chunk_size:
-                chunk_movies.append(remaining_movies.pop(0))
-            while remaining_episodes and (len(chunk_movies) + len(chunk_episodes)) < chunk_size:
-                chunk_episodes.append(remaining_episodes.pop(0))
-            chunk_index += 1
-            stall_state["phase"] = f"chunk_{chunk_index}"
-            logger.debug(
-                f"Scoped materialization chunk {chunk_index}{subject_part}: "
-                f"movies={len(chunk_movies)} episodes={len(chunk_episodes)} "
-                f"remaining={len(remaining_movies) + len(remaining_episodes)}",
-                extra={"emoji_type": "debug"},
-            )
-            progress_base = done_ids
-
-            def _on_scoped_chunk_items(done_in_chunk: int, chunk_stats: dict[str, Any]) -> None:
-                preview = dict(merged)
-                _merge_materialization_stats(preview, chunk_stats)
-                _emit(progress_base + int(done_in_chunk or 0), preview)
-
-            part = _run_materialization_entity_chunk(
-                movie_ids=chunk_movies,
-                episode_ids=chunk_episodes,
-                observation_source=observation_source,
-                subject_part=subject_part,
-                density_scope_episode_ids=density_scope,
-                on_item_progress=_on_scoped_chunk_items,
-                stall_state=stall_state,
-            )
-            _merge_materialization_stats(merged, part)
-            done_ids += len(chunk_movies) + len(chunk_episodes)
-            _emit(done_ids, merged)
-            if total_ids > chunk_size:
-                elapsed = max(0.001, time.monotonic() - scoped_chunk_started)
-                logger.info(
-                    f"Scoped materialization{subject_part}: {done_ids}/{total_ids} done · "
-                    f"chunk={chunk_index} · elapsed_s={elapsed:.1f} · "
-                    f"rows_per_s={done_ids / elapsed:.2f}",
-                    extra={"emoji_type": "processing"},
+        # Defer TMDB localized_poster so ensure_*_art cannot UPDATE series on a
+        # second connection while this task's mat session still holds those rows (#170).
+        with defer_tmdb_poster_resolve():
+            while remaining_movies or remaining_episodes:
+                chunk_movies: list[int] = []
+                chunk_episodes: list[int] = []
+                while remaining_movies and (len(chunk_movies) + len(chunk_episodes)) < chunk_size:
+                    chunk_movies.append(remaining_movies.pop(0))
+                while remaining_episodes and (len(chunk_movies) + len(chunk_episodes)) < chunk_size:
+                    chunk_episodes.append(remaining_episodes.pop(0))
+                chunk_index += 1
+                stall_state["phase"] = f"chunk_{chunk_index}"
+                logger.debug(
+                    f"Scoped materialization chunk {chunk_index}{subject_part}: "
+                    f"movies={len(chunk_movies)} episodes={len(chunk_episodes)} "
+                    f"remaining={len(remaining_movies) + len(remaining_episodes)}",
+                    extra={"emoji_type": "debug"},
                 )
+                progress_base = done_ids
+
+                def _on_scoped_chunk_items(done_in_chunk: int, chunk_stats: dict[str, Any]) -> None:
+                    preview = dict(merged)
+                    _merge_materialization_stats(preview, chunk_stats)
+                    _emit(progress_base + int(done_in_chunk or 0), preview)
+
+                part = _run_materialization_entity_chunk(
+                    movie_ids=chunk_movies,
+                    episode_ids=chunk_episodes,
+                    observation_source=observation_source,
+                    subject_part=subject_part,
+                    density_scope_episode_ids=density_scope,
+                    on_item_progress=_on_scoped_chunk_items,
+                    stall_state=stall_state,
+                )
+                _merge_materialization_stats(merged, part)
+                done_ids += len(chunk_movies) + len(chunk_episodes)
+                _emit(done_ids, merged)
+                if total_ids > chunk_size:
+                    elapsed = max(0.001, time.monotonic() - scoped_chunk_started)
+                    logger.info(
+                        f"Scoped materialization{subject_part}: {done_ids}/{total_ids} done · "
+                        f"chunk={chunk_index} · elapsed_s={elapsed:.1f} · "
+                        f"rows_per_s={done_ids / elapsed:.2f}",
+                        extra={"emoji_type": "processing"},
+                    )
 
         logger.info(
             f"Scoped materialization complete{subject_part}: {merged}",
