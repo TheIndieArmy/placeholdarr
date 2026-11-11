@@ -29,6 +29,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ### Fixed
 
+- **Lite sync localized poster lock**: Scoped/lite materialization defers TMDB `localized_poster` resolve until after commits (then the existing poster-language job), so art ensure cannot self-block on `UPDATE series` while idle-in-transaction (#170).
 - **Tasks live poll**: Active tasks poll `/api/tasks/status` every 1s again (no 5s mat slowdown); SSE start/finish uses the status patch path; status stays off the stuck-task reconcile hot path.
 - **Lite catalog discovery bars**: Discovery publishes progress during Arr catalog fetch heartbeats and targeted title sync so bars move without a manual refresh.
 - **Chunked mat stats merge**: Merging per-chunk materialization stats no longer crashes when a prior chunk left a numeric field as `None` (lite sync TypeError mid-run).
