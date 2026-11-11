@@ -12,6 +12,12 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 ### Added
 
 - **Fail active jobs and restart**: Advanced Settings confirmed control and `POST /api/system/jobs/fail-active` mark every PENDING/CLAIMED/WORKING worker job FAILED, then restart Placeholdarr so wedged handler threads drop locks.
+- **Layout designer rotation**: Angle presets and a free slider (−180…180) for fills and chips; bake and desk stay in sync.
+- **Fill shape size**: Center plus Shape width/height before angle; size can exceed the poster so diagonals cover corner to corner.
+- **Fill frame border**: Color, opacity, and thickness on all four sides of the unrotated shape.
+- **Fill edge fade**: Per-edge fade depth; a faded edge skips its border automatically.
+- **Custom text vertical**: Stack characters for vertical chip orientation.
+- **Layout label sprite API**: Bake-accurate cropped PNG for desk chip ghosts.
 
 ### Changed
 

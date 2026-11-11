@@ -622,14 +622,45 @@ def _prepare_rating_logo(source: str, icon_h: int):
     return plate
 
 
-def _measure_text(font, text: str) -> tuple[int, int]:
-    try:
-        bbox = font.getbbox(text)
-        if bbox:
-            return max(1, int(bbox[2] - bbox[0])), max(1, int(bbox[3] - bbox[1]))
-    except Exception:
-        pass
-    return max(1, len(text) * 10), 16
+def _measure_text(font, text: str, *, line_spacing: int = 2) -> tuple[int, int]:
+    raw = str(text or "")
+    if "\n" not in raw:
+        try:
+            bbox = font.getbbox(raw)
+            if bbox:
+                return max(1, int(bbox[2] - bbox[0])), max(1, int(bbox[3] - bbox[1]))
+        except Exception:
+            pass
+        return max(1, len(raw) * 10), 16
+    lines = raw.split("\n")
+    width = 1
+    height = 0
+    gap = max(0, int(line_spacing))
+    for i, line in enumerate(lines):
+        try:
+            bbox = font.getbbox(line if line else " ")
+            if bbox:
+                lw = max(1, int(bbox[2] - bbox[0]))
+                lh = max(1, int(bbox[3] - bbox[1]))
+            else:
+                lw, lh = 1, 16
+        except Exception:
+            lw, lh = max(1, len(line) * 10), 16
+        width = max(width, lw)
+        height += lh
+        if i < len(lines) - 1:
+            height += gap
+    return width, max(1, height)
+
+
+def _verticalize_chip_text(text: str) -> str:
+    """Stack characters top-to-bottom for vertical chip orientation."""
+    chars: list[str] = []
+    for ch in str(text or ""):
+        if ch == "\n":
+            continue
+        chars.append(" " if ch.isspace() else ch)
+    return "\n".join(chars) if chars else ""
 
 
 def _clamp_box_to_image(
@@ -680,46 +711,78 @@ def _draw_layout_chip(
     border_color: str,
     fill_opacity: float,
     border_opacity: float = 0.0,
+    border_thickness: int | None = None,
+    text_opacity: float = 1.0,
+    logo_opacity: float = 1.0,
     size: str = "small",
     size_scale: float | None = None,
     art_path: Path | None = None,
     art_layout: str = "left",
     landscape: bool = False,
+    rotation: int = 0,
+    text_orientation: str = "horizontal",
 ):
-    """Draw a content-sized chip centered on ``anchor`` (fractional x/y point).
+    """Draw a content-sized chip centered on ``anchor``.
+
+    Returns ``(image, box)`` where ``box`` is ``[x0, y0, x1, y1]`` in bake pixels,
+    or ``(out, None)`` when nothing was drawn.
 
     Placement is independent of any snap grid. Width/height follow the label
     text (and optional art logo). Font size scales with ``size`` / ``size_scale``.
 
     ``art_layout`` (arted Rating): ``left`` / ``right`` of the score, ``above``,
-    ``below``, or ``fill`` (logo as background; fill color paints only the margin
-    around it; ``fill_opacity`` fades the logo). For ``above`` / ``below``, logo
-    width matches an ``8.8`` score at the chip font (percentage scores like
-    ``88%`` stay wider on purpose).
+    ``below``, or ``fill`` (logo as background; fill color paints the margin
+    around it). ``fill_opacity`` fades the plate; ``text_opacity`` fades the score;
+    ``logo_opacity`` fades the logo. ``rotation`` is CSS-clockwise degrees.
+    ``text_orientation`` ``vertical`` stacks characters top-to-bottom.
+    For ``above`` / ``below``, logo width matches an ``8.8`` score at the chip font
+    (percentage scores like ``88%`` stay wider on purpose).
     """
     mods = _pillow()
     if mods is None:
-        return out
+        return out, None
     Image, ImageDraw, _, _, ImageOps = mods
     label = str(text or "").strip()
     if not label and art_path is None:
-        return out
+        return out, None
 
     layout = str(art_layout or "left").strip().lower()
     if layout == "beside":
         layout = "left"
     if layout not in {"left", "right", "above", "below", "fill"}:
         layout = "left"
+    from services.poster_layouts import normalize_text_orientation
+
+    vertical = normalize_text_orientation(text_orientation) == "vertical" and bool(label)
+    if vertical:
+        # Art layouts assume a horizontal score; keep logo beside stacked text as left.
+        if layout not in {"left", "right", "fill"}:
+            layout = "left"
+        label = _verticalize_chip_text(label)
 
     img_w, img_h = out.size
     mult = _label_size_mult(size, size_scale)
     preferred = max(16, int(round(_layout_chip_font_size(img_w, img_h, landscape=landscape) * mult)))
-    # Cap width so a long string shrinks type instead of spanning the whole poster.
-    max_text_w = max(80, int(img_w * 0.82))
-    font = _fit_banner_font(label or "0", max_width=max_text_w, preferred_size=preferred, min_size=max(12, int(14 * mult)))
+    # Grow the fit budget with size so the slider raises type, not only padding.
+    max_text_w = max(80, int(img_w * min(0.95, 0.50 + 0.20 * mult)))
+    # Keep at least ~85% of preferred so size_scale always moves the glyphs.
+    min_font = max(12, int(round(preferred * 0.85)))
+    if vertical:
+        # Vertical stacks are height-bound; load preferred (soft-fit by chip later).
+        font = _load_font(preferred) or _fit_banner_font(
+            "0", max_width=max_text_w, preferred_size=preferred, min_size=min_font
+        )
+    else:
+        font = _fit_banner_font(
+            label or "0",
+            max_width=max_text_w,
+            preferred_size=preferred,
+            min_size=min_font,
+        )
     if font is None:
-        return out
-    text_w, text_h = _measure_text(font, label) if label else (0, preferred)
+        return out, None
+    line_gap = max(2, int(round(preferred * 0.08)))
+    text_w, text_h = _measure_text(font, label, line_spacing=line_gap) if label else (0, preferred)
     pad_y = max(8, int(preferred * 0.32))
     # Arted chips size to the logo+score cluster; keep side pad tight like text chips.
     if art_path is not None:
@@ -775,14 +838,18 @@ def _draw_layout_chip(
         chip_h = max(text_h, icon_h) + pad_y * 2
 
     ax, ay = int(anchor[0]), int(anchor[1])
-    box = _clamp_box_to_image(
-        [ax - chip_w // 2, ay - chip_h // 2, ax - chip_w // 2 + chip_w, ay - chip_h // 2 + chip_h],
-        img_w=img_w,
-        img_h=img_h,
-    )
+    # Allow partial off-canvas placement; Draw/paste clip to the image.
+    box = [
+        ax - chip_w // 2,
+        ay - chip_h // 2,
+        ax - chip_w // 2 + chip_w,
+        ay - chip_h // 2 + chip_h,
+    ]
 
     fill_opacity = max(0.0, min(1.0, float(fill_opacity)))
     border_opacity = max(0.0, min(1.0, float(border_opacity)))
+    text_opacity = max(0.0, min(1.0, float(text_opacity)))
+    logo_opacity = max(0.0, min(1.0, float(logo_opacity)))
     fill_rgb = _parse_hex_rgba(fill_color, alpha=255)[:3]
     border_rgb = _parse_hex_rgba(border_color, alpha=255)[:3]
     text_rgb = _parse_hex_rgba(text_color, alpha=255)[:3]
@@ -790,17 +857,21 @@ def _draw_layout_chip(
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     radius = max(6, int(min(box[2] - box[0], box[3] - box[1]) * 0.22))
-    stroke = max(3, int(round(preferred * 0.09)))
-    # Fill mode: plate around the logo stays opaque; opacity fades the logo itself.
-    if layout == "fill" and logo is not None:
-        fill_a = 255
-        logo_a = int(round(255 * fill_opacity))
+    auto_stroke = max(3, int(round(preferred * 0.09)))
+    if border_thickness is None:
+        stroke = auto_stroke
     else:
-        fill_a = int(round(255 * fill_opacity))
-        logo_a = 255
+        from services.poster_layouts import normalize_border_thickness
+
+        stroke = normalize_border_thickness(border_thickness, default=0)
+    fill_a = int(round(255 * fill_opacity))
+    text_a = int(round(255 * text_opacity))
+    logo_a = int(round(255 * logo_opacity)) if logo is not None else 255
     border_a = int(round(255 * border_opacity))
+    text_fill = (*text_rgb, text_a)
     has_border = (
         border_a > 0
+        and stroke > 0
         and box[2] - box[0] > stroke * 2
         and box[3] - box[1] > stroke * 2
     )
@@ -832,37 +903,56 @@ def _draw_layout_chip(
     mid_y = content_box[1] + content_h // 2
 
     def _paste_logo(lx: int, ly: int) -> None:
-        nonlocal logo
+        """Composite the logo onto the plate so logo_opacity reveals fill, not the poster."""
+        nonlocal logo, overlay, draw
         if logo is None:
             return
-        if logo_a >= 255:
-            overlay.paste(logo, (lx, ly), logo)
+        mark = logo
+        if logo_a < 255:
+            mark = logo.copy()
+            # Scale only the alpha channel; keep RGB.
+            r, g, b, a = mark.split()
+            a = a.point(lambda p: int(p * logo_a / 255))
+            mark = Image.merge("RGBA", (r, g, b, a))
+        # paste() replaces destination pixels; alpha_composite keeps the fill under a faded mark.
+        layer = Image.new("RGBA", overlay.size, (0, 0, 0, 0))
+        layer.paste(mark, (lx, ly), mark)
+        overlay = Image.alpha_composite(overlay, layer)
+        draw = ImageDraw.Draw(overlay)
+
+    def _draw_label(cx: int, cy: int) -> None:
+        if not label:
             return
-        faded = logo.copy()
-        # Scale only the alpha channel.
-        r, g, b, a = faded.split()
-        a = a.point(lambda p: int(p * logo_a / 255))
-        faded = Image.merge("RGBA", (r, g, b, a))
-        overlay.paste(faded, (lx, ly), faded)
+        if "\n" in label:
+            draw.multiline_text(
+                (cx, cy),
+                label,
+                fill=text_fill,
+                font=font,
+                anchor="mm",
+                align="center",
+                spacing=line_gap,
+            )
+        else:
+            draw.text((cx, cy), label, fill=text_fill, font=font, anchor="mm")
 
     if layout == "fill" and logo is not None:
         lx = mid_x - logo.width // 2
         ly = mid_y - logo.height // 2
         _paste_logo(lx, ly)
-        if label:
-            draw.text((mid_x, mid_y), label, fill=(*text_rgb, 255), font=font, anchor="mm")
+        _draw_label(mid_x, mid_y)
     elif layout == "above" and logo is not None:
         cluster_h = icon_h + (gap if label else 0) + text_h
         top = content_box[1] + max(0, (content_h - cluster_h) // 2)
         _paste_logo(mid_x - logo.width // 2, top)
         if label:
             ty = top + icon_h + gap + text_h // 2
-            draw.text((mid_x, ty), label, fill=(*text_rgb, 255), font=font, anchor="mm")
+            _draw_label(mid_x, ty)
     elif layout == "below" and logo is not None:
         cluster_h = text_h + (gap if label else 0) + icon_h
         top = content_box[1] + max(0, (content_h - cluster_h) // 2)
         if label:
-            draw.text((mid_x, top + text_h // 2), label, fill=(*text_rgb, 255), font=font, anchor="mm")
+            _draw_label(mid_x, top + text_h // 2)
             _paste_logo(mid_x - logo.width // 2, top + text_h + gap)
         else:
             _paste_logo(mid_x - logo.width // 2, top)
@@ -871,7 +961,7 @@ def _draw_layout_chip(
         cluster_x = content_box[0] + max(0, (content_w - cluster_w) // 2)
         if label:
             tx = cluster_x + text_w // 2
-            draw.text((tx, mid_y), label, fill=(*text_rgb, 255), font=font, anchor="mm")
+            _draw_label(tx, mid_y)
             cluster_x += text_w + gap
         _paste_logo(cluster_x, mid_y - logo.height // 2)
     else:
@@ -883,25 +973,162 @@ def _draw_layout_chip(
             cluster_x += logo.width + gap
         if label:
             tx = cluster_x + text_w // 2
-            draw.text((tx, mid_y), label, fill=(*text_rgb, 255), font=font, anchor="mm")
-    return Image.alpha_composite(base, overlay)
+            _draw_label(tx, mid_y)
 
+    from services.poster_layouts import normalize_rotation
+
+    rot = normalize_rotation(rotation)
+    out_box = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
+    if rot % 360 != 0:
+        cx = (box[0] + box[2]) // 2
+        cy = (box[1] + box[3]) // 2
+        chip = overlay.crop((box[0], box[1], box[2], box[3]))
+        ImageDraw.Draw(overlay).rectangle(box, fill=(0, 0, 0, 0))
+        # CSS clockwise ↔ Pillow counter-clockwise.
+        rotated = chip.rotate(-rot, expand=True, resample=Image.Resampling.BICUBIC)
+        rw, rh = rotated.size
+        px = cx - rw // 2
+        py = cy - rh // 2
+        _paste_rgba_clipped(overlay, rotated, (px, py))
+        out_box = [
+            max(0, px),
+            max(0, py),
+            min(img_w, px + rw),
+            min(img_h, py + rh),
+        ]
+        if out_box[2] <= out_box[0] or out_box[3] <= out_box[1]:
+            out_box = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
+    return Image.alpha_composite(base, overlay), out_box
 
 
 def _frac_axis_px(start: float, end: float, dim: int) -> tuple[int, int]:
-    """Map a 0..1 axis range to inclusive-start / exclusive-end bake pixels."""
+    """Map axis fractions to bake pixels (may extend past the canvas for off-edge fills)."""
     d = max(1, int(dim))
-    a = max(0.0, min(1.0, float(start)))
-    b = max(0.0, min(1.0, float(end)))
+    try:
+        a = float(start)
+    except (TypeError, ValueError):
+        a = 0.0
+    try:
+        b = float(end)
+    except (TypeError, ValueError):
+        b = 1.0
+    if not math.isfinite(a):
+        a = 0.0
+    if not math.isfinite(b):
+        b = 1.0
     if b < a:
         a, b = b, a
     x0 = int(round(d * a))
     x1 = max(x0 + 1, int(round(d * b)))
-    x0 = max(0, min(d, x0))
-    x1 = max(0, min(d, x1))
-    if x1 <= x0:
-        x1 = min(d, x0 + 1)
     return x0, x1
+
+
+def _paste_rgba_clipped(dest, src, origin: tuple[int, int]) -> None:
+    """Paste ``src`` onto ``dest`` at ``origin``, clipping to dest bounds."""
+    if src is None or dest is None:
+        return
+    dx, dy = int(origin[0]), int(origin[1])
+    sw, sh = src.size
+    dw, dh = dest.size
+    sx0 = max(0, -dx)
+    sy0 = max(0, -dy)
+    sx1 = min(sw, dw - dx)
+    sy1 = min(sh, dh - dy)
+    if sx1 <= sx0 or sy1 <= sy0:
+        return
+    crop = src.crop((sx0, sy0, sx1, sy1))
+    dest.paste(crop, (dx + sx0, dy + sy0), crop)
+
+
+def _draw_fill_frame_borders(
+    draw,
+    box: list[int],
+    *,
+    border_rgba: tuple[int, int, int, int],
+    border_thickness_px: int,
+    sides: tuple[bool, bool, bool, bool] | None = None,
+) -> None:
+    """Stroke sides of an axis-aligned fill box.
+
+    ``sides`` is ``(top, right, bottom, left)``; omitted sides default to all on.
+    """
+    if border_rgba[3] <= 0:
+        return
+    x0, y0, x1, y1 = (int(box[0]), int(box[1]), int(box[2]), int(box[3]))
+    bw = max(1, x1 - x0)
+    bh = max(1, y1 - y0)
+    bt = max(0, int(border_thickness_px))
+    if bt <= 0:
+        return
+    bt = min(bt, max(1, min(bw, bh) // 2))
+    top_on, right_on, bottom_on, left_on = sides if sides is not None else (True, True, True, True)
+    if top_on:
+        draw.rectangle([x0, y0, x1, y0 + bt], fill=border_rgba)
+    if bottom_on:
+        draw.rectangle([x0, y1 - bt, x1, y1], fill=border_rgba)
+    if left_on:
+        draw.rectangle([x0, y0, x0 + bt, y1], fill=border_rgba)
+    if right_on:
+        draw.rectangle([x1 - bt, y0, x1, y1], fill=border_rgba)
+
+
+def _apply_fill_edge_fade_mask(
+    tile,
+    *,
+    fade_top: float,
+    fade_right: float,
+    fade_bottom: float,
+    fade_left: float,
+    Image,
+):
+    """Multiply tile alpha by per-edge linear ramps (0 at outer → 1 inward)."""
+    w, h = tile.size
+    if w <= 0 or h <= 0:
+        return tile
+    from PIL import ImageChops
+    from services.poster_layouts import normalize_fade_edge
+
+    ft = normalize_fade_edge(fade_top)
+    fr = normalize_fade_edge(fade_right)
+    fb = normalize_fade_edge(fade_bottom)
+    fl = normalize_fade_edge(fade_left)
+    if ft <= 0 and fr <= 0 and fb <= 0 and fl <= 0:
+        return tile
+    mask = Image.new("L", (w, h), 255)
+    px = mask.load()
+    top_px = int(round(ft * h)) if ft > 0 else 0
+    bottom_px = int(round(fb * h)) if fb > 0 else 0
+    left_px = int(round(fl * w)) if fl > 0 else 0
+    right_px = int(round(fr * w)) if fr > 0 else 0
+    if top_px > 0:
+        for y in range(min(top_px, h)):
+            v = int(round(255 * (y / top_px)))
+            for x in range(w):
+                if px[x, y] > v:
+                    px[x, y] = v
+    if bottom_px > 0:
+        for i in range(min(bottom_px, h)):
+            y = h - 1 - i
+            v = int(round(255 * (i / bottom_px)))
+            for x in range(w):
+                if px[x, y] > v:
+                    px[x, y] = v
+    if left_px > 0:
+        for x in range(min(left_px, w)):
+            v = int(round(255 * (x / left_px)))
+            for y in range(h):
+                if px[x, y] > v:
+                    px[x, y] = v
+    if right_px > 0:
+        for i in range(min(right_px, w)):
+            x = w - 1 - i
+            v = int(round(255 * (i / right_px)))
+            for y in range(h):
+                if px[x, y] > v:
+                    px[x, y] = v
+    r, g, b, a = tile.split()
+    a = ImageChops.multiply(a, mask)
+    return Image.merge("RGBA", (r, g, b, a))
 
 
 def _draw_layout_banner(
@@ -922,13 +1149,30 @@ def _draw_layout_banner(
     edge: str | None = None,
     size: str = "medium",
     thickness: float | None = None,
+    rotation: int = 0,
+    border_color: str = "#ffffff",
+    border_opacity: float = 0.0,
+    border_thickness: int = 3,
+    fade_top: float = 0.0,
+    fade_right: float = 0.0,
+    fade_bottom: float = 0.0,
+    fade_left: float = 0.0,
 ):
-    """Draw a textless fill rectangle; chips supply copy."""
+    """Draw a textless fill rectangle; chips supply copy.
+
+    Shape-first: size the local width×height box, fade edges, paint remaining
+    borders, then rotate around its center (CSS-clockwise). Clipped to the poster.
+    """
     mods = _pillow()
     if mods is None:
         return out
     Image, ImageDraw, _, _, _ = mods
-    from services.poster_layouts import _fill_rect_geometry_from_raw
+    from services.poster_layouts import (
+        _fill_rect_geometry_from_raw,
+        normalize_border_thickness,
+        normalize_fade_edge,
+        normalize_rotation,
+    )
 
     base = out.convert("RGBA") if out.mode != "RGBA" else out
     w, h = base.size
@@ -956,16 +1200,61 @@ def _draw_layout_banner(
     )
     x0, x1 = _frac_axis_px(xa, xb, w)
     y0, y1 = _frac_axis_px(ya, yb, h)
-    box = [x0, y0, x1, y1]
+    rect_w = max(1, abs(x1 - x0))
+    rect_h = max(1, abs(y1 - y0))
+    cx = (x0 + x1) / 2.0
+    cy = (y0 + y1) / 2.0
 
     fill_opacity = max(0.0, min(1.0, float(fill_opacity)))
+    border_opacity = max(0.0, min(1.0, float(border_opacity)))
     fill_rgb = _parse_hex_rgba(fill_color, alpha=255)[:3]
+    border_rgb = _parse_hex_rgba(border_color, alpha=255)[:3]
     fill_a = int(round(255 * fill_opacity))
-    if fill_a <= 0:
+    border_a = int(round(255 * border_opacity))
+    border_px = normalize_border_thickness(border_thickness)
+    ft = normalize_fade_edge(fade_top)
+    fr = normalize_fade_edge(fade_right)
+    fb = normalize_fade_edge(fade_bottom)
+    fl = normalize_fade_edge(fade_left)
+    if fill_a <= 0 and border_a <= 0:
         return base
+
+    tile = Image.new("RGBA", (rect_w, rect_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(tile)
+    local_box = [0, 0, rect_w, rect_h]
+    if fill_a > 0:
+        draw.rectangle(local_box, fill=(*fill_rgb, fill_a))
+        tile = _apply_fill_edge_fade_mask(
+            tile,
+            fade_top=ft,
+            fade_right=fr,
+            fade_bottom=fb,
+            fade_left=fl,
+            Image=Image,
+        )
+        draw = ImageDraw.Draw(tile)
+    # Faded edges skip their border stroke.
+    side_on = (ft <= 0, fr <= 0, fb <= 0, fl <= 0)
+    if border_a > 0 and border_px > 0 and any(side_on):
+        _draw_fill_frame_borders(
+            draw,
+            local_box,
+            border_rgba=(*border_rgb, border_a),
+            border_thickness_px=border_px,
+            sides=side_on,
+        )
+
+    rot = normalize_rotation(rotation)
+    if rot % 360 != 0:
+        # CSS clockwise ↔ Pillow counter-clockwise.
+        tile = tile.rotate(-rot, expand=True, resample=Image.Resampling.BICUBIC)
+    tw, th = tile.size
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-    draw.rectangle(box, fill=(*fill_rgb, fill_a))
+    _paste_rgba_clipped(
+        overlay,
+        tile,
+        (int(round(cx - tw / 2)), int(round(cy - th / 2))),
+    )
     return Image.alpha_composite(base, overlay)
 
 
@@ -1022,6 +1311,7 @@ def _layout_anchor_xy(
             fx = 0.5
         if not math.isfinite(fy):
             fy = 0.5
+        # Centers stay on-canvas; half the chip may still hang past the edge.
         fx = max(0.0, min(1.0, fx))
         fy = max(0.0, min(1.0, fy))
         return int(round(fx * width)), int(round(fy * height))
@@ -1069,6 +1359,7 @@ def apply_layout_overlay(
     # Fill rectangles first, then chips / badge on top.
     banners = [lab for lab in label_list if isinstance(lab, dict) and _is_banner_label(lab)]
     chips = [lab for lab in label_list if isinstance(lab, dict) and not _is_banner_label(lab)]
+    from services.poster_layouts import normalize_border_thickness, normalize_rotation
 
     for label in banners:
         label_size = str(label.get("size") or "medium").strip().lower()
@@ -1079,6 +1370,10 @@ def apply_layout_overlay(
             thickness_val = None
         orient_raw = str(label.get("orientation") or "").strip().lower() or None
         edge_raw = str(label.get("edge") or "").strip().lower() or None
+        border_opacity = label.get("border_opacity")
+        if border_opacity is None:
+            border_opacity = 0.0
+
         out = _draw_layout_banner(
             out,
             fill_color=str(label.get("fill_color") or "#000000"),
@@ -1095,6 +1390,14 @@ def apply_layout_overlay(
             edge=edge_raw,
             size=label_size,
             thickness=thickness_val,
+            rotation=normalize_rotation(label.get("rotation")),
+            border_color=str(label.get("border_color") or "#ffffff"),
+            border_opacity=float(border_opacity),
+            border_thickness=normalize_border_thickness(label.get("border_thickness")),
+            fade_top=float(label.get("fade_top") or 0),
+            fade_right=float(label.get("fade_right") or 0),
+            fade_bottom=float(label.get("fade_bottom") or 0),
+            fade_left=float(label.get("fade_left") or 0),
         )
 
     for label in chips:
@@ -1122,14 +1425,18 @@ def apply_layout_overlay(
             badge = _build_corner_logo_badge(badge_w, variant=variant)
             if badge is None:
                 continue
+            Image, _, _, _, _ = mods
+            rot = normalize_rotation(label.get("rotation"))
+            if rot % 360 != 0:
+                badge = badge.rotate(-rot, expand=True, resample=Image.Resampling.BICUBIC)
+            bw, bh = badge.size
             if out.mode != "RGBA":
                 out = out.convert("RGBA")
-            bx = ax - badge_w // 2
-            by = ay - badge_w // 2
-            # Keep badge fully on-canvas.
-            bx = max(8, min(w - badge_w - 8, bx))
-            by = max(8, min(h - badge_w - 8, by))
-            out.paste(badge, (bx, by), badge)
+            if out.mode != "RGBA":
+                out = out.convert("RGBA")
+            bx = ax - bw // 2
+            by = ay - bh // 2
+            _paste_rgba_clipped(out, badge, (bx, by))
             continue
         text, art_path = _resolve_layout_label_text(label, token_map)
         if not text and art_path is None:
@@ -1144,7 +1451,7 @@ def apply_layout_overlay(
             art_layout = str(label.get("rating_art_layout") or "left").strip().lower() or "left"
             if art_layout == "beside":
                 art_layout = "left"
-        out = _draw_layout_chip(
+        painted, _box = _draw_layout_chip(
             out,
             text=text,
             anchor=(ax, ay),
@@ -1153,15 +1460,212 @@ def apply_layout_overlay(
             border_color=str(label.get("border_color") or "#000000"),
             fill_opacity=float(label.get("fill_opacity") if label.get("fill_opacity") is not None else 0.65),
             border_opacity=float(border_opacity),
+            border_thickness=normalize_border_thickness(label.get("border_thickness")),
+            text_opacity=float(label.get("text_opacity") if label.get("text_opacity") is not None else 1.0),
+            logo_opacity=float(label.get("logo_opacity") if label.get("logo_opacity") is not None else 1.0),
             size=label_size,
             size_scale=size_scale,
             art_path=art_path,
             art_layout=art_layout,
             landscape=landscape,
+            rotation=normalize_rotation(label.get("rotation")),
+            text_orientation=str(label.get("text_orientation") or "horizontal"),
         )
+        out = painted
     if out.mode == "RGBA":
         out = out.convert("RGB")
     return out
+
+
+def _paint_one_layout_label(
+    out,
+    label: dict,
+    *,
+    tokens: dict | None = None,
+    cols: int = 12,
+    rows: int = 18,
+    landscape: bool = False,
+):
+    """Draw a single layout label onto ``out``.
+
+    Returns ``(image, crop_box)`` where ``crop_box`` is ``[x0, y0, x1, y1]`` for
+    chips/badges (exact bake paste box), or ``None`` for fills / empty draws.
+    """
+    if not isinstance(label, dict):
+        return out, None
+    mods = _pillow()
+    if mods is None:
+        return out, None
+    token_map = dict(tokens or {})
+    w, h = out.size
+    grid_cols = max(1, int(cols))
+    grid_rows = max(1, int(rows))
+    token = str(label.get("token") or "").strip()
+    style = str(label.get("style") or "").strip().lower()
+    is_banner = token in {"FillRectangle", "Banner"} or style == "banner"
+    if is_banner:
+        label_size = str(label.get("size") or "medium").strip().lower()
+        raw_thickness = label.get("thickness")
+        try:
+            thickness_val = float(raw_thickness) if raw_thickness is not None else None
+        except (TypeError, ValueError):
+            thickness_val = None
+        orient_raw = str(label.get("orientation") or "").strip().lower() or None
+        edge_raw = str(label.get("edge") or "").strip().lower() or None
+        from services.poster_layouts import normalize_border_thickness, normalize_rotation
+
+        border_opacity = label.get("border_opacity")
+        if border_opacity is None:
+            border_opacity = 0.0
+        painted = _draw_layout_banner(
+            out,
+            fill_color=str(label.get("fill_color") or "#000000"),
+            fill_opacity=float(label.get("fill_opacity") if label.get("fill_opacity") is not None else 0.65),
+            x_start=label.get("x_start"),
+            x_end=label.get("x_end"),
+            y_start=label.get("y_start"),
+            y_end=label.get("y_end"),
+            orientation=orient_raw,
+            span_start=label.get("span_start"),
+            span_end=label.get("span_end"),
+            depth_start=label.get("depth_start"),
+            depth_end=label.get("depth_end"),
+            edge=edge_raw,
+            size=label_size,
+            thickness=thickness_val,
+            rotation=normalize_rotation(label.get("rotation")),
+            border_color=str(label.get("border_color") or "#ffffff"),
+            border_opacity=float(border_opacity),
+            border_thickness=normalize_border_thickness(label.get("border_thickness")),
+            fade_top=float(label.get("fade_top") or 0),
+            fade_right=float(label.get("fade_right") or 0),
+            fade_bottom=float(label.get("fade_bottom") or 0),
+            fade_left=float(label.get("fade_left") or 0),
+        )
+        return painted, None
+    ax, ay = _layout_anchor_xy(label, width=w, height=h, cols=grid_cols, rows=grid_rows)
+    label_size = str(label.get("size") or ("medium" if token == "Badge" else "small")).strip().lower()
+    raw_scale = label.get("size_scale")
+    try:
+        size_scale = float(raw_scale) if raw_scale is not None else None
+    except (TypeError, ValueError):
+        size_scale = None
+    from services.poster_layouts import normalize_border_thickness, normalize_rotation
+
+    if token == "Badge":
+        Image, _, _, _, _ = mods
+        base_mult = _label_size_mult(_BADGE_SIZE_BASE)
+        badge_w = max(
+            24,
+            int(round(_corner_badge_size(w, h) * (_label_size_mult(label_size, size_scale) / base_mult))),
+        )
+        variant = _badge_logo_variant(label.get("fill_color"))
+        badge = _build_corner_logo_badge(badge_w, variant=variant)
+        if badge is None:
+            return out, None
+        rot = normalize_rotation(label.get("rotation"))
+        if rot % 360 != 0:
+            badge = badge.rotate(-rot, expand=True, resample=Image.Resampling.BICUBIC)
+        bw, bh = badge.size
+        base = out.convert("RGBA") if out.mode != "RGBA" else out
+        bx = ax - bw // 2
+        by = ay - bh // 2
+        _paste_rgba_clipped(base, badge, (bx, by))
+        # Crop box is the unclipped AABB (desk places by center + sprite size).
+        return base, [bx, by, bx + bw, by + bh]
+    text, art_path = _resolve_layout_label_text(label, token_map)
+    if not text and art_path is None:
+        return out, None
+    border_opacity = label.get("border_opacity")
+    if border_opacity is None:
+        legacy = _parse_hex_rgba(str(label.get("border_color") or "#00000000"))
+        border_opacity = legacy[3] / 255.0
+    art_layout = "left"
+    if token == "Rating" and art_path is not None:
+        art_layout = str(label.get("rating_art_layout") or "left").strip().lower() or "left"
+        if art_layout == "beside":
+            art_layout = "left"
+    return _draw_layout_chip(
+        out,
+        text=text,
+        anchor=(ax, ay),
+        text_color=str(label.get("text_color") or "#ffffff"),
+        fill_color=str(label.get("fill_color") or "#000000"),
+        border_color=str(label.get("border_color") or "#000000"),
+        fill_opacity=float(label.get("fill_opacity") if label.get("fill_opacity") is not None else 0.65),
+        border_opacity=float(border_opacity),
+        border_thickness=normalize_border_thickness(label.get("border_thickness")),
+        text_opacity=float(label.get("text_opacity") if label.get("text_opacity") is not None else 1.0),
+        logo_opacity=float(label.get("logo_opacity") if label.get("logo_opacity") is not None else 1.0),
+        size=label_size,
+        size_scale=size_scale,
+        art_path=art_path,
+        art_layout=art_layout,
+        landscape=landscape,
+        rotation=normalize_rotation(label.get("rotation")),
+        text_orientation=str(label.get("text_orientation") or "horizontal"),
+    )
+
+
+def render_layout_label_sprite_png(
+    label: dict,
+    *,
+    landscape: bool = False,
+    tokens: dict | None = None,
+    cols: int | None = None,
+    rows: int | None = None,
+) -> tuple[bytes, int, int] | None:
+    """Render one layout label to a cropped transparent PNG for the designer desk.
+
+    Draws the label centered on a bake-sized canvas, then crops to the **exact**
+    bake paste box (badge edge length / chip clamp box), not an alpha getbbox.
+    """
+    mods = _pillow()
+    if mods is None:
+        _log_pillow_missing_once()
+        return None
+    if not isinstance(label, dict):
+        return None
+    Image = mods[0]
+    target = LANDSCAPE_SIZE if landscape else PORTRAIT_SIZE
+    canvas = Image.new("RGBA", target, (0, 0, 0, 0))
+    token = str(label.get("token") or "").strip()
+    style = str(label.get("style") or "").strip().lower()
+    is_banner = token in {"FillRectangle", "Banner"} or style == "banner"
+    lab = dict(label)
+    if not is_banner:
+        # Size-only render: center so edge clamp does not shrink the crop.
+        lab["x"] = 0.5
+        lab["y"] = 0.5
+    grid_cols = max(1, int(cols or (16 if landscape else 12)))
+    grid_rows = max(1, int(rows or (10 if landscape else 18)))
+    painted, crop_box = _paint_one_layout_label(
+        canvas,
+        lab,
+        tokens=tokens,
+        cols=grid_cols,
+        rows=grid_rows,
+        landscape=landscape,
+    )
+    if painted is None:
+        return None
+    if painted.mode != "RGBA":
+        painted = painted.convert("RGBA")
+    if crop_box and len(crop_box) == 4:
+        x0, y0, x1, y1 = (int(crop_box[0]), int(crop_box[1]), int(crop_box[2]), int(crop_box[3]))
+        if x1 > x0 and y1 > y0:
+            cropped = painted.crop((x0, y0, x1, y1))
+        else:
+            return None
+    else:
+        bbox = painted.getbbox()
+        if not bbox:
+            return None
+        cropped = painted.crop(bbox)
+    buf = io.BytesIO()
+    cropped.save(buf, format="PNG", optimize=True)
+    cw, ch = cropped.size
+    return buf.getvalue(), int(cw), int(ch)
 
 
 def apply_overlay(

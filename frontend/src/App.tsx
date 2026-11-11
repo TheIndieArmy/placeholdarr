@@ -71,7 +71,12 @@ import { ScheduleTimezoneNote, TaskScheduleEditor } from "./settings/TaskSchedul
 import { UI_SECTION_FRAME_CLASS, UI_SECTION_LEGEND_CLASS } from "./uiSectionFrame";
 
 import { TmdbAttribution } from "./TmdbAttribution";
-import { getBrandSemanticTokens, semanticTokensToCssVars, type BrandSemanticTokens } from "./brandSemanticTheme";
+import {
+  getBrandSemanticTokens,
+  PLACEHOLDARR_SPECTRAL_CYAN_HEX,
+  semanticTokensToCssVars,
+  type BrandSemanticTokens,
+} from "./brandSemanticTheme";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "./brandAccentUi";
 import {
   DATE_FORMAT_OPTIONS,
@@ -4239,27 +4244,90 @@ function LogsPanel(props: {
   const accent = getBrandAccent(props.brand, props.themeMode);
   const streamRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoFollowRef = useRef(true);
+  const [paused, setPaused] = useState(false);
+  const [frozenLines, setFrozenLines] = useState<string[] | null>(null);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const copyResetRef = useRef(0);
+
+  const displayLines = frozenLines ?? props.lines;
+
+  const pauseStream = useCallback((snapshot?: string[]) => {
+    setPaused(true);
+    shouldAutoFollowRef.current = false;
+    setFrozenLines((prev) => prev ?? [...(snapshot ?? props.lines)]);
+  }, [props.lines]);
+
+  const scrollStreamToBottom = useCallback(() => {
+    const el = streamRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, []);
+
+  const resumeStream = useCallback(() => {
+    setPaused(false);
+    setFrozenLines(null);
+    shouldAutoFollowRef.current = true;
+    // Layout after unfreeze: follow the live buffer.
+    requestAnimationFrame(() => {
+      scrollStreamToBottom();
+    });
+  }, [scrollStreamToBottom]);
 
   useLayoutEffect(() => {
-    const el = streamRef.current;
-    if (!el || !shouldAutoFollowRef.current) return;
-    el.scrollTop = el.scrollHeight;
-  }, [props.lines]);
+    if (paused) return;
+    if (!shouldAutoFollowRef.current) return;
+    scrollStreamToBottom();
+  }, [props.lines, paused, scrollStreamToBottom]);
+
+  useEffect(() => {
+    return () => {
+      window.clearTimeout(copyResetRef.current);
+    };
+  }, []);
 
   const handleStreamScroll = () => {
     const el = streamRef.current;
     if (!el) return;
     const distanceFromBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
     // Treat near-bottom as "follow mode" to avoid jitter from fractional pixels.
-    shouldAutoFollowRef.current = distanceFromBottom <= 24;
+    const nearBottom = distanceFromBottom <= 24;
+    if (paused) {
+      // Stay frozen while reading; Jump to latest clears the snapshot.
+      return;
+    }
+    if (!nearBottom) {
+      pauseStream();
+      return;
+    }
+    shouldAutoFollowRef.current = true;
+  };
+
+  const handleStreamPointerDown = () => {
+    // Selecting/copying mid-stream: freeze so live trim does not yank the selection.
+    if (!paused) {
+      pauseStream();
+    }
+  };
+
+  const handleCopyVisible = async () => {
+    const text = displayLines.join("\n");
+    const ok = await copyTextToClipboard(text);
+    setCopyState(ok ? "copied" : "failed");
+    window.clearTimeout(copyResetRef.current);
+    copyResetRef.current = window.setTimeout(() => setCopyState("idle"), 1600);
   };
 
   return (
     <div>
       {/* Title row */}
       <div className="flex items-center gap-2 mb-1">
-        <div className="w-2 h-2 rounded-full" style={{ backgroundColor: accent.hex }} />
-        <span className="text-[12px] font-headline uppercase tracking-widest text-slate-400">Live</span>
+        <div
+          className="w-2 h-2 rounded-full"
+          style={{ backgroundColor: paused ? "#94a3b8" : accent.hex }}
+        />
+        <span className="text-[12px] font-headline uppercase tracking-widest text-slate-400">
+          {paused ? "Paused" : "Live"}
+        </span>
       </div>
       <div className="flex justify-between items-center mb-5">
         <h1 className="text-[32px] font-black text-white tracking-tight font-headline">System Logs</h1>
@@ -4276,6 +4344,8 @@ function LogsPanel(props: {
         ) : null}
         . The dropdown below only narrows what you browse;{" "}
         <span className="text-slate-400">&quot;All captured levels&quot;</span> shows the full tail from disk. Container stdout stays INFO-only.
+        {" "}
+        Scroll up, click in the stream, or press Pause to freeze the view for reading and copying.
       </p>
 
       {/* Filter bar */}
@@ -4306,20 +4376,56 @@ function LogsPanel(props: {
 
       {/* Log terminal */}
       <div className="bg-[#0a0e14] rounded-xl border border-[#424753]/40 p-5">
-        <div className="flex justify-between items-center pb-3 mb-3 border-b border-[#424753]/30">
-          <div className="flex items-center gap-2">
+        <div className="flex justify-between items-center gap-3 pb-3 mb-3 border-b border-[#424753]/30 flex-wrap">
+          <div className="flex items-center gap-2 min-w-0">
             <span className="material-symbols-outlined text-slate-500" style={{ fontSize: 18 }}>terminal</span>
             <span className="text-[12px] font-headline uppercase tracking-widest text-slate-400">Output Stream</span>
+            <span className="text-[12px] font-headline uppercase tracking-widest text-slate-500">
+              {displayLines.length} lines
+              {paused ? " · frozen" : ""}
+            </span>
           </div>
-          <span className="text-[12px] font-headline uppercase tracking-widest text-slate-500">{props.lines.length} lines</span>
+          <div className="flex items-center gap-2 flex-wrap">
+            {paused ? (
+              <span className="text-[12px] text-slate-500">Frozen for reading / copy</span>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => void handleCopyVisible()}
+              className={`inline-flex items-center gap-1.5 rounded-lg border border-[#424753]/50 bg-[#1e2430] px-2.5 py-1.5 text-[12px] font-headline uppercase tracking-widest text-slate-300 hover:bg-[#252e3a] outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>content_copy</span>
+              {copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy view"}
+            </button>
+            {paused ? (
+              <button
+                type="button"
+                onClick={resumeStream}
+                className={`inline-flex items-center gap-1.5 rounded-lg border border-[#424753]/50 bg-[#1e2430] px-2.5 py-1.5 text-[12px] font-headline uppercase tracking-widest text-slate-300 hover:bg-[#252e3a] outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: 16 }}>vertical_align_bottom</span>
+                Jump to latest
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => pauseStream()}
+                className={`inline-flex items-center gap-1.5 rounded-lg border border-[#424753]/50 bg-[#1e2430] px-2.5 py-1.5 text-[12px] font-headline uppercase tracking-widest text-slate-300 hover:bg-[#252e3a] outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: 16 }}>pause</span>
+                Pause
+              </button>
+            )}
+          </div>
         </div>
         <div
           ref={streamRef}
           onScroll={handleStreamScroll}
+          onPointerDown={handleStreamPointerDown}
           className="font-mono text-[14px] space-y-1 max-h-[60vh] overflow-y-auto"
         >
-          {!props.lines.length && <div className="text-slate-600 p-2">No log lines to display.</div>}
-          {props.lines.map((line, idx) => {
+          {!displayLines.length && <div className="text-slate-600 p-2">No log lines to display.</div>}
+          {displayLines.map((line, idx) => {
             const isError = line.includes("ERROR") || line.includes("CRITICAL");
             const isWarn = line.includes("WARNING") || line.includes("WARN");
             const isInfo = line.includes("INFO");
@@ -7553,6 +7659,132 @@ function LookAndFeelSectionIntro(props: { embedded?: boolean }) {
   );
 }
 
+/** Board tools for the layout designer sticky bake preview (Marquee / Quickstart-style). */
+type LayoutGuideColor = "yellow" | "blue" | "teal";
+
+type LayoutBoardTools = {
+  pan: boolean;
+  grid: boolean;
+  snap: boolean;
+  /** Bake-canvas pixels between grid lines / snap points. */
+  snapStep: number;
+  /** Color for grid, midlines, alignment, and spacing guides. */
+  guideColor: LayoutGuideColor;
+};
+
+const LAYOUT_GUIDE_COLOR_HEX: Record<LayoutGuideColor, string> = {
+  yellow: "#FBBF24",
+  /** Placeholdarr logo / wordmark slate navy (same as dark ``surfacePanel``). */
+  blue: "#0F172A",
+  teal: PLACEHOLDARR_SPECTRAL_CYAN_HEX,
+};
+
+const LAYOUT_GUIDE_COLOR_OPTIONS: Array<{ id: LayoutGuideColor; label: string }> = [
+  { id: "yellow", label: "Yellow" },
+  { id: "blue", label: "Blue" },
+  { id: "teal", label: "Teal" },
+];
+
+function layoutGuideHex(tools: LayoutBoardTools | null | undefined, fallback = "#FBBF24"): string {
+  const key = tools?.guideColor;
+  if (key && LAYOUT_GUIDE_COLOR_HEX[key]) return LAYOUT_GUIDE_COLOR_HEX[key];
+  return fallback;
+}
+
+const DEFAULT_LAYOUT_BOARD_TOOLS: LayoutBoardTools = {
+  pan: false,
+  grid: false,
+  snap: false,
+  snapStep: 25,
+  guideColor: "yellow",
+};
+
+function LayoutBoardToolsToolbar(props: {
+  tools: LayoutBoardTools;
+  onChange: (next: LayoutBoardTools) => void;
+  accentHex: string;
+}) {
+  const guideHex = layoutGuideHex(props.tools, props.accentHex);
+  const toggle = (key: "pan" | "grid" | "snap") => {
+    props.onChange({ ...props.tools, [key]: !props.tools[key] });
+  };
+  const btn = (key: "pan" | "grid" | "snap", label: string, title: string) => {
+    const active = props.tools[key];
+    return (
+      <button
+        type="button"
+        title={title}
+        aria-pressed={active}
+        onClick={() => toggle(key)}
+        className={`rounded-md border px-2 py-1 text-[11px] font-headline uppercase tracking-wider ${
+          active
+            ? "text-slate-100"
+            : "border-[#424753]/55 text-slate-400 hover:border-[#424753] hover:text-slate-200"
+        }`}
+        style={
+          active
+            ? {
+                borderColor: guideHex,
+                backgroundColor: `color-mix(in srgb, ${guideHex} 18%, transparent)`,
+              }
+            : undefined
+        }
+      >
+        {label}
+      </button>
+    );
+  };
+  return (
+    <div className="mb-2 flex flex-wrap items-center gap-1.5">
+      {btn("pan", "Pan", "Pan: drag the preview without moving labels (H)")}
+      {btn("grid", "Grid", "Grid: show bake-pixel alignment grid")}
+      {btn("snap", "Snap", "Snap: stick placement to the grid size while dragging")}
+      <select
+        aria-label="Snap step"
+        title="Grid / snap size in bake pixels"
+        value={props.tools.snapStep}
+        onChange={(e) => props.onChange({ ...props.tools, snapStep: Number(e.target.value) || 25 })}
+        className="rounded-md border border-[#424753]/55 bg-[#0b111b] px-1.5 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-[color:var(--brand-accent)]"
+      >
+        {[10, 25, 50, 100].map((n) => (
+          <option key={n} value={n}>
+            {n}px
+          </option>
+        ))}
+      </select>
+      <div
+        className="ml-0.5 flex items-center gap-1 rounded-md border border-[#424753]/55 bg-[#0b111b] px-1 py-0.5"
+        role="group"
+        aria-label="Guide color"
+        title="Guide line color"
+      >
+        {LAYOUT_GUIDE_COLOR_OPTIONS.map((opt) => {
+          const hex = LAYOUT_GUIDE_COLOR_HEX[opt.id];
+          const active = props.tools.guideColor === opt.id;
+          return (
+            <button
+              key={opt.id}
+              type="button"
+              title={`${opt.label} guides`}
+              aria-label={`${opt.label} guide color`}
+              aria-pressed={active}
+              onClick={() => props.onChange({ ...props.tools, guideColor: opt.id })}
+              className={`h-5 w-5 rounded-full transition ${
+                active ? "scale-110" : "opacity-85 hover:opacity-100"
+              }`}
+              style={{
+                backgroundColor: hex,
+                border: active ? "3px solid #e2e8f0" : "3px solid rgba(148,163,184,0.65)",
+                boxShadow: active ? `0 0 0 1px ${hex}, 0 0 8px ${hex}88` : undefined,
+              }}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 /** Overlay controls on the left; live previews on the right (aspect ratios preserved). */
 function PosterOverlayControlsWithPreview(props: {
   values: FieldValueMap;
@@ -7577,8 +7809,11 @@ function PosterOverlayControlsWithPreview(props: {
     selectedId?: string | null;
     placementControlsHot?: boolean;
   } | null;
-  /** Drag-update selected chip x/y from the sticky bake preview. */
-  onPlacementDrag?: (x: number, y: number) => void;
+  /** Drag-update label x/y from the desk (optional labelId when grabbing a layer). */
+  onPlacementDrag?: (x: number, y: number, labelId?: string) => void;
+  onSelectLabel?: (id: string | null) => void;
+  boardTools?: LayoutBoardTools;
+  onBoardToolsChange?: (next: LayoutBoardTools) => void;
 }) {
   return (
     <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:gap-8">
@@ -7589,6 +7824,13 @@ function PosterOverlayControlsWithPreview(props: {
       {/* Wider aside so the 2:3 poster + Preview art bottom roughly meets the designer Plex tip. */}
       <aside className="w-full shrink-0 lg:sticky lg:top-4 lg:w-[28rem]">
         <div className={`mb-3 ${SETTINGS_DENSITY_LEGEND_CLASS}`}>Preview</div>
+        {props.boardTools && props.onBoardToolsChange ? (
+          <LayoutBoardToolsToolbar
+            tools={props.boardTools}
+            onChange={props.onBoardToolsChange}
+            accentHex={props.accentHex || "#38bdf8"}
+          />
+        ) : null}
         <PosterOverlayLivePreview
           values={props.values}
           compact={props.compact}
@@ -7596,6 +7838,8 @@ function PosterOverlayControlsWithPreview(props: {
           accentHex={props.accentHex}
           layoutPreview={props.layoutPreview}
           onPlacementDrag={props.onPlacementDrag}
+          onSelectLabel={props.onSelectLabel}
+          boardTools={props.boardTools}
         />
         {props.belowPreview ? <div className="mt-3">{props.belowPreview}</div> : null}
       </aside>
@@ -7605,21 +7849,685 @@ function PosterOverlayControlsWithPreview(props: {
 
 /** Sticky-preview placement guides from the layout designer. */
 type LayoutPreviewGuide =
-  | { kind: "chip"; x: number; y: number }
+  | {
+      kind: "chip";
+      x: number;
+      y: number;
+      token?: string;
+    }
   | {
       kind: "banner";
       xStart: number;
       xEnd: number;
       yStart: number;
       yEnd: number;
+      fill_color?: string;
+      fill_opacity?: number;
+      border_color?: string;
+      border_opacity?: number;
+      border_thickness?: number;
+      fade_top?: number;
+      fade_right?: number;
+      fade_bottom?: number;
+      fade_left?: number;
+      rotation?: number;
     };
+
+function normalizeLayoutRotation(raw: unknown): number {
+  const deg = Number(raw);
+  if (!Number.isFinite(deg)) return 0;
+  let snapped = Math.round(deg / 45) * 45;
+  snapped = ((snapped % 360) + 360) % 360;
+  if (snapped >= 180) snapped -= 360;
+  return snapped;
+}
+
+/** Match fill shape max (2.5× axis); half hangs past 0..1 when the center sits on an edge. */
+const DESK_SPAN_FRAC_PAD = 1.25;
+
+/** Centers stay on the poster so shapes can hang off, but not fly away. */
+function clampCenterPlacementFrac(raw: unknown, fallback = 0.5): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(1, n));
+}
+
+/** Fill span edges (derived from center + size); allow half-size overhang. */
+function clampSpanPlacementFrac(raw: unknown, fallback = 0.5): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(-DESK_SPAN_FRAC_PAD, Math.min(1 + DESK_SPAN_FRAC_PAD, n));
+}
+
+/** Clamp fill edge fade depth to ``[0, 0.5]`` of the local shape axis. */
+function normalizeDeskFadeEdge(raw: unknown): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(0.5, n));
+}
+
+/** CSS mask ramps matching Pillow edge fades (intersected). */
+function deskFillFadeMaskStyle(fades: {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}): CSSProperties | null {
+  const layers: string[] = [];
+  if (fades.top > 0) {
+    const p = fades.top * 100;
+    layers.push(`linear-gradient(to bottom, transparent 0%, #000 ${p}%, #000 100%)`);
+  }
+  if (fades.bottom > 0) {
+    const p = fades.bottom * 100;
+    layers.push(`linear-gradient(to top, transparent 0%, #000 ${p}%, #000 100%)`);
+  }
+  if (fades.left > 0) {
+    const p = fades.left * 100;
+    layers.push(`linear-gradient(to right, transparent 0%, #000 ${p}%, #000 100%)`);
+  }
+  if (fades.right > 0) {
+    const p = fades.right * 100;
+    layers.push(`linear-gradient(to left, transparent 0%, #000 ${p}%, #000 100%)`);
+  }
+  if (!layers.length) return null;
+  const joined = layers.join(", ");
+  const multi = layers.length > 1;
+  return {
+    WebkitMaskImage: joined,
+    maskImage: joined,
+    ...(multi
+      ? {
+          // WebKit: each successive layer is source-in'd against the prior result.
+          WebkitMaskComposite: "source-in",
+          maskComposite: "intersect" as const,
+        }
+      : null),
+    WebkitMaskSize: "100% 100%",
+    maskSize: "100% 100%",
+    WebkitMaskRepeat: "no-repeat",
+    maskRepeat: "no-repeat",
+  };
+}
+
+/** Desk/sticky fill: local width×height box, then CSS-clockwise rotate (matches bake). */
+function deskFillBandStyle(
+  x0: number,
+  x1: number,
+  y0: number,
+  y1: number,
+  fill: string,
+  rotation: unknown,
+  extra?: CSSProperties,
+  border?: { color: string; opacity: number; thicknessPx: number } | null,
+  fades?: { top?: number; right?: number; bottom?: number; left?: number } | null,
+): CSSProperties {
+  const xa = clampSpanPlacementFrac(x0, 0);
+  const xb = clampSpanPlacementFrac(x1, 1);
+  const ya = clampSpanPlacementFrac(y0, 0);
+  const yb = clampSpanPlacementFrac(y1, 0.12);
+  const widthFrac = Math.abs(xb - xa);
+  const heightFrac = Math.abs(yb - ya);
+  const left = Math.min(xa, xb) * 100;
+  const top = Math.min(ya, yb) * 100;
+  const width = widthFrac * 100;
+  const height = heightFrac * 100;
+  const rot = normalizeLayoutRotation(rotation);
+  const fade = {
+    top: normalizeDeskFadeEdge(fades?.top),
+    right: normalizeDeskFadeEdge(fades?.right),
+    bottom: normalizeDeskFadeEdge(fades?.bottom),
+    left: normalizeDeskFadeEdge(fades?.left),
+  };
+  const borderOn =
+    border &&
+    border.opacity > 0 &&
+    border.thicknessPx > 0 &&
+    Number.isFinite(border.thicknessPx);
+  const stroke = borderOn
+    ? `${Math.max(1, Math.round(border.thicknessPx))}px solid ${hexToRgba(border.color, border.opacity)}`
+    : undefined;
+  // Faded edges skip their border; use per-side when any fade is on.
+  const anyFade = fade.top > 0 || fade.right > 0 || fade.bottom > 0 || fade.left > 0;
+  const borderStyle: CSSProperties = stroke
+    ? anyFade
+      ? {
+          borderTop: fade.top > 0 ? "none" : stroke,
+          borderRight: fade.right > 0 ? "none" : stroke,
+          borderBottom: fade.bottom > 0 ? "none" : stroke,
+          borderLeft: fade.left > 0 ? "none" : stroke,
+        }
+      : { border: stroke }
+    : {};
+  const maskStyle = deskFillFadeMaskStyle(fade);
+  return {
+    left: `${left}%`,
+    top: `${top}%`,
+    width: `${Math.max(0.5, width)}%`,
+    height: `${Math.max(0.5, height)}%`,
+    backgroundColor: fill,
+    boxSizing: "border-box",
+    ...borderStyle,
+    ...(maskStyle || null),
+    ...(rot % 360 !== 0
+      ? { transform: `rotate(${rot}deg)`, transformOrigin: "center center" }
+      : null),
+    ...extra,
+  };
+}
 
 function layoutGuideKey(guide: LayoutPreviewGuide | null | undefined): string {
   if (!guide) return "";
   if (guide.kind === "banner") {
-    return `b:${guide.xStart}:${guide.xEnd}:${guide.yStart}:${guide.yEnd}`;
+    return `b:${guide.xStart}:${guide.xEnd}:${guide.yStart}:${guide.yEnd}:${guide.fill_color || ""}:${guide.fill_opacity ?? ""}:${guide.border_color || ""}:${guide.border_opacity ?? ""}:${guide.border_thickness ?? ""}:${guide.fade_top ?? 0}:${guide.fade_right ?? 0}:${guide.fade_bottom ?? 0}:${guide.fade_left ?? 0}:${guide.rotation ?? 0}`;
   }
-  return `c:${guide.x}:${guide.y}`;
+  return `c:${guide.x}:${guide.y}:${guide.token || ""}`;
+}
+
+/** Parse #RRGGBB into an rgba() string. */
+function hexToRgba(hex: string, alpha: number): string {
+  const raw = String(hex || "").trim();
+  const m = /^#?([0-9a-f]{6})$/i.exec(raw);
+  const a = Math.max(0, Math.min(1, alpha));
+  if (!m) return `rgba(15, 23, 42, ${a})`;
+  const n = parseInt(m[1], 16);
+  const r = (n >> 16) & 255;
+  const g = (n >> 8) & 255;
+  const b = n & 255;
+  return `rgba(${r}, ${g}, ${b}, ${a})`;
+}
+
+/** Match Pillow ``_clamp_box_to_image`` / badge edge inset (margin 8 bake-px). */
+function clampBoxBakePx(
+  ax: number,
+  ay: number,
+  boxW: number,
+  boxH: number,
+  bakeW: number,
+  bakeH: number,
+  margin = 8,
+): { x0: number; y0: number } {
+  const w = Math.max(1, Math.round(boxW));
+  const h = Math.max(1, Math.round(boxH));
+  const maxX = Math.max(margin, bakeW - w - margin);
+  const maxY = Math.max(margin, bakeH - h - margin);
+  // Python uses ``ax - w // 2`` (floor toward -inf for positives = trunc).
+  let x0 = Math.floor(ax) - Math.floor(w / 2);
+  let y0 = Math.floor(ay) - Math.floor(h / 2);
+  x0 = Math.max(margin, Math.min(maxX, x0));
+  y0 = Math.max(margin, Math.min(maxY, y0));
+  return { x0, y0 };
+}
+
+/** Convert a pointer frac into the clamped visual center (matches bake). */
+function clampedPlacementFrac(
+  frac: { x: number; y: number },
+  boxW: number,
+  boxH: number,
+  bakeW: number,
+  bakeH: number,
+): { x: number; y: number } {
+  const w = Math.max(1, Math.round(boxW));
+  const h = Math.max(1, Math.round(boxH));
+  const { x0, y0 } = clampBoxBakePx(frac.x * bakeW, frac.y * bakeH, w, h, bakeW, bakeH);
+  // Match Pillow ``mid = origin + size // 2`` so odd boxes land on exact mid bake-px
+  // (e.g. 750 on a 1500 canvas), not 750.5 → 751 after Math.round.
+  return {
+    x: (x0 + Math.floor(w / 2)) / Math.max(1, bakeW),
+    y: (y0 + Math.floor(h / 2)) / Math.max(1, bakeH),
+  };
+}
+
+/** Bake-pixel AABB for desk alignment guides (edges + centers). */
+type DeskAlignBox = {
+  id: string;
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  cx: number;
+  cy: number;
+};
+
+type DeskAlignGuides = { xs: number[]; ys: number[] };
+
+/** Gap segment drawn while equal-spacing is active. */
+type DeskSpacingSegment = {
+  axis: "x" | "y";
+  start: number;
+  end: number;
+  /** Perpendicular bake-px center for the marker. */
+  cross: number;
+};
+
+type DeskSpacingGuides = { segments: DeskSpacingSegment[] };
+
+function deskAlignBoxFromChip(
+  id: string,
+  fx: number,
+  fy: number,
+  boxW: number,
+  boxH: number,
+  bakeW: number,
+  bakeH: number,
+): DeskAlignBox {
+  const w = Math.max(1, Math.round(boxW));
+  const h = Math.max(1, Math.round(boxH));
+  const { x0, y0, x1, y1 } = deskChipBoxFromCenter(fx, fy, w, h, bakeW, bakeH);
+  return {
+    id,
+    x0,
+    y0,
+    x1,
+    y1,
+    cx: x0 + Math.floor(w / 2),
+    cy: y0 + Math.floor(h / 2),
+  };
+}
+
+function deskAlignBoxFromFill(
+  id: string,
+  lab: Record<string, unknown>,
+  bakeW: number,
+  bakeH: number,
+): DeskAlignBox {
+  const xa = clampSpanPlacementFrac(Number(lab.x_start) || 0, 0);
+  const xb = clampSpanPlacementFrac(Number(lab.x_end) || 1, 1);
+  const ya = clampSpanPlacementFrac(Number(lab.y_start) || 0, 0);
+  const yb = clampSpanPlacementFrac(Number(lab.y_end) || 0.12, 0.12);
+  const x0 = Math.round(Math.min(xa, xb) * bakeW);
+  const x1 = Math.max(x0 + 1, Math.round(Math.max(xa, xb) * bakeW));
+  const y0 = Math.round(Math.min(ya, yb) * bakeH);
+  const y1 = Math.max(y0 + 1, Math.round(Math.max(ya, yb) * bakeH));
+  return {
+    id,
+    x0,
+    y0,
+    x1,
+    y1,
+    cx: x0 + Math.floor((x1 - x0) / 2),
+    cy: y0 + Math.floor((y1 - y0) / 2),
+  };
+}
+
+/** Chip AABB from center frac without forcing the box fully on-canvas. */
+function deskChipBoxFromCenter(
+  fx: number,
+  fy: number,
+  boxW: number,
+  boxH: number,
+  bakeW: number,
+  bakeH: number,
+): { x0: number; y0: number; x1: number; y1: number } {
+  const w = Math.max(1, Math.round(boxW));
+  const h = Math.max(1, Math.round(boxH));
+  const ax = clampCenterPlacementFrac(fx, 0.5) * bakeW;
+  const ay = clampCenterPlacementFrac(fy, 0.5) * bakeH;
+  const x0 = Math.floor(ax) - Math.floor(w / 2);
+  const y0 = Math.floor(ay) - Math.floor(h / 2);
+  return { x0, y0, x1: x0 + w, y1: y0 + h };
+}
+
+function deskAlignBoxesForLabels(
+  labels: Record<string, unknown>[],
+  sprites: Record<string, { w: number; h: number }>,
+  bakeW: number,
+  bakeH: number,
+  excludeId?: string | null,
+): DeskAlignBox[] {
+  const out: DeskAlignBox[] = [];
+  for (const lab of labels) {
+    const id = String(lab.id || "");
+    if (!id || (excludeId && id === excludeId)) continue;
+    const token = String(lab.token || "").trim();
+    const style = String(lab.style || "").trim().toLowerCase();
+    const isFill = token === "FillRectangle" || token === "Banner" || style === "banner";
+    if (isFill) {
+      out.push(deskAlignBoxFromFill(id, lab, bakeW, bakeH));
+      continue;
+    }
+    const sprite = sprites[id];
+    if (!sprite || !(sprite.w > 0) || !(sprite.h > 0)) continue;
+    const ax = Number(lab.x);
+    const ay = Number(lab.y);
+    const fx = Number.isFinite(ax) ? Math.max(0, Math.min(1, ax)) : 0.5;
+    const fy = Number.isFinite(ay) ? Math.max(0, Math.min(1, ay)) : 0.5;
+    out.push(deskAlignBoxFromChip(id, fx, fy, sprite.w, sprite.h, bakeW, bakeH));
+  }
+  return out;
+}
+
+/**
+ * Magnetize a moving box to other labels' edges/centers within ``thresholdPx``.
+ * Returns bake-pixel delta for the box origin/center and guide line positions.
+ */
+function snapDeskBoxToAlignments(
+  moving: DeskAlignBox,
+  targets: DeskAlignBox[],
+  thresholdPx = 3,
+): { dx: number; dy: number; guides: DeskAlignGuides } {
+  const thresh = Math.max(0, Math.round(thresholdPx));
+  const movingX = [moving.x0, moving.cx, moving.x1];
+  const movingY = [moving.y0, moving.cy, moving.y1];
+
+  let bestDx = 0;
+  let bestDxDist = thresh + 1;
+  let bestDy = 0;
+  let bestDyDist = thresh + 1;
+
+  for (const t of targets) {
+    const tx = [t.x0, t.cx, t.x1];
+    const ty = [t.y0, t.cy, t.y1];
+    for (const ml of movingX) {
+      for (const tl of tx) {
+        const d = tl - ml;
+        const dist = Math.abs(d);
+        if (dist <= thresh && dist < bestDxDist) {
+          bestDxDist = dist;
+          bestDx = d;
+        }
+      }
+    }
+    for (const ml of movingY) {
+      for (const tl of ty) {
+        const d = tl - ml;
+        const dist = Math.abs(d);
+        if (dist <= thresh && dist < bestDyDist) {
+          bestDyDist = dist;
+          bestDy = d;
+        }
+      }
+    }
+  }
+
+  const dx = bestDxDist <= thresh ? bestDx : 0;
+  const dy = bestDyDist <= thresh ? bestDy : 0;
+  const shifted: DeskAlignBox = {
+    ...moving,
+    x0: moving.x0 + dx,
+    x1: moving.x1 + dx,
+    cx: moving.cx + dx,
+    y0: moving.y0 + dy,
+    y1: moving.y1 + dy,
+    cy: moving.cy + dy,
+  };
+  const xs = new Set<number>();
+  const ys = new Set<number>();
+  const sx = [shifted.x0, shifted.cx, shifted.x1];
+  const sy = [shifted.y0, shifted.cy, shifted.y1];
+  for (const t of targets) {
+    for (const ml of sx) {
+      for (const tl of [t.x0, t.cx, t.x1]) {
+        if (Math.abs(ml - tl) <= 0.5) xs.add(tl);
+      }
+    }
+    for (const ml of sy) {
+      for (const tl of [t.y0, t.cy, t.y1]) {
+        if (Math.abs(ml - tl) <= 0.5) ys.add(tl);
+      }
+    }
+  }
+  return {
+    dx,
+    dy,
+    guides: { xs: [...xs].sort((a, b) => a - b), ys: [...ys].sort((a, b) => a - b) },
+  };
+}
+
+function deskBoxesOverlapY(a: DeskAlignBox, b: DeskAlignBox): boolean {
+  return a.y0 < b.y1 && b.y0 < a.y1;
+}
+
+function deskBoxesOverlapX(a: DeskAlignBox, b: DeskAlignBox): boolean {
+  return a.x0 < b.x1 && b.x0 < a.x1;
+}
+
+function deskConsecutiveGapsX(
+  boxes: DeskAlignBox[],
+): Array<{ gap: number; left: DeskAlignBox; right: DeskAlignBox }> {
+  const sorted = [...boxes].sort((a, b) => a.x0 - b.x0 || a.cx - b.cx);
+  const out: Array<{ gap: number; left: DeskAlignBox; right: DeskAlignBox }> = [];
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const left = sorted[i];
+    const right = sorted[i + 1];
+    if (!deskBoxesOverlapY(left, right)) continue;
+    const gap = right.x0 - left.x1;
+    if (gap > 0) out.push({ gap, left, right });
+  }
+  return out;
+}
+
+function deskConsecutiveGapsY(
+  boxes: DeskAlignBox[],
+): Array<{ gap: number; top: DeskAlignBox; bottom: DeskAlignBox }> {
+  const sorted = [...boxes].sort((a, b) => a.y0 - b.y0 || a.cy - b.cy);
+  const out: Array<{ gap: number; top: DeskAlignBox; bottom: DeskAlignBox }> = [];
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const top = sorted[i];
+    const bottom = sorted[i + 1];
+    if (!deskBoxesOverlapX(top, bottom)) continue;
+    const gap = bottom.y0 - top.y1;
+    if (gap > 0) out.push({ gap, top, bottom });
+  }
+  return out;
+}
+
+/**
+ * Magnetize so gaps to nearest neighbors match an existing same-row/column gap.
+ * Also equalizes when the moving box sits between two neighbors.
+ */
+function snapDeskBoxToEqualSpacing(
+  moving: DeskAlignBox,
+  targets: DeskAlignBox[],
+  thresholdPx = 3,
+): { dx: number; dy: number; guides: DeskSpacingGuides } {
+  const thresh = Math.max(0, Math.round(thresholdPx));
+  let bestDx = 0;
+  let bestDxDist = thresh + 1;
+  let bestDy = 0;
+  let bestDyDist = thresh + 1;
+  let bestXSegments: DeskSpacingSegment[] = [];
+  let bestYSegments: DeskSpacingSegment[] = [];
+
+  const considerX = (dx: number, segments: DeskSpacingSegment[]) => {
+    const dist = Math.abs(dx);
+    if (dist <= thresh && dist < bestDxDist) {
+      bestDxDist = dist;
+      bestDx = dx;
+      bestXSegments = segments;
+    }
+  };
+  const considerY = (dy: number, segments: DeskSpacingSegment[]) => {
+    const dist = Math.abs(dy);
+    if (dist <= thresh && dist < bestDyDist) {
+      bestDyDist = dist;
+      bestDy = dy;
+      bestYSegments = segments;
+    }
+  };
+
+  const peersX = targets.filter((t) => deskBoxesOverlapY(moving, t));
+  const peersY = targets.filter((t) => deskBoxesOverlapX(moving, t));
+  const gapsX = deskConsecutiveGapsX(peersX);
+  const gapsY = deskConsecutiveGapsY(peersY);
+  const w = moving.x1 - moving.x0;
+  const h = moving.y1 - moving.y0;
+
+  let left: DeskAlignBox | null = null;
+  let right: DeskAlignBox | null = null;
+  let leftDist = Infinity;
+  let rightDist = Infinity;
+  for (const p of peersX) {
+    if (p.x1 <= moving.x0) {
+      const d = moving.x0 - p.x1;
+      if (d < leftDist) {
+        leftDist = d;
+        left = p;
+      }
+    }
+    if (p.x0 >= moving.x1) {
+      const d = p.x0 - moving.x1;
+      if (d < rightDist) {
+        rightDist = d;
+        right = p;
+      }
+    }
+  }
+
+  // Between two neighbors: equalize left/right gaps.
+  if (left && right) {
+    const inner = right.x0 - left.x1 - w;
+    if (inner >= 0) {
+      const idealX0 = left.x1 + Math.floor(inner / 2);
+      considerX(idealX0 - moving.x0, [
+        { axis: "x", start: left.x1, end: idealX0, cross: moving.cy },
+        { axis: "x", start: idealX0 + w, end: right.x0, cross: moving.cy },
+      ]);
+    }
+  } else {
+    // Outside a pair: match nearest-neighbor gap to any existing row gap.
+    if (left) {
+      for (const pair of gapsX) {
+        const idealX0 = left.x1 + pair.gap;
+        considerX(idealX0 - moving.x0, [
+          { axis: "x", start: left.x1, end: idealX0, cross: moving.cy },
+          {
+            axis: "x",
+            start: pair.left.x1,
+            end: pair.right.x0,
+            cross: Math.round((pair.left.cy + pair.right.cy) / 2),
+          },
+        ]);
+      }
+    }
+    if (right) {
+      for (const pair of gapsX) {
+        const idealX0 = right.x0 - pair.gap - w;
+        considerX(idealX0 - moving.x0, [
+          { axis: "x", start: idealX0 + w, end: right.x0, cross: moving.cy },
+          {
+            axis: "x",
+            start: pair.left.x1,
+            end: pair.right.x0,
+            cross: Math.round((pair.left.cy + pair.right.cy) / 2),
+          },
+        ]);
+      }
+    }
+  }
+
+  let above: DeskAlignBox | null = null;
+  let below: DeskAlignBox | null = null;
+  let aboveDist = Infinity;
+  let belowDist = Infinity;
+  for (const p of peersY) {
+    if (p.y1 <= moving.y0) {
+      const d = moving.y0 - p.y1;
+      if (d < aboveDist) {
+        aboveDist = d;
+        above = p;
+      }
+    }
+    if (p.y0 >= moving.y1) {
+      const d = p.y0 - moving.y1;
+      if (d < belowDist) {
+        belowDist = d;
+        below = p;
+      }
+    }
+  }
+
+  if (above && below) {
+    const inner = below.y0 - above.y1 - h;
+    if (inner >= 0) {
+      const idealY0 = above.y1 + Math.floor(inner / 2);
+      considerY(idealY0 - moving.y0, [
+        { axis: "y", start: above.y1, end: idealY0, cross: moving.cx },
+        { axis: "y", start: idealY0 + h, end: below.y0, cross: moving.cx },
+      ]);
+    }
+  } else {
+    if (above) {
+      for (const pair of gapsY) {
+        const idealY0 = above.y1 + pair.gap;
+        considerY(idealY0 - moving.y0, [
+          { axis: "y", start: above.y1, end: idealY0, cross: moving.cx },
+          {
+            axis: "y",
+            start: pair.top.y1,
+            end: pair.bottom.y0,
+            cross: Math.round((pair.top.cx + pair.bottom.cx) / 2),
+          },
+        ]);
+      }
+    }
+    if (below) {
+      for (const pair of gapsY) {
+        const idealY0 = below.y0 - pair.gap - h;
+        considerY(idealY0 - moving.y0, [
+          { axis: "y", start: idealY0 + h, end: below.y0, cross: moving.cx },
+          {
+            axis: "y",
+            start: pair.top.y1,
+            end: pair.bottom.y0,
+            cross: Math.round((pair.top.cx + pair.bottom.cx) / 2),
+          },
+        ]);
+      }
+    }
+  }
+
+  return {
+    dx: bestDxDist <= thresh ? bestDx : 0,
+    dy: bestDyDist <= thresh ? bestDy : 0,
+    guides: {
+      segments: [
+        ...(bestDxDist <= thresh ? bestXSegments : []),
+        ...(bestDyDist <= thresh ? bestYSegments : []),
+      ],
+    },
+  };
+}
+
+/** Equal-spacing markers for a placed box (segments only when within threshold). */
+function collectDeskEqualSpacingGuides(
+  moving: DeskAlignBox,
+  targets: DeskAlignBox[],
+  thresholdPx = 0.5,
+): DeskSpacingGuides {
+  return snapDeskBoxToEqualSpacing(moving, targets, thresholdPx).guides;
+}
+
+/** Shared glow styles for poster midlines (horizontal hairlines need extra weight). */
+function midlineGlowStyle(axis: "v" | "h", lit: boolean, accent: string): CSSProperties {
+  if (!lit) {
+    return { backgroundColor: "rgba(148,163,184,0.35)" };
+  }
+  if (axis === "h") {
+    return {
+      backgroundColor: accent,
+      height: 2,
+      boxShadow: `0 0 0 1px ${accent}66, 0 0 12px ${accent}, 0 0 22px ${accent}aa`,
+    };
+  }
+  return {
+    backgroundColor: accent,
+    boxShadow: `0 0 0 1px ${accent}55, 0 0 10px ${accent}, 0 0 18px ${accent}88`,
+  };
+}
+
+/** Style fingerprint for sprite refetch (ignores placement). */
+function layoutLabelSpriteStyleKey(label: Record<string, unknown> | null | undefined): string {
+  if (!label) return "";
+  const {
+    x: _x,
+    y: _y,
+    row: _row,
+    col: _col,
+    id: _id,
+    ...style
+  } = label;
+  return JSON.stringify(style);
 }
 
 /** Layout designer with shared sticky preview (Settings + onboarding). */
@@ -7644,12 +8552,36 @@ function PosterArtOverlaysBlock(props: {
   } | null>(null);
   const [previewArtControls, setPreviewArtControls] = useState<ReactNode>(null);
   const [layoutHeaderActions, setLayoutHeaderActions] = useState<ReactNode>(null);
-  const placementDragRef = useRef<((x: number, y: number) => void) | null>(null);
-  const registerPlacementDrag = useCallback((handler: ((x: number, y: number) => void) | null) => {
-    placementDragRef.current = handler;
+  const [boardTools, setBoardTools] = useState<LayoutBoardTools>(DEFAULT_LAYOUT_BOARD_TOOLS);
+  const placementDragRef = useRef<((x: number, y: number, labelId?: string) => void) | null>(null);
+  const selectLabelRef = useRef<((id: string | null) => void) | null>(null);
+  const registerPlacementDrag = useCallback(
+    (handler: ((x: number, y: number, labelId?: string) => void) | null) => {
+      placementDragRef.current = handler;
+    },
+    [],
+  );
+  const registerSelectLabel = useCallback((handler: ((id: string | null) => void) | null) => {
+    selectLabelRef.current = handler;
   }, []);
-  const handlePlacementDrag = useCallback((x: number, y: number) => {
-    placementDragRef.current?.(x, y);
+  const handlePlacementDrag = useCallback((x: number, y: number, labelId?: string) => {
+    placementDragRef.current?.(x, y, labelId);
+  }, []);
+  const handleSelectLabel = useCallback((id: string | null) => {
+    selectLabelRef.current?.(id);
+  }, []);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea" || tag === "select" || target?.isContentEditable) return;
+      if (event.key === "h" || event.key === "H") {
+        event.preventDefault();
+        setBoardTools((prev) => ({ ...prev, pan: !prev.pan }));
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, []);
   const handleLayoutPreviewChange = useCallback(
     (state: {
@@ -7722,6 +8654,9 @@ function PosterArtOverlaysBlock(props: {
       layoutPreview={layoutPreview}
       belowPreview={previewArtControls}
       onPlacementDrag={handlePlacementDrag}
+      onSelectLabel={handleSelectLabel}
+      boardTools={boardTools}
+      onBoardToolsChange={setBoardTools}
       controls={
         <SettingsDensityFrame legend="Layout designer" legendEnd={layoutHeaderActions}>
           <PosterLayoutDesigner
@@ -7731,6 +8666,7 @@ function PosterArtOverlaysBlock(props: {
             onPreviewArtControlsChange={setPreviewArtControls}
             onHeaderActionsChange={setLayoutHeaderActions}
             onRegisterPlacementDrag={registerPlacementDrag}
+            onRegisterSelectLabel={registerSelectLabel}
           />
         </SettingsDensityFrame>
       }
@@ -7812,6 +8748,33 @@ function posterOverlaySettingOn(value: unknown): boolean {
   return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
 }
 
+function snapFracToBakeGrid(frac: number, dim: number, step: number): number {
+  const d = Math.max(1, dim);
+  const s = Math.max(1, Math.round(step));
+  const px = Math.round(Math.max(0, Math.min(1, frac)) * d);
+  const snapped = Math.round(px / s) * s;
+  return Math.max(0, Math.min(1, snapped / d));
+}
+
+/** Magnetic pull to poster center when within ``thresholdPx`` bake pixels on an axis. */
+function snapFracToBakeCenter(
+  frac: { x: number; y: number },
+  bakeW: number,
+  bakeH: number,
+  thresholdPx = 3,
+): { x: number; y: number } {
+  const w = Math.max(1, bakeW);
+  const h = Math.max(1, bakeH);
+  const cx = w / 2;
+  const cy = h / 2;
+  const px = Math.round(Math.max(0, Math.min(1, frac.x)) * w);
+  const py = Math.round(Math.max(0, Math.min(1, frac.y)) * h);
+  return {
+    x: Math.abs(px - cx) <= thresholdPx ? cx / w : frac.x,
+    y: Math.abs(py - cy) <= thresholdPx ? cy / h : frac.y,
+  };
+}
+
 function PosterOverlayPreviewTile(props: {
   src: string;
   label: string;
@@ -7828,6 +8791,11 @@ function PosterOverlayPreviewTile(props: {
   onPlacementDrag?: (x: number, y: number) => void;
   /** Keep the drag handle visible while X/Y bake-px controls are in use. */
   placementControlsHot?: boolean;
+  boardTools?: LayoutBoardTools;
+  /** Bake-accurate PNG ghost for the selected chip/badge. */
+  spriteUrl?: string | null;
+  spriteW?: number;
+  spriteH?: number;
 }) {
   const [currentSrc, setCurrentSrc] = useState(props.src);
   const [nextSrc, setNextSrc] = useState<string | null>(null);
@@ -7835,11 +8803,20 @@ function PosterOverlayPreviewTile(props: {
   const [dragging, setDragging] = useState(false);
   const [previewHovering, setPreviewHovering] = useState(false);
   const [handleOpaque, setHandleOpaque] = useState(true);
+  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
   const currentSrcRef = useRef(props.src);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const dragActiveRef = useRef(false);
+  const panActiveRef = useRef<{ startX: number; startY: number; originX: number; originY: number } | null>(null);
   /** Pointer minus banner center at grab (keeps strip from jumping under the cursor). */
   const bannerGrabOffsetRef = useRef<{ dx: number; dy: number } | null>(null);
+  const boardTools = props.boardTools || DEFAULT_LAYOUT_BOARD_TOOLS;
+  const boardToolsRef = useRef(boardTools);
+  boardToolsRef.current = boardTools;
+  const bakeSizeRef = useRef({ bakeW: 1000, bakeH: 1500 });
+  const spriteSizeRef = useRef({ w: 0, h: 0 });
+  const panOffsetRef = useRef(panOffset);
+  panOffsetRef.current = panOffset;
 
   useEffect(() => {
     currentSrcRef.current = currentSrc;
@@ -7883,22 +8860,48 @@ function PosterOverlayPreviewTile(props: {
   }, [props.src]);
 
   const guide = props.guide;
-  const accent = guide?.accentHex || props.accentHex || "#38bdf8";
+  const boardToolsForColor = props.boardTools || DEFAULT_LAYOUT_BOARD_TOOLS;
+  const accent = layoutGuideHex(
+    boardToolsForColor,
+    guide?.accentHex || props.accentHex || "#FBBF24",
+  );
   const bakeW = Math.max(1, guide?.bakeW || 1000);
   const bakeH = Math.max(1, guide?.bakeH || 1500);
+  bakeSizeRef.current = { bakeW, bakeH };
+  const spriteW = Math.max(0, Math.round(props.spriteW || 0));
+  const spriteH = Math.max(0, Math.round(props.spriteH || 0));
+  const hasSprite = Boolean(props.spriteUrl && spriteW > 0 && spriteH > 0);
+  spriteSizeRef.current = { w: spriteW, h: spriteH };
   const chipGuide = guide?.kind === "chip" ? guide : null;
   const bannerGuide = guide?.kind === "banner" ? guide : null;
+  const chipBox =
+    chipGuide && hasSprite
+      ? deskChipBoxFromCenter(chipGuide.x, chipGuide.y, spriteW, spriteH, bakeW, bakeH)
+      : null;
+  const chipVisual = chipBox
+    ? {
+        x: (chipBox.x0 + Math.floor(spriteW / 2)) / bakeW,
+        y: (chipBox.y0 + Math.floor(spriteH / 2)) / bakeH,
+        leftPct: (chipBox.x0 / bakeW) * 100,
+        topPct: (chipBox.y0 / bakeH) * 100,
+        widthPct: (spriteW / bakeW) * 100,
+        heightPct: (spriteH / bakeH) * 100,
+      }
+    : chipGuide
+      ? { x: chipGuide.x, y: chipGuide.y, leftPct: chipGuide.x * 100, topPct: chipGuide.y * 100, widthPct: 0, heightPct: 0 }
+      : null;
   // Glow only at the exact bake-canvas midpoint (e.g. 500/750 or 960/540).
-  const glowX = Boolean(chipGuide && Math.round(chipGuide.x * bakeW) === bakeW / 2);
-  const glowY = Boolean(chipGuide && Math.round(chipGuide.y * bakeH) === bakeH / 2);
-  const canDrag = Boolean((chipGuide || bannerGuide) && props.onPlacementDrag);
+  const glowX = Boolean(chipVisual && Math.round(chipVisual.x * bakeW) === bakeW / 2);
+  const glowY = Boolean(chipVisual && Math.round(chipVisual.y * bakeH) === bakeH / 2);
+  const panMode = boardTools.pan;
+  const canDrag = Boolean((chipGuide || bannerGuide) && props.onPlacementDrag && !panMode);
   const wantHandleVisible = Boolean(
     canDrag && (previewHovering || dragging || props.placementControlsHot),
   );
   const bannerCenter = bannerGuide
     ? {
-        x: (Math.max(0, Math.min(1, bannerGuide.xStart)) + Math.max(0, Math.min(1, bannerGuide.xEnd))) / 2,
-        y: (Math.max(0, Math.min(1, bannerGuide.yStart)) + Math.max(0, Math.min(1, bannerGuide.yEnd))) / 2,
+        x: (bannerGuide.xStart + bannerGuide.xEnd) / 2,
+        y: (bannerGuide.yStart + bannerGuide.yEnd) / 2,
       }
     : null;
 
@@ -7920,25 +8923,59 @@ function PosterOverlayPreviewTile(props: {
     if (!el) return null;
     const rect = el.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return null;
-    const x = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    const y = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+    // Pointer may leave the stage; finalize clamps centers to the poster.
+    const x = (clientX - rect.left) / rect.width;
+    const y = (clientY - rect.top) / rect.height;
     return { x, y };
   }, []);
+
+  const snapPlacementFrac = useCallback((frac: { x: number; y: number }) => {
+    const size = bakeSizeRef.current;
+    const t = boardToolsRef.current;
+    let next = {
+      x: clampCenterPlacementFrac(frac.x, 0.5),
+      y: clampCenterPlacementFrac(frac.y, 0.5),
+    };
+    if (t.snap && t.snapStep > 1) {
+      next = {
+        x: snapFracToBakeGrid(next.x, size.bakeW, t.snapStep),
+        y: snapFracToBakeGrid(next.y, size.bakeH, t.snapStep),
+      };
+    }
+    // Always magnet to midlines within 3 bake-px (independent of Grid Snap).
+    return snapFracToBakeCenter(next, size.bakeW, size.bakeH, 3);
+  }, []);
+
+  const finalizeChipPlacementFrac = useCallback((frac: { x: number; y: number }) => {
+    return snapPlacementFrac(frac);
+  }, [snapPlacementFrac]);
 
   useEffect(() => {
     if (!dragging) return;
     const onMove = (event: PointerEvent) => {
+      if (panActiveRef.current) {
+        const pan = panActiveRef.current;
+        setPanOffset({
+          x: pan.originX + (event.clientX - pan.startX),
+          y: pan.originY + (event.clientY - pan.startY),
+        });
+        return;
+      }
       if (!dragActiveRef.current || !props.onPlacementDrag) return;
       const next = fracFromClient(event.clientX, event.clientY);
       if (!next) return;
       const off = bannerGrabOffsetRef.current;
+      const raw = off ? { x: next.x - off.dx, y: next.y - off.dy } : next;
       if (off) {
-        props.onPlacementDrag(next.x - off.dx, next.y - off.dy);
+        const snapped = snapPlacementFrac(raw);
+        props.onPlacementDrag(snapped.x, snapped.y);
       } else {
-        props.onPlacementDrag(next.x, next.y);
+        const placed = finalizeChipPlacementFrac(raw);
+        props.onPlacementDrag(placed.x, placed.y);
       }
     };
     const onUp = () => {
+      panActiveRef.current = null;
       dragActiveRef.current = false;
       bannerGrabOffsetRef.current = null;
       setDragging(false);
@@ -7951,10 +8988,10 @@ function PosterOverlayPreviewTile(props: {
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
     };
-  }, [dragging, fracFromClient, props.onPlacementDrag]);
+  }, [dragging, finalizeChipPlacementFrac, fracFromClient, props.onPlacementDrag, snapPlacementFrac]);
 
   const beginDrag = (event: ReactPointerEvent<HTMLElement>) => {
-    if (!canDrag || !props.onPlacementDrag) return;
+    if (panMode || !canDrag || !props.onPlacementDrag) return;
     event.preventDefault();
     event.stopPropagation();
     dragActiveRef.current = true;
@@ -7962,10 +8999,14 @@ function PosterOverlayPreviewTile(props: {
     const next = fracFromClient(event.clientX, event.clientY);
     if (bannerGuide && bannerCenter && next) {
       bannerGrabOffsetRef.current = { dx: next.x - bannerCenter.x, dy: next.y - bannerCenter.y };
-      props.onPlacementDrag(bannerCenter.x, bannerCenter.y);
+      const snapped = snapPlacementFrac(bannerCenter);
+      props.onPlacementDrag(snapped.x, snapped.y);
     } else {
       bannerGrabOffsetRef.current = null;
-      if (next) props.onPlacementDrag(next.x, next.y);
+      if (next) {
+        const placed = finalizeChipPlacementFrac(next);
+        props.onPlacementDrag(placed.x, placed.y);
+      }
     }
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
@@ -7974,16 +9015,41 @@ function PosterOverlayPreviewTile(props: {
     }
   };
 
+  const beginPan = (event: ReactPointerEvent<HTMLElement>) => {
+    if (!panMode) return;
+    event.preventDefault();
+    panActiveRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: panOffsetRef.current.x,
+      originY: panOffsetRef.current.y,
+    };
+    setDragging(true);
+  };
+
+  const stageCursor = panMode
+    ? dragging
+      ? "cursor-grabbing select-none"
+      : "cursor-grab select-none"
+    : canDrag && dragging
+      ? "cursor-grabbing select-none"
+      : "";
+
   return (
     <figure
       className={`shrink-0 rounded-lg overflow-hidden border border-[#424753]/40 bg-[#0f1419]/80 ${props.widthClass}`}
     >
       <div
-        ref={stageRef}
         onPointerEnter={() => setPreviewHovering(true)}
         onPointerLeave={() => setPreviewHovering(false)}
-        className={`relative w-full ${props.aspect} bg-[#0b111b] ${canDrag ? (dragging ? "cursor-grabbing select-none" : "") : ""}`}
+        className={`relative w-full overflow-hidden bg-[#0b111b] ${props.aspect}`}
       >
+        <div
+          ref={stageRef}
+          onPointerDown={panMode ? beginPan : undefined}
+          className={`absolute inset-0 touch-none ${stageCursor}`}
+          style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px)` }}
+        >
         <img
           src={currentSrc}
           alt={`${props.label} overlay preview`}
@@ -8001,85 +9067,103 @@ function PosterOverlayPreviewTile(props: {
             }`}
           />
         ) : null}
+        {boardTools.grid ? (
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-0 z-[3] opacity-50"
+            style={{
+              backgroundImage: `linear-gradient(to right, ${accent}55 1px, transparent 1px), linear-gradient(to bottom, ${accent}55 1px, transparent 1px)`,
+              backgroundSize: `${(boardTools.snapStep / bakeW) * 100}% ${(boardTools.snapStep / bakeH) * 100}%`,
+            }}
+          />
+        ) : null}
         {chipGuide ? (
           <>
             {/* Poster midlines (glow when the chip sits on the bake midpoint). */}
             <div
               aria-hidden
               className="pointer-events-none absolute inset-y-0 z-[4] w-px -translate-x-1/2"
-              style={{
-                left: "50%",
-                backgroundColor: glowX ? accent : "rgba(148,163,184,0.35)",
-                boxShadow: glowX
-                  ? `0 0 0 1px ${accent}55, 0 0 10px ${accent}, 0 0 18px ${accent}88`
-                  : undefined,
-              }}
+              style={{ left: "50%", ...midlineGlowStyle("v", glowX, accent) }}
             />
             <div
               aria-hidden
               className="pointer-events-none absolute inset-x-0 z-[4] h-px -translate-y-1/2"
-              style={{
-                top: "50%",
-                backgroundColor: glowY ? accent : "rgba(148,163,184,0.35)",
-                boxShadow: glowY
-                  ? `0 0 0 1px ${accent}55, 0 0 10px ${accent}, 0 0 18px ${accent}88`
-                  : undefined,
-              }}
+              style={{ top: "50%", ...midlineGlowStyle("h", glowY, accent) }}
             />
-            {/* Chip position guides while selected. */}
-            <div
-              aria-hidden
-              className="pointer-events-none absolute inset-y-0 z-[5] w-px -translate-x-1/2"
-              style={{
-                left: `${Math.max(0, Math.min(1, chipGuide.x)) * 100}%`,
-                backgroundColor: `${accent}66`,
-              }}
-            />
-            <div
-              aria-hidden
-              className="pointer-events-none absolute inset-x-0 z-[5] h-px -translate-y-1/2"
-              style={{
-                top: `${Math.max(0, Math.min(1, chipGuide.y)) * 100}%`,
-                backgroundColor: `${accent}66`,
-              }}
-            />
-            {canDrag ? (
+            {/* Chip position guides follow the clamped visual center (matches bake). */}
+            {chipVisual ? (
+              <>
+                <div
+                  aria-hidden
+                  className="pointer-events-none absolute inset-y-0 z-[5] w-px -translate-x-1/2"
+                  style={{
+                    left: `${Math.max(0, Math.min(1, chipVisual.x)) * 100}%`,
+                    backgroundColor: `${accent}66`,
+                    opacity: wantHandleVisible || dragging ? 1 : 0.45,
+                  }}
+                />
+                <div
+                  aria-hidden
+                  className="pointer-events-none absolute inset-x-0 z-[5] h-px -translate-y-1/2"
+                  style={{
+                    top: `${Math.max(0, Math.min(1, chipVisual.y)) * 100}%`,
+                    backgroundColor: `${accent}66`,
+                    opacity: wantHandleVisible || dragging ? 1 : 0.45,
+                  }}
+                />
+              </>
+            ) : null}
+            {hasSprite && chipVisual && props.spriteUrl ? (
               <button
                 type="button"
-                title="Drag to place"
-                aria-label="Drag chip position"
-                tabIndex={handleOpaque ? undefined : -1}
-                aria-hidden={!handleOpaque}
-                onPointerDown={beginDrag}
-                className={`absolute z-[9] flex h-7 w-7 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-[#0b111b] shadow-md touch-none transition-opacity duration-300 ease-out ${
-                  dragging ? "cursor-grabbing" : "cursor-grab"
-                } ${handleOpaque ? "opacity-100" : "pointer-events-none opacity-0"}`}
+                title={canDrag ? "Drag to place" : undefined}
+                aria-label={canDrag ? "Drag label position" : "Selected label"}
+                tabIndex={canDrag ? 0 : -1}
+                onPointerDown={canDrag ? beginDrag : undefined}
+                className={`absolute z-[9] overflow-hidden p-0 ${
+                  canDrag
+                    ? `touch-none ${dragging ? "cursor-grabbing" : "cursor-grab"}`
+                    : "pointer-events-none"
+                }`}
                 style={{
-                  left: `${Math.max(0, Math.min(1, chipGuide.x)) * 100}%`,
-                  top: `${Math.max(0, Math.min(1, chipGuide.y)) * 100}%`,
-                  backgroundColor: accent,
-                  boxShadow: `0 0 0 1px ${accent}, 0 0 12px ${accent}88`,
+                  left: `${chipVisual.leftPct}%`,
+                  top: `${chipVisual.topPct}%`,
+                  width: `${chipVisual.widthPct}%`,
+                  height: `${chipVisual.heightPct}%`,
+                  boxShadow: dragging
+                    ? `0 0 0 1px ${accent}, 0 0 14px ${accent}88`
+                    : `0 0 0 1px ${accent}55`,
+                  background: "transparent",
                 }}
               >
-                <span className="material-symbols-outlined leading-none text-[#0b111b]" style={{ fontSize: 16 }}>
-                  open_with
-                </span>
+                <img
+                  src={props.spriteUrl}
+                  alt=""
+                  draggable={false}
+                  className="pointer-events-none h-full w-full select-none object-fill"
+                />
               </button>
             ) : null}
           </>
         ) : null}
         {bannerGuide
           ? (() => {
-              const x0 = Math.max(0, Math.min(1, bannerGuide.xStart));
-              const x1 = Math.max(0, Math.min(1, bannerGuide.xEnd));
-              const y0 = Math.max(0, Math.min(1, bannerGuide.yStart));
-              const y1 = Math.max(0, Math.min(1, bannerGuide.yEnd));
-              const left = x0 * 100;
-              const top = y0 * 100;
-              const width = Math.max(0, (x1 - x0) * 100);
-              const height = Math.max(0, (y1 - y0) * 100);
+              const x0 = clampSpanPlacementFrac(bannerGuide.xStart, 0);
+              const x1 = clampSpanPlacementFrac(bannerGuide.xEnd, 1);
+              const y0 = clampSpanPlacementFrac(bannerGuide.yStart, 0);
+              const y1 = clampSpanPlacementFrac(bannerGuide.yEnd, 0.12);
+              const left = Math.min(x0, x1) * 100;
+              const top = Math.min(y0, y1) * 100;
+              const width = Math.abs(x1 - x0) * 100;
+              const height = Math.abs(y1 - y0) * 100;
               const right = left + width;
               const bottom = top + height;
+              const fill = hexToRgba(bannerGuide.fill_color || "#000000", bannerGuide.fill_opacity ?? 0.65);
+              const borderSpec = {
+                color: bannerGuide.border_color || "#ffffff",
+                opacity: Number(bannerGuide.border_opacity ?? 0),
+                thicknessPx: Math.max(0, Math.round(Number(bannerGuide.border_thickness ?? 3))),
+              };
               const line = (style: CSSProperties, strong = false) => (
                 <div
                   aria-hidden
@@ -8091,29 +9175,41 @@ function PosterOverlayPreviewTile(props: {
                   }}
                 />
               );
+              const fillRot = normalizeLayoutRotation(bannerGuide.rotation);
               return (
                 <>
                   <div
                     role={canDrag ? "button" : undefined}
-                    aria-label={canDrag ? "Drag banner position" : undefined}
-                    tabIndex={canDrag && handleOpaque ? 0 : -1}
+                    aria-label={canDrag ? "Drag fill rectangle" : "Selected fill rectangle"}
+                    tabIndex={canDrag ? 0 : -1}
                     onPointerDown={canDrag ? beginDrag : undefined}
                     className={`absolute z-[4] ${
                       canDrag
-                        ? `touch-none ${dragging ? "cursor-grabbing" : "cursor-grab"} ${
-                            handleOpaque ? "" : "pointer-events-none"
-                          }`
+                        ? `touch-none ${dragging ? "cursor-grabbing" : "cursor-grab"}`
                         : "pointer-events-none"
                     }`}
-                    style={{
-                      left: `${left}%`,
-                      top: `${top}%`,
-                      width: `${width}%`,
-                      height: `${height}%`,
-                      backgroundColor: `${accent}22`,
-                    }}
+                    style={deskFillBandStyle(
+                      x0,
+                      x1,
+                      y0,
+                      y1,
+                      fill,
+                      fillRot,
+                      {
+                        boxShadow: dragging
+                          ? `0 0 0 1px ${accent}, 0 0 12px ${accent}66`
+                          : `0 0 0 1px ${accent}44`,
+                      },
+                      borderSpec,
+                      {
+                        top: bannerGuide.fade_top,
+                        right: bannerGuide.fade_right,
+                        bottom: bannerGuide.fade_bottom,
+                        left: bannerGuide.fade_left,
+                      },
+                    )}
                   />
-                  {/* Four movement edges; end lines inset 1px so overflow:hidden does not clip them. */}
+                  {/* AABB edges mark the thickness box (band center) even when the fill is diagonal. */}
                   {line({ left: `${left}%`, top: `${top}%`, width: 1, height: `${height}%` })}
                   {line(
                     {
@@ -8136,32 +9232,6 @@ function PosterOverlayPreviewTile(props: {
                     },
                     true,
                   )}
-                  {canDrag && bannerCenter ? (
-                    <button
-                      type="button"
-                      title="Drag to place"
-                      aria-label="Drag banner position"
-                      tabIndex={handleOpaque ? undefined : -1}
-                      aria-hidden={!handleOpaque}
-                      onPointerDown={beginDrag}
-                      className={`absolute z-[9] flex h-7 w-7 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-[#0b111b] shadow-md touch-none transition-opacity duration-300 ease-out ${
-                        dragging ? "cursor-grabbing" : "cursor-grab"
-                      } ${handleOpaque ? "opacity-100" : "pointer-events-none opacity-0"}`}
-                      style={{
-                        left: `${bannerCenter.x * 100}%`,
-                        top: `${bannerCenter.y * 100}%`,
-                        backgroundColor: accent,
-                        boxShadow: `0 0 0 1px ${accent}, 0 0 12px ${accent}88`,
-                      }}
-                    >
-                      <span
-                        className="material-symbols-outlined leading-none text-[#0b111b]"
-                        style={{ fontSize: 16 }}
-                      >
-                        open_with
-                      </span>
-                    </button>
-                  ) : null}
                 </>
               );
             })()
@@ -8201,13 +9271,21 @@ function PosterOverlayPreviewTile(props: {
               );
             })
           : null}
+        </div>
       </div>
       <figcaption className="px-2 py-1.5 text-[11px] text-slate-400 leading-snug">
         {props.label}
-        {chipGuide && canDrag ? <span className="text-slate-500"> · Drag handle to place</span> : null}
-        {bannerGuide && canDrag ? (
-          <span className="text-slate-500"> · Drag fill to slide (size stays fixed)</span>
+        {panMode ? <span className="text-slate-500"> · Pan mode (drag preview)</span> : null}
+        {!panMode && chipGuide && canDrag ? (
+          <span className="text-slate-500"> · Drag the selected label to place</span>
         ) : null}
+        {!panMode && bannerGuide && canDrag ? (
+          <span className="text-slate-500"> · Drag the fill to slide (size stays fixed)</span>
+        ) : null}
+        {boardTools.grid ? (
+          <span className="text-slate-500"> · grid {boardTools.snapStep}px</span>
+        ) : null}
+        {boardTools.snap ? <span className="text-slate-500"> · snap on</span> : null}
       </figcaption>
     </figure>
   );
@@ -8265,7 +9343,566 @@ function labelsWithSelectedOnTop(labels: unknown[], selectedId: string | null | 
   return next;
 }
 
-/** Sticky preview that POSTs the active designer draft (avoids GET query truncation). */
+function isDeskBannerLabel(lab: Record<string, unknown>): boolean {
+  const token = String(lab.token || "").trim();
+  const style = String(lab.style || "").trim().toLowerCase();
+  return token === "FillRectangle" || token === "Banner" || style === "banner";
+}
+
+type DeskSprite = { url: string; w: number; h: number; styleKey: string };
+
+/** Desk stage: unlabeled base bake + live bake-accurate label layers. */
+function PosterOverlayDeskStage(props: {
+  src: string;
+  label: string;
+  aspect: string;
+  widthClass: string;
+  bakeW: number;
+  bakeH: number;
+  labels: Record<string, unknown>[];
+  sprites: Record<string, DeskSprite>;
+  selectedId?: string | null;
+  accentHex?: string;
+  boardTools?: LayoutBoardTools;
+  markers?: Array<{ id: string; n: number; x: number; y: number }> | null;
+  hoveredMarkerId?: string | null;
+  placementControlsHot?: boolean;
+  onPlacementDrag?: (x: number, y: number, labelId?: string) => void;
+  onSelectLabel?: (id: string | null) => void;
+}) {
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
+  const [alignGuides, setAlignGuides] = useState<DeskAlignGuides>({ xs: [], ys: [] });
+  const [spacingGuides, setSpacingGuides] = useState<DeskSpacingGuides>({ segments: [] });
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const dragActiveRef = useRef<{ id: string; kind: "chip" | "banner"; grabDx: number; grabDy: number } | null>(
+    null,
+  );
+  const panActiveRef = useRef<{ startX: number; startY: number; originX: number; originY: number } | null>(null);
+  const panOffsetRef = useRef(panOffset);
+  panOffsetRef.current = panOffset;
+  const boardTools = props.boardTools || DEFAULT_LAYOUT_BOARD_TOOLS;
+  const boardToolsRef = useRef(boardTools);
+  boardToolsRef.current = boardTools;
+  const bakeSizeRef = useRef({ bakeW: props.bakeW, bakeH: props.bakeH });
+  bakeSizeRef.current = { bakeW: props.bakeW, bakeH: props.bakeH };
+  const spritesRef = useRef(props.sprites);
+  spritesRef.current = props.sprites;
+  const labelsRef = useRef(props.labels);
+  labelsRef.current = props.labels;
+  const accent = layoutGuideHex(boardTools, props.accentHex || "#FBBF24");
+  const panMode = boardTools.pan;
+  const bakeW = Math.max(1, props.bakeW);
+  const bakeH = Math.max(1, props.bakeH);
+
+  const fracFromClient = useCallback((clientX: number, clientY: number) => {
+    const el = stageRef.current;
+    if (!el) return null;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    return {
+      x: (clientX - rect.left) / rect.width,
+      y: (clientY - rect.top) / rect.height,
+    };
+  }, []);
+
+  const buildMovingBox = useCallback(
+    (
+      frac: { x: number; y: number },
+      labelId: string,
+      kind: "chip" | "banner",
+      bakeW: number,
+      bakeH: number,
+    ): DeskAlignBox | null => {
+      if (kind === "chip") {
+        const sprite = spritesRef.current[labelId];
+        if (!sprite || !(sprite.w > 0) || !(sprite.h > 0)) return null;
+        return deskAlignBoxFromChip(labelId, frac.x, frac.y, sprite.w, sprite.h, bakeW, bakeH);
+      }
+      const lab = labelsRef.current.find((l) => String(l.id || "") === labelId);
+      if (!lab) return null;
+      const geom = deskAlignBoxFromFill(labelId, lab, bakeW, bakeH);
+      const width = geom.x1 - geom.x0;
+      const height = geom.y1 - geom.y0;
+      const x0 = Math.round(frac.x * bakeW) - Math.floor(width / 2);
+      const y0 = Math.round(frac.y * bakeH) - Math.floor(height / 2);
+      return {
+        id: labelId,
+        x0,
+        y0,
+        x1: x0 + width,
+        y1: y0 + height,
+        cx: x0 + Math.floor(width / 2),
+        cy: y0 + Math.floor(height / 2),
+      };
+    },
+    [],
+  );
+
+  const finalizePlacement = useCallback(
+    (frac: { x: number; y: number }, labelId: string, kind: "chip" | "banner") => {
+      const size = bakeSizeRef.current;
+      const t = boardToolsRef.current;
+      let next = frac;
+      if (t.snap && t.snapStep > 1) {
+        next = {
+          x: snapFracToBakeGrid(next.x, size.bakeW, t.snapStep),
+          y: snapFracToBakeGrid(next.y, size.bakeH, t.snapStep),
+        };
+      }
+
+      const targets = deskAlignBoxesForLabels(
+        labelsRef.current,
+        spritesRef.current,
+        size.bakeW,
+        size.bakeH,
+        labelId,
+      );
+      let guides: DeskAlignGuides = { xs: [], ys: [] };
+      let spacing: DeskSpacingGuides = { segments: [] };
+
+      if (targets.length > 0) {
+        const moving = buildMovingBox(next, labelId, kind, size.bakeW, size.bakeH);
+        if (moving) {
+          const aligned = snapDeskBoxToAlignments(moving, targets, 3);
+          if (aligned.dx !== 0 || aligned.dy !== 0) {
+            next = {
+              x: (moving.cx + aligned.dx) / size.bakeW,
+              y: (moving.cy + aligned.dy) / size.bakeH,
+            };
+          }
+          const afterAlign = buildMovingBox(next, labelId, kind, size.bakeW, size.bakeH);
+          if (afterAlign) {
+            const spaced = snapDeskBoxToEqualSpacing(afterAlign, targets, 3);
+            if (spaced.dx !== 0 || spaced.dy !== 0) {
+              next = {
+                x: (afterAlign.cx + spaced.dx) / size.bakeW,
+                y: (afterAlign.cy + spaced.dy) / size.bakeH,
+              };
+            }
+          }
+        }
+      }
+
+      next = snapFracToBakeCenter(next, size.bakeW, size.bakeH, 3);
+      next = {
+        x: clampCenterPlacementFrac(next.x, 0.5),
+        y: clampCenterPlacementFrac(next.y, 0.5),
+      };
+
+      // Guides from the final placed box so center/clamp do not leave stale lines.
+      if (targets.length > 0) {
+        const finalBox = buildMovingBox(next, labelId, kind, size.bakeW, size.bakeH);
+        if (finalBox) {
+          guides = snapDeskBoxToAlignments(finalBox, targets, 0.5).guides;
+          spacing = collectDeskEqualSpacingGuides(finalBox, targets, 0.5);
+        }
+      }
+      setAlignGuides(guides);
+      setSpacingGuides(spacing);
+      return next;
+    },
+    [buildMovingBox],
+  );
+
+  useEffect(() => {
+    if (!draggingId && !panActiveRef.current) return;
+    const onMove = (event: PointerEvent) => {
+      if (panActiveRef.current) {
+        const pan = panActiveRef.current;
+        setPanOffset({
+          x: pan.originX + (event.clientX - pan.startX),
+          y: pan.originY + (event.clientY - pan.startY),
+        });
+        return;
+      }
+      const drag = dragActiveRef.current;
+      if (!drag || !props.onPlacementDrag) return;
+      const next = fracFromClient(event.clientX, event.clientY);
+      if (!next) return;
+      const raw = { x: next.x - drag.grabDx, y: next.y - drag.grabDy };
+      const placed = finalizePlacement(raw, drag.id, drag.kind);
+      props.onPlacementDrag(placed.x, placed.y, drag.id);
+    };
+    const onUp = () => {
+      panActiveRef.current = null;
+      dragActiveRef.current = null;
+      setDraggingId(null);
+      setAlignGuides({ xs: [], ys: [] });
+      setSpacingGuides({ segments: [] });
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+  }, [draggingId, finalizePlacement, fracFromClient, props.onPlacementDrag]);
+
+  const beginPan = (event: ReactPointerEvent<HTMLElement>) => {
+    if (!panMode) return;
+    event.preventDefault();
+    panActiveRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: panOffsetRef.current.x,
+      originY: panOffsetRef.current.y,
+    };
+    setDraggingId("__pan__");
+  };
+
+  const beginLayerDrag = (
+    event: ReactPointerEvent<HTMLElement>,
+    lab: Record<string, unknown>,
+    kind: "chip" | "banner",
+    center: { x: number; y: number },
+  ) => {
+    if (panMode || !props.onPlacementDrag) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const id = String(lab.id || "");
+    if (!id) return;
+    props.onSelectLabel?.(id);
+    const next = fracFromClient(event.clientX, event.clientY);
+    const grabDx = next ? next.x - center.x : 0;
+    const grabDy = next ? next.y - center.y : 0;
+    dragActiveRef.current = { id, kind, grabDx, grabDy };
+    setDraggingId(id);
+    const placed = finalizePlacement(center, id, kind);
+    props.onPlacementDrag(placed.x, placed.y, id);
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const selected = props.labels.find((l) => String(l.id || "") === props.selectedId) || null;
+  const selectedChipCenter = (() => {
+    if (!selected || isDeskBannerLabel(selected)) return null;
+    const id = String(selected.id || "");
+    const sprite = props.sprites[id];
+    const ax = Number(selected.x);
+    const ay = Number(selected.y);
+    const fx = Number.isFinite(ax) ? clampCenterPlacementFrac(ax, 0.5) : 0.5;
+    const fy = Number.isFinite(ay) ? clampCenterPlacementFrac(ay, 0.5) : 0.5;
+    if (sprite && sprite.w > 0 && sprite.h > 0) {
+      const box = deskChipBoxFromCenter(fx, fy, sprite.w, sprite.h, bakeW, bakeH);
+      return {
+        x: (box.x0 + Math.floor(sprite.w / 2)) / bakeW,
+        y: (box.y0 + Math.floor(sprite.h / 2)) / bakeH,
+      };
+    }
+    return { x: fx, y: fy };
+  })();
+  const glowX = Boolean(selectedChipCenter && Math.round(selectedChipCenter.x * bakeW) === bakeW / 2);
+  const glowY = Boolean(selectedChipCenter && Math.round(selectedChipCenter.y * bakeH) === bakeH / 2);
+
+  const fills = props.labels.filter((l) => isDeskBannerLabel(l));
+  const chips = props.labels.filter((l) => !isDeskBannerLabel(l));
+
+  return (
+    <figure
+      className={`shrink-0 rounded-lg overflow-hidden border border-[#424753]/40 bg-[#0f1419]/80 ${props.widthClass}`}
+    >
+      <div className={`relative w-full overflow-hidden bg-[#0b111b] ${props.aspect}`}>
+        <div
+          ref={stageRef}
+          onPointerDown={(e) => {
+            if (panMode) {
+              beginPan(e);
+              return;
+            }
+            if (e.target === e.currentTarget) props.onSelectLabel?.(null);
+          }}
+          className={`absolute inset-0 touch-none ${
+            panMode ? (draggingId === "__pan__" ? "cursor-grabbing" : "cursor-grab") : ""
+          }`}
+          style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px)` }}
+        >
+          <img
+            src={props.src}
+            alt={`${props.label} desk backdrop`}
+            draggable={false}
+            className="pointer-events-none absolute inset-0 h-full w-full object-cover"
+          />
+          {boardTools.grid ? (
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-0 z-[3] opacity-50"
+              style={{
+                backgroundImage: `linear-gradient(to right, ${accent}55 1px, transparent 1px), linear-gradient(to bottom, ${accent}55 1px, transparent 1px)`,
+                backgroundSize: `${(boardTools.snapStep / bakeW) * 100}% ${(boardTools.snapStep / bakeH) * 100}%`,
+              }}
+            />
+          ) : null}
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-y-0 z-[4] w-px -translate-x-1/2"
+            style={{ left: "50%", ...midlineGlowStyle("v", glowX, accent) }}
+          />
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-x-0 z-[4] h-px -translate-y-1/2"
+            style={{ top: "50%", ...midlineGlowStyle("h", glowY, accent) }}
+          />
+          {selectedChipCenter ? (
+            <>
+              <div
+                aria-hidden
+                className="pointer-events-none absolute inset-y-0 z-[5] w-px -translate-x-1/2"
+                style={{ left: `${selectedChipCenter.x * 100}%`, backgroundColor: `${accent}66` }}
+              />
+              <div
+                aria-hidden
+                className="pointer-events-none absolute inset-x-0 z-[5] h-px -translate-y-1/2"
+                style={{ top: `${selectedChipCenter.y * 100}%`, backgroundColor: `${accent}66` }}
+              />
+            </>
+          ) : null}
+          {alignGuides.xs.map((px) => (
+            <div
+              key={`align-x-${px}`}
+              aria-hidden
+              className="pointer-events-none absolute inset-y-0 z-[8] w-px -translate-x-1/2"
+              style={{
+                left: `${(px / bakeW) * 100}%`,
+                backgroundColor: accent,
+                boxShadow: `0 0 0 1px ${accent}44, 0 0 10px ${accent}99`,
+              }}
+            />
+          ))}
+          {alignGuides.ys.map((px) => (
+            <div
+              key={`align-y-${px}`}
+              aria-hidden
+              className="pointer-events-none absolute inset-x-0 z-[8] h-px -translate-y-1/2"
+              style={{
+                top: `${(px / bakeH) * 100}%`,
+                height: 2,
+                backgroundColor: accent,
+                boxShadow: `0 0 0 1px ${accent}44, 0 0 12px ${accent}aa`,
+              }}
+            />
+          ))}
+          {spacingGuides.segments.map((seg, i) => {
+            const span = Math.max(0, seg.end - seg.start);
+            if (span <= 0) return null;
+            const cap = 6;
+            if (seg.axis === "x") {
+              return (
+                <div
+                  key={`space-x-${i}-${seg.start}-${seg.end}`}
+                  aria-hidden
+                  className="pointer-events-none absolute z-[9]"
+                  style={{
+                    left: `${(seg.start / bakeW) * 100}%`,
+                    width: `${(span / bakeW) * 100}%`,
+                    top: `${(seg.cross / bakeH) * 100}%`,
+                    height: 0,
+                  }}
+                >
+                  <div
+                    className="absolute left-0 right-0 top-0 -translate-y-1/2"
+                    style={{
+                      height: 2,
+                      backgroundColor: accent,
+                      boxShadow: `0 0 8px ${accent}aa`,
+                    }}
+                  />
+                  <div
+                    className="absolute left-0 top-1/2 -translate-y-1/2"
+                    style={{ width: 2, height: cap, backgroundColor: accent }}
+                  />
+                  <div
+                    className="absolute right-0 top-1/2 -translate-y-1/2"
+                    style={{ width: 2, height: cap, backgroundColor: accent }}
+                  />
+                </div>
+              );
+            }
+            return (
+              <div
+                key={`space-y-${i}-${seg.start}-${seg.end}`}
+                aria-hidden
+                className="pointer-events-none absolute z-[9]"
+                style={{
+                  top: `${(seg.start / bakeH) * 100}%`,
+                  height: `${(span / bakeH) * 100}%`,
+                  left: `${(seg.cross / bakeW) * 100}%`,
+                  width: 0,
+                }}
+              >
+                <div
+                  className="absolute top-0 bottom-0 left-0 -translate-x-1/2"
+                  style={{
+                    width: 2,
+                    backgroundColor: accent,
+                    boxShadow: `0 0 8px ${accent}aa`,
+                  }}
+                />
+                <div
+                  className="absolute top-0 left-1/2 -translate-x-1/2"
+                  style={{ height: 2, width: cap, backgroundColor: accent }}
+                />
+                <div
+                  className="absolute bottom-0 left-1/2 -translate-x-1/2"
+                  style={{ height: 2, width: cap, backgroundColor: accent }}
+                />
+              </div>
+            );
+          })}
+          {fills.map((lab) => {
+            const id = String(lab.id || "");
+            const x0 = clampSpanPlacementFrac(Number(lab.x_start) || 0, 0);
+            const x1 = clampSpanPlacementFrac(Number(lab.x_end) || 1, 1);
+            const y0 = clampSpanPlacementFrac(Number(lab.y_start) || 0, 0);
+            const y1 = clampSpanPlacementFrac(Number(lab.y_end) || 0.12, 0.12);
+            const left = Math.min(x0, x1) * 100;
+            const top = Math.min(y0, y1) * 100;
+            const center = { x: (x0 + x1) / 2, y: (y0 + y1) / 2 };
+            const selected = id === props.selectedId;
+            const fill = hexToRgba(String(lab.fill_color || "#000000"), Number(lab.fill_opacity ?? 0.65));
+            const borderSpec = {
+              color: String(lab.border_color || "#ffffff"),
+              opacity: Number(lab.border_opacity ?? 0),
+              thicknessPx: Math.max(0, Math.round(Number(lab.border_thickness ?? 3))),
+            };
+            return (
+              <button
+                key={id || `fill-${left}-${top}`}
+                type="button"
+                aria-label={selected ? "Selected fill rectangle" : "Select fill rectangle"}
+                aria-pressed={selected}
+                onPointerDown={(e) => beginLayerDrag(e, lab, "banner", center)}
+                className={`absolute z-[6] p-0 ${
+                  panMode
+                    ? "pointer-events-none"
+                    : draggingId === id
+                      ? "cursor-grabbing touch-none"
+                      : "cursor-grab touch-none"
+                }`}
+                style={deskFillBandStyle(
+                  x0,
+                  x1,
+                  y0,
+                  y1,
+                  fill,
+                  lab.rotation,
+                  {
+                    boxShadow: selected
+                      ? `0 0 0 1px ${accent}, 0 0 12px ${accent}66`
+                      : `0 0 0 1px ${accent}33`,
+                  },
+                  borderSpec,
+                  {
+                    top: Number((lab as { fade_top?: number }).fade_top ?? 0),
+                    right: Number((lab as { fade_right?: number }).fade_right ?? 0),
+                    bottom: Number((lab as { fade_bottom?: number }).fade_bottom ?? 0),
+                    left: Number((lab as { fade_left?: number }).fade_left ?? 0),
+                  },
+                )}
+              />
+            );
+          })}
+          {chips.map((lab) => {
+            const id = String(lab.id || "");
+            const sprite = props.sprites[id];
+            if (!sprite) return null;
+            const ax = Number(lab.x);
+            const ay = Number(lab.y);
+            const fx = Number.isFinite(ax) ? clampCenterPlacementFrac(ax, 0.5) : 0.5;
+            const fy = Number.isFinite(ay) ? clampCenterPlacementFrac(ay, 0.5) : 0.5;
+            const box = deskChipBoxFromCenter(fx, fy, sprite.w, sprite.h, bakeW, bakeH);
+            const center = {
+              x: (box.x0 + Math.floor(sprite.w / 2)) / bakeW,
+              y: (box.y0 + Math.floor(sprite.h / 2)) / bakeH,
+            };
+            const selected = id === props.selectedId;
+            return (
+              <button
+                key={id || sprite.url}
+                type="button"
+                aria-label={selected ? "Selected label" : "Select label"}
+                aria-pressed={selected}
+                onPointerDown={(e) => beginLayerDrag(e, lab, "chip", center)}
+                className={`absolute z-[7] overflow-hidden p-0 ${
+                  panMode
+                    ? "pointer-events-none"
+                    : draggingId === id
+                      ? "cursor-grabbing touch-none"
+                      : "cursor-grab touch-none"
+                }`}
+                style={{
+                  left: `${(box.x0 / bakeW) * 100}%`,
+                  top: `${(box.y0 / bakeH) * 100}%`,
+                  width: `${(sprite.w / bakeW) * 100}%`,
+                  height: `${(sprite.h / bakeH) * 100}%`,
+                  boxShadow: selected
+                    ? `0 0 0 1px ${accent}, 0 0 14px ${accent}88`
+                    : "0 0 0 1px rgba(148,163,184,0.25)",
+                  background: "transparent",
+                }}
+              >
+                <img
+                  src={sprite.url}
+                  alt=""
+                  draggable={false}
+                  className="pointer-events-none h-full w-full select-none object-fill"
+                />
+              </button>
+            );
+          })}
+          {props.markers && props.markers.length > 0
+            ? [...props.markers]
+                .sort((a, b) => {
+                  if (a.id === props.hoveredMarkerId) return 1;
+                  if (b.id === props.hoveredMarkerId) return -1;
+                  return 0;
+                })
+                .map((marker) => {
+                  const hot = marker.id === props.hoveredMarkerId;
+                  const pad = 0.045;
+                  const x = Math.max(pad, Math.min(1 - pad, marker.x));
+                  const y = Math.max(pad, Math.min(1 - pad, marker.y));
+                  return (
+                    <div
+                      key={marker.id}
+                      aria-hidden
+                      className={`pointer-events-none absolute flex h-5 min-w-[1.25rem] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-md px-1 font-mono text-[11px] font-semibold shadow-sm ${
+                        hot ? "z-[8]" : "z-[5]"
+                      }`}
+                      style={{
+                        left: `${x * 100}%`,
+                        top: `${y * 100}%`,
+                        backgroundColor: hot ? accent : "rgba(11, 17, 27, 0.88)",
+                        color: hot ? "#0b111b" : "#e2e8f0",
+                        boxShadow: hot
+                          ? `0 0 0 1px ${accent}, 0 0 10px ${accent}88`
+                          : "0 0 0 1px rgba(148,163,184,0.35)",
+                      }}
+                    >
+                      {marker.n}
+                    </div>
+                  );
+                })
+            : null}
+        </div>
+      </div>
+      <figcaption className="px-2 py-1.5 text-[11px] text-slate-400 leading-snug">
+        {props.label}
+        {panMode ? <span className="text-slate-500"> · Pan mode (drag preview)</span> : null}
+        {!panMode ? <span className="text-slate-500"> · Click a label to select · Drag to place</span> : null}
+        {boardTools.grid ? <span className="text-slate-500"> · grid {boardTools.snapStep}px</span> : null}
+        {boardTools.snap ? <span className="text-slate-500"> · snap on</span> : null}
+      </figcaption>
+    </figure>
+  );
+}
+
+/** Sticky desk: base bake (no labels) + live Pillow sprites for every chip/badge. */
 function PosterOverlayFocusPreview(props: {
   values: FieldValueMap;
   accentHex?: string;
@@ -8283,7 +9920,9 @@ function PosterOverlayFocusPreview(props: {
     selectedId?: string | null;
     placementControlsHot?: boolean;
   };
-  onPlacementDrag?: (x: number, y: number) => void;
+  onPlacementDrag?: (x: number, y: number, labelId?: string) => void;
+  onSelectLabel?: (id: string | null) => void;
+  boardTools?: LayoutBoardTools;
 }) {
   const grayscale = Boolean(props.layoutPreview.grayscale);
   const baseUrl = props.layoutPreview.baseUrl || null;
@@ -8292,8 +9931,26 @@ function PosterOverlayFocusPreview(props: {
   const selectedId = props.layoutPreview.selectedId || null;
   const meta = posterPreviewMetaForProfile(props.layoutPreview.profileKey);
   const [src, setSrc] = useState<string | null>(null);
+  const [sprites, setSprites] = useState<Record<string, DeskSprite>>({});
   const blobRef = useRef<string | null>(null);
+  const spriteUrlSetRef = useRef<Set<string>>(new Set());
+  const spritesRef = useRef(sprites);
+  spritesRef.current = sprites;
   const labelsJson = props.layoutPreview.labelsJson || "[]";
+  const labels = (() => {
+    try {
+      const parsed = JSON.parse(labelsJson) as unknown[];
+      return Array.isArray(parsed)
+        ? parsed.filter((l): l is Record<string, unknown> => Boolean(l && typeof l === "object"))
+        : [];
+    } catch {
+      return [] as Record<string, unknown>[];
+    }
+  })();
+  const chipSpriteNeeds = labels
+    .filter((l) => !isDeskBannerLabel(l) && String(l.id || ""))
+    .map((l) => ({ id: String(l.id), styleKey: layoutLabelSpriteStyleKey(l), label: l }));
+  const chipNeedsKey = chipSpriteNeeds.map((c) => `${c.id}:${c.styleKey}`).join("|");
 
   useEffect(() => {
     let cancelled = false;
@@ -8301,13 +9958,6 @@ function PosterOverlayFocusPreview(props: {
       void (async () => {
         try {
           const csrf = getCsrfToken();
-          let labels: unknown[] = [];
-          try {
-            labels = JSON.parse(labelsJson) as unknown[];
-          } catch {
-            labels = [];
-          }
-          labels = labelsWithSelectedOnTop(labels, selectedId);
           const response = await fetch("/api/settings/poster-overlay-preview", {
             method: "POST",
             credentials: "same-origin",
@@ -8320,7 +9970,7 @@ function PosterOverlayFocusPreview(props: {
               kind: meta.kind,
               grayscale,
               profile_key: props.layoutPreview.profileKey,
-              labels,
+              labels: [],
               dim_base: false,
               base_url: baseUrl || undefined,
               sample_tokens: sampleTokens || undefined,
@@ -8342,64 +9992,113 @@ function PosterOverlayFocusPreview(props: {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [
-    baseUrl,
-    grayscale,
-    labelsJson,
-    meta.kind,
-    props.layoutPreview.profileKey,
-    sampleTokens,
-    sampleTokensJson,
-    selectedId,
-  ]);
+  }, [baseUrl, grayscale, meta.kind, props.layoutPreview.profileKey, sampleTokens, sampleTokensJson]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        const prevSprites = spritesRef.current;
+        const nextMap: Record<string, DeskSprite> = {};
+        const keepUrls = new Set<string>();
+        await Promise.all(
+          chipSpriteNeeds.map(async (need) => {
+            const existing = prevSprites[need.id];
+            if (existing && existing.styleKey === need.styleKey) {
+              nextMap[need.id] = existing;
+              keepUrls.add(existing.url);
+              return;
+            }
+            try {
+              const csrf = getCsrfToken();
+              const response = await fetch("/api/settings/poster-overlay-label-sprite", {
+                method: "POST",
+                credentials: "same-origin",
+                headers: {
+                  Accept: "image/png",
+                  "Content-Type": "application/json",
+                  ...(csrf ? { "X-CSRF-Token": csrf } : {}),
+                },
+                body: JSON.stringify({
+                  kind: meta.kind,
+                  profile_key: props.layoutPreview.profileKey,
+                  label: need.label,
+                  sample_tokens: sampleTokens || undefined,
+                }),
+              });
+              if (!response.ok) throw new Error(`Sprite failed (${response.status})`);
+              const w = Number(response.headers.get("X-Sprite-Width") || 0);
+              const h = Number(response.headers.get("X-Sprite-Height") || 0);
+              const blob = await response.blob();
+              if (cancelled || !(w > 0 && h > 0)) return;
+              const url = URL.createObjectURL(blob);
+              keepUrls.add(url);
+              nextMap[need.id] = { url, w, h, styleKey: need.styleKey };
+            } catch {
+              /* skip failed sprite */
+            }
+          }),
+        );
+        if (cancelled) {
+          keepUrls.forEach((url) => {
+            if (![...Object.values(prevSprites)].some((s) => s.url === url)) URL.revokeObjectURL(url);
+          });
+          return;
+        }
+        for (const prev of Object.values(prevSprites)) {
+          if (!keepUrls.has(prev.url)) URL.revokeObjectURL(prev.url);
+        }
+        spriteUrlSetRef.current = keepUrls;
+        setSprites(nextMap);
+      })();
+    }, 80);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+    // chipNeedsKey encodes ids+style; avoid refetch on x/y-only label changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chipNeedsKey, meta.kind, props.layoutPreview.profileKey, sampleTokensJson]);
 
   useEffect(() => {
     return () => {
       if (blobRef.current) URL.revokeObjectURL(blobRef.current);
+      spriteUrlSetRef.current.forEach((url) => URL.revokeObjectURL(url));
+      spriteUrlSetRef.current.clear();
     };
   }, []);
 
-  // Fill the sticky aside (28rem) so the poster scales with the designer column.
   const widthClass = "w-full";
   const bakeSize = meta.kind === "episode" ? { bakeW: 1920, bakeH: 1080 } : { bakeW: 1000, bakeH: 1500 };
-  const guide = props.layoutPreview.guide
-    ? { ...props.layoutPreview.guide, accentHex: props.accentHex, ...bakeSize }
-    : null;
   const showMarkers = Boolean(props.layoutPreview.listHovering);
   const markers = showMarkers ? props.layoutPreview.markers || null : null;
   if (!src) {
     return (
-      <div className={`relative rounded-lg border border-[#424753]/40 bg-[#0b111b] ${widthClass} ${meta.aspect} flex items-center justify-center overflow-hidden`}>
-        <span className="text-[12px] text-slate-500">Loading preview…</span>
-        {guide ? (
-          <>
-            <div
-              aria-hidden
-              className="pointer-events-none absolute inset-y-0 z-[4] w-px -translate-x-1/2"
-              style={{ left: "50%", backgroundColor: "rgba(148,163,184,0.35)" }}
-            />
-            <div
-              aria-hidden
-              className="pointer-events-none absolute inset-x-0 z-[4] h-px -translate-y-1/2"
-              style={{ top: "50%", backgroundColor: "rgba(148,163,184,0.35)" }}
-            />
-          </>
-        ) : null}
+      <div
+        className={`relative flex ${widthClass} ${meta.aspect} items-center justify-center overflow-hidden rounded-lg border border-[#424753]/40 bg-[#0b111b]`}
+      >
+        <span className="text-[12px] text-slate-500">Loading desk…</span>
       </div>
     );
   }
   return (
-    <PosterOverlayPreviewTile
+    <PosterOverlayDeskStage
       src={src}
       label={meta.label}
       aspect={meta.aspect}
       widthClass={widthClass}
-      guide={guide}
+      bakeW={bakeSize.bakeW}
+      bakeH={bakeSize.bakeH}
+      labels={labels}
+      sprites={sprites}
+      selectedId={selectedId}
+      accentHex={props.accentHex}
+      boardTools={props.boardTools}
       markers={markers}
       hoveredMarkerId={props.layoutPreview.hoveredId || null}
-      accentHex={props.accentHex}
-      onPlacementDrag={guide ? props.onPlacementDrag : undefined}
       placementControlsHot={Boolean(props.layoutPreview.placementControlsHot)}
+      onPlacementDrag={props.onPlacementDrag}
+      onSelectLabel={props.onSelectLabel}
     />
   );
 }
@@ -8425,7 +10124,9 @@ function PosterOverlayLivePreview(props: {
     selectedId?: string | null;
     placementControlsHot?: boolean;
   } | null;
-  onPlacementDrag?: (x: number, y: number) => void;
+  onPlacementDrag?: (x: number, y: number, labelId?: string) => void;
+  onSelectLabel?: (id: string | null) => void;
+  boardTools?: LayoutBoardTools;
 }) {
   const draftGrayscale = props.layoutPreview?.grayscale;
   const layerQs = new URLSearchParams({
@@ -8445,6 +10146,8 @@ function PosterOverlayLivePreview(props: {
         accentHex={props.accentHex}
         layoutPreview={props.layoutPreview}
         onPlacementDrag={props.onPlacementDrag}
+        onSelectLabel={props.onSelectLabel}
+        boardTools={props.boardTools}
       />
     );
   }

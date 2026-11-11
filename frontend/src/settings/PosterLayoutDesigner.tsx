@@ -8,7 +8,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import { fetchJson } from "../api/client";
+import { fetchJson, getCsrfToken } from "../api/client";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
 import {
   DATE_FORMAT_OPTIONS,
@@ -49,6 +49,21 @@ export type PosterLayoutLabel = {
   border_color: string;
   fill_opacity: number;
   border_opacity: number;
+  /** Bake-pixel border stroke (long sides on fills; full frame on chips). */
+  border_thickness?: number;
+  /** Fill edge fade depth (0..0.5 of that local shape axis, before rotation). */
+  fade_top?: number;
+  fade_right?: number;
+  fade_bottom?: number;
+  fade_left?: number;
+  /** Chip score / label text fade. */
+  text_opacity?: number;
+  /** Arted Rating logo fade (independent of plate ``fill_opacity``). */
+  logo_opacity?: number;
+  /** CSS-clockwise degrees (0 = upright). */
+  rotation?: number;
+  /** Custom chip glyph layout: horizontal line or stacked vertical. */
+  text_orientation?: "horizontal" | "vertical";
   size: LabelSize;
   /** Continuous chip/badge scale (1 = small, 1.5 = medium, 2 = large). */
   size_scale?: number;
@@ -106,6 +121,25 @@ const LABEL_SIZES: LabelSize[] = ["small", "medium", "large"];
 const SIZE_SCALE_PRESETS: Record<LabelSize, number> = { small: 1, medium: 1.5, large: 2 };
 const SIZE_SCALE_MIN = 0.5;
 const SIZE_SCALE_MAX = 2.5;
+/** Common angle presets (slider allows any degree). */
+const ROTATION_STEPS = [-135, -90, -45, 0, 45, 90, 135, 180] as const;
+
+function normalizeRotation(raw: unknown): number {
+  const deg = Number(raw);
+  if (!Number.isFinite(deg)) return 0;
+  let snapped = Math.round(deg);
+  snapped = ((snapped % 360) + 360) % 360;
+  if (snapped > 180) snapped -= 360;
+  return snapped;
+}
+
+function normalizeTextOrientation(raw: unknown): "horizontal" | "vertical" {
+  const key = String(raw || "")
+    .trim()
+    .toLowerCase();
+  if (key === "vertical" || key === "vert" || key === "stacked") return "vertical";
+  return "horizontal";
+}
 const RATING_ART_LAYOUTS: Array<{ id: "left" | "right" | "above" | "below" | "fill"; label: string }> = [
   { id: "left", label: "Left" },
   { id: "right", label: "Right" },
@@ -115,6 +149,20 @@ const RATING_ART_LAYOUTS: Array<{ id: "left" | "right" | "above" | "below" | "fi
 ];
 const FILL_RECTANGLE_TOKEN = "FillRectangle";
 const FILL_RECTANGLE_LABEL = "Fill rectangle";
+/**
+ * Max local shape size as a fraction of the poster axis (before rotation).
+ * 2.5× covers a full diagonal on movie (1000×1500) and episode (1920×1080) canvases.
+ */
+const FILL_SHAPE_SIZE_MAX_FRAC = 2.5;
+/**
+ * Span ends may extend this far past 0..1 when the center sits on an edge
+ * (half the max shape size), so the shape can hang off without the center leaving the poster.
+ */
+const SPAN_FRAC_PAD = FILL_SHAPE_SIZE_MAX_FRAC / 2;
+const BORDER_THICKNESS_DEFAULT = 3;
+const BORDER_THICKNESS_MAX = 32;
+/** Fill edge fade depth as a fraction of that local shape axis (before rotation). */
+const FADE_EDGE_MAX = 0.5;
 /** Invisible Custom chip used so the empty editor matches the tallest selected layout. */
 const EDITOR_HEIGHT_PROBE: PosterLayoutLabel = {
   id: "__editor_height__",
@@ -126,6 +174,15 @@ const EDITOR_HEIGHT_PROBE: PosterLayoutLabel = {
   border_color: "#ffffff",
   fill_opacity: 0.65,
   border_opacity: 0,
+  border_thickness: BORDER_THICKNESS_DEFAULT,
+  fade_top: 0,
+  fade_right: 0,
+  fade_bottom: 0,
+  fade_left: 0,
+  text_opacity: 1,
+  logo_opacity: 1,
+  rotation: 0,
+  text_orientation: "horizontal",
   size: "medium",
   size_scale: 1.5,
   rating_art_layout: "left",
@@ -145,20 +202,39 @@ const BANNER_THICKNESS_MAX = 0.45;
 /** Minimum axis width so the fill stays visible; thumbs can nearly meet. */
 const BANNER_SPAN_MIN_GAP = 0.01;
 
+/** Centers stay on the poster (0..1); shapes may still hang past the edge. */
+function clampCenterFrac(raw: unknown, fallback = 0.5): number {
+  return clampFrac(raw, fallback);
+}
+
+function normalizeBorderThickness(raw: unknown, fallback = BORDER_THICKNESS_DEFAULT): number {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(BORDER_THICKNESS_MAX, Math.round(n)));
+}
+
+function normalizeFadeEdge(raw: unknown, fallback = 0): number {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(FADE_EDGE_MAX, n));
+}
+
 function normalizeBannerSpan(start: unknown, end: unknown): { start: number; end: number } {
+  const lo = -SPAN_FRAC_PAD;
+  const hi = 1 + SPAN_FRAC_PAD;
   const one = (raw: unknown, fallback: number) => {
     const n = typeof raw === "number" ? raw : Number(raw);
     if (!Number.isFinite(n)) return fallback;
-    return Math.max(0, Math.min(1, n));
+    return Math.max(lo, Math.min(hi, n));
   };
   let a = one(start, 0);
   let b = one(end, 1);
   if (b < a) [a, b] = [b, a];
   if (b - a < BANNER_SPAN_MIN_GAP) {
     const mid = (a + b) / 2;
-    a = Math.max(0, mid - BANNER_SPAN_MIN_GAP / 2);
-    b = Math.min(1, a + BANNER_SPAN_MIN_GAP);
-    if (b - a < BANNER_SPAN_MIN_GAP) a = Math.max(0, b - BANNER_SPAN_MIN_GAP);
+    a = Math.max(lo, mid - BANNER_SPAN_MIN_GAP / 2);
+    b = Math.min(hi, a + BANNER_SPAN_MIN_GAP);
+    if (b - a < BANNER_SPAN_MIN_GAP) a = Math.max(lo, b - BANNER_SPAN_MIN_GAP);
   }
   return { start: a, end: b };
 }
@@ -725,15 +801,31 @@ function fillRectCenterXY(geom: FillRectGeom): { x: number; y: number } {
   return { x: (geom.xStart + geom.xEnd) / 2, y: (geom.yStart + geom.yEnd) / 2 };
 }
 
-/** Translate a fill rect so its center sits at (cx, cy); keep widths fixed. */
-function translateFillRectToCenter(geom: FillRectGeom, cx: number, cy: number): FillRectGeom {
-  const w = Math.max(BANNER_SPAN_MIN_GAP, geom.xEnd - geom.xStart);
-  const h = Math.max(BANNER_SPAN_MIN_GAP, geom.yEnd - geom.yStart);
-  let xStart = clampFrac(cx, 0.5) - w / 2;
-  let yStart = clampFrac(cy, 0.5) - h / 2;
-  xStart = Math.max(0, Math.min(1 - w, xStart));
-  yStart = Math.max(0, Math.min(1 - h, yStart));
+function fillRectSizeFromGeom(geom: FillRectGeom): { width: number; height: number } {
+  return {
+    width: Math.max(BANNER_SPAN_MIN_GAP, geom.xEnd - geom.xStart),
+    height: Math.max(BANNER_SPAN_MIN_GAP, geom.yEnd - geom.yStart),
+  };
+}
+
+/** Build spans from center + local shape size (shape-first; may hang off-canvas). */
+function fillRectGeomFromCenterSize(
+  cx: number,
+  cy: number,
+  width: number,
+  height: number,
+): FillRectGeom {
+  const w = Math.max(BANNER_SPAN_MIN_GAP, Math.min(FILL_SHAPE_SIZE_MAX_FRAC, width));
+  const h = Math.max(BANNER_SPAN_MIN_GAP, Math.min(FILL_SHAPE_SIZE_MAX_FRAC, height));
+  const xStart = clampCenterFrac(cx, 0.5) - w / 2;
+  const yStart = clampCenterFrac(cy, 0.5) - h / 2;
   return { xStart, xEnd: xStart + w, yStart, yEnd: yStart + h };
+}
+
+/** Translate a fill rect so its center sits at (cx, cy); keep size fixed (may hang off-canvas). */
+function translateFillRectToCenter(geom: FillRectGeom, cx: number, cy: number): FillRectGeom {
+  const size = fillRectSizeFromGeom(geom);
+  return fillRectGeomFromCenterSize(cx, cy, size.width, size.height);
 }
 
 function normalizeCustomText(raw: unknown, token: string, maxLen = CUSTOM_TEXT_MAX_LEN): string {
@@ -1076,12 +1168,16 @@ function bakeSizeForKind(kind: MediaKind): { w: number; h: number } {
 }
 
 function fracToBakePx(frac: number, dim: number): number {
-  return Math.round(clampFrac(frac, 0.5) * Math.max(1, dim));
+  const n = Number(frac);
+  const f = Number.isFinite(n) ? n : 0.5;
+  return Math.round(f * Math.max(1, dim));
 }
 
 function bakePxToFrac(px: number, dim: number): number {
   const d = Math.max(1, dim);
-  return clampFrac(px / d, 0);
+  const n = Number(px);
+  if (!Number.isFinite(n)) return 0;
+  return n / d;
 }
 
 /** Slider + typed bake-pixel field for one axis (stores fraction via onChange). */
@@ -1099,8 +1195,10 @@ function BakePxAxisControl(props: {
   /** Fired while the user is adjusting this control (keeps the preview drag handle visible). */
   onInteract?: () => void;
 }) {
-  const minPx = Math.round(Math.max(0, props.minFrac ?? 0) * props.dim);
-  const maxPx = Math.round(Math.min(1, props.maxFrac ?? 1) * props.dim);
+  const minFrac = props.minFrac ?? 0;
+  const maxFrac = props.maxFrac ?? 1;
+  const minPx = Math.round(minFrac * props.dim);
+  const maxPx = Math.round(maxFrac * props.dim);
   const px = Math.max(minPx, Math.min(maxPx, fracToBakePx(props.frac, props.dim)));
   const midPx = Math.round(props.dim / 2);
   const atCenter = px === midPx;
@@ -1158,6 +1256,111 @@ function BakePxAxisControl(props: {
         onChange={(e) => setPx(Number(e.target.value))}
         className="w-full accent-[var(--brand-accent)]"
       />
+    </div>
+  );
+}
+
+/** Single-axis shape size in bake-px (fill box before rotation). */
+function BakePxSizeControl(props: {
+  label: string;
+  frac: number;
+  dim: number;
+  /** Inclusive bake-px ceiling as a fraction of dim (default: fill shape max). */
+  maxFrac?: number;
+  onChange: (frac: number) => void;
+  onInteract?: () => void;
+}) {
+  const dim = Math.max(1, Math.round(props.dim));
+  const maxFrac = props.maxFrac ?? FILL_SHAPE_SIZE_MAX_FRAC;
+  const minPx = Math.max(1, Math.round(BANNER_SPAN_MIN_GAP * dim));
+  const maxPx = Math.max(minPx, Math.round(maxFrac * dim));
+  const px = Math.max(minPx, Math.min(maxPx, Math.round(props.frac * dim)));
+  const setPx = (raw: number) => {
+    if (!Number.isFinite(raw)) return;
+    const next = Math.max(minPx, Math.min(maxPx, Math.round(raw)));
+    props.onInteract?.();
+    props.onChange(next / dim);
+  };
+  return (
+    <div
+      className="space-y-1 text-[12px] text-slate-400 min-w-0"
+      onPointerDown={() => props.onInteract?.()}
+      onFocusCapture={() => props.onInteract?.()}
+    >
+      <div className="flex items-center gap-2">
+        <span className="shrink-0">{props.label}</span>
+        <input
+          type="number"
+          inputMode="numeric"
+          min={minPx}
+          max={maxPx}
+          step={1}
+          value={px}
+          aria-label={`${props.label} pixels`}
+          onChange={(e) => setPx(Number(e.target.value))}
+          className="ml-auto w-[4.25rem] shrink-0 rounded-lg border border-[#424753]/55 bg-[#0b111b] px-2 py-1 font-mono text-[12px] tabular-nums text-slate-100 outline-none focus:border-[color:var(--brand-accent)]"
+        />
+      </div>
+      <input
+        type="range"
+        min={minPx}
+        max={maxPx}
+        step={1}
+        value={px}
+        aria-label={`${props.label} size`}
+        onChange={(e) => setPx(Number(e.target.value))}
+        className="w-full accent-[var(--brand-accent)]"
+      />
+    </div>
+  );
+}
+
+/** Angle presets plus a free slider (−180…180). */
+function RotationControl(props: { value: number; onChange: (rotation: number) => void }) {
+  const value = normalizeRotation(props.value);
+  const labelFor = (deg: number) => (deg === 0 ? "0°" : `${deg > 0 ? "+" : ""}${deg}°`);
+  return (
+    <div className="space-y-1 text-[12px] text-slate-400 min-w-0">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="shrink-0">Angle</span>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {ROTATION_STEPS.map((deg) => {
+            const active = value === deg;
+            const label = labelFor(deg);
+            return (
+              <button
+                key={deg}
+                type="button"
+                title={label}
+                aria-label={`Angle ${label}`}
+                aria-pressed={active}
+                onClick={() => props.onChange(deg)}
+                className={`rounded-md border px-1.5 py-0.5 text-[10px] font-mono tabular-nums ${
+                  active
+                    ? "border-[var(--brand-accent)] text-slate-100 bg-[color:color-mix(in_srgb,var(--brand-accent)_18%,transparent)]"
+                    : "border-[#424753]/55 text-slate-400 hover:border-[#424753] hover:text-slate-200"
+                }`}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+        <input
+          type="range"
+          min={-180}
+          max={180}
+          step={1}
+          value={value}
+          aria-label="Angle degrees"
+          title={labelFor(value)}
+          onChange={(e) => props.onChange(normalizeRotation(Number(e.target.value)))}
+          className="ml-auto min-w-[7rem] flex-1 accent-[var(--brand-accent)]"
+        />
+        <span className="w-10 shrink-0 text-right font-mono tabular-nums text-slate-300">
+          {labelFor(value)}
+        </span>
+      </div>
     </div>
   );
 }
@@ -1247,15 +1450,13 @@ function normalizeLabelColors(label: PosterLayoutLabel, landscape = false): Post
   if (arted && (ratingSource === "auto" || !ratingSource)) ratingSource = "imdb";
   const ratingArtLayout = arted ? normalizeRatingArtLayout(label.rating_art_layout) : "left";
   const borderOpacity =
-    style === "banner"
-      ? 0
-      : border.length === 9
-        ? typeof label.border_opacity === "number" && !Number.isNaN(label.border_opacity)
-          ? label.border_opacity
-          : parseInt(border.slice(7, 9), 16) / 255
-        : typeof label.border_opacity === "number" && !Number.isNaN(label.border_opacity)
-          ? Math.max(0, Math.min(1, label.border_opacity))
-          : 0;
+    border.length === 9
+      ? typeof label.border_opacity === "number" && !Number.isNaN(label.border_opacity)
+        ? label.border_opacity
+        : parseInt(border.slice(7, 9), 16) / 255
+      : typeof label.border_opacity === "number" && !Number.isNaN(label.border_opacity)
+        ? Math.max(0, Math.min(1, label.border_opacity))
+        : 0;
   const cols = landscape ? 33 : 25;
   const rows = landscape ? 21 : 37;
   let xStart = 0;
@@ -1284,6 +1485,16 @@ function normalizeLabelColors(label: PosterLayoutLabel, landscape = false): Post
     xy = normalizeLabelXY(label, cols, rows);
   }
   const cell = cellFromXY(xy.x, xy.y, cols, rows);
+  const hasLogoOpacity = typeof label.logo_opacity === "number" && !Number.isNaN(label.logo_opacity);
+  const rawFillOpacity =
+    typeof label.fill_opacity === "number" && !Number.isNaN(label.fill_opacity) ? label.fill_opacity : 0.65;
+  // Legacy arted FILL: fill_opacity faded the logo; plate stayed opaque.
+  let fillOpacity = Math.max(0, Math.min(1, rawFillOpacity));
+  let logoOpacity = hasLogoOpacity ? Math.max(0, Math.min(1, Number(label.logo_opacity))) : 1;
+  if (!hasLogoOpacity && arted && ratingArtLayout === "fill") {
+    logoOpacity = fillOpacity;
+    fillOpacity = 1;
+  }
   return {
     ...label,
     token,
@@ -1293,7 +1504,20 @@ function normalizeLabelColors(label: PosterLayoutLabel, landscape = false): Post
     col: cell.col,
     border_color: border.length === 9 ? border.slice(0, 7) : solidHex(label.border_color, "#000000"),
     border_opacity: Math.max(0, Math.min(1, borderOpacity)),
-    fill_opacity: typeof label.fill_opacity === "number" ? label.fill_opacity : 0.65,
+    border_thickness: normalizeBorderThickness(label.border_thickness),
+    text_opacity: Math.max(
+      0,
+      Math.min(
+        1,
+        typeof label.text_opacity === "number" && !Number.isNaN(label.text_opacity)
+          ? Number(label.text_opacity)
+          : 1,
+      ),
+    ),
+    fill_opacity: fillOpacity,
+    logo_opacity: logoOpacity,
+    rotation: normalizeRotation(label.rotation),
+    text_orientation: token === "Custom" ? normalizeTextOrientation(label.text_orientation) : "horizontal",
     size: label.size_scale != null ? nearestSizePreset(sizeScale) : size,
     size_scale: sizeScale,
     thickness,
@@ -1301,6 +1525,10 @@ function normalizeLabelColors(label: PosterLayoutLabel, landscape = false): Post
     x_end: xEnd,
     y_start: yStart,
     y_end: yEnd,
+    fade_top: style === "banner" ? normalizeFadeEdge(label.fade_top) : 0,
+    fade_right: style === "banner" ? normalizeFadeEdge(label.fade_right) : 0,
+    fade_bottom: style === "banner" ? normalizeFadeEdge(label.fade_bottom) : 0,
+    fade_left: style === "banner" ? normalizeFadeEdge(label.fade_left) : 0,
     style,
     arted,
     rating_source: ratingSource,
@@ -1346,6 +1574,7 @@ function EditorHeightLock(props: {
         presets={props.catalog?.size_scale_presets}
         onChange={() => {}}
       />
+      <RotationControl value={0} onChange={noop} />
       <div className="grid grid-cols-1 gap-3 min-w-0 sm:grid-cols-2">
         <BakePxAxisControl label="X" frac={label.x} dim={bake.w} onChange={noop} />
         <BakePxAxisControl label="Y" frac={label.y} dim={bake.h} onChange={noop} />
@@ -1413,23 +1642,38 @@ type Props = {
     sampleTokens?: Record<string, string> | null;
     /**
      * Sticky-preview movement guides for the selected label.
-     * Chips: center crosshairs. Banners: depth + span outline.
+     * Chips use a bake-accurate PNG sprite; fills use live geometry.
      */
     guide?:
-      | { kind: "chip"; x: number; y: number }
+      | {
+          kind: "chip";
+          x: number;
+          y: number;
+          token?: string;
+        }
       | {
           kind: "banner";
           xStart: number;
           xEnd: number;
           yStart: number;
           yEnd: number;
+          fill_color?: string;
+          fill_opacity?: number;
+          border_color?: string;
+          border_opacity?: number;
+          border_thickness?: number;
+          fade_top?: number;
+          fade_right?: number;
+          fade_bottom?: number;
+          fade_left?: number;
+          rotation?: number;
         }
       | null;
     /** Number badges overlaid on the sticky preview while the asset list is hovered. */
     markers?: LayoutPreviewMarker[];
     listHovering?: boolean;
     hoveredId?: string | null;
-    /** Selected label id; preview bake draws it last so it sits on top. */
+    /** Selected label id on the desk. */
     selectedId?: string | null;
     /** True while X/Y bake-px controls are being adjusted. */
     placementControlsHot?: boolean;
@@ -1438,8 +1682,10 @@ type Props = {
   onPreviewArtControlsChange?: (node: ReactNode | null) => void;
   /** Mount Unsaved / Discard / Save on the Layout designer legend row. */
   onHeaderActionsChange?: (node: ReactNode | null) => void;
-  /** Register a handler so the sticky preview can drag-update chip x/y. */
-  onRegisterPlacementDrag?: (handler: ((x: number, y: number) => void) | null) => void;
+  /** Register a handler so the desk can drag-update label x/y (optional labelId). */
+  onRegisterPlacementDrag?: (handler: ((x: number, y: number, labelId?: string) => void) | null) => void;
+  /** Register a handler so the desk can select / clear a label. */
+  onRegisterSelectLabel?: (handler: ((id: string | null) => void) | null) => void;
 };
 
 function tokenDisplayLabel(
@@ -1489,6 +1735,11 @@ export default function PosterLayoutDesigner(props: Props) {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [bakeReviewOpen, setBakeReviewOpen] = useState(false);
+  const [bakeReviewBusy, setBakeReviewBusy] = useState(false);
+  const [bakeReviewError, setBakeReviewError] = useState<string | null>(null);
+  const [bakeReviewUrl, setBakeReviewUrl] = useState<string | null>(null);
+  const bakeReviewUrlRef = useRef<string | null>(null);
   const [applyOpen, setApplyOpen] = useState(false);
   const [applyScope, setApplyScope] = useState<ApplyScope>("next_full_sync");
   const [copyMenuOpen, setCopyMenuOpen] = useState(false);
@@ -1594,17 +1845,28 @@ export default function PosterLayoutDesigner(props: Props) {
         xEnd: geom.xEnd,
         yStart: geom.yStart,
         yEnd: geom.yEnd,
+        fill_color: selectedForGuide.fill_color,
+        fill_opacity: selectedForGuide.fill_opacity,
+        border_color: selectedForGuide.border_color,
+        border_opacity: selectedForGuide.border_opacity,
+        border_thickness: normalizeBorderThickness(selectedForGuide.border_thickness),
+        fade_top: normalizeFadeEdge(selectedForGuide.fade_top),
+        fade_right: normalizeFadeEdge(selectedForGuide.fade_right),
+        fade_bottom: normalizeFadeEdge(selectedForGuide.fade_bottom),
+        fade_left: normalizeFadeEdge(selectedForGuide.fade_left),
+        rotation: normalizeRotation(selectedForGuide.rotation),
       };
     }
     return {
       kind: "chip" as const,
       x: clampFrac(selectedForGuide.x, 0.5),
       y: clampFrac(selectedForGuide.y, 0.5),
+      token: selectedForGuide.token,
     };
   })();
   const guideKey = guide
     ? guide.kind === "banner"
-      ? `b:${guide.xStart}:${guide.xEnd}:${guide.yStart}:${guide.yEnd}`
+      ? `b:${guide.xStart}:${guide.xEnd}:${guide.yStart}:${guide.yEnd}:${guide.fade_top ?? 0}:${guide.fade_right ?? 0}:${guide.fade_bottom ?? 0}:${guide.fade_left ?? 0}:${guide.rotation ?? 0}`
       : `c:${guide.x}:${guide.y}`
     : "";
   const markers: LayoutPreviewMarker[] = labels.map((label, index) => {
@@ -1648,12 +1910,13 @@ export default function PosterLayoutDesigner(props: Props) {
 
   useEffect(() => {
     if (!props.onRegisterPlacementDrag) return;
-    props.onRegisterPlacementDrag((x, y) => {
+    props.onRegisterPlacementDrag((x, y, labelId) => {
+      const targetId = labelId || selectedId;
       setDraft((prev) => {
-        if (!prev || !selectedId) return prev;
+        if (!prev || !targetId) return prev;
         const current = prev[activeKey] || { labels: [], grayscale: false };
         const list = current.labels || [];
-        const sel = list.find((l) => l.id === selectedId);
+        const sel = list.find((l) => l.id === targetId);
         if (!sel) return prev;
         const cols = kind === "episode" ? 33 : 25;
         const rows = kind === "episode" ? 21 : 37;
@@ -1668,7 +1931,7 @@ export default function PosterLayoutDesigner(props: Props) {
             [activeKey]: {
               ...current,
               labels: list.map((l) =>
-                l.id === selectedId
+                l.id === targetId
                   ? {
                       ...l,
                       token: FILL_RECTANGLE_TOKEN,
@@ -1687,23 +1950,31 @@ export default function PosterLayoutDesigner(props: Props) {
             },
           };
         }
-        const nx = clampFrac(x, 0.5);
-        const ny = clampFrac(y, 0.5);
+        const nx = clampCenterFrac(x, 0.5);
+        const ny = clampCenterFrac(y, 0.5);
         const cell = cellFromXY(nx, ny, cols, rows);
         return {
           ...prev,
           [activeKey]: {
             ...current,
             labels: list.map((l) =>
-              l.id === selectedId ? { ...l, x: nx, y: ny, row: cell.row, col: cell.col } : l,
+              l.id === targetId ? { ...l, x: nx, y: ny, row: cell.row, col: cell.col } : l,
             ),
           },
         };
       });
+      if (labelId && labelId !== selectedId) setSelectedId(labelId);
     });
     return () => props.onRegisterPlacementDrag?.(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeKey, kind, selectedId, props.onRegisterPlacementDrag]);
+
+  useEffect(() => {
+    if (!props.onRegisterSelectLabel) return;
+    props.onRegisterSelectLabel((id) => setSelectedId(id));
+    return () => props.onRegisterSelectLabel?.(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.onRegisterSelectLabel]);
 
   useEffect(() => {
     // Kind change restores the bundled sample id so movie/TV/episode stay appropriate.
@@ -1844,6 +2115,15 @@ export default function PosterLayoutDesigner(props: Props) {
         </button>
         <button
           type="button"
+          disabled={busy || bakeReviewBusy || !draft}
+          title="Optional: preview how this layout will look on finished posters"
+          onClick={() => void runPreviewBake()}
+          className="rounded-lg border border-[#424753]/55 px-3 py-2 text-[13px] font-headline uppercase tracking-wider text-slate-300 hover:border-[#424753] hover:text-slate-100 disabled:opacity-40"
+        >
+          {bakeReviewBusy ? "Baking…" : "Preview bake"}
+        </button>
+        <button
+          type="button"
           disabled={!dirty || busy}
           onClick={() => setApplyOpen(true)}
           className={`px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-40`}
@@ -1853,9 +2133,9 @@ export default function PosterLayoutDesigner(props: Props) {
         </button>
       </>
     ),
-    // discardUnsavedProfile closes over catalog; dirty/busy/messages drive the UI.
+    // discardUnsavedProfile / runPreviewBake close over draft state; messages drive the UI.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [busy, dirty, props.accentHex, saveError, saveMsg, catalog],
+    [bakeReviewBusy, busy, dirty, draft, props.accentHex, saveError, saveMsg, catalog],
   );
 
   useLayoutEffect(() => {
@@ -1899,7 +2179,16 @@ export default function PosterLayoutDesigner(props: Props) {
       fill_color: "#000000",
       border_color: "#ffffff",
       border_opacity: 0,
+      border_thickness: BORDER_THICKNESS_DEFAULT,
+      fade_top: 0,
+      fade_right: 0,
+      fade_bottom: 0,
+      fade_left: 0,
+      text_opacity: 1,
       fill_opacity: 0.65,
+      logo_opacity: 1,
+      rotation: 0,
+      text_orientation: "horizontal",
       size: "medium",
       size_scale: SIZE_SCALE_PRESETS.medium,
       rating_art_layout: "left",
@@ -1946,7 +2235,12 @@ export default function PosterLayoutDesigner(props: Props) {
       fill_color: placeToken === "Badge" ? "#0b111b" : "#000000",
       border_color: "#ffffff",
       border_opacity: 0,
+      border_thickness: BORDER_THICKNESS_DEFAULT,
+      text_opacity: 1,
       fill_opacity: placeToken === "Badge" ? 1 : 0.65,
+      logo_opacity: 1,
+      rotation: 0,
+      text_orientation: "horizontal",
       size: placeToken === "Badge" ? "medium" : "small",
       size_scale: placeToken === "Badge" ? SIZE_SCALE_PRESETS.medium : SIZE_SCALE_PRESETS.small,
       rating_art_layout: "left",
@@ -1979,23 +2273,40 @@ export default function PosterLayoutDesigner(props: Props) {
     updateActiveLabels(
       labels.map((l) => {
         if (l.id !== selected.id) return l;
-        const next = { ...l, ...patch };
+        let next = { ...l, ...patch };
         const cols = kind === "episode" ? 33 : 25;
         const rows = kind === "episode" ? 21 : 37;
-        const fillGeomTouched =
-          isFillRectangleLabel(next) &&
-          (patch.x_start != null ||
+        const landscape = kind === "episode";
+        if (isFillRectangleLabel(next)) {
+          next.token = FILL_RECTANGLE_TOKEN;
+          const prevGeom = fillRectGeometryFromLabel(l, landscape);
+          const prevCenter = fillRectCenterXY(prevGeom);
+          const centerTouched = patch.x != null || patch.y != null;
+          const spanTouched =
+            patch.x_start != null ||
             patch.x_end != null ||
             patch.y_start != null ||
-            patch.y_end != null);
-        if (fillGeomTouched) {
-          next.token = FILL_RECTANGLE_TOKEN;
-          const geom = fillRectGeometryFromLabel(next, kind === "episode");
-          next.x_start = geom.xStart;
-          next.x_end = geom.xEnd;
-          next.y_start = geom.yStart;
-          next.y_end = geom.yEnd;
-          next.thickness = Math.max(BANNER_SPAN_MIN_GAP, geom.yEnd - geom.yStart);
+            patch.y_end != null;
+          let geom: FillRectGeom;
+          if (spanTouched) {
+            geom = fillRectGeometryFromLabel(next, landscape);
+          } else if (centerTouched) {
+            geom = translateFillRectToCenter(
+              prevGeom,
+              patch.x != null ? clampCenterFrac(patch.x, prevCenter.x) : prevCenter.x,
+              patch.y != null ? clampCenterFrac(patch.y, prevCenter.y) : prevCenter.y,
+            );
+          } else {
+            geom = prevGeom;
+          }
+          next = {
+            ...next,
+            x_start: geom.xStart,
+            x_end: geom.xEnd,
+            y_start: geom.yStart,
+            y_end: geom.yEnd,
+            thickness: Math.max(BANNER_SPAN_MIN_GAP, geom.yEnd - geom.yStart),
+          };
           const center = fillRectCenterXY(geom);
           next.x = center.x;
           next.y = center.y;
@@ -2003,7 +2314,9 @@ export default function PosterLayoutDesigner(props: Props) {
           next.row = cell.row;
           next.col = cell.col;
         } else if (patch.x != null || patch.y != null) {
-          const cell = cellFromXY(clampFrac(next.x, 0.5), clampFrac(next.y, 0.5), cols, rows);
+          next.x = clampCenterFrac(next.x, 0.5);
+          next.y = clampCenterFrac(next.y, 0.5);
+          const cell = cellFromXY(next.x, next.y, cols, rows);
           next.row = cell.row;
           next.col = cell.col;
         }
@@ -2056,6 +2369,77 @@ export default function PosterLayoutDesigner(props: Props) {
     setSaveError(null);
     setSaveMsg("Discarded unsaved edits. Layout restored to the last saved version.");
   }
+
+  function closeBakeReview() {
+    setBakeReviewOpen(false);
+    setBakeReviewBusy(false);
+    setBakeReviewError(null);
+    if (bakeReviewUrlRef.current) {
+      URL.revokeObjectURL(bakeReviewUrlRef.current);
+      bakeReviewUrlRef.current = null;
+    }
+    setBakeReviewUrl(null);
+  }
+
+  async function runPreviewBake() {
+    if (!draft) return;
+    setBakeReviewOpen(true);
+    setBakeReviewBusy(true);
+    setBakeReviewError(null);
+    if (bakeReviewUrlRef.current) {
+      URL.revokeObjectURL(bakeReviewUrlRef.current);
+      bakeReviewUrlRef.current = null;
+      setBakeReviewUrl(null);
+    }
+    try {
+      const csrf = getCsrfToken();
+      const response = await fetch("/api/settings/poster-overlay-preview", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          Accept: "image/jpeg",
+          "Content-Type": "application/json",
+          ...(csrf ? { "X-CSRF-Token": csrf } : {}),
+        },
+        body: JSON.stringify({
+          kind: previewKind(kind),
+          grayscale: profileGrayscale,
+          profile_key: activeKey,
+          labels,
+          dim_base: false,
+          base_url: previewBaseUrl || undefined,
+          sample_tokens: sampleTokens || undefined,
+        }),
+      });
+      if (!response.ok) {
+        let message = `Bake failed (${response.status})`;
+        try {
+          const errBody = (await response.json()) as { message?: string };
+          if (errBody?.message) message = errBody.message;
+        } catch {
+          /* keep status message */
+        }
+        throw new Error(message);
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      bakeReviewUrlRef.current = url;
+      setBakeReviewUrl(url);
+    } catch (err) {
+      setBakeReviewError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBakeReviewBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      if (bakeReviewUrlRef.current) {
+        URL.revokeObjectURL(bakeReviewUrlRef.current);
+        bakeReviewUrlRef.current = null;
+      }
+    };
+  }, []);
 
   function exportLayouts(scope: LayoutShareScope) {
     if (!draft) return;
@@ -2605,37 +2989,62 @@ export default function PosterLayoutDesigner(props: Props) {
                   </div>
                   {isFillRectangleLabel(selected) ? (
                     <>
+                      <RotationControl
+                        value={normalizeRotation(selected.rotation)}
+                        onChange={(rotation) => patchSelected({ rotation })}
+                      />
                       {(() => {
                         const geom = fillRectGeometryFromLabel(selected, kind === "episode");
+                        const center = fillRectCenterXY(geom);
+                        const size = fillRectSizeFromGeom(geom);
                         const bake = bakeSizeForKind(kind);
+                        const applySize = (width: number, height: number) => {
+                          const next = fillRectGeomFromCenterSize(center.x, center.y, width, height);
+                          patchSelected({
+                            x_start: next.xStart,
+                            x_end: next.xEnd,
+                            y_start: next.yStart,
+                            y_end: next.yEnd,
+                          });
+                        };
                         return (
                           <>
-                            <div className="space-y-1 min-w-0">
-                              <div className="text-[12px] text-slate-400">Horizontal</div>
-                              <BannerSpanSlider
-                                start={geom.xStart}
-                                end={geom.xEnd}
+                            <div className="grid grid-cols-1 gap-3 min-w-0 sm:grid-cols-2">
+                              <BakePxAxisControl
+                                label="X"
+                                frac={center.x}
                                 dim={bake.w}
-                                accentHex={props.accentHex}
+                                onChange={(x) => patchSelected({ x })}
                                 onInteract={bumpPlacementControlsHot}
-                                onChange={(start, end) =>
-                                  patchSelected({ x_start: start, x_end: end })
-                                }
                               />
-                            </div>
-                            <div className="space-y-1 min-w-0">
-                              <div className="text-[12px] text-slate-400">Vertical</div>
-                              <BannerSpanSlider
-                                start={geom.yStart}
-                                end={geom.yEnd}
+                              <BakePxAxisControl
+                                label="Y"
+                                frac={center.y}
                                 dim={bake.h}
-                                accentHex={props.accentHex}
+                                onChange={(y) => patchSelected({ y })}
                                 onInteract={bumpPlacementControlsHot}
-                                onChange={(start, end) =>
-                                  patchSelected({ y_start: start, y_end: end })
-                                }
                               />
                             </div>
+                            <div className="grid grid-cols-1 gap-3 min-w-0 sm:grid-cols-2">
+                              <BakePxSizeControl
+                                label="Shape width"
+                                frac={size.width}
+                                dim={bake.w}
+                                onInteract={bumpPlacementControlsHot}
+                                onChange={(width) => applySize(width, size.height)}
+                              />
+                              <BakePxSizeControl
+                                label="Shape height"
+                                frac={size.height}
+                                dim={bake.h}
+                                onInteract={bumpPlacementControlsHot}
+                                onChange={(height) => applySize(size.width, height)}
+                              />
+                            </div>
+                            <p className="text-[11px] text-slate-500 leading-snug">
+                              Shape size is before angle. Go past the poster edge to cover a
+                              diagonal. Drag on the desk to move the center.
+                            </p>
                           </>
                         );
                       })()}
@@ -2657,6 +3066,105 @@ export default function PosterLayoutDesigner(props: Props) {
                           />
                         </label>
                       </div>
+                      {(() => {
+                        const fadeEdges: Array<{
+                          key: "fade_top" | "fade_right" | "fade_bottom" | "fade_left";
+                          label: string;
+                        }> = [
+                          { key: "fade_top", label: "Fade top" },
+                          { key: "fade_right", label: "Fade right" },
+                          { key: "fade_bottom", label: "Fade bottom" },
+                          { key: "fade_left", label: "Fade left" },
+                        ];
+                        return (
+                          <div className="space-y-2 min-w-0">
+                            <div className="grid grid-cols-1 gap-3 min-w-0 sm:grid-cols-2">
+                              {fadeEdges.map(({ key, label }) => {
+                                const frac = normalizeFadeEdge(selected[key]);
+                                const pct = Math.round(frac * 100);
+                                return (
+                                  <label
+                                    key={key}
+                                    className="space-y-1 text-[12px] text-slate-400 min-w-0"
+                                  >
+                                    <span>
+                                      {label} ({pct}%)
+                                    </span>
+                                    <input
+                                      type="range"
+                                      min={0}
+                                      max={50}
+                                      step={1}
+                                      value={pct}
+                                      onChange={(e) =>
+                                        patchSelected({
+                                          [key]: Math.max(0, Math.min(50, Number(e.target.value))) / 100,
+                                        })
+                                      }
+                                      className="w-full accent-[var(--brand-accent)]"
+                                    />
+                                  </label>
+                                );
+                              })}
+                            </div>
+                            <p className="text-[11px] text-slate-500 leading-snug">
+                              Fade depth is before angle (percent of that shape axis). A faded
+                              edge drops its border automatically.
+                            </p>
+                          </div>
+                        );
+                      })()}
+                      <div className="space-y-3 min-w-0">
+                        <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-end sm:gap-4">
+                          <div className="min-w-0 shrink-0">
+                            <ColorField
+                              label="Border"
+                              value={selected.border_color}
+                              onChange={(v) => {
+                                const next = solidHex(v, "#ffffff");
+                                const opacity =
+                                  (selected.border_opacity ?? 0) > 0 ? selected.border_opacity : 1;
+                                patchSelected({ border_color: next, border_opacity: opacity });
+                              }}
+                            />
+                          </div>
+                          <label className="block min-w-0 flex-1 space-y-1 text-[12px] text-slate-400">
+                            <span>
+                              Border opacity ({Math.round((selected.border_opacity ?? 0) * 100)}%)
+                            </span>
+                            <input
+                              type="range"
+                              min={0}
+                              max={100}
+                              value={Math.round((selected.border_opacity ?? 0) * 100)}
+                              onChange={(e) =>
+                                patchSelected({ border_opacity: Number(e.target.value) / 100 })
+                              }
+                              className="w-full accent-[var(--brand-accent)]"
+                            />
+                          </label>
+                        </div>
+                        <label className="block min-w-0 space-y-1 text-[12px] text-slate-400">
+                          <span>
+                            Border thickness (
+                            {normalizeBorderThickness(selected.border_thickness)}px)
+                          </span>
+                          <input
+                            type="range"
+                            min={1}
+                            max={BORDER_THICKNESS_MAX}
+                            value={normalizeBorderThickness(selected.border_thickness)}
+                            onChange={(e) =>
+                              patchSelected({ border_thickness: Number(e.target.value) })
+                            }
+                            className="w-full accent-[var(--brand-accent)]"
+                          />
+                        </label>
+                        <p className="text-[11px] text-slate-500 leading-snug">
+                          Full frame on hard edges. Faded edges skip their stroke; you can also
+                          drag a side off the poster to hide it.
+                        </p>
+                      </div>
                     </>
                   ) : (
                     <>
@@ -2666,6 +3174,10 @@ export default function PosterLayoutDesigner(props: Props) {
                         max={catalog?.size_scale_max}
                         presets={catalog?.size_scale_presets}
                         onChange={(size_scale, size) => patchSelected({ size_scale, size })}
+                      />
+                      <RotationControl
+                        value={normalizeRotation(selected.rotation)}
+                        onChange={(rotation) => patchSelected({ rotation })}
                       />
                       {(() => {
                         const bake = bakeSizeForKind(kind);
@@ -2719,6 +3231,35 @@ export default function PosterLayoutDesigner(props: Props) {
                       ) : null}
                       {selected.token === "Custom" ? (
                         <div className="space-y-2 min-w-0">
+                          <div className="space-y-1 text-[12px] text-slate-400 min-w-0">
+                            <span>Orientation</span>
+                            <div className="flex flex-wrap gap-1.5">
+                              {(
+                                [
+                                  { id: "horizontal" as const, label: "Horizontal" },
+                                  { id: "vertical" as const, label: "Vertical" },
+                                ] as const
+                              ).map((opt) => {
+                                const active =
+                                  normalizeTextOrientation(selected.text_orientation) === opt.id;
+                                return (
+                                  <button
+                                    key={opt.id}
+                                    type="button"
+                                    aria-pressed={active}
+                                    onClick={() => patchSelected({ text_orientation: opt.id })}
+                                    className={`rounded-md border px-2 py-1 text-[11px] font-headline uppercase tracking-wider ${
+                                      active
+                                        ? "border-[var(--brand-accent)] text-slate-100 bg-[color:color-mix(in_srgb,var(--brand-accent)_18%,transparent)]"
+                                        : "border-[#424753]/55 text-slate-400 hover:border-[#424753] hover:text-slate-200"
+                                    }`}
+                                  >
+                                    {opt.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
                           <label className="space-y-1 text-[12px] text-slate-400 min-w-0 block">
                             <span>Text</span>
                             <div className="flex gap-2 min-w-0">
@@ -2887,82 +3428,138 @@ export default function PosterLayoutDesigner(props: Props) {
                             aria-hidden={!selected.arted}
                           >
                             <div className="text-[12px] text-slate-400">Logo placement</div>
-                            <div className="flex flex-wrap gap-2">
-                              {(
-                                (catalog?.rating_art_layouts || RATING_ART_LAYOUTS.map((o) => o.id)).map(
-                                  (id) => RATING_ART_LAYOUTS.find((o) => o.id === id) || { id, label: id },
-                                )
-                              ).map((opt) => {
-                                const active =
-                                  normalizeRatingArtLayout(selected.rating_art_layout) === opt.id;
-                                return (
-                                  <button
-                                    key={opt.id}
-                                    type="button"
-                                    disabled={!selected.arted}
-                                    tabIndex={selected.arted ? undefined : -1}
-                                    onClick={() => patchSelected({ rating_art_layout: opt.id })}
-                                    className={`rounded-lg border px-3 py-1.5 text-[12px] font-headline uppercase tracking-wider ${
-                                      active
-                                        ? "border-[var(--brand-accent)] text-slate-100 bg-[color:color-mix(in_srgb,var(--brand-accent)_18%,transparent)]"
-                                        : "border-[#424753]/55 text-slate-400 hover:border-[#424753] hover:text-slate-200"
-                                    }`}
-                                  >
-                                    {opt.label}
-                                  </button>
-                                );
-                              })}
+                            <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-end sm:gap-4">
+                              <div className="flex min-w-0 flex-wrap gap-2">
+                                {(
+                                  (catalog?.rating_art_layouts || RATING_ART_LAYOUTS.map((o) => o.id)).map(
+                                    (id) => RATING_ART_LAYOUTS.find((o) => o.id === id) || { id, label: id },
+                                  )
+                                ).map((opt) => {
+                                  const active =
+                                    normalizeRatingArtLayout(selected.rating_art_layout) === opt.id;
+                                  return (
+                                    <button
+                                      key={opt.id}
+                                      type="button"
+                                      disabled={!selected.arted}
+                                      tabIndex={selected.arted ? undefined : -1}
+                                      onClick={() => patchSelected({ rating_art_layout: opt.id })}
+                                      className={`rounded-lg border px-3 py-1.5 text-[12px] font-headline uppercase tracking-wider ${
+                                        active
+                                          ? "border-[var(--brand-accent)] text-slate-100 bg-[color:color-mix(in_srgb,var(--brand-accent)_18%,transparent)]"
+                                          : "border-[#424753]/55 text-slate-400 hover:border-[#424753] hover:text-slate-200"
+                                      }`}
+                                    >
+                                      {opt.label}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                              <label className="block min-w-0 flex-1 space-y-1 text-[12px] text-slate-400 sm:max-w-[14rem]">
+                                <span>Logo opacity ({Math.round((selected.logo_opacity ?? 1) * 100)}%)</span>
+                                <input
+                                  type="range"
+                                  min={0}
+                                  max={100}
+                                  disabled={!selected.arted}
+                                  value={Math.round((selected.logo_opacity ?? 1) * 100)}
+                                  onChange={(e) =>
+                                    patchSelected({ logo_opacity: Number(e.target.value) / 100 })
+                                  }
+                                  className="w-full accent-[var(--brand-accent)]"
+                                />
+                              </label>
                             </div>
                           </div>
                         </div>
                       ) : null}
                       {selected.token !== "Badge" ? (
-                        <div className="grid grid-cols-1 gap-3 min-w-0 sm:grid-cols-2">
-                          <ColorField
-                            label="Text"
-                            value={selected.text_color}
-                            onChange={(v) => patchSelected({ text_color: solidHex(v, "#ffffff") })}
-                          />
-                          <ColorField
-                            label="Fill"
-                            value={selected.fill_color}
-                            onChange={(v) => patchSelected({ fill_color: solidHex(v, "#000000") })}
-                          />
-                          <ColorField
-                            label="Border"
-                            value={selected.border_color}
-                            onChange={(v) => {
-                              const next = solidHex(v, "#ffffff");
-                              const opacity = (selected.border_opacity ?? 0) > 0 ? selected.border_opacity : 1;
-                              patchSelected({ border_color: next, border_opacity: opacity });
-                            }}
-                          />
-                          <label className="space-y-1 text-[12px] text-slate-400 min-w-0">
+                        <div className="flex min-w-0 flex-col gap-3">
+                          <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-end sm:gap-4">
+                            <div className="min-w-0 shrink-0">
+                              <ColorField
+                                label="Text"
+                                value={selected.text_color}
+                                onChange={(v) => patchSelected({ text_color: solidHex(v, "#ffffff") })}
+                              />
+                            </div>
+                            <label className="block min-w-0 flex-1 space-y-1 text-[12px] text-slate-400">
+                              <span>Text opacity ({Math.round((selected.text_opacity ?? 1) * 100)}%)</span>
+                              <input
+                                type="range"
+                                min={0}
+                                max={100}
+                                value={Math.round((selected.text_opacity ?? 1) * 100)}
+                                onChange={(e) =>
+                                  patchSelected({ text_opacity: Number(e.target.value) / 100 })
+                                }
+                                className="w-full accent-[var(--brand-accent)]"
+                              />
+                            </label>
+                          </div>
+                          <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-end sm:gap-4">
+                            <div className="min-w-0 shrink-0">
+                              <ColorField
+                                label="Fill"
+                                value={selected.fill_color}
+                                onChange={(v) => patchSelected({ fill_color: solidHex(v, "#000000") })}
+                              />
+                            </div>
+                            <label className="block min-w-0 flex-1 space-y-1 text-[12px] text-slate-400">
+                              <span>Fill opacity ({Math.round((selected.fill_opacity ?? 0.65) * 100)}%)</span>
+                              <input
+                                type="range"
+                                min={0}
+                                max={100}
+                                value={Math.round((selected.fill_opacity ?? 0.65) * 100)}
+                                onChange={(e) =>
+                                  patchSelected({ fill_opacity: Number(e.target.value) / 100 })
+                                }
+                                className="w-full accent-[var(--brand-accent)]"
+                              />
+                            </label>
+                          </div>
+                          <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-end sm:gap-4">
+                            <div className="min-w-0 shrink-0">
+                              <ColorField
+                                label="Border"
+                                value={selected.border_color}
+                                onChange={(v) => {
+                                  const next = solidHex(v, "#ffffff");
+                                  const opacity =
+                                    (selected.border_opacity ?? 0) > 0 ? selected.border_opacity : 1;
+                                  patchSelected({ border_color: next, border_opacity: opacity });
+                                }}
+                              />
+                            </div>
+                            <label className="block min-w-0 flex-1 space-y-1 text-[12px] text-slate-400">
+                              <span>
+                                Border opacity ({Math.round((selected.border_opacity ?? 0) * 100)}%)
+                              </span>
+                              <input
+                                type="range"
+                                min={0}
+                                max={100}
+                                value={Math.round((selected.border_opacity ?? 0) * 100)}
+                                onChange={(e) =>
+                                  patchSelected({ border_opacity: Number(e.target.value) / 100 })
+                                }
+                                className="w-full accent-[var(--brand-accent)]"
+                              />
+                            </label>
+                          </div>
+                          <label className="block min-w-0 space-y-1 text-[12px] text-slate-400">
                             <span>
-                              {selected.arted &&
-                              normalizeRatingArtLayout(selected.rating_art_layout) === "fill"
-                                ? "Logo opacity"
-                                : "Fill opacity"}{" "}
-                              ({Math.round((selected.fill_opacity ?? 0.65) * 100)}%)
+                              Border thickness (
+                              {normalizeBorderThickness(selected.border_thickness)}px)
                             </span>
                             <input
                               type="range"
-                              min={0}
-                              max={100}
-                              value={Math.round((selected.fill_opacity ?? 0.65) * 100)}
-                              onChange={(e) => patchSelected({ fill_opacity: Number(e.target.value) / 100 })}
-                              className="w-full accent-[var(--brand-accent)]"
-                            />
-                          </label>
-                          <label className="space-y-1 text-[12px] text-slate-400 min-w-0 sm:col-span-2">
-                            <span>Border opacity ({Math.round((selected.border_opacity ?? 0) * 100)}%)</span>
-                            <input
-                              type="range"
-                              min={0}
-                              max={100}
-                              value={Math.round((selected.border_opacity ?? 0) * 100)}
+                              min={1}
+                              max={BORDER_THICKNESS_MAX}
+                              value={normalizeBorderThickness(selected.border_thickness)}
                               onChange={(e) =>
-                                patchSelected({ border_opacity: Number(e.target.value) / 100 })
+                                patchSelected({ border_thickness: Number(e.target.value) })
                               }
                               className="w-full accent-[var(--brand-accent)]"
                             />
@@ -2986,8 +3583,8 @@ export default function PosterLayoutDesigner(props: Props) {
               Plex tip
             </p>
             <p>
-              On Plex, the unwatched count in the top right can cover badge and label text. Consider avoiding this
-              area.
+              On Plex, the top-right watched checkbox (movies and TV) and TV unwatched episode count can cover
+              badges and labels. Consider avoiding this area.
             </p>
           </div>
         </div>
@@ -3160,6 +3757,55 @@ export default function PosterLayoutDesigner(props: Props) {
         </div>
       ) : null}
 
+      {bakeReviewOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !bakeReviewBusy) closeBakeReview();
+          }}
+        >
+          <div className="flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-[#424753]/40 bg-[#171c22]">
+            <div className="shrink-0 border-b border-[#424753]/30 px-5 py-4">
+              <h3 className="text-[18px] font-bold text-white font-headline">Preview bake</h3>
+              <p className="ui-field-description mt-1">
+                Finished posters can differ slightly from the editor. This preview shows how{" "}
+                {mediaKindLabel(kind)} · {variantLabel(variant)} will look in media players.
+              </p>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+              {bakeReviewBusy ? (
+                <div className="flex min-h-[16rem] items-center justify-center text-[13px] text-slate-400">
+                  Building preview…
+                </div>
+              ) : null}
+              {bakeReviewError ? (
+                <p className="text-[13px] text-red-400">{bakeReviewError}</p>
+              ) : null}
+              {bakeReviewUrl ? (
+                <img
+                  src={bakeReviewUrl}
+                  alt="Preview bake"
+                  className={`mx-auto max-h-[70vh] w-auto max-w-full rounded-lg border border-[#424753]/40 ${
+                    kind === "episode" ? "aspect-video object-contain" : "aspect-[2/3] object-contain"
+                  }`}
+                />
+              ) : null}
+            </div>
+            <div className="flex shrink-0 justify-end border-t border-[#424753]/30 px-5 py-3">
+              <button
+                type="button"
+                disabled={bakeReviewBusy}
+                onClick={() => closeBakeReview()}
+                className={`rounded-lg px-4 py-2 text-[13px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-40`}
+                style={accentFilledStyle(props.accentHex)}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {applyOpen ? (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
@@ -3253,7 +3899,7 @@ function ColorField(props: { label: string; value: string; onChange: (v: string)
           value={solid}
           onChange={(e) => props.onChange(solidHex(e.target.value, solid))}
           spellCheck={false}
-          className={`${FIELD_CLASS} font-mono text-[12px]`}
+          className="w-[7.25rem] shrink-0 rounded-lg border border-[#424753]/55 bg-[#0b111b] px-2.5 py-1.5 font-mono text-[12px] text-slate-100 outline-none focus:border-[color:var(--brand-accent)]"
         />
       </div>
     </label>
