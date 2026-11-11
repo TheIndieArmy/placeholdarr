@@ -19,6 +19,15 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Media-server refresh broker**: Coalesces and rate-limits full-section scans; single-title reconcile uses path refresh only.
 - **Event-loop offload**: Never/policy/tag-clear and manual Tasks run off the FastAPI loop via `asyncio.to_thread`.
 
+### Added
+
+- **Layout designer rotation**: Angle presets and a free slider (−180…180) for fills and chips; bake and desk stay in sync.
+- **Fill shape size**: Center plus Shape width/height before angle; size can exceed the poster so diagonals cover corner to corner.
+- **Fill frame border**: Color, opacity, and thickness on all four sides of the unrotated shape.
+- **Fill edge fade**: Per-edge fade depth; a faded edge skips its border automatically.
+- **Custom text vertical**: Stack characters for vertical chip orientation.
+- **Layout label sprite API**: Bake-accurate cropped PNG for desk chip ghosts.
+
 ### Fixed
 
 - **Tasks live poll**: Active tasks poll `/api/tasks/status` every 1s again (no 5s mat slowdown); SSE start/finish uses the status patch path; status stays off the stuck-task reconcile hot path.

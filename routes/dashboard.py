@@ -5576,6 +5576,70 @@ async def settings_poster_overlay_preview_post(request: Request):
     )
 
 
+@router.post("/api/settings/poster-overlay-label-sprite")
+async def settings_poster_overlay_label_sprite(request: Request):
+    """Cropped PNG of one layout label for the designer live ghost (bake-accurate size)."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "message": "Expected a JSON object"}, status_code=400)
+    raw_label = body.get("label")
+    if not isinstance(raw_label, dict):
+        return JSONResponse({"ok": False, "message": "label must be an object"}, status_code=400)
+    kind = str(body.get("kind") or "movie").strip().lower()
+    if kind not in {"movie", "series", "episode"}:
+        kind = "movie"
+    landscape = kind == "episode"
+    profile_key = str(body.get("profile_key") or "").strip() or None
+    sample_overrides = body.get("sample_tokens") if isinstance(body.get("sample_tokens"), dict) else None
+    try:
+        from services.poster_layouts import (
+            get_profile,
+            grid_size_for_profile,
+            sample_tokens_for_profile,
+        )
+        from services.poster_overlay import render_layout_label_sprite_png
+
+        key = profile_key or (
+            f"{'episode' if kind == 'episode' else ('tv' if kind == 'series' else 'movie')}"
+            f".placeholder.default"
+        )
+        # Touch profile so missing keys still resolve sample/grid defaults.
+        get_profile(key)
+        tokens = sample_tokens_for_profile(key)
+        if sample_overrides:
+            for raw_key, raw_val in sample_overrides.items():
+                name = str(raw_key or "").strip()
+                text = str(raw_val or "").strip()
+                if name and text:
+                    tokens[name] = text
+        cols, rows = grid_size_for_profile(key)
+        result = render_layout_label_sprite_png(
+            raw_label,
+            landscape=landscape,
+            tokens=tokens,
+            cols=cols,
+            rows=rows,
+        )
+    except Exception as exc:
+        logger.warning(f"Poster overlay label sprite failed: {exc}", extra={"emoji_type": "warning"})
+        return JSONResponse({"ok": False, "message": "Sprite render failed"}, status_code=500)
+    if not result:
+        return JSONResponse(
+            {"ok": False, "message": "Sprite unavailable (Pillow missing or empty label)"},
+            status_code=503,
+        )
+    data, sprite_w, sprite_h = result
+    return StreamingResponse(
+        iter([data]),
+        media_type="image/png",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Sprite-Width": str(int(sprite_w)),
+            "X-Sprite-Height": str(int(sprite_h)),
+        },
+    )
+
+
 @router.get("/api/settings/arr-root-folders")
 async def settings_arr_root_folders():
     """Live Arr root folders per configured instance (for destination map UX)."""

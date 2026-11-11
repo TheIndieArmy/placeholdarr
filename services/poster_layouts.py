@@ -297,11 +297,48 @@ def _clamp_frac(value: Any, default: float = 0.5) -> float:
     return max(0.0, min(1.0, n))
 
 
+# Max local fill shape size as a fraction of the poster axis (before rotation).
+# 2.5× covers a full diagonal on movie (1000×1500) and episode (1920×1080) canvases.
+_FILL_SHAPE_SIZE_MAX_FRAC = 2.5
+# Span ends may extend this far past 0..1 when the center sits on an edge
+# (half the max shape size).
+_SPAN_FRAC_PAD = _FILL_SHAPE_SIZE_MAX_FRAC / 2.0
+_BORDER_THICKNESS_DEFAULT = 3
+_BORDER_THICKNESS_MAX = 32
+# Fill edge fade depth as a fraction of that local shape axis (before rotation).
+_FADE_EDGE_MAX = 0.5
+
+
+def normalize_border_thickness(raw: Any, *, default: int = _BORDER_THICKNESS_DEFAULT) -> int:
+    """Bake-pixel border stroke (long sides for fills; full frame for chips)."""
+    if raw is None or str(raw).strip() == "":
+        return int(default)
+    try:
+        n = int(round(float(raw)))
+    except (TypeError, ValueError):
+        return int(default)
+    return max(0, min(_BORDER_THICKNESS_MAX, n))
+
+
+def normalize_fade_edge(raw: Any, *, default: float = 0.0) -> float:
+    """Clamp fill edge fade depth to ``[0, 0.5]`` of the local shape axis."""
+    if raw is None or str(raw).strip() == "":
+        return float(default)
+    try:
+        n = float(raw)
+    except (TypeError, ValueError):
+        return float(default)
+    if not math.isfinite(n):
+        return float(default)
+    return max(0.0, min(_FADE_EDGE_MAX, n))
+
+
 def _xy_from_raw(raw: dict[str, Any], *, cols: int, rows: int) -> tuple[float, float]:
     """Prefer stored ``x``/``y``; otherwise migrate from snap-cell centers."""
     has_x = raw.get("x") is not None
     has_y = raw.get("y") is not None
     if has_x or has_y:
+        # Centers stay on-canvas; shapes may still hang past the edge.
         return _clamp_frac(raw.get("x"), 0.5), _clamp_frac(raw.get("y"), 0.5)
     c = max(1, int(cols))
     r = max(1, int(rows))
@@ -599,13 +636,19 @@ _BANNER_SPAN_MIN_GAP = 0.01
 
 
 def _normalize_banner_span(start: Any, end: Any) -> tuple[float, float]:
-    """Axis coverage as fractions 0..1 (full axis is 0..1)."""
+    """Axis coverage as fractions; may extend past 0..1 so fills can hang off-canvas."""
+
+    lo = -_SPAN_FRAC_PAD
+    hi = 1.0 + _SPAN_FRAC_PAD
 
     def _one(raw: Any, default: float) -> float:
         try:
-            return max(0.0, min(1.0, float(raw)))
+            n = float(raw)
         except (TypeError, ValueError):
             return default
+        if not math.isfinite(n):
+            return default
+        return max(lo, min(hi, n))
 
     a = _one(start, 0.0)
     b = _one(end, 1.0)
@@ -613,10 +656,10 @@ def _normalize_banner_span(start: Any, end: Any) -> tuple[float, float]:
         a, b = b, a
     if b - a < _BANNER_SPAN_MIN_GAP:
         mid = (a + b) / 2.0
-        a = max(0.0, mid - _BANNER_SPAN_MIN_GAP / 2.0)
-        b = min(1.0, a + _BANNER_SPAN_MIN_GAP)
+        a = max(lo, mid - _BANNER_SPAN_MIN_GAP / 2.0)
+        b = min(hi, a + _BANNER_SPAN_MIN_GAP)
         if b - a < _BANNER_SPAN_MIN_GAP:
-            a = max(0.0, b - _BANNER_SPAN_MIN_GAP)
+            a = max(lo, b - _BANNER_SPAN_MIN_GAP)
     return a, b
 
 
@@ -836,6 +879,27 @@ def normalize_size_scale(raw: Any, *, size: str) -> float:
     return float(_SIZE_MULT.get(str(size or "small").strip().lower(), 1.0))
 
 
+def normalize_rotation(raw: Any) -> int:
+    """Clamp label rotation to integer degrees in ``[-180, 180]`` (0 = upright)."""
+    try:
+        deg = float(raw)
+    except (TypeError, ValueError):
+        return 0
+    if deg != deg:  # NaN
+        return 0
+    snapped = int(round(deg)) % 360
+    if snapped > 180:
+        snapped -= 360
+    return snapped
+
+
+def normalize_text_orientation(raw: Any) -> str:
+    key = str(raw or "").strip().lower()
+    if key in {"vertical", "vert", "portrait", "stacked"}:
+        return "vertical"
+    return "horizontal"
+
+
 def normalize_rating_art_layout(raw: Any, *, arted: bool) -> str:
     if not arted:
         return _RATING_ART_LAYOUT_DEFAULT
@@ -880,17 +944,34 @@ def normalize_label(raw: Any, *, cols: int, rows: int, landscape: bool = False) 
     if style == "banner":
         arted = False
         rating_art_layout = _RATING_ART_LAYOUT_DEFAULT
-        border_opacity = 0.0
         x_start, x_end, y_start, y_end = _fill_rect_geometry_from_raw(
             raw, size=size, landscape=landscape, row=row, col=col, cols=cols, rows=rows
         )
         x, y = _fill_rect_center_xy(x_start, x_end, y_start, y_end)
         row, col = _cell_from_xy(x, y, cols=cols, rows=rows)
         thickness = max(_BANNER_SPAN_MIN_GAP, y_end - y_start)
+        fade_top = normalize_fade_edge(raw.get("fade_top"))
+        fade_right = normalize_fade_edge(raw.get("fade_right"))
+        fade_bottom = normalize_fade_edge(raw.get("fade_bottom"))
+        fade_left = normalize_fade_edge(raw.get("fade_left"))
     else:
         thickness = banner_base_frac("top", landscape=landscape)
         x_start, x_end = 0.0, 1.0
         y_start, y_end = 0.0, thickness
+        fade_top = fade_right = fade_bottom = fade_left = 0.0
+    # Legacy arted FILL: ``fill_opacity`` faded the logo while the plate stayed opaque.
+    has_logo_opacity = raw.get("logo_opacity") is not None
+    if (
+        not has_logo_opacity
+        and arted
+        and token == "Rating"
+        and rating_art_layout == "fill"
+    ):
+        logo_opacity = _opacity(raw.get("fill_opacity"), _DEFAULT_FILL_OPACITY)
+        fill_opacity = 1.0
+    else:
+        logo_opacity = _opacity(raw.get("logo_opacity"), 1.0)
+        fill_opacity = _opacity(raw.get("fill_opacity"), _DEFAULT_FILL_OPACITY)
     return {
         "id": label_id,
         "token": token,
@@ -902,7 +983,14 @@ def normalize_label(raw: Any, *, cols: int, rows: int, landscape: bool = False) 
         "fill_color": _hex_color(raw.get("fill_color"), _DEFAULT_FILL),
         "border_color": border_color,
         "border_opacity": border_opacity,
-        "fill_opacity": _opacity(raw.get("fill_opacity"), _DEFAULT_FILL_OPACITY),
+        "border_thickness": normalize_border_thickness(raw.get("border_thickness")),
+        "text_opacity": _opacity(raw.get("text_opacity"), 1.0),
+        "fill_opacity": fill_opacity,
+        "logo_opacity": logo_opacity,
+        "rotation": normalize_rotation(raw.get("rotation")),
+        "text_orientation": normalize_text_orientation(raw.get("text_orientation"))
+        if token == CUSTOM_TOKEN
+        else "horizontal",
         "size": size,
         "size_scale": size_scale,
         "thickness": thickness,
@@ -910,6 +998,10 @@ def normalize_label(raw: Any, *, cols: int, rows: int, landscape: bool = False) 
         "x_end": x_end,
         "y_start": y_start,
         "y_end": y_end,
+        "fade_top": fade_top,
+        "fade_right": fade_right,
+        "fade_bottom": fade_bottom,
+        "fade_left": fade_left,
         "style": style,
         "arted": arted,
         "rating_source": _rating_source_for_label(token=token, arted=arted, raw=raw.get("rating_source")),
@@ -1072,10 +1164,15 @@ def _make_label(token: str, row: int = 0, col: int = 0, **style: Any) -> dict[st
         thickness = max(_BANNER_SPAN_MIN_GAP, y_end - y_start)
         x, y = _fill_rect_center_xy(x_start, x_end, y_start, y_end)
         row, col = _cell_from_xy(x, y, cols=cols, rows=rows)
+        fade_top = normalize_fade_edge(style.get("fade_top"))
+        fade_right = normalize_fade_edge(style.get("fade_right"))
+        fade_bottom = normalize_fade_edge(style.get("fade_bottom"))
+        fade_left = normalize_fade_edge(style.get("fade_left"))
     else:
         thickness = banner_base_frac("top", landscape=landscape)
         x_start, x_end = 0.0, 1.0
         y_start, y_end = 0.0, thickness
+        fade_top = fade_right = fade_bottom = fade_left = 0.0
         if style.get("x") is not None or style.get("y") is not None:
             x = _clamp_frac(style.get("x"), 0.5)
             y = _clamp_frac(style.get("y"), 0.5)
@@ -1092,14 +1189,25 @@ def _make_label(token: str, row: int = 0, col: int = 0, **style: Any) -> dict[st
         "text_color": style.get("text_color", _DEFAULT_TEXT),
         "fill_color": style.get("fill_color", _DEFAULT_FILL),
         "border_color": border_color[:7] if str(border_color).startswith("#") else border_color,
-        "border_opacity": float(border_opacity) if label_style != "banner" else 0.0,
+        "border_opacity": float(border_opacity),
+        "border_thickness": normalize_border_thickness(style.get("border_thickness")),
+        "text_opacity": style.get("text_opacity", 1.0),
         "fill_opacity": style.get("fill_opacity", _DEFAULT_FILL_OPACITY),
+        "logo_opacity": style.get("logo_opacity", 1.0),
+        "rotation": normalize_rotation(style.get("rotation")),
+        "text_orientation": normalize_text_orientation(style.get("text_orientation"))
+        if token == CUSTOM_TOKEN
+        else "horizontal",
         "size": size,
         "thickness": thickness,
         "x_start": x_start,
         "x_end": x_end,
         "y_start": y_start,
         "y_end": y_end,
+        "fade_top": fade_top,
+        "fade_right": fade_right,
+        "fade_bottom": fade_bottom,
+        "fade_left": fade_left,
         "style": label_style,
         "arted": bool(style.get("arted")) and token in _ARTED_TOKENS and label_style != "banner",
         "rating_source": _normalize_rating_source(style.get("rating_source")) if token == "Rating" else "auto",
