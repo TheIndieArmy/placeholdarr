@@ -9,8 +9,16 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Added
+
+- **Fail active jobs and restart**: Advanced Settings confirmed control and `POST /api/system/jobs/fail-active` mark every PENDING/CLAIMED/WORKING worker job FAILED, then restart Placeholdarr so wedged handler threads drop locks.
+
 ### Changed
 
+- **Handler watchdog timeout**: When `JOB_HANDLER_TIMEOUT_SECONDS` fires, the claim is marked FAILED (not log-only) so the stale-CLAIMED reaper cannot recycle that hang forever.
+- **Event-scoped TV density**: Import-grace and other event mats finish core placeholders, then run series/season density in per-series short sessions so filesystem/art work cannot hold `library_catalog_version` / series row locks.
+- **Import/event mats skip poster ensure**: Webhook and import-grace materialization keep/retire placeholders and density stubs without `ensure_*_art`; poster work stays on full/lite mat, calendar Coming Soon art, and art refresh.
+- **Scoped mat stall heartbeats**: Heartbeats include `last_phase` plus series/episode/movie ids so hangs self-identify without a full log dump.
 - **Full-sync materialization chunks**: Library-wide mat commits in batches with lock timeouts so import-grace and webhooks can finish between chunks.
 - **Materialization commit size**: Default `MATERIALIZATION_COMMIT_CHUNK_SIZE` is 50 (was 200) for shorter lock windows between bites.
 - **Live materialization progress**: Full/lite/startup mat and calendar phases publish running counts during each commit chunk (~3s), not only after each batch finishes.
@@ -30,6 +38,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ### Fixed
 
+- **Lite sync localized poster lock**: Scoped/lite materialization defers TMDB `localized_poster` resolve until after commits (then the existing poster-language job), so art ensure cannot self-block on `UPDATE series` while idle-in-transaction (#170).
 - **Tasks live poll**: Active tasks poll `/api/tasks/status` every 1s again (no 5s mat slowdown); SSE start/finish uses the status patch path; status stays off the stuck-task reconcile hot path.
 - **Lite catalog discovery bars**: Discovery publishes progress during Arr catalog fetch heartbeats and targeted title sync so bars move without a manual refresh.
 - **Chunked mat stats merge**: Merging per-chunk materialization stats no longer crashes when a prior chunk left a numeric field as `None` (lite sync TypeError mid-run).

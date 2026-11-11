@@ -24,6 +24,7 @@ import {
   getSettingsCurrent,
   getSettingsStatus,
   restartApp,
+  failActiveJobs,
   saveSettings,
   testIntegrationConnection,
   type NfoBackfillApplyScope,
@@ -10647,6 +10648,10 @@ function SettingsPanel(props: {
 }) {
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
   const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
+  const [failActiveConfirmOpen, setFailActiveConfirmOpen] = useState(false);
+  const [failActivePending, setFailActivePending] = useState(false);
+  const [failActiveError, setFailActiveError] = useState<string | null>(null);
+  const [failActiveFeedback, setFailActiveFeedback] = useState<string | null>(null);
   const [arrSecondaryTestStatus, setArrSecondaryTestStatus] = useState<{ radarr: boolean; sonarr: boolean }>({ radarr: false, sonarr: false });
   const [mediaPanel, setMediaPanel] = useState<null | (typeof ONBOARDING_MEDIA_CARDS)[number]["id"]>(null);
   const [mediaPanelTestPassed, setMediaPanelTestPassed] = useState(false);
@@ -11716,6 +11721,56 @@ function SettingsPanel(props: {
                     </div>
                   );
                 })()
+              ) : active.name === "Advanced" ? (
+                <div className="space-y-6 px-6 py-5">
+                  {active.fields.length ? (
+                    <SettingsDensityFrame legend="Advanced">
+                      {active.fields.map((field) => (
+                        <Fragment key={field.key}>{renderStandardField(field, { density: true })}</Fragment>
+                      ))}
+                    </SettingsDensityFrame>
+                  ) : null}
+                  <SettingsDensityFrame
+                    legend="Job queue recovery"
+                    intro={
+                      <p>
+                        Fail every queued or in-flight worker job (imports, webhooks, reconcile, materialization jobs),
+                        then restart Placeholdarr so any thread stuck in disk I/O drops its locks. Titles involved in
+                        those failed jobs can be briefly out of sync until a later import, webhook, or library sync
+                        catches them up. Use this when a hung job is blocking sync. The app will be briefly unreachable
+                        while it comes back up.
+                      </p>
+                    }
+                  >
+                    <div className="space-y-3">
+                      {failActiveFeedback ? (
+                        <p className="text-[14px] text-green-400 font-headline uppercase tracking-wider">
+                          {failActiveFeedback}
+                        </p>
+                      ) : null}
+                      {failActiveError ? (
+                        <p className="text-[14px] text-red-400 font-headline uppercase tracking-wider">
+                          {failActiveError}
+                        </p>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setFailActiveError(null);
+                          setFailActiveFeedback(null);
+                          setFailActiveConfirmOpen(true);
+                        }}
+                        disabled={failActivePending}
+                        className="inline-flex items-center gap-2 rounded-lg border border-red-500/50 bg-red-500/15 px-3 py-2 text-[13px] font-headline uppercase tracking-wider text-red-300 hover:bg-red-500/25 disabled:cursor-not-allowed disabled:opacity-70"
+                      >
+                        <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
+                          dangerous
+                        </span>
+                        {failActivePending ? "Failing and restarting…" : "Fail active jobs and restart"}
+                      </button>
+                    </div>
+                  </SettingsDensityFrame>
+                </div>
               ) : (
                 renderOnboardingStyleSectionRows(active.fields, { legend: active.name })
               )}
@@ -11801,6 +11856,40 @@ function SettingsPanel(props: {
         onConfirm={() => {
           setRestartConfirmOpen(false);
           props.onConfirmRestart();
+        }}
+      />
+    ) : null}
+    {failActiveConfirmOpen ? (
+      <ConfirmModal
+        title="Fail active jobs and restart?"
+        message="This marks every queued or in-flight worker job as failed (imports, webhooks, reconcile, materialization), then restarts Placeholdarr so wedged handler threads drop their locks. Titles involved in those jobs can be briefly out of sync until a later import, webhook, or library sync. The app will be unreachable for a few seconds."
+        confirmLabel="Fail and restart"
+        cancelLabel="Cancel"
+        accentHex={accent.hex}
+        themeMode={props.themeMode}
+        onCancel={() => {
+          if (failActivePending) return;
+          setFailActiveConfirmOpen(false);
+        }}
+        onConfirm={() => {
+          if (failActivePending) return;
+          setFailActivePending(true);
+          setFailActiveError(null);
+          setFailActiveFeedback(null);
+          void failActiveJobs()
+            .then((res) => {
+              const n = Number(res.failed_count || 0);
+              const failPart =
+                n === 0 ? "No active jobs to fail." : `Failed ${n} active job${n === 1 ? "" : "s"}.`;
+              setFailActiveFeedback(`${failPart} Restarting…`);
+              setFailActiveConfirmOpen(false);
+            })
+            .catch((err: unknown) => {
+              const msg = err instanceof Error ? err.message : String(err || "Failed to fail active jobs");
+              setFailActiveError(msg);
+              setFailActiveConfirmOpen(false);
+              setFailActivePending(false);
+            });
         }}
       />
     ) : null}
