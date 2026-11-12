@@ -404,12 +404,16 @@ def _apply_initial_status_for_placeholder(
     placeholder_id: int,
     event_type: str = "creation",
     activity_reason: str | None = None,
+    enqueue_art: bool = True,
 ) -> None:
     """
     After materializer creates or deletes a placeholder, compute and apply initial status.
     
     This decouples status changes from file operations: the orchestrator handles all
     status computation, not just file state changes.
+
+    ``enqueue_art``: event-scoped mats pass False and batch art refresh after the
+    needs-placeholder loop so FS determination does not run inside the chunk txn.
     """
     try:
         from services.source_of_truth.status_intent import StatusSource
@@ -430,10 +434,51 @@ def _apply_initial_status_for_placeholder(
             }
 
         if intent:
-            orchestrator.apply_and_project_statuses([intent])
+            orchestrator.apply_and_project_statuses([intent], enqueue_art=enqueue_art)
             logger.debug(f"Applied initial status for Placeholder[{placeholder_id}]: {intent.new_status}")
     except Exception as e:
         logger.error(f"Failed to apply initial status for Placeholder[{placeholder_id}]: {e}", exc_info=True)
+
+
+def _mid_commit_needs_pass(session, *, enabled: bool, idx: int, total: int, every: int = 10) -> None:
+    """Release row locks during long event-scoped needs-placeholder FS loops."""
+    if not enabled or every < 1 or total <= 0:
+        return
+    if idx % every != 0 or idx >= total:
+        return
+    session.commit()
+    _apply_materialization_lock_timeout(session)
+
+
+def _enqueue_art_for_created_placeholders(
+    session,
+    *,
+    movie_ids: list[int] | None,
+    episode_ids: list[int] | None,
+) -> int:
+    """Batch-enqueue art refresh after event needs passes (skip per-row FS determination)."""
+    from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_refresh
+
+    pids: list[int] = []
+    if movie_ids:
+        pids.extend(
+            int(r[0])
+            for r in session.query(Placeholder.id)
+            .filter(Placeholder.movie_id.in_(list(movie_ids)), Placeholder.has_placeholder == True)  # noqa: E712
+            .all()
+        )
+    if episode_ids:
+        pids.extend(
+            int(r[0])
+            for r in session.query(Placeholder.id)
+            .filter(Placeholder.episode_id.in_(list(episode_ids)), Placeholder.has_placeholder == True)  # noqa: E712
+            .all()
+        )
+    pids = list(dict.fromkeys(pids))
+    if not pids:
+        return 0
+    enqueue_placeholder_art_refresh(pids, session=session, skip_determination=True)
+    return len(pids)
 
 
 def _sync_content_placeholder_status(session, *, movie_id: int | None, episode_id: int | None) -> None:
@@ -762,6 +807,8 @@ def apply_movie_materialization(
                     placeholder_id=placeholder_row.id,
                     event_type="creation",
                     activity_reason=activity_reason,
+                    # Event mats batch art after the needs loop; full/lite keep inline enqueue.
+                    enqueue_art=ensure_art,
                 )
             if ensure_art:
                 try:
@@ -928,6 +975,8 @@ def apply_episode_materialization(
                     placeholder_id=placeholder_row.id,
                     event_type="creation",
                     activity_reason=activity_reason,
+                    # Event mats batch art after the needs loop; full/lite keep inline enqueue.
+                    enqueue_art=ensure_art,
                 )
             if ensure_art:
                 try:
@@ -1466,10 +1515,19 @@ def _run_materialization_for_ids(
         ]
     else:
         pending_movie_needs = []
+    movie_needs_total = len(pending_movie_needs)
     for idx, movie_id in enumerate(pending_movie_needs, start=1):
         maybe_check_active_cancel(idx)
+        if isinstance(stall_state, dict) and movie_needs_total:
+            stall_state["phase"] = f"needs-placeholder movie {idx}/{movie_needs_total}"
         _process_single_movie_materialization(movie_id)
         _note_item_progress()
+        _mid_commit_needs_pass(
+            session,
+            enabled=event_scoped,
+            idx=idx,
+            total=movie_needs_total,
+        )
     _scoped_phase("needs-placeholder movie pass done")
     _note_item_progress(0, force=True)
 
@@ -1727,13 +1785,35 @@ def _run_materialization_for_ids(
         ]
     else:
         pending_episode_needs = []
+    episode_needs_total = len(pending_episode_needs)
     for idx, episode_id in enumerate(pending_episode_needs, start=1):
         maybe_check_active_cancel(idx)
+        if isinstance(stall_state, dict) and episode_needs_total:
+            stall_state["phase"] = f"needs-placeholder episode {idx}/{episode_needs_total}"
         _process_single_episode_materialization(episode_id)
         _note_item_progress()
+        _mid_commit_needs_pass(
+            session,
+            enabled=event_scoped,
+            idx=idx,
+            total=episode_needs_total,
+        )
     _scoped_phase("episode obsolete + needs passes done")
+    if event_scoped and (pending_movie_needs or pending_episode_needs):
+        try:
+            art_n = _enqueue_art_for_created_placeholders(
+                session,
+                movie_ids=pending_movie_needs or None,
+                episode_ids=pending_episode_needs or None,
+            )
+            if art_n:
+                _scoped_phase(f"batched art refresh enqueue for {art_n} placeholders")
+        except Exception as art_exc:
+            logger.warning(
+                f"Scoped materialization art enqueue skipped [{observation_source}]: {art_exc}",
+                extra={"emoji_type": "warning"},
+            )
     _note_item_progress(0, force=True)
-
     # TV density stubs: series and/or season (also clears leftovers after switching away).
     if skip_density:
         _scoped_phase("tv density skipped (caller batches density separately)")
