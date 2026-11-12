@@ -217,9 +217,10 @@ _DEFAULT_FILL_OPACITY = 0.65
 _DEFAULT_BORDER_OPACITY = 0.0
 LABEL_SIZES: tuple[str, ...] = ("small", "medium", "large")
 # Relative to small. Placeholdarr badge defaults to medium (matches legacy corner size).
-_SIZE_MULT: dict[str, float] = {"small": 1.0, "medium": 1.5, "large": 2.0}
+# Chip/badge size_scale presets (1.0 ≈ prior "small"). Kept compact so L stays on-poster.
+_SIZE_MULT: dict[str, float] = {"small": 0.85, "medium": 1.1, "large": 1.4}
 _SIZE_SCALE_MIN = 0.5
-_SIZE_SCALE_MAX = 2.5
+_SIZE_SCALE_MAX = 2.0
 # Arted Rating logo placement relative to the score.
 _RATING_ART_LAYOUTS: tuple[str, ...] = ("left", "right", "above", "below", "fill")
 _RATING_ART_LAYOUT_DEFAULT = "left"

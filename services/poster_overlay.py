@@ -547,8 +547,8 @@ def _parse_hex_rgba(color: str, *, alpha: int | None = None) -> tuple[int, int, 
 def _layout_chip_font_size(img_w: int, img_h: int, *, landscape: bool) -> int:
     """Readable chip type sized from the poster, not from a snap cell (small tier)."""
     if landscape:
-        return max(28, min(56, int(img_h * 0.055)))
-    return max(26, min(52, int(img_w * 0.048)))
+        return max(22, min(42, int(img_h * 0.042)))
+    return max(20, min(38, int(img_w * 0.036)))
 
 
 def _label_size_mult(size: str | float | None, size_scale: float | None = None) -> float:
@@ -561,11 +561,11 @@ def _label_size_mult(size: str | float | None, size_scale: float | None = None) 
     except Exception:
         if size_scale is not None:
             try:
-                return max(0.5, min(2.5, float(size_scale)))
+                return max(0.5, min(2.0, float(size_scale)))
             except (TypeError, ValueError):
                 pass
         key = str(size or "small").strip().lower()
-        return {"small": 1.0, "medium": 1.5, "large": 2.0}.get(key, 1.0)
+        return {"small": 0.85, "medium": 1.1, "large": 1.4}.get(key, 0.85)
 
 
 def _rating_logo_path(source: str) -> Path | None:
@@ -622,35 +622,175 @@ def _prepare_rating_logo(source: str, icon_h: int):
     return plate
 
 
+def _font_line_height(font) -> int:
+    """Line box height used by multiline draw (ascent+descent), not ink-only getbbox."""
+    try:
+        ascent, descent = font.getmetrics()
+        return max(1, int(ascent) + int(descent))
+    except Exception:
+        pass
+    try:
+        bbox = font.getbbox("Hg")
+        if bbox:
+            return max(1, int(bbox[3] - bbox[1]))
+    except Exception:
+        pass
+    return 16
+
+
 def _measure_text(font, text: str, *, line_spacing: int = 2) -> tuple[int, int]:
+    """Measure text for chip layout; multiline height matches Pillow multiline_text."""
     raw = str(text or "")
     if "\n" not in raw:
         try:
             bbox = font.getbbox(raw)
             if bbox:
-                return max(1, int(bbox[2] - bbox[0])), max(1, int(bbox[3] - bbox[1]))
+                # Prefer metric line height so vertical padding matches drawn glyphs.
+                return max(1, int(bbox[2] - bbox[0])), max(_font_line_height(font), int(bbox[3] - bbox[1]))
         except Exception:
             pass
-        return max(1, len(raw) * 10), 16
+        return max(1, len(raw) * 10), _font_line_height(font)
     lines = raw.split("\n")
     width = 1
-    height = 0
     gap = max(0, int(line_spacing))
-    for i, line in enumerate(lines):
+    line_h = _font_line_height(font)
+    for line in lines:
         try:
             bbox = font.getbbox(line if line else " ")
             if bbox:
                 lw = max(1, int(bbox[2] - bbox[0]))
-                lh = max(1, int(bbox[3] - bbox[1]))
             else:
-                lw, lh = 1, 16
+                lw = 1
         except Exception:
-            lw, lh = max(1, len(line) * 10), 16
+            lw = max(1, len(line) * 10)
         width = max(width, lw)
-        height += lh
-        if i < len(lines) - 1:
-            height += gap
+    n = max(1, len(lines))
+    height = line_h * n + gap * max(0, n - 1)
     return width, max(1, height)
+
+
+def _vertical_font_size(font) -> int:
+    try:
+        return max(1, int(getattr(font, "size", 16) or 16))
+    except Exception:
+        return 16
+
+
+def _glyph_ink_bbox(font, ch: str) -> tuple[int, int, int, int]:
+    """Return ``(left, top, right, bottom)`` ink box for one glyph (or a space slot)."""
+    size = _vertical_font_size(font)
+    # Word break: advance a readable blank slot; do not paint a space glyph.
+    if ch and ch.isspace():
+        slot = max(6, int(round(size * 0.62)))
+        return (0, 0, max(1, size // 3), slot)
+    try:
+        bbox = font.getbbox(ch if ch else " ")
+        if bbox:
+            return (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
+    except Exception:
+        pass
+    return (0, 0, max(1, size // 2), max(1, size))
+
+
+def _measure_vertical_stack(font, text: str, *, gap: int = 1) -> tuple[int, int]:
+    """Ink-based width/height for a vertical stack with letter and word gaps."""
+    lines = str(text or "").split("\n")
+    if not lines:
+        return 1, 1
+    width = 1
+    height = 0
+    g = max(0, int(gap))
+    for i, line in enumerate(lines):
+        left, top, right, bottom = _glyph_ink_bbox(font, line)
+        # Width from painted glyphs only; spaces are vertical separators.
+        if not (line and line.isspace()):
+            width = max(width, max(1, right - left))
+        height += max(1, bottom - top)
+        if i < len(lines) - 1 and not (line and line.isspace()):
+            # Letter gap after glyphs; word slots already include their own advance.
+            next_line = lines[i + 1]
+            if not (next_line and next_line.isspace()):
+                height += g
+    return width, max(1, height)
+
+
+def _draw_vertical_stack(
+    draw,
+    *,
+    mid_x: int,
+    top_y: int,
+    text: str,
+    font,
+    fill,
+    gap: int = 1,
+) -> None:
+    """Paint stacked glyphs from ink boxes with readable letter/word spacing."""
+    lines = str(text or "").split("\n")
+    y = int(top_y)
+    g = max(0, int(gap))
+    for i, line in enumerate(lines):
+        left, top, right, bottom = _glyph_ink_bbox(font, line)
+        ink_h = max(1, bottom - top)
+        is_space = bool(line and line.isspace())
+        if not is_space:
+            # Pen so the ink box is centered on mid_x and starts at y.
+            pen_x = int(mid_x - (left + right) / 2)
+            pen_y = int(y - top)
+            draw.text((pen_x, pen_y), line, fill=fill, font=font)
+        y += ink_h
+        if i < len(lines) - 1 and not is_space:
+            next_line = lines[i + 1]
+            if not (next_line and next_line.isspace()):
+                y += g
+
+
+def _fit_layout_chip_font(
+    text: str,
+    *,
+    preferred_size: int,
+    min_size: int,
+    max_width: int,
+    max_height: int | None = None,
+    line_gap_ratio: float = 0.06,
+    vertical: bool = False,
+    pad_x_ratio: float = 0.0,
+    pad_x_min: int = 0,
+    pad_y_ratio: float = 0.0,
+    pad_y_min: int = 0,
+):
+    """Shrink chip type until plate size (ink + pad) fits the poster budget.
+
+    Prefers ``preferred_size`` and only steps down when the chip would exceed
+    ``max_width`` / ``max_height``. Never stops early while still overflowing
+    until ``min_size`` (callers should set a low floor so text does not clip).
+    """
+    size = max(min_size, int(preferred_size))
+    font = _load_font(size)
+    if font is None:
+        return font
+    limit_w = max(1, int(max_width))
+    limit_h = max(1, int(max_height)) if max_height is not None else None
+    while True:
+        line_gap = max(2 if vertical else 1, int(round(size * line_gap_ratio)))
+        if vertical:
+            tw, th = _measure_vertical_stack(font, text, gap=line_gap)
+        else:
+            tw, th = _measure_text(font, text, line_spacing=line_gap)
+        pad_x = max(int(pad_x_min), int(round(size * pad_x_ratio))) if (pad_x_ratio or pad_x_min) else 0
+        pad_y = max(int(pad_y_min), int(round(size * pad_y_ratio))) if (pad_y_ratio or pad_y_min) else 0
+        chip_w = tw + pad_x * 2
+        chip_h = th + pad_y * 2
+        fits_w = chip_w <= limit_w
+        fits_h = limit_h is None or chip_h <= limit_h
+        if fits_w and fits_h:
+            break
+        if size <= min_size:
+            break
+        size = max(min_size, size - 2)
+        font = _load_font(size)
+        if font is None:
+            break
+    return font
 
 
 def _verticalize_chip_text(text: str) -> str:
@@ -762,47 +902,85 @@ def _draw_layout_chip(
 
     img_w, img_h = out.size
     mult = _label_size_mult(size, size_scale)
-    preferred = max(16, int(round(_layout_chip_font_size(img_w, img_h, landscape=landscape) * mult)))
-    # Grow the fit budget with size so the slider raises type, not only padding.
-    max_text_w = max(80, int(img_w * min(0.95, 0.50 + 0.20 * mult)))
-    # Keep at least ~85% of preferred so size_scale always moves the glyphs.
-    min_font = max(12, int(round(preferred * 0.85)))
-    if vertical:
-        # Vertical stacks are height-bound; load preferred (soft-fit by chip later).
-        font = _load_font(preferred) or _fit_banner_font(
-            "0", max_width=max_text_w, preferred_size=preferred, min_size=min_font
-        )
+    preferred = max(14, int(round(_layout_chip_font_size(img_w, img_h, landscape=landscape) * mult)))
+    # Prefer size_scale type size; shrink only when the plate would leave the poster.
+    # Low floor so long copy can still fit instead of clipping at the edges.
+    min_font = max(11, int(round(preferred * 0.40)))
+    # Vertical: ink boxes + letter gap (avoid metric line slots that inflate end pad).
+    line_gap_ratio = 0.16 if vertical else 0.06
+    if label:
+        if vertical:
+            font = _fit_layout_chip_font(
+                label,
+                preferred_size=preferred,
+                min_size=min_font,
+                max_width=max(24, int(img_w * min(0.42, 0.22 + 0.08 * mult))),
+                max_height=img_h,
+                line_gap_ratio=line_gap_ratio,
+                vertical=True,
+                pad_x_ratio=0.32,
+                pad_x_min=7,
+                pad_y_ratio=0.10,
+                pad_y_min=3,
+            )
+        else:
+            font = _fit_layout_chip_font(
+                label,
+                preferred_size=preferred,
+                min_size=min_font,
+                max_width=img_w,
+                max_height=None,
+                line_gap_ratio=line_gap_ratio,
+                vertical=False,
+                pad_x_ratio=0.38,
+                pad_x_min=10,
+                pad_y_ratio=0.28,
+                pad_y_min=6,
+            )
     else:
-        font = _fit_banner_font(
-            label or "0",
-            max_width=max_text_w,
-            preferred_size=preferred,
-            min_size=min_font,
-        )
+        font = _load_font(preferred)
     if font is None:
         return out, None
-    line_gap = max(2, int(round(preferred * 0.08)))
-    text_w, text_h = _measure_text(font, label, line_spacing=line_gap) if label else (0, preferred)
-    pad_y = max(8, int(preferred * 0.32))
+    # Use the fitted font size for padding/gaps so the plate hugs the glyphs.
+    try:
+        fitted_size = int(getattr(font, "size", preferred) or preferred)
+    except Exception:
+        fitted_size = preferred
+    fitted_size = max(min_font, fitted_size)
+    line_gap = max(2 if vertical else 1, int(round(fitted_size * line_gap_ratio)))
+    if label and vertical:
+        text_w, text_h = _measure_vertical_stack(font, label, gap=line_gap)
+    elif label:
+        text_w, text_h = _measure_text(font, label, line_spacing=line_gap)
+    else:
+        text_w, text_h = 0, fitted_size
+    # Vertical spines use less end-cap pad so the plate hugs the stack like horizontal side pad.
+    if vertical:
+        pad_y = max(3, int(fitted_size * 0.10))
+        pad_x = max(7, int(fitted_size * 0.32))
+    else:
+        pad_y = max(6, int(fitted_size * 0.28))
+        pad_x = max(10, int(fitted_size * 0.38))
     # Arted chips size to the logo+score cluster; keep side pad tight like text chips.
     if art_path is not None:
-        pad_x = max(5, int(preferred * 0.16))
-        gap = max(3, int(preferred * 0.10)) if label else 0
+        pad_x = max(5, int(fitted_size * 0.16))
+        gap = max(3, int(fitted_size * 0.10)) if label else 0
         if layout in {"above", "below"}:
             # Logo width matches an "8.8" score at this type size (not "88%").
             ref_w, _ = _measure_text(font, "8.8")
             icon_h = max(12, int(ref_w))
         else:
-            icon_h = max(12, int(round(max(text_h, preferred * 0.78))))
+            icon_h = max(12, int(round(max(text_h, fitted_size * 0.78))))
             if layout == "fill":
                 # Larger mark so it reads as the chip background.
-                icon_h = max(icon_h, int(round(preferred * 1.35)))
-                pad_x = max(6, int(preferred * 0.22))
-                pad_y = max(6, int(preferred * 0.22))
+                icon_h = max(icon_h, int(round(fitted_size * 1.35)))
+                pad_x = max(6, int(fitted_size * 0.22))
+                pad_y = max(6, int(fitted_size * 0.22))
+        if vertical and layout != "fill":
+            pad_y = max(3, int(fitted_size * 0.10))
     else:
-        pad_x = max(14, int(preferred * 0.55))
         gap = 0
-        icon_h = max(12, int(round(max(text_h, preferred * 0.85))))
+        icon_h = max(12, int(round(max(text_h, fitted_size * 0.85))))
         layout = "left"
     icon_w = 0
     logo = None
@@ -857,7 +1035,7 @@ def _draw_layout_chip(
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     radius = max(6, int(min(box[2] - box[0], box[3] - box[1]) * 0.22))
-    auto_stroke = max(3, int(round(preferred * 0.09)))
+    auto_stroke = max(2, int(round(fitted_size * 0.09)))
     if border_thickness is None:
         stroke = auto_stroke
     else:
@@ -923,7 +1101,17 @@ def _draw_layout_chip(
     def _draw_label(cx: int, cy: int) -> None:
         if not label:
             return
-        if "\n" in label:
+        if vertical:
+            _draw_vertical_stack(
+                draw,
+                mid_x=cx,
+                top_y=cy - text_h // 2,
+                text=label,
+                font=font,
+                fill=text_fill,
+                gap=line_gap,
+            )
+        elif "\n" in label:
             draw.multiline_text(
                 (cx, cy),
                 label,
@@ -1024,7 +1212,12 @@ def _frac_axis_px(start: float, end: float, dim: int) -> tuple[int, int]:
 
 
 def _paste_rgba_clipped(dest, src, origin: tuple[int, int]) -> None:
-    """Paste ``src`` onto ``dest`` at ``origin``, clipping to dest bounds."""
+    """Paste ``src`` onto ``dest`` at ``origin``, clipping to dest bounds.
+
+    Uses alpha compositing so source alpha is applied once. ``Image.paste`` with
+    an RGBA mask multiplies alpha again, which made translucent fill rectangles
+    look lighter in bake than the desk CSS ``rgba()`` overlay.
+    """
     if src is None or dest is None:
         return
     dx, dy = int(origin[0]), int(origin[1])
@@ -1037,7 +1230,13 @@ def _paste_rgba_clipped(dest, src, origin: tuple[int, int]) -> None:
     if sx1 <= sx0 or sy1 <= sy0:
         return
     crop = src.crop((sx0, sy0, sx1, sy1))
-    dest.paste(crop, (dx + sx0, dy + sy0), crop)
+    if crop.mode != "RGBA":
+        crop = crop.convert("RGBA")
+    if dest.mode != "RGBA":
+        # RGB destinations (opaque badges): mask paste is fine; no partial alpha to keep.
+        dest.paste(crop, (dx + sx0, dy + sy0), crop)
+        return
+    dest.alpha_composite(crop, dest=(dx + sx0, dy + sy0))
 
 
 def _draw_fill_frame_borders(
@@ -1072,6 +1271,20 @@ def _draw_fill_frame_borders(
         draw.rectangle([x1 - bt, y0, x1, y1], fill=border_rgba)
 
 
+def _fill_fade_ramp_alpha(i: int, span: int) -> int:
+    """Alpha along one fade edge: 0 at the outer pixel → 255 at the inner edge.
+
+    Uses Hermite smoothstep so the onset against bright art is softer than a
+    linear ramp (which reads as a hard shelf).
+    """
+    n = max(1, int(span))
+    if n <= 1:
+        return 0
+    t = max(0.0, min(1.0, float(i) / float(n - 1)))
+    t = t * t * (3.0 - 2.0 * t)
+    return int(round(255 * t))
+
+
 def _apply_fill_edge_fade_mask(
     tile,
     *,
@@ -1081,7 +1294,7 @@ def _apply_fill_edge_fade_mask(
     fade_left: float,
     Image,
 ):
-    """Multiply tile alpha by per-edge linear ramps (0 at outer → 1 inward)."""
+    """Multiply tile alpha by per-edge smoothstep ramps (0 at outer → 1 inward)."""
     w, h = tile.size
     if w <= 0 or h <= 0:
         return tile
@@ -1102,27 +1315,27 @@ def _apply_fill_edge_fade_mask(
     right_px = int(round(fr * w)) if fr > 0 else 0
     if top_px > 0:
         for y in range(min(top_px, h)):
-            v = int(round(255 * (y / top_px)))
+            v = _fill_fade_ramp_alpha(y, top_px)
             for x in range(w):
                 if px[x, y] > v:
                     px[x, y] = v
     if bottom_px > 0:
         for i in range(min(bottom_px, h)):
             y = h - 1 - i
-            v = int(round(255 * (i / bottom_px)))
+            v = _fill_fade_ramp_alpha(i, bottom_px)
             for x in range(w):
                 if px[x, y] > v:
                     px[x, y] = v
     if left_px > 0:
         for x in range(min(left_px, w)):
-            v = int(round(255 * (x / left_px)))
+            v = _fill_fade_ramp_alpha(x, left_px)
             for y in range(h):
                 if px[x, y] > v:
                     px[x, y] = v
     if right_px > 0:
         for i in range(min(right_px, w)):
             x = w - 1 - i
-            v = int(round(255 * (i / right_px)))
+            v = _fill_fade_ramp_alpha(i, right_px)
             for y in range(h):
                 if px[x, y] > v:
                     px[x, y] = v

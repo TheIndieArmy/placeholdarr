@@ -22,6 +22,14 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Fill frame border**: Color, opacity, and thickness on all four sides.
 - **Fill edge fade**: Per-edge fade depth; faded edges skip their border.
 - **Custom text vertical**: Stack characters for vertical chip orientation.
+- **Layout chip size scale**: S/M/L presets and max scale are more compact so Large type stays on-poster for typical Text chips.
+- **Preview bake sizes**: Mosaic Large / Medium / Small views sized for media-player poster tiles.
+- **Vertical chip text clip**: Stacked Custom text uses font metrics and a poster height budget so glyphs no longer clip inside the plate.
+- **Vertical chip end pad**: Vertical stacks size and draw from glyph ink boxes so ascent/descent no longer inflate top/bottom fill.
+- **Preview bake after tab switch**: Preview bake uses the active Movie/TV/Episode profile instead of a stale header closure.
+- **Layout chip text fit**: Same size scale keeps preferred type until the plate would leave the poster, then shrinks so copy never clips.
+- **Fill bake opacity**: Translucent fill rectangles match the desk; bake no longer doubles alpha on paste.
+- **Fill edge fade hard edge**: Edge fades use a smoothstep ramp on bake and desk so the onset no longer reads as a hard shelf.
 - **Fail active jobs and restart**: Advanced Settings control to fail wedged jobs and restart Placeholdarr.
 - **Materialization lock fairness**: Chunked mats, shorter lock windows, and stall heartbeats so import/webhooks can finish (#152).
 - **Lite sync localized poster lock**: Scoped/lite mat defers TMDB localized poster resolve so art ensure cannot self-block (#170).
@@ -34,10 +42,12 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Fill frame border**: Color, opacity, and thickness on all four sides of the unrotated shape.
 - **Fill edge fade**: Per-edge fade depth; a faded edge skips its border automatically.
 - **Custom text vertical**: Stack characters for vertical chip orientation.
+- **Preview bake sizes**: Mosaic Large / Medium / Small views sized for media-player poster tiles.
 - **Layout label sprite API**: Bake-accurate cropped PNG for desk chip ghosts.
 
 ### Changed
 
+- **Layout chip size scale**: S/M/L presets and max scale are more compact so Large type stays on-poster for typical Text chips.
 - **Handler watchdog timeout**: When `JOB_HANDLER_TIMEOUT_SECONDS` fires, the claim is marked FAILED (not log-only) so the stale-CLAIMED reaper cannot recycle that hang forever.
 - **Event-scoped TV density**: Import-grace and other event mats finish core placeholders, then run series/season density in per-series short sessions so filesystem/art work cannot hold `library_catalog_version` / series row locks.
 - **Import/event mats skip poster ensure**: Webhook and import-grace materialization keep/retire placeholders and density stubs without `ensure_*_art`; poster work stays on full/lite mat, calendar Coming Soon art, and art refresh.
@@ -52,6 +62,12 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ### Fixed
 
+- **Vertical chip text clip**: Stacked Custom text uses font metrics and a poster height budget so glyphs no longer clip inside the plate.
+- **Vertical chip end pad**: Vertical stacks size and draw from glyph ink boxes so ascent/descent no longer inflate top/bottom fill.
+- **Layout chip text fit**: Same size scale keeps preferred type until the plate would leave the poster, then shrinks so copy never clips.
+- **Fill bake opacity**: Translucent fill rectangles match the desk; bake no longer doubles alpha on paste.
+- **Fill edge fade hard edge**: Edge fades use a smoothstep ramp on bake and desk so the onset no longer reads as a hard shelf.
+- **Preview bake after tab switch**: Preview bake uses the active Movie/TV/Episode profile instead of a stale header closure.
 - **Lite sync localized poster lock**: Scoped/lite materialization defers TMDB `localized_poster` resolve until after commits (then the existing poster-language job), so art ensure cannot self-block on `UPDATE series` while idle-in-transaction (#170).
 - **Tasks live poll**: Active tasks poll `/api/tasks/status` every 1s again (no 5s mat slowdown); SSE start/finish uses the status patch path; status stays off the stuck-task reconcile hot path.
 - **Lite catalog discovery bars**: Discovery publishes progress during Arr catalog fetch heartbeats and targeted title sync so bars move without a manual refresh.
