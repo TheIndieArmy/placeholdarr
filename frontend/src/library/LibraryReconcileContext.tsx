@@ -34,11 +34,21 @@ type TrackReconcileJobOpts = {
   title?: string | null;
 };
 
+type FlashSidebarStatusOpts = {
+  message: string;
+  kind?: LibraryReconcileSidebarStatus["kind"];
+  busy?: boolean;
+  step?: string | null;
+  title?: string | null;
+};
+
 type LibraryReconcileContextValue = {
   status: LibraryReconcileSidebarStatus;
   runReconcile: (startReconcile: () => Promise<EntityReconcileStartResponse>) => Promise<void>;
   /** Poll an already-queued entity reconcile in the sidebar (e.g. Auto pin). */
   trackReconcileJob: (opts: TrackReconcileJobOpts) => void;
+  /** Local Creating…/Removing…/Done for Never/Pinned fast path (no job id). */
+  flashSidebarStatus: (opts: FlashSidebarStatusOpts) => void;
 };
 
 const LibraryReconcileContext = createContext<LibraryReconcileContextValue | null>(null);
@@ -292,6 +302,26 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
     [beginPollingJob],
   );
 
+  const flashSidebarStatus = useCallback(
+    (opts: FlashSidebarStatusOpts) => {
+      const message = String(opts.message || "").trim();
+      if (!message) return;
+      // Local pin apply supersedes any in-flight Auto poll (Never cancels that job).
+      clearPollingJob();
+      const kind = opts.kind ?? "info";
+      const busy = opts.busy ?? kind === "info";
+      setStatus({
+        busy,
+        kind,
+        message,
+        step: opts.step != null ? String(opts.step).trim() || null : busy ? "working" : "done",
+        title: String(opts.title || "").trim() || null,
+        live: null,
+      });
+    },
+    [clearPollingJob],
+  );
+
   const runReconcile = useCallback(async (startReconcile: () => Promise<EntityReconcileStartResponse>) => {
     clearPollingJob();
     setStatus({
@@ -332,8 +362,8 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
   }, [clearPollingJob, trackReconcileJob]);
 
   const value = useMemo(
-    () => ({ status, runReconcile, trackReconcileJob }),
-    [status, runReconcile, trackReconcileJob],
+    () => ({ status, runReconcile, trackReconcileJob, flashSidebarStatus }),
+    [status, runReconcile, trackReconcileJob, flashSidebarStatus],
   );
 
   return (

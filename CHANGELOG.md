@@ -42,6 +42,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 ### Changed
 
 - **Auto pin sidebar progress**: After the pin debounce, Auto marks Saved on the chip and shows title refresh progress in the library sidebar instead of holding Saving… until reconcile finishes.
+- **Never/Pinned sidebar progress**: Fast create/remove also flashes Creating…/Removing… then Done in the library sidebar, even when no reconcile job is queued.
 - **DB dual pools**: Separate API and worker SQLAlchemy pools so UI checkouts are not starved by long worker holds.
 - **Entity mat claim caps**: Cap concurrent `entity_materialization` jobs, with a tighter cap for `event_series_add`.
 - **Background thread pool role**: Maintenance/Settings/watchlist route-spawned daemons bind the worker DB pool so syncs do not starve the API pool.

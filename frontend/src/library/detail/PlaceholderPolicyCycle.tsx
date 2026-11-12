@@ -86,7 +86,7 @@ export function PlaceholderPolicyCycle(props: {
   const locked = Boolean(props.locked);
   const progressSide = props.inlineProgressSide ?? "end";
   const hasPlaceholder = Boolean(props.hasPlaceholder);
-  const { trackReconcileJob } = useLibraryReconcile();
+  const { trackReconcileJob, flashSidebarStatus } = useLibraryReconcile();
   const hasFile = Boolean(props.hasFile);
   const tagControl = props.policyTagControl || null;
   const tagConflict = Boolean(tagControl?.conflict);
@@ -148,8 +148,23 @@ export function PlaceholderPolicyCycle(props: {
       desiredPolicyRef.current = policy;
       const gen = ++generationRef.current;
       inFlightRef.current = true;
-      updatePhase(phaseForPolicy(policy, hasPlaceholder, hasFile));
+      const syncPhase = phaseForPolicy(policy, hasPlaceholder, hasFile);
+      updatePhase(syncPhase);
       setError(null);
+      const busyMsg =
+        syncPhase === "removing"
+          ? "Removing placeholders…"
+          : syncPhase === "creating"
+            ? "Creating placeholders…"
+            : "Updating placeholders…";
+      // Never/Pinned (and the brief Auto API hop) show in the sidebar immediately.
+      flashSidebarStatus({
+        message: busyMsg,
+        busy: true,
+        kind: "info",
+        step: syncPhase,
+        title: POLICY_LABEL[policy],
+      });
       try {
         const setter = setterForMediaType(props.mediaType);
         const out = await setter(props.entityId, { policy });
@@ -181,6 +196,21 @@ export function PlaceholderPolicyCycle(props: {
             followupJobId: out.followup_job_id,
             message: out.step_label || "Refreshing placeholders…",
             step: "queued",
+            title: POLICY_LABEL[policy],
+          });
+        } else {
+          const doneMsg =
+            syncPhase === "removing"
+              ? "Placeholders removed"
+              : syncPhase === "creating"
+                ? "Placeholders created"
+                : "Placeholders updated";
+          flashSidebarStatus({
+            message: doneMsg,
+            busy: false,
+            kind: "success",
+            step: "done",
+            title: POLICY_LABEL[policy],
           });
         }
 
@@ -203,7 +233,15 @@ export function PlaceholderPolicyCycle(props: {
         setDisplayPolicy(confirmedPolicyRef.current);
         displayPolicyRef.current = confirmedPolicyRef.current;
         desiredPolicyRef.current = confirmedPolicyRef.current;
-        setError(err instanceof Error ? err.message : "Failed to update placeholder policy");
+        const msg = err instanceof Error ? err.message : "Failed to update placeholder policy";
+        flashSidebarStatus({
+          message: msg,
+          busy: false,
+          kind: "error",
+          step: null,
+          title: POLICY_LABEL[policy],
+        });
+        setError(msg);
       }
     },
     [
@@ -214,6 +252,7 @@ export function PlaceholderPolicyCycle(props: {
       hasFile,
       updatePhase,
       trackReconcileJob,
+      flashSidebarStatus,
     ],
   );
 
