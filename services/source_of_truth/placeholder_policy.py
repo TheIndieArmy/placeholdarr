@@ -431,6 +431,28 @@ def _episode_ids_for_season(session, season_id: int) -> list[int]:
     ]
 
 
+def _refresh_series_episode_stats_after_policy(series_id: int) -> None:
+    """Settle cached series episode counters after bulk Never/Pinned create/remove."""
+    try:
+        from services.series_episode_stats import refresh_series_episode_stats
+        from services.series_episode_stats_hooks import wake_stats_refresh_worker
+
+        stats_session = get_session()
+        try:
+            refresh_series_episode_stats(stats_session, [int(series_id)])
+            stats_session.commit()
+        except Exception:
+            try:
+                stats_session.rollback()
+            except Exception:
+                pass
+        finally:
+            stats_session.close()
+        wake_stats_refresh_worker()
+    except Exception:
+        pass
+
+
 def apply_series_gate_fast(series_id: int, *, policy: PlaceholderPolicy) -> dict[str, Any]:
     """Apply series Never/Pinned across episodes via effective policy (no flag rewrite on children)."""
     episode_ids: list[int] = []
@@ -455,6 +477,9 @@ def apply_series_gate_fast(series_id: int, *, policy: PlaceholderPolicy) -> dict
         created_n, deleted_n = _policy_fast_action_counts(action)
         created += created_n
         removed += deleted_n
+    # Per-episode commits enqueue async series stats; settle the series counter
+    # here so Seasons & Episodes does not lag the Placeholdarr / season PH chips.
+    _refresh_series_episode_stats_after_policy(int(series_id))
     if errors and created == 0 and removed == 0:
         return {
             "ok": False,
@@ -478,11 +503,14 @@ def apply_series_gate_fast(series_id: int, *, policy: PlaceholderPolicy) -> dict
 def apply_season_stamp_fast(season_id: int, *, policy: PlaceholderPolicy) -> dict[str, Any]:
     """Stamp season Auto/Never/Pinned onto all episodes, then apply (Auto → per-episode reconcile)."""
     episode_ids: list[int] = []
+    series_id: int | None = None
     session = get_session()
     try:
         season = session.query(Season).filter(Season.id == int(season_id)).first()
         if not season:
             return {"ok": False, "message": "Season not found", "job_id": None}
+        if getattr(season, "series_id", None) is not None:
+            series_id = int(season.series_id)
         episode_ids = _episode_ids_for_season(session, int(season_id))
         for eid in episode_ids:
             ep = session.get(Episode, int(eid))
@@ -524,6 +552,8 @@ def apply_season_stamp_fast(season_id: int, *, policy: PlaceholderPolicy) -> dic
         created_n, deleted_n = _policy_fast_action_counts(action)
         created += created_n
         removed += deleted_n
+    if series_id is not None:
+        _refresh_series_episode_stats_after_policy(int(series_id))
     if errors and created == 0 and removed == 0:
         return {
             "ok": False,
