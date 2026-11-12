@@ -1271,6 +1271,20 @@ def _draw_fill_frame_borders(
         draw.rectangle([x1 - bt, y0, x1, y1], fill=border_rgba)
 
 
+def _fill_fade_ramp_alpha(i: int, span: int) -> int:
+    """Alpha along one fade edge: 0 at the outer pixel → 255 at the inner edge.
+
+    Uses Hermite smoothstep so the onset against bright art is softer than a
+    linear ramp (which reads as a hard shelf).
+    """
+    n = max(1, int(span))
+    if n <= 1:
+        return 0
+    t = max(0.0, min(1.0, float(i) / float(n - 1)))
+    t = t * t * (3.0 - 2.0 * t)
+    return int(round(255 * t))
+
+
 def _apply_fill_edge_fade_mask(
     tile,
     *,
@@ -1280,7 +1294,7 @@ def _apply_fill_edge_fade_mask(
     fade_left: float,
     Image,
 ):
-    """Multiply tile alpha by per-edge linear ramps (0 at outer → 1 inward)."""
+    """Multiply tile alpha by per-edge smoothstep ramps (0 at outer → 1 inward)."""
     w, h = tile.size
     if w <= 0 or h <= 0:
         return tile
@@ -1301,27 +1315,27 @@ def _apply_fill_edge_fade_mask(
     right_px = int(round(fr * w)) if fr > 0 else 0
     if top_px > 0:
         for y in range(min(top_px, h)):
-            v = int(round(255 * (y / top_px)))
+            v = _fill_fade_ramp_alpha(y, top_px)
             for x in range(w):
                 if px[x, y] > v:
                     px[x, y] = v
     if bottom_px > 0:
         for i in range(min(bottom_px, h)):
             y = h - 1 - i
-            v = int(round(255 * (i / bottom_px)))
+            v = _fill_fade_ramp_alpha(i, bottom_px)
             for x in range(w):
                 if px[x, y] > v:
                     px[x, y] = v
     if left_px > 0:
         for x in range(min(left_px, w)):
-            v = int(round(255 * (x / left_px)))
+            v = _fill_fade_ramp_alpha(x, left_px)
             for y in range(h):
                 if px[x, y] > v:
                     px[x, y] = v
     if right_px > 0:
         for i in range(min(right_px, w)):
             x = w - 1 - i
-            v = int(round(255 * (i / right_px)))
+            v = _fill_fade_ramp_alpha(i, right_px)
             for y in range(h):
                 if px[x, y] > v:
                     px[x, y] = v

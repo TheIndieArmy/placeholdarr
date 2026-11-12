@@ -7906,6 +7906,29 @@ function normalizeDeskFadeEdge(raw: unknown): number {
   return Math.max(0, Math.min(0.5, n));
 }
 
+/** Approximate Pillow ``_fill_fade_ramp_alpha`` smoothstep as CSS mask stops. */
+function deskFillFadeGradient(direction: string, fadeFrac: number): string {
+  const p = Math.max(0, Math.min(50, fadeFrac * 100));
+  // Sample Hermite smoothstep at a few points inside the fade band.
+  const stop = (t: number, alpha: number) => {
+    const pct = (p * Math.max(0, Math.min(1, t))).toFixed(2);
+    const a = Math.max(0, Math.min(1, alpha)).toFixed(3);
+    return `rgba(0,0,0,${a}) ${pct}%`;
+  };
+  // t^2*(3-2t) at 0, 0.2, 0.4, 0.6, 0.8, 1
+  const body = [
+    stop(0, 0),
+    stop(0.2, 0.104),
+    stop(0.4, 0.352),
+    stop(0.6, 0.648),
+    stop(0.8, 0.896),
+    stop(1, 1),
+    `#000 ${p.toFixed(2)}%`,
+    "#000 100%",
+  ].join(", ");
+  return `linear-gradient(${direction}, ${body})`;
+}
+
 /** CSS mask ramps matching Pillow edge fades (intersected). */
 function deskFillFadeMaskStyle(fades: {
   top: number;
@@ -7914,22 +7937,10 @@ function deskFillFadeMaskStyle(fades: {
   left: number;
 }): CSSProperties | null {
   const layers: string[] = [];
-  if (fades.top > 0) {
-    const p = fades.top * 100;
-    layers.push(`linear-gradient(to bottom, transparent 0%, #000 ${p}%, #000 100%)`);
-  }
-  if (fades.bottom > 0) {
-    const p = fades.bottom * 100;
-    layers.push(`linear-gradient(to top, transparent 0%, #000 ${p}%, #000 100%)`);
-  }
-  if (fades.left > 0) {
-    const p = fades.left * 100;
-    layers.push(`linear-gradient(to right, transparent 0%, #000 ${p}%, #000 100%)`);
-  }
-  if (fades.right > 0) {
-    const p = fades.right * 100;
-    layers.push(`linear-gradient(to left, transparent 0%, #000 ${p}%, #000 100%)`);
-  }
+  if (fades.top > 0) layers.push(deskFillFadeGradient("to bottom", fades.top));
+  if (fades.bottom > 0) layers.push(deskFillFadeGradient("to top", fades.bottom));
+  if (fades.left > 0) layers.push(deskFillFadeGradient("to right", fades.left));
+  if (fades.right > 0) layers.push(deskFillFadeGradient("to left", fades.right));
   if (!layers.length) return null;
   const joined = layers.join(", ");
   const multi = layers.length > 1;
