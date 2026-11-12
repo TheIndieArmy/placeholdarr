@@ -9958,9 +9958,15 @@ function PosterOverlayFocusPreview(props: {
       return [] as Record<string, unknown>[];
     }
   })();
+  // Fold sampleTokensJson into styleKey so randomize/TMDB preview art invalidates
+  // cached chips (Title, ratings, runtime, …). Style-only keys reused Breaking Bad text.
   const chipSpriteNeeds = labels
     .filter((l) => !isDeskBannerLabel(l) && String(l.id || ""))
-    .map((l) => ({ id: String(l.id), styleKey: layoutLabelSpriteStyleKey(l), label: l }));
+    .map((l) => ({
+      id: String(l.id),
+      styleKey: `${layoutLabelSpriteStyleKey(l)}::${sampleTokensJson}`,
+      label: l,
+    }));
   const chipNeedsKey = chipSpriteNeeds.map((c) => `${c.id}:${c.styleKey}`).join("|");
 
   useEffect(() => {

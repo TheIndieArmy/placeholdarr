@@ -494,6 +494,9 @@ class Settings(BaseSettings):
     IMPORT_GRACE_STEP_SECONDS: int = int(os.getenv("IMPORT_GRACE_STEP_SECONDS", "60").split('#')[0].strip())
     IMPORT_GRACE_ACCELERATED_STEP_SECONDS: int = int(os.getenv("IMPORT_GRACE_ACCELERATED_STEP_SECONDS", "5").split('#')[0].strip())
     STATUS_JOB_BATCH_SIZE: int = int(os.getenv("STATUS_JOB_BATCH_SIZE", "100").split('#')[0].strip())
+    # Layout-designer art refreshes bake richer posters; keep batches smaller than status jobs
+    # so the handler watchdog does not fail mid-batch on complex studio layouts.
+    LAYOUT_ART_BATCH_SIZE: int = int(os.getenv("LAYOUT_ART_BATCH_SIZE", "25").split('#')[0].strip() or "25")
     STATUS_JOB_DEBOUNCE_SECONDS: float = float(os.getenv("STATUS_JOB_DEBOUNCE_SECONDS", "0.5").split('#')[0].strip())
     # Entity materialization jobs (off webhook path): coalesce pending ids up to this size.
     MATERIALIZATION_JOB_BATCH_SIZE: int = int(

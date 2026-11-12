@@ -107,6 +107,8 @@ export type PosterLayoutCatalog = {
   styles?: LabelStyle[];
   arted_tokens?: string[];
   rating_sources?: string[];
+  /** Per media kind; TV/Episode are IMDb-only (Sonarr bake data). */
+  rating_sources_by_kind?: Partial<Record<"movie" | "tv" | "episode", string[]>>;
   custom_template_tokens?: Record<string, string[]>;
   custom_text_max_length?: number;
   custom_date_tokens?: string[];
@@ -610,13 +612,41 @@ function newLabelId(): string {
   return Math.random().toString(16).slice(2, 14);
 }
 
+function mediaKindFromProfileKey(key: string): MediaKind {
+  if (key.startsWith("episode.")) return "episode";
+  if (key.startsWith("tv.")) return "tv";
+  return "movie";
+}
+
+/** Providers we can bake for each media kind (matches server ``rating_sources_for_media``). */
+function allowedRatingSourcesForKind(mediaKind: MediaKind): string[] {
+  if (mediaKind === "tv" || mediaKind === "episode") return ["imdb"];
+  return ["imdb", "tmdb", "trakt", "rottentomatoes", "metacritic"];
+}
+
+function coerceRatingSource(
+  raw: string | undefined,
+  opts: { arted: boolean; mediaKind: MediaKind },
+): string {
+  let source = String(raw || "auto").trim().toLowerCase() || "auto";
+  if (opts.arted && (source === "auto" || !source)) source = "imdb";
+  const allowed = allowedRatingSourcesForKind(opts.mediaKind);
+  if (source !== "auto" && !allowed.includes(source)) {
+    return allowed[0] || "imdb";
+  }
+  return source;
+}
+
 function cloneProfiles(profiles: Record<string, PosterLayoutProfile>): Record<string, PosterLayoutProfile> {
   const cloned = JSON.parse(JSON.stringify(profiles)) as Record<string, PosterLayoutProfile>;
   for (const key of Object.keys(cloned)) {
     const labels = cloned[key]?.labels;
-    const landscape = key.startsWith("episode.");
+    const mediaKind = mediaKindFromProfileKey(key);
+    const landscape = mediaKind === "episode";
     cloned[key] = {
-      labels: Array.isArray(labels) ? labels.map((l) => normalizeLabelColors(l, landscape)) : [],
+      labels: Array.isArray(labels)
+        ? labels.map((l) => normalizeLabelColors(l, landscape, mediaKind))
+        : [],
       grayscale: Boolean(cloned[key]?.grayscale),
     };
   }
@@ -1440,14 +1470,17 @@ function SizeScaleControl(props: {
 }
 
 /** Lift legacy ``#RRGGBBAA`` into RGB + opacity (alpha 00 meant border off). */
-function normalizeLabelColors(label: PosterLayoutLabel, landscape = false): PosterLayoutLabel {
+function normalizeLabelColors(
+  label: PosterLayoutLabel,
+  landscape = false,
+  mediaKind: MediaKind = "movie",
+): PosterLayoutLabel {
   const border = hexOr(label.border_color, "#000000");
   const size = normalizeLabelSize(label.size, label.token);
   const sizeScale = normalizeSizeScale(label.size_scale, size);
   const style = normalizeLabelStyle(label.style, label.token);
   const arted = Boolean(label.arted) && label.token === "Rating" && style !== "banner";
-  let ratingSource = String(label.rating_source || "auto").trim().toLowerCase() || "auto";
-  if (arted && (ratingSource === "auto" || !ratingSource)) ratingSource = "imdb";
+  const ratingSource = coerceRatingSource(label.rating_source, { arted, mediaKind });
   const ratingArtLayout = arted ? normalizeRatingArtLayout(label.rating_art_layout) : "left";
   const borderOpacity =
     border.length === 9
@@ -1786,11 +1819,39 @@ export default function PosterLayoutDesigner(props: Props) {
     return [FILL_RECTANGLE_TOKEN, ...chips];
   }, [activeKey, catalog?.allowed_tokens]);
   const tokenMeta = catalog?.tokens || [];
+  const ratingSourcesForKind = useMemo(() => {
+    const byKind = catalog?.rating_sources_by_kind;
+    const fromKind = byKind?.[kind];
+    if (Array.isArray(fromKind) && fromKind.length) return fromKind;
+    if (kind === "tv" || kind === "episode") return ["imdb"];
+    return (
+      catalog?.rating_sources || ["imdb", "tmdb", "trakt", "rottentomatoes", "metacritic"]
+    );
+  }, [catalog?.rating_sources, catalog?.rating_sources_by_kind, kind]);
+
   const sampleTokens = useMemo(() => {
     const catalogSampleTokens = catalog?.sample_tokens?.[activeKey] || {};
     if (!previewArtTokens || Object.keys(previewArtTokens).length === 0) return catalogSampleTokens;
-    return { ...catalogSampleTokens, ...previewArtTokens, Sep: catalogSampleTokens.Sep || "·" };
-  }, [activeKey, catalog?.sample_tokens, previewArtTokens]);
+    // Drop title-specific catalog demos when preview art is active. Rating sources with
+    // no value for this title stay blank (bake shows —); they must not keep leftover demos.
+    const structural = new Set(["FillRectangle", "PLACEHOLDER", "Badge", "Sep", "Custom"]);
+    const kept: Record<string, string> = {};
+    for (const [key, value] of Object.entries(catalogSampleTokens)) {
+      if (structural.has(key)) kept[key] = String(value ?? "");
+    }
+    const merged: Record<string, string> = {
+      ...kept,
+      ...previewArtTokens,
+      Sep: catalogSampleTokens.Sep || kept.Sep || "·",
+    };
+    for (const source of ratingSourcesForKind) {
+      const key = `Rating:${source}`;
+      if (!(key in merged)) merged[key] = "";
+    }
+    if (!("Rating" in merged)) merged.Rating = "";
+    if (!("RatingSource" in merged)) merged.RatingSource = "";
+    return merged;
+  }, [activeKey, catalog?.sample_tokens, previewArtTokens, ratingSourcesForKind]);
 
   const whenUsed = variantWhenUsed(kind);
   const copyDests = useMemo(
@@ -1885,7 +1946,7 @@ export default function PosterLayoutDesigner(props: Props) {
       labels: JSON.parse(labelsKey) as PosterLayoutLabel[],
       grayscale: profileGrayscale,
       baseUrl: previewBaseUrl,
-      sampleTokens: previewArtTokens,
+      sampleTokens,
       guide,
       markers,
       listHovering,
@@ -1899,7 +1960,7 @@ export default function PosterLayoutDesigner(props: Props) {
     labelsKey,
     profileGrayscale,
     previewBaseUrl,
-    previewArtTokens,
+    sampleTokens,
     guideKey,
     selectedId,
     markersKey,
@@ -2568,6 +2629,7 @@ export default function PosterLayoutDesigner(props: Props) {
             id: newLabelId(),
           } as PosterLayoutLabel,
           destLandscape,
+          destKind,
         ),
       );
     return {
@@ -3364,10 +3426,13 @@ export default function PosterLayoutDesigner(props: Props) {
                                   type="button"
                                   onClick={() => {
                                     if (opt.id) {
-                                      const source =
+                                      const preferred =
                                         selected.rating_source && selected.rating_source !== "auto"
                                           ? selected.rating_source
                                           : "imdb";
+                                      const source = ratingSourcesForKind.includes(preferred)
+                                        ? preferred
+                                        : ratingSourcesForKind[0] || "imdb";
                                       patchSelected({
                                         arted: true,
                                         rating_source: source,
@@ -3401,24 +3466,18 @@ export default function PosterLayoutDesigner(props: Props) {
                             <span>Rating source</span>
                             <select
                               value={
-                                selected.rating_source && selected.rating_source !== "auto"
+                                selected.rating_source &&
+                                selected.rating_source !== "auto" &&
+                                ratingSourcesForKind.includes(selected.rating_source)
                                   ? selected.rating_source
-                                  : "imdb"
+                                  : ratingSourcesForKind[0] || "imdb"
                               }
                               disabled={!selected.arted}
                               tabIndex={selected.arted ? undefined : -1}
                               onChange={(e) => patchSelected({ rating_source: e.target.value })}
                               className={SELECT_CLASS}
                             >
-                              {(
-                                catalog?.rating_sources || [
-                                  "imdb",
-                                  "tmdb",
-                                  "trakt",
-                                  "rottentomatoes",
-                                  "metacritic",
-                                ]
-                              ).map((source) => (
+                              {ratingSourcesForKind.map((source) => (
                                 <option key={source} value={source} className="bg-[#0b111b] text-slate-100">
                                   {source === "rottentomatoes"
                                     ? "Rotten Tomatoes"
