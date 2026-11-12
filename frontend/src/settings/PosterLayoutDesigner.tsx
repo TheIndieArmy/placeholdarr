@@ -3121,7 +3121,7 @@ export default function PosterLayoutDesigner(props: Props) {
                             </div>
                             <p className="text-[11px] text-slate-500 leading-snug">
                               Fade depth is before angle (percent of that shape axis). A faded
-                              edge drops its border automatically.
+                              edge drops borders automatically.
                             </p>
                           </div>
                         );

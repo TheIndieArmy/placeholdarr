@@ -1212,7 +1212,12 @@ def _frac_axis_px(start: float, end: float, dim: int) -> tuple[int, int]:
 
 
 def _paste_rgba_clipped(dest, src, origin: tuple[int, int]) -> None:
-    """Paste ``src`` onto ``dest`` at ``origin``, clipping to dest bounds."""
+    """Paste ``src`` onto ``dest`` at ``origin``, clipping to dest bounds.
+
+    Uses alpha compositing so source alpha is applied once. ``Image.paste`` with
+    an RGBA mask multiplies alpha again, which made translucent fill rectangles
+    look lighter in bake than the desk CSS ``rgba()`` overlay.
+    """
     if src is None or dest is None:
         return
     dx, dy = int(origin[0]), int(origin[1])
@@ -1225,7 +1230,13 @@ def _paste_rgba_clipped(dest, src, origin: tuple[int, int]) -> None:
     if sx1 <= sx0 or sy1 <= sy0:
         return
     crop = src.crop((sx0, sy0, sx1, sy1))
-    dest.paste(crop, (dx + sx0, dy + sy0), crop)
+    if crop.mode != "RGBA":
+        crop = crop.convert("RGBA")
+    if dest.mode != "RGBA":
+        # RGB destinations (opaque badges): mask paste is fine; no partial alpha to keep.
+        dest.paste(crop, (dx + sx0, dy + sy0), crop)
+        return
+    dest.alpha_composite(crop, dest=(dx + sx0, dy + sy0))
 
 
 def _draw_fill_frame_borders(
