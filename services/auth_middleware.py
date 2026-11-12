@@ -7,10 +7,19 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from services import auth as auth_svc
+from services.postgres.db import reset_db_pool_role, set_db_pool_role
 
 
 class AuthGateMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
+        # Prefer API pool for all request-path DB work so workers cannot starve UI.
+        role_token = set_db_pool_role("api")
+        try:
+            return await self._dispatch_authenticated(request, call_next)
+        finally:
+            reset_db_pool_role(role_token)
+
+    async def _dispatch_authenticated(self, request: Request, call_next) -> Response:
         method = request.method.upper()
         path = request.url.path
 

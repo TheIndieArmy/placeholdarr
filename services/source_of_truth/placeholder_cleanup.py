@@ -547,6 +547,9 @@ def run_orphan_placeholder_cleanup(
 
 		session.commit()
 
+		# Decide which folders are empty of placeholders while session is still open,
+		# then release before FS prune + player library refresh.
+		series_folders_empty: list[str] = []
 		for folder in sorted(series_folders_to_prune):
 			try:
 				norm = folder.replace("\\", "/").rstrip("/")
@@ -560,6 +563,21 @@ def run_orphan_placeholder_cleanup(
 				)
 				if remaining:
 					continue
+				series_folders_empty.append(folder)
+			except Exception as exc:
+				stats["prune_errors"] += 1
+				logger.warning(
+					f"Orphan placeholder series-folder prune check failed for {folder!r}: {exc}",
+					extra={"emoji_type": "warning"},
+				)
+
+		movie_folders_empty = sorted(movie_folders_to_prune)
+		session.commit()
+		session.close()
+		session = None
+
+		for folder in series_folders_empty:
+			try:
 				if _remove_series_nfo(folder):
 					stats["series_nfo_deleted"] += 1
 				stats["directories_deleted"] += int(_prune_empty_tree(folder))
@@ -570,7 +588,7 @@ def run_orphan_placeholder_cleanup(
 					extra={"emoji_type": "warning"},
 				)
 
-		for folder in sorted(movie_folders_to_prune):
+		for folder in movie_folders_empty:
 			try:
 				if _remove_dir_if_empty(folder):
 					stats["directories_deleted"] += 1
@@ -580,8 +598,6 @@ def run_orphan_placeholder_cleanup(
 					f"Orphan placeholder movie-folder prune failed for {folder!r}: {exc}",
 					extra={"emoji_type": "warning"},
 				)
-
-		session.commit()
 
 		if not dry_run and (touched_tv or touched_movie):
 			try:
@@ -602,7 +618,9 @@ def run_orphan_placeholder_cleanup(
 		logger.info(f"Orphan placeholder cleanup complete: {stats}", extra={"emoji_type": "success"})
 		return stats
 	except Exception:
-		session.rollback()
+		if session is not None:
+			session.rollback()
 		raise
 	finally:
-		session.close()
+		if session is not None:
+			session.close()

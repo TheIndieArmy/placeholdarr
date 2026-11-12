@@ -807,9 +807,10 @@ def apply_movie_materialization(
                     placeholder_id=placeholder_row.id,
                     event_type="creation",
                     activity_reason=activity_reason,
-                    # Event mats batch art after the needs loop; full/lite keep inline enqueue.
+                    # Art is batch-enqueued after the needs loop (no poster I/O in this txn).
                     enqueue_art=ensure_art,
                 )
+            # Inline ensure_*_art only when callers opt in; core mats pass ensure_art=False.
             if ensure_art:
                 try:
                     ensure_movie_art(movie, target_path)
@@ -1179,9 +1180,11 @@ def _run_materialization_for_ids(
     }
     is_full_sync = (observation_source == "full_sync_materialization")
     event_scoped = (not is_full_sync) and str(observation_source or "").startswith("event_")
-    # Import grace / webhook event mats: placeholders and density stubs only.
-    # Poster ensure stays on full/lite mat, calendar Coming Soon art, and art refresh.
-    ensure_art = not event_scoped
+    # Never run poster/TMDB ensure inside the materialization chunk transaction.
+    # Status apply enqueues art jobs; event/full/lite batch-enqueue after needs loops.
+    ensure_art = False
+    # Mid-commit during needs FS loops for event mats and long full/lite chunks.
+    mid_commit_needs = True
     movie_phase_start_mono: float | None = None
     last_movie_periodic_refresh_mono: float | None = None
     episode_phase_start_mono: float | None = None
@@ -1524,7 +1527,7 @@ def _run_materialization_for_ids(
         _note_item_progress()
         _mid_commit_needs_pass(
             session,
-            enabled=event_scoped,
+            enabled=mid_commit_needs,
             idx=idx,
             total=movie_needs_total,
         )
@@ -1794,12 +1797,12 @@ def _run_materialization_for_ids(
         _note_item_progress()
         _mid_commit_needs_pass(
             session,
-            enabled=event_scoped,
+            enabled=mid_commit_needs,
             idx=idx,
             total=episode_needs_total,
         )
     _scoped_phase("episode obsolete + needs passes done")
-    if event_scoped and (pending_movie_needs or pending_episode_needs):
+    if pending_movie_needs or pending_episode_needs:
         try:
             art_n = _enqueue_art_for_created_placeholders(
                 session,
@@ -1810,7 +1813,7 @@ def _run_materialization_for_ids(
                 _scoped_phase(f"batched art refresh enqueue for {art_n} placeholders")
         except Exception as art_exc:
             logger.warning(
-                f"Scoped materialization art enqueue skipped [{observation_source}]: {art_exc}",
+                f"Materialization art enqueue skipped [{observation_source}]: {art_exc}",
                 extra={"emoji_type": "warning"},
             )
     _note_item_progress(0, force=True)

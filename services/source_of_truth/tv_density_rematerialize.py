@@ -154,6 +154,9 @@ def run_tv_density_rematerialize(*, source: str = "settings_save") -> dict[str, 
 
 def start_tv_density_rematerialize_background(*, source: str = "settings_save") -> None:
     def _run() -> None:
+        from services.postgres.db import bind_worker_pool_role
+
+        bind_worker_pool_role()
         try:
             run_tv_density_rematerialize(source=source)
         except Exception as exc:

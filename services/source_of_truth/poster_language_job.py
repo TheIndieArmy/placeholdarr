@@ -96,13 +96,13 @@ def process_poster_language_resolve_job(session, job: Job) -> dict[str, Any]:
     payload = job.payload if isinstance(job.payload, dict) else {}
     movie_ids = [int(x) for x in (payload.get("movie_ids") or []) if x is not None]
     series_ids = [int(x) for x in (payload.get("series_ids") or []) if x is not None]
+    # resolve_* releases the handler session, then uses short scopes around TMDB.
     movie_stats = resolve_movies_by_ids(session, movie_ids) if movie_ids else {"resolved": 0, "skipped": 0}
     series_stats = (
-        resolve_series_by_ids(session, series_ids, include_seasons=True)
+        resolve_series_by_ids(None, series_ids, include_seasons=True)
         if series_ids
         else {"resolved": 0, "skipped": 0, "seasons_resolved": 0}
     )
-    session.commit()
     return {
         "ok": True,
         "movies": movie_stats,

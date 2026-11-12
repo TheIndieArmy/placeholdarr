@@ -41,6 +41,92 @@ IMPORT_GRACE_INTERRUPT_REASON = "import_grace_interrupted"
 COUNTDOWN_MINUTES_DECREASING = (5, 4, 3, 2, 1)
 
 
+def _load_arr_has_file_probe(session, *, content_type: str, entity_id: int) -> dict[str, Any] | None:
+    """Return Arr probe args for hasFile, or None when the check should keep grace alive."""
+    ct = str(content_type or "").strip().lower()
+    try:
+        eid = int(entity_id)
+    except (TypeError, ValueError):
+        return None
+    if ct not in {"movie", "episode"} or eid <= 0:
+        return None
+
+    if ct == "movie":
+        movie = session.query(Movie).filter(Movie.id == eid).first()
+        if not movie:
+            return None
+        radarr_id = getattr(movie, "radarrid", None)
+        if not radarr_id:
+            return None
+        base_url, api_key = settings.resolve_arr_endpoint(
+            "radarr",
+            instance_key=str(getattr(movie, "instance_key", "") or "") or None,
+            instance_id=str(getattr(movie, "instance_id", "") or "") or None,
+        )
+        if not base_url or not api_key:
+            return None
+        return {
+            "kind": "movie",
+            "arr_id": int(radarr_id),
+            "base_url": base_url,
+            "api_key": api_key,
+        }
+
+    episode = session.query(Episode).filter(Episode.id == eid).first()
+    if not episode:
+        return None
+    sonarr_id = getattr(episode, "sonarrid", None)
+    if not sonarr_id:
+        return None
+    season = session.query(Season).filter(Season.id == int(episode.season_id)).first()
+    if not season:
+        return None
+    series = session.query(Series).filter(Series.id == int(season.series_id)).first()
+    if not series:
+        return None
+    base_url, api_key = settings.resolve_arr_endpoint(
+        "sonarr",
+        instance_key=str(getattr(series, "instance_key", "") or "") or None,
+        instance_id=str(getattr(series, "instance_id", "") or "") or None,
+    )
+    if not base_url or not api_key:
+        return None
+    return {
+        "kind": "episode",
+        "arr_id": int(sonarr_id),
+        "base_url": base_url,
+        "api_key": api_key,
+    }
+
+
+def _arr_has_file_from_probe(probe: dict[str, Any] | None) -> bool:
+    """HTTP-only hasFile check. ``None`` probe means keep grace (cannot verify)."""
+    if not probe:
+        return True
+    try:
+        if probe.get("kind") == "movie":
+            item = fetch_radarr_movie(
+                int(probe["arr_id"]),
+                probe["base_url"],
+                probe["api_key"],
+                bypass_cache=True,
+            )
+            if not isinstance(item, dict):
+                return True
+            return bool(item.get("hasFile") or (item.get("movieFile") or {}).get("path"))
+        item = fetch_sonarr_episode_item(
+            int(probe["arr_id"]),
+            url=probe["base_url"],
+            api_key=probe["api_key"],
+            bypass_cache=True,
+        )
+        if not isinstance(item, dict):
+            return True
+        return bool(item.get("hasFile") or (item.get("episodeFile") or {}).get("path"))
+    except Exception:
+        return True
+
+
 def arr_import_still_has_file(session, *, content_type: str, entity_id: int) -> bool:
     """True when Arr still reports hasFile, or the Arr check cannot be completed.
 
@@ -48,57 +134,9 @@ def arr_import_still_has_file(session, *, content_type: str, entity_id: int) -> 
     grace validity uses Radarr/Sonarr hasFile rather than a local filesystem check.
     API failure or missing ids keep grace running (cannot verify).
     """
-    ct = str(content_type or "").strip().lower()
     try:
-        eid = int(entity_id)
-    except (TypeError, ValueError):
-        return True
-    if ct not in {"movie", "episode"} or eid <= 0:
-        return True
-
-    try:
-        if ct == "movie":
-            movie = session.query(Movie).filter(Movie.id == eid).first()
-            if not movie:
-                return True
-            radarr_id = getattr(movie, "radarrid", None)
-            if not radarr_id:
-                return True
-            base_url, api_key = settings.resolve_arr_endpoint(
-                "radarr",
-                instance_key=str(getattr(movie, "instance_key", "") or "") or None,
-                instance_id=str(getattr(movie, "instance_id", "") or "") or None,
-            )
-            if not base_url or not api_key:
-                return True
-            item = fetch_radarr_movie(int(radarr_id), base_url, api_key, bypass_cache=True)
-            if not isinstance(item, dict):
-                return True
-            return bool(item.get("hasFile") or (item.get("movieFile") or {}).get("path"))
-
-        episode = session.query(Episode).filter(Episode.id == eid).first()
-        if not episode:
-            return True
-        sonarr_id = getattr(episode, "sonarrid", None)
-        if not sonarr_id:
-            return True
-        season = session.query(Season).filter(Season.id == int(episode.season_id)).first()
-        if not season:
-            return True
-        series = session.query(Series).filter(Series.id == int(season.series_id)).first()
-        if not series:
-            return True
-        base_url, api_key = settings.resolve_arr_endpoint(
-            "sonarr",
-            instance_key=str(getattr(series, "instance_key", "") or "") or None,
-            instance_id=str(getattr(series, "instance_id", "") or "") or None,
-        )
-        if not base_url or not api_key:
-            return True
-        item = fetch_sonarr_episode_item(int(sonarr_id), url=base_url, api_key=api_key, bypass_cache=True)
-        if not isinstance(item, dict):
-            return True
-        return bool(item.get("hasFile") or (item.get("episodeFile") or {}).get("path"))
+        probe = _load_arr_has_file_probe(session, content_type=content_type, entity_id=entity_id)
+        return _arr_has_file_from_probe(probe)
     except Exception:
         return True
 
@@ -499,7 +537,25 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
             "reason": "cancelled",
         }
 
-    if not arr_import_still_has_file(session, content_type=content_type, entity_id=entity_id):
+    # Arr hasFile: DB probe → release handler session → HTTP → reopen for cancel/restore.
+    from services.postgres.db import get_session, release_handler_session
+
+    job_id_int = int(job.id) if getattr(job, "id", None) is not None else None
+    try:
+        probe = _load_arr_has_file_probe(session, content_type=content_type, entity_id=entity_id)
+    except Exception:
+        probe = None
+    try:
+        session.commit()
+    except Exception:
+        pass
+    release_handler_session(session)
+    still_has = _arr_has_file_from_probe(probe)
+    session = get_session()
+    if job_id_int is not None:
+        job = session.get(Job, job_id_int) or job
+
+    if not still_has:
         phase = "finalize_aborted_arr_no_file" if is_finalize else "tick_aborted_arr_no_file"
         logger.info(
             f"Import grace aborted ({phase}): Arr no longer reports hasFile "

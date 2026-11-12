@@ -95,7 +95,10 @@ def fail_claimed_job_for_watchdog(
 ) -> bool:
     """Fail one CLAIMED/WORKING row if it still matches ``claim_token``.
 
-    Returns True when the row was updated to FAILED.
+    Returns True when the row was updated to FAILED. For art/NFO refresh batches
+    linked to a Maintenance placeholder_refresh task_run, also bumps
+    ``batches_failed`` and attempts to close the parent so it does not sit WORKING
+    forever after the queue drains.
     """
     from services.worker import mark_claim_revoked
 
@@ -106,27 +109,29 @@ def fail_claimed_job_for_watchdog(
         return False
 
     session = get_session()
+    job_type = ""
+    payload: dict[str, Any] = {}
     try:
-        updated = (
+        row = (
             session.query(Job)
             .filter(
                 Job.id == jid,
                 Job.status.in_(("CLAIMED", "WORKING")),
                 Job.claim_token == tok,
             )
-            .update(
-                {
-                    Job.status: "FAILED",
-                    Job.error_message: reason_text,
-                    Job.claim_token: None,
-                    Job.updated_at: datetime.now(timezone.utc),
-                },
-                synchronize_session=False,
-            )
+            .first()
         )
-        if int(updated or 0) <= 0:
+        if row is None:
             session.rollback()
             return False
+        job_type = str(getattr(row, "job_type", "") or "")
+        raw_payload = getattr(row, "payload", None)
+        payload = raw_payload if isinstance(raw_payload, dict) else {}
+        row.status = "FAILED"
+        row.error_message = reason_text
+        row.claim_token = None
+        row.updated_at = datetime.now(timezone.utc)
+        session.add(row)
         session.commit()
         try:
             mark_claim_revoked(jid, tok)
@@ -137,7 +142,6 @@ def fail_claimed_job_for_watchdog(
             f"(handler thread not killed; queue row is terminal FAILED)",
             extra={"emoji_type": "warning"},
         )
-        return True
     except Exception as exc:
         try:
             session.rollback()
@@ -153,3 +157,51 @@ def fail_claimed_job_for_watchdog(
             session.close()
         except Exception:
             pass
+
+    if job_type in ("placeholder_art_refresh", "nfo_refresh"):
+        try:
+            from services.source_of_truth.placeholder_refresh import (
+                note_placeholder_refresh_batch_terminal_failure,
+                try_complete_placeholder_refresh_task_run,
+            )
+
+            raw_tid = payload.get("placeholder_refresh_task_run_id")
+            if raw_tid is not None:
+                batch_index = None
+                try:
+                    batch_index = int(payload.get("batch_index") or 0) or None
+                except Exception:
+                    batch_index = None
+                note_placeholder_refresh_batch_terminal_failure(
+                    task_run_id=int(raw_tid),
+                    job_type=job_type,
+                    batch_index=batch_index,
+                    reason=reason_text,
+                )
+                try_complete_placeholder_refresh_task_run(
+                    int(raw_tid),
+                    failed=True,
+                    error_message=reason_text,
+                    exclude_job_id=jid,
+                )
+        except Exception as exc:
+            logger.debug(
+                f"Watchdog placeholder_refresh completion after job_id={jid} skipped: {exc}",
+                extra={"emoji_type": "debug"},
+            )
+        try:
+            raw_full = payload.get("full_sync_task_run_id") or payload.get("art_backfill_task_run_id")
+            if raw_full is not None:
+                from services.task_run_phases import try_complete_full_sync_task_run
+
+                try_complete_full_sync_task_run(
+                    int(raw_full),
+                    failed=True,
+                    error_message=reason_text,
+                )
+        except Exception as exc:
+            logger.debug(
+                f"Watchdog full_sync completion after job_id={jid} skipped: {exc}",
+                extra={"emoji_type": "debug"},
+            )
+    return True

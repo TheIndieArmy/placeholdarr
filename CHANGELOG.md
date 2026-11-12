@@ -15,6 +15,33 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Art refresh DB hold**: `placeholder_art_refresh` loads rows then closes the worker session before HTTP/image I/O so long art batches no longer pin pool connections.
 - **Event mat needs locks**: Event-scoped needs-placeholder commits every 10 items, batches art enqueue after the loop, and reports episode/movie progress in stall phases.
 - **Mat handler idle session**: `entity_materialization` releases the worker handler connection up front; chunk work uses its own short sessions.
+- **Art refresh stuck WORKING**: Watchdog-failed art/NFO batches bump `batches_failed` and close the parent Maintenance run so it does not sit WORKING after the queue drains.
+- **Layout studio art determination**: After layout migrate, legacy PLACEHOLDER banner toggles no longer alone mark sidecars stale when `layout_hash` already matches.
+- **NFO refresh DB hold**: `nfo_refresh` loads entities then closes before NFO FS and player metadata HTTP.
+- **Player metadata batch hold**: Batch projection releases the parent session and uses a short session per placeholder.
+- **Watchlist Arr auto-add hold**: Snapshot and enrich, then Arr HTTP with no pooled connection; short write-back afterward.
+- **Full/lite mat poster hold**: Needs loops mid-commit and batch-enqueue art instead of poster/TMDB inside the chunk transaction.
+- **Watchlist list remap hold**: List load snapshots rows, remaps Arr with no API session, then short-writes `extra`.
+- **Entity reconcile session**: Title Refresh releases before Arr wait/sync and before sidecar FS/art; short sessions for status steps.
+- **Poster language job hold**: Load IDs, close, TMDB, then short persist per entity.
+- **Webhook handler session**: Snapshot EventLog, close, dispatch nested handlers, short finish session.
+- **Playback start hold**: Snapshot context, close, then Plex/JF/Arr HTTP with short write-back.
+- **Import grace Arr hold**: Probe then release before Arr hasFile HTTP and nested mat finalize.
+- **Calendar date refresh hold**: Fetch Arr calendars with no session; short write session for upserts.
+- **Series-add episode fetch**: Pull Sonarr episodes before opening the handler session.
+- **Queue monitor nudge hold**: Close before RefreshMonitoredDownloads HTTP.
+- **Full sync Arr catalog hold**: Catalog and per-series episode GETs run outside the DB txn; writebacks commit per series/batch.
+- **Targeted Arr sync hold**: `sync_*_by_ids` and specials backfill fetch Arr first, then short DB write sessions.
+- **Lite/startup catalog hold**: Release before Arr catalog GETs; nested targeted syncs use their own short sessions.
+- **Orphan cleanup refresh hold**: Close before folder prune FS and player library refresh.
+- **Settings save nested sessions**: Release the request session before Arr transplants/reconcile and post-save refresh work.
+- **Apply-now enqueue hold**: Snapshot placeholder ids, close, then enqueue NFO/art in short sessions.
+
+### Changed
+
+- **DB dual pools**: Separate API and worker SQLAlchemy pools so UI checkouts are not starved by long worker holds.
+- **Entity mat claim caps**: Cap concurrent `entity_materialization` jobs, with a tighter cap for `event_series_add`.
+- **Background thread pool role**: Maintenance/Settings/watchlist route-spawned daemons bind the worker DB pool so syncs do not starve the API pool.
 
 ## Pre-release
 

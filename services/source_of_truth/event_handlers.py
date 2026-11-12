@@ -228,6 +228,15 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
     if not isinstance(series_entry, dict):
         raise ValueError("seriesadd_missing_series_payload")
 
+    # Episode catalog fetch before opening a DB session (movie-add already fetches Arr first).
+    episodes = fetch_sonarr_episodes(series_id, base_url, api_key)
+    if not episodes and isinstance(payload.get("episodes"), list):
+        logger.warning(
+            f"Series add episodes lookup returned no results for series_id={series_id}; using payload episodes when available.",
+            extra={'emoji_type': 'warning'},
+        )
+        episodes = payload.get("episodes") or []
+
     session = get_session()
     allow_episode_detail = _episode_detail_fetches_enabled()
     try:
@@ -237,14 +246,6 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
 
         series_row, _, _ = _upsert_series(session, s_fields)
         stats["series_upserted"] = 1
-
-        episodes = fetch_sonarr_episodes(series_id, base_url, api_key)
-        if not episodes and isinstance(payload.get("episodes"), list):
-            logger.warning(
-                f"Series add episodes lookup returned no results for series_id={series_id}; using payload episodes when available.",
-                extra={'emoji_type': 'warning'},
-            )
-            episodes = payload.get("episodes") or []
 
         season_rows_by_number: dict[int, Season] = {}
         season_rollups: dict[int, dict[str, int | bool | str | None]] = {}

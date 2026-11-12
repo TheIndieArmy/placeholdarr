@@ -617,6 +617,20 @@ class Settings(BaseSettings):
     DB_POOL_MAX_OVERFLOW: int = int(
         os.getenv("DB_POOL_MAX_OVERFLOW", "20").split('#')[0].strip() or "20"
     )
+    # Dual pools: API (UI) vs worker. Defaults split DB_POOL_SIZE / overflow.
+    # Leave unset to use half of DB_POOL_SIZE each (see services.postgres.db).
+    DB_API_POOL_SIZE: int = int(
+        os.getenv("DB_API_POOL_SIZE", "0").split('#')[0].strip() or "0"
+    )
+    DB_WORKER_POOL_SIZE: int = int(
+        os.getenv("DB_WORKER_POOL_SIZE", "0").split('#')[0].strip() or "0"
+    )
+    DB_API_POOL_MAX_OVERFLOW: int = int(
+        os.getenv("DB_API_POOL_MAX_OVERFLOW", "0").split('#')[0].strip() or "0"
+    )
+    DB_WORKER_POOL_MAX_OVERFLOW: int = int(
+        os.getenv("DB_WORKER_POOL_MAX_OVERFLOW", "0").split('#')[0].strip() or "0"
+    )
     DB_POOL_TIMEOUT_SECONDS: int = int(
         os.getenv("DB_POOL_TIMEOUT_SECONDS", "10").split('#')[0].strip() or "10"
     )

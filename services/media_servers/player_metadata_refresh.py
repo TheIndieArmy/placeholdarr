@@ -1007,10 +1007,26 @@ def push_placeholder_player_metadata(
 
 
 def push_placeholder_batch_player_metadata(session, placeholders: list[Placeholder]) -> None:
-    """Project status directly for a placeholder batch and fallback-refresh once."""
+    """Project status directly for a placeholder batch and fallback-refresh once.
+
+    Releases the caller session immediately (``session`` may be ``None`` when the
+    caller already closed), then uses a short ``session_scope`` per placeholder so
+    one slow Plex/JF/Emby call does not pin the parent worker connection for the
+    whole batch.
+    """
+    from services.postgres.db import release_handler_session, session_scope
+
+    ids = [
+        int(p.id)
+        for p in (placeholders or [])
+        if getattr(p, "id", None) is not None and bool(getattr(p, "has_placeholder", False))
+    ]
+    if session is not None:
+        release_handler_session(session)
+
     fallback = ProjectionFallbackAccumulator()
     summary = ProjectionBatchSummary()
-    total = len(placeholders)
+    total = len(ids)
     if total:
         logger.info(
             f"Player metadata batch: starting {total} placeholder(s) "
@@ -1037,12 +1053,18 @@ def push_placeholder_batch_player_metadata(session, placeholders: list[Placehold
         )
         _phb.start()
     try:
-        for i, placeholder in enumerate(placeholders, start=1):
-            push_placeholder_player_metadata(session, placeholder, fallback=fallback, summary=summary)
-            try:
-                session.commit()
-            except Exception:
-                pass
+        for i, pid in enumerate(ids, start=1):
+            with session_scope() as item_session:
+                placeholder = item_session.get(Placeholder, int(pid))
+                if placeholder is None:
+                    continue
+                push_placeholder_player_metadata(
+                    item_session, placeholder, fallback=fallback, summary=summary
+                )
+                try:
+                    item_session.commit()
+                except Exception:
+                    pass
             if total and (i % 25 == 0 or i == total):
                 logger.info(
                     f"Player metadata batch: processed {i}/{total} "
@@ -1051,10 +1073,6 @@ def push_placeholder_batch_player_metadata(session, placeholders: list[Placehold
                 )
     finally:
         stop_batch_hb.set()
-        try:
-            session.commit()
-        except Exception:
-            pass
     logger.info(
         "Player libraries synced for this batch — "
         f"Plex: {summary.plex_ok} ok / {summary.plex_failed} failed / {summary.plex_disabled} off; "

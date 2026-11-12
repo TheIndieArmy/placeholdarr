@@ -653,6 +653,9 @@ async def arr_add(body: ArrAddPayload):
             events.put(event)
 
         def run() -> None:
+            from services.postgres.db import bind_worker_pool_role
+
+            bind_worker_pool_role()
             try:
                 _run_arr_add(body, keys, on_progress)
             except Exception as exc:
@@ -911,6 +914,9 @@ async def run_recipe_now(recipe_id: int):
         name = str(row.name)
 
     def _runner():
+        from services.postgres.db import bind_worker_pool_role
+
+        bind_worker_pool_role()
         try:
             run_recipe(recipe_id)
         except Exception as exc:

@@ -106,7 +106,10 @@ def _launch_post_onboarding_startup_sync() -> None:
         pass
 
     def _runner() -> None:
+        from services.postgres.db import bind_worker_pool_role
         from services.startup_gate import startup_sync_complete
+
+        bind_worker_pool_role()
         try:
             from main import ensure_sync_scheduler_started, start_runtime_background_services
             from services.source_of_truth.startup import run_startup_source_of_truth
@@ -264,6 +267,9 @@ def _launch_arr_change_full_sync(reason: str) -> None:
         pass
 
     def _runner() -> None:
+        from services.postgres.db import bind_worker_pool_role
+
+        bind_worker_pool_role()
         try:
             from services.source_of_truth.sync_runner import run_full_sync
 

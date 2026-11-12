@@ -590,25 +590,29 @@ class QueueMonitorProducer:
 
     def _nudge_arr_monitored_downloads(self) -> None:
         """POST RefreshMonitoredDownloads so Radarr/Sonarr pick up queue changes before our next /queue read."""
+        ctx = None
         session = get_session()
         try:
             ctx = _collect_queue_monitor_poll_context(session)
-            if ctx is None:
-                return
-            ok: list[str] = []
-            for key in sorted(ctx.get("radarr_instance_keys") or ()):
-                if trigger_radarr_refresh_monitored_downloads(instance_key=key):
-                    ok.append(key)
-            for key in sorted(ctx.get("sonarr_instance_keys") or ()):
-                if trigger_sonarr_refresh_monitored_downloads(instance_key=key):
-                    ok.append(key)
-            if ok:
-                logger.debug(
-                    f"Queue monitor triggered RefreshMonitoredDownloads: {','.join(ok)}",
-                    extra={"emoji_type": "refresh"},
-                )
         finally:
-            session.close()
+            try:
+                session.close()
+            except Exception:
+                pass
+        if ctx is None:
+            return
+        ok: list[str] = []
+        for key in sorted(ctx.get("radarr_instance_keys") or ()):
+            if trigger_radarr_refresh_monitored_downloads(instance_key=key):
+                ok.append(key)
+        for key in sorted(ctx.get("sonarr_instance_keys") or ()):
+            if trigger_sonarr_refresh_monitored_downloads(instance_key=key):
+                ok.append(key)
+        if ok:
+            logger.debug(
+                f"Queue monitor triggered RefreshMonitoredDownloads: {','.join(ok)}",
+                extra={"emoji_type": "refresh"},
+            )
 
     def _poll_once(self) -> None:
         """One full poll cycle: scan -> ARR HTTP (no DB held) -> apply intents.

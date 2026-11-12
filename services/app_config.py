@@ -26,6 +26,9 @@ def _defer_settings_post_save_work(name: str, fn: Callable[[], None]) -> None:
     """Run heavy Apply-now work off the settings save request so the UI can unblock."""
 
     def _run() -> None:
+        from services.postgres.db import bind_worker_pool_role
+
+        bind_worker_pool_role()
         try:
             fn()
         except Exception as exc:
@@ -3727,6 +3730,20 @@ def save_settings(
             return {"ok": False, "errors": errors}
 
         if arr_rewrite_merged is not None:
+            # Release the request session before transplant/rename catalog work
+            # (those helpers open their own short sessions).
+            if owns_session:
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
+                session.close()
+                session = None
+            else:
+                try:
+                    session.commit()
+                except Exception:
+                    pass
             try:
                 from services.source_of_truth.arr_instance_key_rewrite import (
                     apply_instance_key_renames,
@@ -3770,6 +3787,8 @@ def save_settings(
                     f"ARR instance_key rename rewrite after settings save failed: {rewrite_exc}",
                     extra={"emoji_type": "error"},
                 )
+            if owns_session and session is None:
+                session = get_session()
 
         restart_required_keys: list[str] = []
         saved_keys: list[str] = []
@@ -3781,6 +3800,8 @@ def save_settings(
         }
         schedule_keys_changed: set[str] = set()
         watchlist_enable_changed = False
+        if session is None:
+            session = get_session()
         for key, value in validated.items():
             meta = SETTINGS_SCHEMA[key]
             row = _get_row(session, key)
@@ -3836,6 +3857,11 @@ def save_settings(
                 session.add(setup_row)
 
         session.commit()
+        # Settings rows are persisted. Release before nested reconcile / poster /
+        # placeholder-refresh work so those paths are not nested under this request.
+        if owns_session:
+            session.close()
+            session = None
         path_keys_for_playback_migrate = {
             "LIBRARY_ROOT",
             "MOVIE_LIBRARY_FOLDER",
@@ -3941,19 +3967,17 @@ def save_settings(
         if language_poster_cleanup_needed and apply_scope != "now":
             # Apply now defers this with the enqueue work so the save response stays fast.
             try:
+                from services.postgres.db import session_scope
                 from services.poster_language import clear_stale_localized_posters
 
-                clear_stale_localized_posters(session)
-                session.commit()
+                with session_scope() as cleanup_session:
+                    clear_stale_localized_posters(cleanup_session)
+                    cleanup_session.commit()
             except Exception as exc:
                 logger.warning(
                     f"Failed to clear stale localized posters after language change: {exc}",
                     extra={"emoji_type": "warning"},
                 )
-                try:
-                    session.rollback()
-                except Exception:
-                    pass
         pending_art = False
         pending_metadata = False
         pending_art_scope = "all"
@@ -4214,6 +4238,8 @@ def save_settings(
             f" created_paths={created_paths}",
             extra={"emoji_type": "update" if partial else "success"},
         )
+        if session is None:
+            session = get_session()
         return {
             "ok": True,
             "saved_keys": saved_keys,
@@ -4230,10 +4256,14 @@ def save_settings(
             "tv_density_rematerialize": tv_density_rematerialize_summary,
         }
     except Exception as exc:
-        session.rollback()
+        if session is not None:
+            try:
+                session.rollback()
+            except Exception:
+                pass
         return {"ok": False, "errors": {"__all__": str(exc)}}
     finally:
-        if owns_session:
+        if owns_session and session is not None:
             session.close()
 
 

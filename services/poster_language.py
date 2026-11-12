@@ -490,18 +490,37 @@ def _persist_entity_localized(kind: str, entity_id: int, url: str, lang: str) ->
 
 
 def resolve_movies_by_ids(session, movie_ids: list[int]) -> dict[str, int]:
+    """Resolve localized posters for movie ids.
+
+    ``session`` may be a live handler session (released immediately) or ``None``.
+    Each title uses a short load session, TMDB with no pool hold, then persist.
+    """
+    from services.postgres.db import release_handler_session, session_scope
+
+    if session is not None:
+        release_handler_session(session)
+
     resolved = 0
     skipped = 0
     total = len(movie_ids)
     started = time.monotonic()
     last_info = started
     for idx, mid in enumerate(movie_ids, start=1):
-        movie = session.query(Movie).get(int(mid))
-        if not movie:
-            skipped += 1
-            continue
-        if resolve_localized_poster_for_movie(movie, persist=False):
-            session.add(movie)
+        with session_scope() as item_session:
+            movie = item_session.get(Movie, int(mid))
+            if not movie:
+                skipped += 1
+                continue
+            # Capture attrs then close before TMDB HTTP.
+            from types import SimpleNamespace
+
+            snap = SimpleNamespace(
+                id=int(movie.id),
+                tmdbid=getattr(movie, "tmdbid", None),
+                localized_poster=getattr(movie, "localized_poster", None),
+                localized_poster_lang=getattr(movie, "localized_poster_lang", None),
+            )
+        if resolve_localized_poster_for_movie(snap, persist=True):
             resolved += 1
         else:
             skipped += 1
@@ -523,6 +542,14 @@ def resolve_movies_by_ids(session, movie_ids: list[int]) -> dict[str, int]:
 
 
 def resolve_series_by_ids(session, series_ids: list[int], *, include_seasons: bool = True) -> dict[str, int]:
+    """Resolve localized posters for series ids (and seasons). See ``resolve_movies_by_ids``."""
+    from types import SimpleNamespace
+
+    from services.postgres.db import release_handler_session, session_scope
+
+    if session is not None:
+        release_handler_session(session)
+
     resolved = 0
     skipped = 0
     seasons_resolved = 0
@@ -530,25 +557,41 @@ def resolve_series_by_ids(session, series_ids: list[int], *, include_seasons: bo
     started = time.monotonic()
     last_info = started
     for idx, sid in enumerate(series_ids, start=1):
-        series = session.query(Series).get(int(sid))
-        if not series:
-            skipped += 1
-            continue
-        if resolve_localized_poster_for_series(series, persist=False):
-            session.add(series)
+        season_snaps: list[SimpleNamespace] = []
+        with session_scope() as item_session:
+            series = item_session.get(Series, int(sid))
+            if not series:
+                skipped += 1
+                continue
+            series_snap = SimpleNamespace(
+                id=int(series.id),
+                sonarr_tmdbid=getattr(series, "sonarr_tmdbid", None),
+                localized_poster=getattr(series, "localized_poster", None),
+                localized_poster_lang=getattr(series, "localized_poster_lang", None),
+            )
+            if include_seasons:
+                seasons = (
+                    item_session.query(Season)
+                    .filter(Season.series_id == int(sid), Season.is_deleted == False)  # noqa: E712
+                    .all()
+                )
+                for season in seasons:
+                    season_snaps.append(
+                        SimpleNamespace(
+                            id=int(season.id),
+                            series_id=int(sid),
+                            season_number=getattr(season, "season_number", None),
+                            localized_poster=getattr(season, "localized_poster", None),
+                            localized_poster_lang=getattr(season, "localized_poster_lang", None),
+                        )
+                    )
+        if resolve_localized_poster_for_series(series_snap, persist=True):
             resolved += 1
         else:
             skipped += 1
-        if include_seasons:
-            seasons = (
-                session.query(Season)
-                .filter(Season.series_id == int(sid), Season.is_deleted == False)  # noqa: E712
-                .all()
-            )
-            for season in seasons:
-                if resolve_localized_poster_for_season(season, series, persist=False):
-                    session.add(season)
-                    seasons_resolved += 1
+        for season_snap in season_snaps:
+            if resolve_localized_poster_for_season(season_snap, series_snap, persist=True):
+                seasons_resolved += 1
         now = time.monotonic()
         if idx == total or (now - last_info) >= 30.0:
             elapsed = max(0.001, now - started)

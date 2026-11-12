@@ -2355,6 +2355,11 @@ def _run_movie_search_for_row(session, movie_row: Movie) -> dict[str, Any]:
     if not base_url or not api_key:
         return {'ok': False, 'reason': 'missing_movie_arr_config', 'movie_id': int(movie_row.id), 'instance': instance_key}
 
+    # End any open txn before Arr HTTP so we are not idle-in-transaction during network I/O.
+    try:
+        session.commit()
+    except Exception:
+        pass
     _refresh_playback_movie_flags_from_radarr(
         session, movie_row, base_url=base_url, api_key=api_key
     )
@@ -2797,6 +2802,10 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
     from services.playback_dest_filters import dest_folder_for_series_row
 
     dest_folder = dest_folder_for_series_row(series_row)
+    try:
+        session.commit()
+    except Exception:
+        pass
     _refresh_playback_episode_flags_from_sonarr(
         session,
         series_row,

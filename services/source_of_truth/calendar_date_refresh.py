@@ -77,11 +77,27 @@ def run_calendar_date_refresh() -> dict:
     changed_episode_ids: set[int] = set()
     changed_series_ids: set[int] = set()
 
+    # Phase 1: Arr calendar HTTP with no DB session held.
+    fetched: list[tuple[str, str, list]] = []
+    for content_type, base_url, api_key, instance_key, instance_id in _iter_calendar_endpoints():
+        try:
+            if content_type == "movie":
+                rows = fetch_radarr_calendar(start_date, end_date, base_url, api_key) or []
+            else:
+                rows = fetch_sonarr_calendar(start_date, end_date, base_url, api_key) or []
+            fetched.append((content_type, instance_key, list(rows)))
+        except Exception as exc:
+            stats["errors"] += 1
+            logger.warning(
+                f"Calendar date refresh Arr fetch failed instance={instance_key}: {exc}",
+                extra={"emoji_type": "warning"},
+            )
+
+    # Phase 2: short write session for upserts + art enqueue.
     session = get_session()
     try:
-        for content_type, base_url, api_key, instance_key, instance_id in _iter_calendar_endpoints():
+        for content_type, instance_key, rows in fetched:
             if content_type == "movie":
-                rows = fetch_radarr_calendar(start_date, end_date, base_url, api_key)
                 for row in rows:
                     radarr_id = row.get("id")
                     tmdb_id = row.get("tmdbId")
@@ -119,7 +135,6 @@ def run_calendar_date_refresh() -> dict:
                             changed_movie_ids.add(int(movie.id))
 
             elif content_type == "series":
-                rows = fetch_sonarr_calendar(start_date, end_date, base_url, api_key)
                 for row in rows:
                     episode_sonarr_id = row.get("id")
                     if not episode_sonarr_id:

@@ -719,6 +719,11 @@ def _run_startup_lite_snapshot_for_instances(
             hb_stop = None
             try:
                 row = _get_or_create_arr_state(session, instance_key, instance['arr_type'])
+                # Release txn before long Arr catalog GET.
+                try:
+                    session.commit()
+                except Exception:
+                    pass
                 t0 = time.monotonic()
                 logger.info(
                     f"Startup lite · {instance_key} · {'movies' if instance['arr_type'] == 'radarr' else 'TV shows'} · catalog check",

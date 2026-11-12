@@ -170,6 +170,47 @@ def _normalize_layers_stamp(raw: Any) -> dict[str, Any] | None:
     }
 
 
+def _layout_studio_owns_overlay() -> bool:
+    """True when Layout Studio profiles are the art source of truth.
+
+    After migrate / when profiles have labels, legacy global PLACEHOLDER banner
+    toggles must not alone invalidate sidecars.
+    """
+    try:
+        from services.poster_layouts import layout_art_library_synced, layouts_have_any_labels
+
+        return bool(layout_art_library_synced() or layouts_have_any_labels())
+    except Exception:
+        return False
+
+
+def _layers_stamps_equivalent(stored: dict[str, Any], want: dict[str, Any]) -> bool:
+    """Compare layer stamps; ignore legacy placeholder_banner when studio owns overlay."""
+    left = dict(stored)
+    right = dict(want)
+    if _layout_studio_owns_overlay():
+        left.pop("placeholder_banner", None)
+        right.pop("placeholder_banner", None)
+    return left == right
+
+
+def _overlay_text_mismatch(stored_text: str, desired_text: str | None, *, mode: str) -> bool:
+    """True when overlay_text drift should force regenerate."""
+    desired = str(desired_text or "").strip()
+    stored = str(stored_text or "").strip()
+    if str(mode or "").strip().lower() == "top_banner" and not stored:
+        from services.poster_overlay_text import OVERLAY_BANNER_PLACEHOLDER
+
+        stored = OVERLAY_BANNER_PLACEHOLDER
+    if stored == desired:
+        return False
+    if _layout_studio_owns_overlay():
+        # Layout chips own static PLACEHOLDER glyphs; ignore legacy toggle text drift.
+        if {stored, desired} <= {"", "PLACEHOLDER"}:
+            return False
+    return True
+
+
 def _normalize_outputs_map(raw: Any) -> dict[str, dict[str, Any]]:
     """Per-artifact entries: meta_key -> {file, source_url, source_kind?, overlay_text?, layers?}.
 
@@ -498,15 +539,12 @@ def _needs_regenerate(
     stored_layers = _normalize_layers_stamp(entry.get("layers"))
     if stored_layers is None:
         return True
-    if stored_layers != _layers_stamp_from_settings(grayscale=grayscale, profile_key=profile_key):
+    want_layers = _layers_stamp_from_settings(grayscale=grayscale, profile_key=profile_key)
+    if not _layers_stamps_equivalent(stored_layers, want_layers):
         return True
     desired_text = _effective_overlay_text(mode, overlay_text)
     stored_text = str(entry.get("overlay_text") or "").strip()
-    if str(mode or "").strip().lower() == "top_banner" and not stored_text:
-        from services.poster_overlay_text import OVERLAY_BANNER_PLACEHOLDER
-
-        stored_text = OVERLAY_BANNER_PLACEHOLDER
-    if stored_text != desired_text:
+    if _overlay_text_mismatch(stored_text, desired_text, mode=str(mode or "")):
         return True
     return False
 

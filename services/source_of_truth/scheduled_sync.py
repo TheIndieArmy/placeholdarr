@@ -252,6 +252,9 @@ def kick_pending_sync_reruns() -> None:
         return
 
     def _run() -> None:
+        from services.postgres.db import bind_worker_pool_role
+
+        bind_worker_pool_role()
         try:
             if _consume_sync_pending_rerun("lite_sync"):
                 logger.info(

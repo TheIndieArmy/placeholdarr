@@ -72,8 +72,10 @@ def watchlist_rss_loop_running() -> bool:
 
 
 def _run_loop() -> None:
+    from services.postgres.db import bind_worker_pool_role
     from services.watchlist.sync import WATCHLIST_RSS_POLL_SECONDS
 
+    bind_worker_pool_role()
     while not _stop.is_set():
         try:
             _tick()

@@ -129,6 +129,9 @@ async def watchlist_sync_now():
         raise HTTPException(status_code=409, detail="Task already running: watchlist sync in progress")
 
     def _runner():
+        from services.postgres.db import bind_worker_pool_role
+
+        bind_worker_pool_role()
         try:
             summary = watchlist_sync.run_watchlist_sync(trigger="manual")
             try:

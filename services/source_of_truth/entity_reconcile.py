@@ -17,7 +17,7 @@ from services.placeholder_poster_art import (
     ensure_movie_art,
     ensure_series_art,
 )
-from services.postgres.db import get_session
+from services.postgres.db import get_session, release_handler_session, session_scope
 from services.postgres.models import Episode, Job, Movie, Placeholder, Season, Series
 from services.source_of_truth.arr_commands import (
     ArrCommandError,
@@ -750,13 +750,53 @@ def _run_sidecars_and_collect_paths(
     job_id: int | None = None,
     on_progress: Any | None = None,
 ) -> _SidecarPassResult:
+    """Write NFO/art then push player metadata.
+
+    Loads related rows on ``session``, then releases it before FS/image I/O and
+    player HTTP (same contract as art/nfo refresh handlers).
+    """
+    from types import SimpleNamespace
+
+    from services.source_of_truth.status_reconciler import _refresh_episode_nfo_with_entities
+
+    work: list[dict[str, Any]] = []
+    for placeholder in placeholders:
+        movie = session.query(Movie).get(placeholder.movie_id) if placeholder.movie_id else None
+        episode = session.query(Episode).get(placeholder.episode_id) if placeholder.episode_id else None
+        season = None
+        series = None
+        if episode is not None:
+            season = session.query(Season).get(episode.season_id) if episode.season_id else None
+            series = session.query(Series).get(season.series_id) if season and season.series_id else None
+        effective = bool(getattr(placeholder, "has_placeholder", False))
+        if movie and bool(getattr(movie, "has_placeholder", False)):
+            effective = True
+        if episode and bool(getattr(episode, "has_placeholder", False)):
+            effective = True
+        work.append(
+            {
+                "placeholder": placeholder,
+                "movie": movie,
+                "episode": episode,
+                "season": season,
+                "series": series,
+                "effective": effective,
+            }
+        )
+
+    try:
+        session.expunge_all()
+    except Exception:
+        pass
+    release_handler_session(session)
+
     refresh_paths: set[str] = set()
     rewritten_movies: list[Any] = []
     rewritten_series: list[Any] = []
     processed_movies: set[int] = set()
     processed_series: set[int] = set()
-    player_push: list[Placeholder] = []
-    total = len(placeholders)
+    player_push_ids: list[int] = []
+    total = len(work)
     processed = 0
 
     progress_every = max(5, total // 20) if total > 0 else 5
@@ -772,21 +812,16 @@ def _run_sidecars_and_collect_paths(
             except Exception:
                 pass
 
-    for placeholder in placeholders:
-        movie = session.query(Movie).get(placeholder.movie_id) if placeholder.movie_id else None
-        episode = session.query(Episode).get(placeholder.episode_id) if placeholder.episode_id else None
-        effective = bool(getattr(placeholder, "has_placeholder", False))
-        if movie and bool(getattr(movie, "has_placeholder", False)):
-            effective = True
-        if episode and bool(getattr(episode, "has_placeholder", False)):
-            effective = True
-        if not effective:
+    for item in work:
+        placeholder = item["placeholder"]
+        movie = item["movie"]
+        episode = item["episode"]
+        if not item["effective"]:
             _tick_sidecar_progress()
             continue
 
         if movie:
-            if _refresh_movie_nfo(placeholder, movie):
-                pass
+            _refresh_movie_nfo(placeholder, movie)
             mid = int(movie.id)
             path = str(getattr(placeholder, "path", "") or getattr(movie, "placeholder_filepath", "") or "").strip()
             if path and mid not in processed_movies:
@@ -796,20 +831,21 @@ def _run_sidecars_and_collect_paths(
                     refresh_paths.add(os.path.dirname(os.path.abspath(path)))
                     rewritten_movies.append(movie)
             if getattr(placeholder, "has_placeholder", False) or getattr(movie, "has_placeholder", False):
-                player_push.append(placeholder)
+                if getattr(placeholder, "id", None) is not None:
+                    player_push_ids.append(int(placeholder.id))
             _tick_sidecar_progress()
             continue
 
         if not episode:
             _tick_sidecar_progress()
             continue
-        season = session.query(Season).get(episode.season_id) if episode.season_id else None
-        series = session.query(Series).get(season.series_id) if season and season.series_id else None
+        season = item["season"]
+        series = item["series"]
         if not season or not series:
             _tick_sidecar_progress()
             continue
 
-        _refresh_episode_nfo(session, placeholder, episode)
+        _refresh_episode_nfo_with_entities(placeholder, episode, season, series)
         path = str(
             getattr(placeholder, "path", "") or getattr(episode, "placeholder_filepath", "") or ""
         ).strip()
@@ -827,39 +863,28 @@ def _run_sidecars_and_collect_paths(
             if series_result.wrote_any and series_folder:
                 refresh_paths.add(os.path.abspath(series_folder))
                 rewritten_series.append(series)
-        still_result = ensure_episode_still_art(episode, season, series, path)
-        if still_result.wrote_any:
-            refresh_paths.add(os.path.dirname(os.path.abspath(path)))
-        else:
-            refresh_paths.add(os.path.dirname(os.path.abspath(path)))
+        ensure_episode_still_art(episode, season, series, path)
+        refresh_paths.add(os.path.dirname(os.path.abspath(path)))
 
         if getattr(placeholder, "has_placeholder", False) or getattr(episode, "has_placeholder", False):
-            player_push.append(placeholder)
+            if getattr(placeholder, "id", None) is not None:
+                player_push_ids.append(int(placeholder.id))
 
         _tick_sidecar_progress()
 
-    if player_push:
-        seen: set[tuple[str, int]] = set()
-        unique: list[Placeholder] = []
-        for ph in player_push:
-            if ph.movie_id:
-                key = ("movie", int(ph.movie_id))
-            elif ph.episode_id:
-                key = ("episode", int(ph.episode_id))
-            else:
-                continue
-            if key in seen:
-                continue
-            seen.add(key)
-            unique.append(ph)
+    if player_push_ids:
+        unique_ids = list(dict.fromkeys(player_push_ids))
         try:
             _log_reconcile_info(
                 entity_type,
                 display_title,
-                f"Pushing status to media servers for {len(unique)} placeholder(s)",
+                f"Pushing status to media servers for {len(unique_ids)} placeholder(s)",
                 job_id=job_id,
             )
-            push_placeholder_batch_player_metadata(session, unique)
+            push_placeholder_batch_player_metadata(
+                None,
+                [SimpleNamespace(id=pid, has_placeholder=True) for pid in unique_ids],
+            )
         except Exception as exc:
             _log_reconcile_warning(
                 entity_type,
@@ -1131,31 +1156,65 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
             except (TypeError, ValueError):
                 arr_cmd_id = None
 
+            job_id_int = int(job.id)
+            arr_label = targets.arr_label
+            arr_kind = targets.arr_kind
+            arr_id = targets.arr_id
+            base_url = targets.base_url
+            api_key = targets.api_key
+            instance_key = targets.instance_key
+
             if arr_cmd_id is None:
                 _step("arr_refresh")
-                if targets.arr_kind == "radarr":
-                    arr_cmd_id = trigger_refresh_movie(
-                        base_url=targets.base_url, api_key=targets.api_key, movie_id=targets.arr_id
-                    )
-                else:
-                    arr_cmd_id = trigger_refresh_series(
-                        base_url=targets.base_url, api_key=targets.api_key, series_id=targets.arr_id
-                    )
+                # Persist step, then release before Arr HTTP.
+                session.commit()
+                release_handler_session(session)
+                session = None
+                try:
+                    if arr_kind == "radarr":
+                        arr_cmd_id = trigger_refresh_movie(
+                            base_url=base_url, api_key=api_key, movie_id=arr_id
+                        )
+                    else:
+                        arr_cmd_id = trigger_refresh_series(
+                            base_url=base_url, api_key=api_key, series_id=arr_id
+                        )
+                except Exception:
+                    session = get_session()
+                    job = session.get(Job, job_id_int)
+                    if job is None:
+                        raise
+                    raise
+                session = get_session()
+                job = session.get(Job, job_id_int)
+                if job is None:
+                    raise ValueError("entity_reconcile_job_missing_after_arr_trigger")
+                payload = _payload_dict(job)
                 payload["arr_command_id"] = int(arr_cmd_id)
+                payload["display_title"] = title
                 job.payload = payload
                 session.add(job)
                 session.commit()
 
             _step("arr_wait_refresh")
+            session.commit()
+            release_handler_session(session)
+            session = None
 
             def _on_refresh_tick(_statuses: dict[int, str]) -> None:
-                _set_job_step(session, job, "arr_wait_refresh", arr_label=targets.arr_label)
+                with session_scope(role="worker") as tick_session:
+                    tick_job = tick_session.get(Job, job_id_int)
+                    if tick_job is not None:
+                        _set_job_step(
+                            tick_session, tick_job, "arr_wait_refresh", arr_label=arr_label
+                        )
+                        tick_session.commit()
 
             # Short poll only: release the worker between Arr ticks via defer.
             try:
                 wait_arr_commands(
-                    base_url=targets.base_url,
-                    api_key=targets.api_key,
+                    base_url=base_url,
+                    api_key=api_key,
                     command_ids=[int(arr_cmd_id)],
                     timeout_s=8.0,
                     poll_s=2.0,
@@ -1168,7 +1227,7 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
                         entity_type,
                         title,
                         "Deferred: waiting for Arr refresh command",
-                        job_id=int(job.id),
+                        job_id=job_id_int,
                     )
                     return {
                         "ok": True,
@@ -1178,35 +1237,41 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
                     }
                 raise
 
-            _step("sync_catalog")
-            if targets.arr_kind == "radarr":
+            # Catalog sync opens its own sessions; keep handler closed during Arr GETs.
+            if arr_kind == "radarr":
                 sync_radarr_movies_by_ids(
-                    [targets.arr_id],
-                    base_url=targets.base_url,
-                    api_key=targets.api_key,
-                    instance_key=targets.instance_key,
+                    [arr_id],
+                    base_url=base_url,
+                    api_key=api_key,
+                    instance_key=instance_key,
                 )
             else:
                 sync_sonarr_series_by_ids(
-                    [targets.arr_id],
+                    [arr_id],
+                    base_url=base_url,
+                    api_key=api_key,
+                    instance_key=instance_key,
+                )
+
+            session = get_session()
+            job = session.get(Job, job_id_int)
+            if job is None:
+                raise ValueError("entity_reconcile_job_missing_after_arr_sync")
+            _step("sync_catalog")
+            if entity_type == "series" and arr_kind == "sonarr":
+                targets = _ReconcileTargets(
+                    entity_type=targets.entity_type,
+                    entity_id=targets.entity_id,
+                    display_title=targets.display_title,
+                    arr_kind=targets.arr_kind,
+                    arr_id=targets.arr_id,
                     base_url=targets.base_url,
                     api_key=targets.api_key,
                     instance_key=targets.instance_key,
+                    movie_row_ids=[],
+                    episode_row_ids=_episode_row_ids_for_series(session, entity_id),
+                    arr_label=targets.arr_label,
                 )
-                if entity_type == "series":
-                    targets = _ReconcileTargets(
-                        entity_type=targets.entity_type,
-                        entity_id=targets.entity_id,
-                        display_title=targets.display_title,
-                        arr_kind=targets.arr_kind,
-                        arr_id=targets.arr_id,
-                        base_url=targets.base_url,
-                        api_key=targets.api_key,
-                        instance_key=targets.instance_key,
-                        movie_row_ids=[],
-                        episode_row_ids=_episode_row_ids_for_series(session, entity_id),
-                        arr_label=targets.arr_label,
-                    )
 
             # Persist Arr completion so a later pipeline defer resumes at rematerialize.
             payload = _payload_dict(job)
@@ -1457,25 +1522,38 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
             job_id=int(job.id),
         )
 
+        job_id_for_sidecars = int(job.id)
+        arr_label_for_sidecars = targets.arr_label
+
         def _on_sidecar_progress(done: int, total: int) -> None:
-            _set_job_step(
-                session,
-                job,
-                "sidecars",
-                arr_label=targets.arr_label,
-                phase_done=int(done),
-                phase_total=max(1, int(total)),
-            )
+            with session_scope(role="worker") as prog_session:
+                prog_job = prog_session.get(Job, job_id_for_sidecars)
+                if prog_job is None:
+                    return
+                _set_job_step(
+                    prog_session,
+                    prog_job,
+                    "sidecars",
+                    arr_label=arr_label_for_sidecars,
+                    phase_done=int(done),
+                    phase_total=max(1, int(total)),
+                )
+                prog_session.commit()
 
         sidecar = _run_sidecars_and_collect_paths(
             session,
             placeholders,
             entity_type=entity_type,
             display_title=title,
-            job_id=int(job.id),
+            job_id=job_id_for_sidecars,
             on_progress=_on_sidecar_progress,
         )
         refresh_paths = sidecar.refresh_paths
+        # Sidecars release the handler session before FS/HTTP; reopen for finish steps.
+        session = get_session()
+        job = session.get(Job, job_id_for_sidecars)
+        if job is None:
+            raise ValueError("entity_reconcile_job_missing_after_sidecars")
 
         _step("player")
         if refresh_paths:

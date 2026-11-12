@@ -256,7 +256,21 @@ def enqueue_template_backfill(
         run_id = uuid.uuid4().hex
         started = datetime.now(timezone.utc).isoformat()
         _set_active_template_run_id(session, run_id)
+        session.commit()
+    except Exception as exc:
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        logger.warning(f"Template backfill ({source}) failed to enqueue: {exc}", extra={"emoji_type": "warning"})
+        return {"ok": False, "reason": str(exc), "source": source}
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
 
+    try:
         extras: dict[str, Any] = {
             "template_backfill_source": source,
             "template_backfill_started_at": started,
@@ -272,9 +286,10 @@ def enqueue_template_backfill(
 
             extras[PLACEHOLDER_REFRESH_TASK_RUN_ID_KEY] = int(placeholder_refresh_task_run_id)
 
+        # Short enqueue sessions after ids / run_id were snapshotted above.
         out = enqueue_nfo_refresh(
             ids,
-            session=session,
+            session=None,
             merge_into_pending=False,
             player_metadata_refresh={int(pid): False for pid in ids},
             payload_extras=extras,
@@ -307,17 +322,8 @@ def enqueue_template_backfill(
         )
         return out
     except Exception as exc:
-        try:
-            session.rollback()
-        except Exception:
-            pass
         logger.warning(f"Template backfill ({source}) failed to enqueue: {exc}", extra={"emoji_type": "warning"})
         return {"ok": False, "reason": str(exc), "source": source}
-    finally:
-        try:
-            session.close()
-        except Exception:
-            pass
 
 
 def run_pending_backfill_if_set(*, source: str = "full_sync", task_run_id: int | None = None) -> dict[str, Any]:
