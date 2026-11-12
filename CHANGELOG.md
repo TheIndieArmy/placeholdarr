@@ -11,6 +11,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ### Fixed
 
+- **Never obsolete teardown**: Never (and other live-title obsolete reasons) remove placeholders again; the stale-obsolete guard only skips Arr delete-then-quick-readd (#177).
 - **Rotated chip edge clip**: Corner chips draw on an offscreen tile before rotate/paste so bake keeps leading glyphs and matches desk placement (off-edge parks still clip).
 - **TV-only layout art**: Saving a TV poster profile no longer rebakes episode stills (layout filter used to force `art_scope=all`).
 - **Episode-only layout art**: Saving an Episode profile skips series/season poster bakes for that refresh.
