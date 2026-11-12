@@ -3776,7 +3776,7 @@ export default function PosterLayoutDesigner(props: Props) {
             if (e.target === e.currentTarget && !bakeReviewBusy) closeBakeReview();
           }}
         >
-          <div className="flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-[#424753]/40 bg-[#171c22]">
+          <div className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-[#424753]/40 bg-[#171c22]">
             <div className="shrink-0 border-b border-[#424753]/30 px-5 py-4">
               <h3 className="text-[18px] font-bold text-white font-headline">Preview bake</h3>
               <p className="ui-field-description mt-1">
@@ -3795,27 +3795,31 @@ export default function PosterLayoutDesigner(props: Props) {
               ) : null}
               {bakeReviewUrl ? (
                 <div className="flex flex-col items-center justify-center gap-5 sm:flex-row sm:items-end sm:justify-center sm:gap-5">
-                  <div className="flex min-w-0 flex-col items-center gap-2">
+                  <div className="flex shrink-0 flex-col items-center gap-2">
                     <img
                       src={bakeReviewUrl}
                       alt="Preview bake large"
-                      className={`max-h-[70vh] w-auto max-w-full rounded-lg border border-[#424753]/40 ${
-                        kind === "episode" ? "aspect-video object-contain" : "aspect-[2/3] object-contain"
+                      className={`h-auto max-h-[70vh] w-auto rounded-lg border border-[#424753]/40 ${
+                        kind === "episode"
+                          ? "max-w-[min(100%,32rem)] aspect-video object-contain"
+                          : "max-w-[min(100%,28rem)] aspect-[2/3] object-contain"
                       }`}
                     />
                     <span className="text-[11px] font-headline uppercase tracking-wider text-slate-500">
                       Large
                     </span>
                   </div>
-                  <div className="flex flex-col items-center gap-4">
+                  <div className="flex shrink-0 flex-col items-center gap-4">
                     <div className="flex flex-col items-center gap-2">
                       <img
                         src={bakeReviewUrl}
                         alt="Preview bake small"
+                        width={199}
+                        height={kind === "episode" ? 112 : 307}
                         className={`h-auto rounded-lg border border-[#424753]/40 ${
                           kind === "episode"
-                            ? "w-[min(100%,10rem)] max-h-[22vh] aspect-video object-contain"
-                            : "w-[min(100%,6.5rem)] max-h-[22vh] aspect-[2/3] object-contain"
+                            ? "w-[199px] aspect-video object-contain"
+                            : "w-[199px] aspect-[2/3] object-contain"
                         }`}
                       />
                       <span className="text-[11px] font-headline uppercase tracking-wider text-slate-500">
@@ -3826,10 +3830,12 @@ export default function PosterLayoutDesigner(props: Props) {
                       <img
                         src={bakeReviewUrl}
                         alt="Preview bake medium"
+                        width={280}
+                        height={kind === "episode" ? 158 : 420}
                         className={`h-auto rounded-lg border border-[#424753]/40 ${
                           kind === "episode"
-                            ? "w-[min(100%,16rem)] max-h-[36vh] aspect-video object-contain"
-                            : "w-[min(100%,10.5rem)] max-h-[36vh] aspect-[2/3] object-contain"
+                            ? "w-[280px] aspect-video object-contain"
+                            : "w-[280px] aspect-[2/3] object-contain"
                         }`}
                       />
                       <span className="text-[11px] font-headline uppercase tracking-wider text-slate-500">
