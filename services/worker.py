@@ -811,6 +811,19 @@ def _try_complete_task_runs_after_job_commit(
     if descriptor.job_type not in (PLACEHOLDER_ART_REFRESH_JOB_TYPE, NFO_REFRESH_JOB_TYPE):
         return
     payload = descriptor.payload if isinstance(descriptor.payload, dict) else {}
+    if failed and descriptor.job_type == PLACEHOLDER_ART_REFRESH_JOB_TYPE:
+        try:
+            from services.job_fail_active import publish_art_batch_failed_for_job
+
+            publish_art_batch_failed_for_job(
+                int(descriptor.id),
+                reason=str(error_message or "failed"),
+            )
+        except Exception as exc:
+            logger.debug(
+                f"art batch live fail publish after job_id={descriptor.id} skipped: {exc}",
+                extra={"emoji_type": "debug"},
+            )
     raw_tid = payload.get("full_sync_task_run_id") or payload.get("art_backfill_task_run_id")
     if raw_tid is not None:
         try:

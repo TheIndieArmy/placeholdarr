@@ -64,13 +64,17 @@ def enqueue_batched_placeholder_job(
     merge_into_pending: bool = True,
     payload_extras: dict[str, Any] | None = None,
     include_player_metadata_refresh: bool = False,
+    batch_size: int | None = None,
 ) -> dict:
     """Enqueue one or more batched jobs for ``placeholder_ids``."""
     ids_remaining = normalize_placeholder_ids(placeholder_ids)
     if not ids_remaining:
         return {"ok": False, "reason": "no_placeholder_ids"}
 
-    batch_size = job_batch_size()
+    try:
+        batch_size = max(1, int(batch_size)) if batch_size is not None else job_batch_size()
+    except Exception:
+        batch_size = job_batch_size()
     debounce_seconds = job_debounce_seconds()
     now = datetime.now(timezone.utc)
     run_after = now if debounce_seconds <= 0 else now + timedelta(seconds=debounce_seconds)

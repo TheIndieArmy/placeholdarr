@@ -2140,6 +2140,7 @@ def render_overlay_preview_jpeg(
     use_layout = layout_labels is not None or bool(str(profile_key or "").strip())
     if use_layout:
         from services.poster_layouts import (
+            apply_sample_token_overrides,
             get_profile,
             grid_size_for_profile,
             sample_tokens_for_profile,
@@ -2155,15 +2156,10 @@ def render_overlay_preview_jpeg(
         labels = layout_labels if layout_labels is not None else list((profile.get("labels") or []))
         # Draft previews pass grayscale explicitly; saved-profile previews use the profile flag.
         gs = bool(grayscale) if layout_labels is not None else bool(profile.get("grayscale"))
-        tokens = sample_tokens_for_profile(key)
-        if isinstance(sample_token_overrides, dict):
-            for raw_key, raw_val in sample_token_overrides.items():
-                name = str(raw_key or "").strip()
-                if not name:
-                    continue
-                text = str(raw_val or "").strip()
-                if text:
-                    tokens[name] = text
+        tokens = apply_sample_token_overrides(
+            sample_tokens_for_profile(key),
+            sample_token_overrides if isinstance(sample_token_overrides, dict) else None,
+        )
         cols, rows = grid_size_for_profile(key)
         out = apply_overlay(
             base,

@@ -5593,6 +5593,7 @@ async def settings_poster_overlay_label_sprite(request: Request):
     sample_overrides = body.get("sample_tokens") if isinstance(body.get("sample_tokens"), dict) else None
     try:
         from services.poster_layouts import (
+            apply_sample_token_overrides,
             get_profile,
             grid_size_for_profile,
             sample_tokens_for_profile,
@@ -5605,13 +5606,7 @@ async def settings_poster_overlay_label_sprite(request: Request):
         )
         # Touch profile so missing keys still resolve sample/grid defaults.
         get_profile(key)
-        tokens = sample_tokens_for_profile(key)
-        if sample_overrides:
-            for raw_key, raw_val in sample_overrides.items():
-                name = str(raw_key or "").strip()
-                text = str(raw_val or "").strip()
-                if name and text:
-                    tokens[name] = text
+        tokens = apply_sample_token_overrides(sample_tokens_for_profile(key), sample_overrides)
         cols, rows = grid_size_for_profile(key)
         result = render_layout_label_sprite_png(
             raw_label,
