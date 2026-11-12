@@ -27,6 +27,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Vertical chip text clip**: Stacked Custom text uses font metrics and a poster height budget so glyphs no longer clip inside the plate.
 - **Vertical chip end pad**: Vertical stacks size and draw from glyph ink boxes so ascent/descent no longer inflate top/bottom fill.
 - **Preview bake after tab switch**: Preview bake uses the active Movie/TV/Episode profile instead of a stale header closure.
+- **Layout chip text fit**: Same size scale keeps preferred type until the plate would leave the poster, then shrinks so copy never clips.
 - **Fail active jobs and restart**: Advanced Settings control to fail wedged jobs and restart Placeholdarr.
 - **Materialization lock fairness**: Chunked mats, shorter lock windows, and stall heartbeats so import/webhooks can finish (#152).
 - **Lite sync localized poster lock**: Scoped/lite mat defers TMDB localized poster resolve so art ensure cannot self-block (#170).
@@ -61,6 +62,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 - **Vertical chip text clip**: Stacked Custom text uses font metrics and a poster height budget so glyphs no longer clip inside the plate.
 - **Vertical chip end pad**: Vertical stacks size and draw from glyph ink boxes so ascent/descent no longer inflate top/bottom fill.
+- **Layout chip text fit**: Same size scale keeps preferred type until the plate would leave the poster, then shrinks so copy never clips.
 - **Preview bake after tab switch**: Preview bake uses the active Movie/TV/Episode profile instead of a stale header closure.
 - **Lite sync localized poster lock**: Scoped/lite materialization defers TMDB `localized_poster` resolve until after commits (then the existing poster-language job), so art ensure cannot self-block on `UPDATE series` while idle-in-transaction (#170).
 - **Tasks live poll**: Active tasks poll `/api/tasks/status` every 1s again (no 5s mat slowdown); SSE start/finish uses the status patch path; status stays off the stuck-task reconcile hot path.

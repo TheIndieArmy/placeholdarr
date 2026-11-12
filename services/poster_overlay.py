@@ -753,21 +753,38 @@ def _fit_layout_chip_font(
     max_height: int | None = None,
     line_gap_ratio: float = 0.06,
     vertical: bool = False,
+    pad_x_ratio: float = 0.0,
+    pad_x_min: int = 0,
+    pad_y_ratio: float = 0.0,
+    pad_y_min: int = 0,
 ):
-    """Shrink chip type until measured width/height fit the poster budget."""
+    """Shrink chip type until plate size (ink + pad) fits the poster budget.
+
+    Prefers ``preferred_size`` and only steps down when the chip would exceed
+    ``max_width`` / ``max_height``. Never stops early while still overflowing
+    until ``min_size`` (callers should set a low floor so text does not clip).
+    """
     size = max(min_size, int(preferred_size))
     font = _load_font(size)
     if font is None:
         return font
     limit_w = max(1, int(max_width))
     limit_h = max(1, int(max_height)) if max_height is not None else None
-    while size > min_size:
+    while True:
         line_gap = max(2 if vertical else 1, int(round(size * line_gap_ratio)))
         if vertical:
             tw, th = _measure_vertical_stack(font, text, gap=line_gap)
         else:
             tw, th = _measure_text(font, text, line_spacing=line_gap)
-        if tw <= limit_w and (limit_h is None or th <= limit_h):
+        pad_x = max(int(pad_x_min), int(round(size * pad_x_ratio))) if (pad_x_ratio or pad_x_min) else 0
+        pad_y = max(int(pad_y_min), int(round(size * pad_y_ratio))) if (pad_y_ratio or pad_y_min) else 0
+        chip_w = tw + pad_x * 2
+        chip_h = th + pad_y * 2
+        fits_w = chip_w <= limit_w
+        fits_h = limit_h is None or chip_h <= limit_h
+        if fits_w and fits_h:
+            break
+        if size <= min_size:
             break
         size = max(min_size, size - 2)
         font = _load_font(size)
@@ -886,23 +903,40 @@ def _draw_layout_chip(
     img_w, img_h = out.size
     mult = _label_size_mult(size, size_scale)
     preferred = max(14, int(round(_layout_chip_font_size(img_w, img_h, landscape=landscape) * mult)))
-    # Keep type on-poster: width budget grows slowly with size; height caps vertical stacks.
-    max_text_w = max(56, int(img_w * min(0.72, 0.36 + 0.12 * mult)))
-    max_text_h = max(56, int(img_h * min(0.86, 0.48 + 0.14 * mult)))
-    # Allow shrink for long copy; preferred still tracks size_scale so S/M/L move glyphs.
-    min_font = max(11, int(round(preferred * 0.55)))
+    # Prefer size_scale type size; shrink only when the plate would leave the poster.
+    # Low floor so long copy can still fit instead of clipping at the edges.
+    min_font = max(11, int(round(preferred * 0.40)))
     # Vertical: ink boxes + letter gap (avoid metric line slots that inflate end pad).
     line_gap_ratio = 0.16 if vertical else 0.06
     if label:
-        font = _fit_layout_chip_font(
-            label,
-            preferred_size=preferred,
-            min_size=min_font,
-            max_width=max_text_w if not vertical else max(24, int(max_text_w * 0.35)),
-            max_height=max_text_h if vertical else None,
-            line_gap_ratio=line_gap_ratio,
-            vertical=vertical,
-        )
+        if vertical:
+            font = _fit_layout_chip_font(
+                label,
+                preferred_size=preferred,
+                min_size=min_font,
+                max_width=max(24, int(img_w * min(0.42, 0.22 + 0.08 * mult))),
+                max_height=img_h,
+                line_gap_ratio=line_gap_ratio,
+                vertical=True,
+                pad_x_ratio=0.32,
+                pad_x_min=7,
+                pad_y_ratio=0.10,
+                pad_y_min=3,
+            )
+        else:
+            font = _fit_layout_chip_font(
+                label,
+                preferred_size=preferred,
+                min_size=min_font,
+                max_width=img_w,
+                max_height=None,
+                line_gap_ratio=line_gap_ratio,
+                vertical=False,
+                pad_x_ratio=0.38,
+                pad_x_min=10,
+                pad_y_ratio=0.28,
+                pad_y_min=6,
+            )
     else:
         font = _load_font(preferred)
     if font is None:
