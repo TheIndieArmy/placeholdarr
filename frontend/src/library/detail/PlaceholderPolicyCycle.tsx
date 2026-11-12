@@ -52,6 +52,8 @@ function setterForMediaType(mediaType: PolicyMediaType) {
 export function PlaceholderPolicyCycle(props: {
   mediaType: PolicyMediaType;
   entityId: number;
+  /** Library title for sidebar progress (same label Auto reconcile uses). */
+  displayTitle?: string | null;
   placeholderPolicy?: PlaceholderPolicy | null;
   forcePlaceholder?: boolean;
   blockPlaceholder?: boolean;
@@ -157,13 +159,14 @@ export function PlaceholderPolicyCycle(props: {
           : syncPhase === "creating"
             ? "Creating placeholders…"
             : "Updating placeholders…";
+      const contentTitle = String(props.displayTitle || "").trim() || null;
       // Never/Pinned (and the brief Auto API hop) show in the sidebar immediately.
       flashSidebarStatus({
         message: busyMsg,
         busy: true,
         kind: "info",
         step: syncPhase,
-        title: POLICY_LABEL[policy],
+        title: contentTitle,
       });
       try {
         const setter = setterForMediaType(props.mediaType);
@@ -196,7 +199,7 @@ export function PlaceholderPolicyCycle(props: {
             followupJobId: out.followup_job_id,
             message: out.step_label || "Refreshing placeholders…",
             step: "queued",
-            title: POLICY_LABEL[policy],
+            title: contentTitle,
           });
         } else {
           const doneMsg =
@@ -210,7 +213,7 @@ export function PlaceholderPolicyCycle(props: {
             busy: false,
             kind: "success",
             step: "done",
-            title: POLICY_LABEL[policy],
+            title: contentTitle,
           });
         }
 
@@ -239,7 +242,7 @@ export function PlaceholderPolicyCycle(props: {
           busy: false,
           kind: "error",
           step: null,
-          title: POLICY_LABEL[policy],
+          title: contentTitle,
         });
         setError(msg);
       }
@@ -247,6 +250,7 @@ export function PlaceholderPolicyCycle(props: {
     [
       props.mediaType,
       props.entityId,
+      props.displayTitle,
       props.onApplied,
       hasPlaceholder,
       hasFile,

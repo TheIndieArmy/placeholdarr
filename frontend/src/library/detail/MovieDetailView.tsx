@@ -61,6 +61,7 @@ export function MovieDetailView(props: {
             <PlaceholderPolicyCycle
               mediaType="movie"
               entityId={payload.id}
+              displayTitle={payload.title}
               placeholderPolicy={payload.placeholder_policy}
               forcePlaceholder={payload.force_placeholder}
               blockPlaceholder={payload.block_placeholder}

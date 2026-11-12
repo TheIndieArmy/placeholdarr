@@ -13,6 +13,8 @@ export function EpisodeRow(props: {
   episode: SeriesEpisodeDetail;
   themeMode: ThemeMode;
   accentHex: string;
+  /** Series title for sidebar pin progress. */
+  displayTitle?: string | null;
   /** Global TV density; greys episode pins under season/series modes. */
   tvPlaceholderDensity?: string | null;
   refreshControl?: ReactNode;
@@ -111,6 +113,7 @@ export function EpisodeRow(props: {
           <PlaceholderPolicyCycle
             mediaType="episode"
             entityId={ep.id}
+            displayTitle={props.displayTitle}
             placeholderPolicy={ep.placeholder_policy}
             forcePlaceholder={ep.force_placeholder}
             blockPlaceholder={ep.block_placeholder}
