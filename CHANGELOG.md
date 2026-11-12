@@ -11,6 +11,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ### Fixed
 
+- **Never obsolete teardown**: Never (and other live-title obsolete reasons) remove placeholders again; the stale-obsolete guard only skips Arr delete-then-quick-readd (#177).
 - **Rotated chip edge clip**: Corner chips draw on an offscreen tile before rotate/paste so bake keeps leading glyphs and matches desk placement (off-edge parks still clip).
 - **Art refresh DB hold**: `placeholder_art_refresh` loads rows then closes the worker session before HTTP/image I/O so long art batches no longer pin pool connections.
 - **Event mat needs locks**: Event-scoped needs-placeholder commits every 10 items, batches art enqueue after the loop, and reports episode/movie progress in stall phases.

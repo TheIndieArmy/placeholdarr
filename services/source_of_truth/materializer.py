@@ -763,6 +763,70 @@ def _record_series_bulk_delete_history(
     )
 
 
+def _obsolete_teardown_still_warranted(
+    session,
+    *,
+    movie: Movie | None = None,
+    episode: Episode | None = None,
+    series: Series | None = None,
+) -> bool:
+    """Whether obsolete materialization should remove placeholders.
+
+    Tear down when a real file exists, the catalog row is soft-deleted, or
+    current determination rules still say obsolete (Never, calendar window, …).
+    Skip only when delete/file justification evaporated and live rules no longer
+    want removal (Arr delete-then-quick-readd).
+    """
+    from services.app_timezone import local_today
+    from services.source_of_truth.determiner import (
+        _resolve_episode_determination,
+        _resolve_movie_determination,
+    )
+    from services.source_of_truth.placeholder_policy import policy_from_entity
+
+    placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
+    lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+    now_date = local_today()
+
+    if movie is not None:
+        if bool(getattr(movie, "has_file", False)) or bool(getattr(movie, "is_deleted", False)):
+            return True
+        if not bool(getattr(movie, "has_placeholder", False)):
+            return False
+        det, _ = _resolve_movie_determination(
+            session,
+            movie,
+            placeholders_enabled=placeholders_enabled,
+            lookahead_days=lookahead_days,
+            now_date=now_date,
+        )
+        return det == DETERMINATION_OBSOLETE
+
+    if episode is not None:
+        series_deleted = bool(getattr(series, "is_deleted", False)) if series is not None else False
+        if (
+            bool(getattr(episode, "has_file", False))
+            or bool(getattr(episode, "is_deleted", False))
+            or series_deleted
+        ):
+            return True
+        if not bool(getattr(episode, "has_placeholder", False)):
+            return False
+        series_pol = policy_from_entity(series) if series is not None else None
+        det, _ = _resolve_episode_determination(
+            session,
+            episode,
+            placeholders_enabled=placeholders_enabled,
+            lookahead_days=lookahead_days,
+            now_date=now_date,
+            series_policy=series_pol if series_pol in ("auto", "pinned", "never") else None,
+            series_row=series,
+        )
+        return det == DETERMINATION_OBSOLETE
+
+    return False
+
+
 def apply_movie_materialization(
     movie_id: int,
     session=None,
@@ -852,9 +916,9 @@ def apply_movie_materialization(
             if not locked:
                 return {"ok": False, "reason": "movie_not_found", "movie_id": movie_id}
             movie = locked
-            if not bool(getattr(movie, "has_file", False)) and not bool(
-                getattr(movie, "is_deleted", False)
-            ):
+            # Stale guard is for Arr delete-then-quick-readd only. Never / calendar
+            # and other live-title obsolete reasons still warrant teardown.
+            if not _obsolete_teardown_still_warranted(session, movie=movie):
                 return {
                     "ok": True,
                     "action": "noop_stale_obsolete",
@@ -871,9 +935,7 @@ def apply_movie_materialization(
             first_path = next((p for p in candidate_paths if p), None)
             disk_paths = filter_movie_disk_cleanup_paths(session, movie, candidate_paths)
             # Re-check under the same lock before touching disk.
-            if not bool(getattr(movie, "has_file", False)) and not bool(
-                getattr(movie, "is_deleted", False)
-            ):
+            if not _obsolete_teardown_still_warranted(session, movie=movie):
                 return {
                     "ok": True,
                     "action": "noop_stale_obsolete",
@@ -1027,12 +1089,9 @@ def apply_episode_materialization(
                 )
                 if locked_series is not None:
                     series = locked_series
-            series_deleted = bool(getattr(series, "is_deleted", False)) if series is not None else False
-            if (
-                not bool(getattr(episode, "has_file", False))
-                and not bool(getattr(episode, "is_deleted", False))
-                and not series_deleted
-            ):
+            # Stale guard is for Arr delete-then-quick-readd only. Never / calendar
+            # and other live-title obsolete reasons still warrant teardown.
+            if not _obsolete_teardown_still_warranted(session, episode=episode, series=series):
                 return {
                     "ok": True,
                     "action": "noop_stale_obsolete",
@@ -1047,12 +1106,7 @@ def apply_episode_materialization(
             if getattr(episode, "placeholder_filepath", None):
                 candidate_paths.append(episode.placeholder_filepath)
             first_path = next((p for p in candidate_paths if p), None)
-            series_deleted = bool(getattr(series, "is_deleted", False)) if series is not None else False
-            if (
-                not bool(getattr(episode, "has_file", False))
-                and not bool(getattr(episode, "is_deleted", False))
-                and not series_deleted
-            ):
+            if not _obsolete_teardown_still_warranted(session, episode=episode, series=series):
                 return {
                     "ok": True,
                     "action": "noop_stale_obsolete",
