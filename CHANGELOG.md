@@ -9,6 +9,10 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Fixed
+
+- **Rotated chip edge clip**: Corner chips draw on an offscreen tile before rotate/paste so bake keeps leading glyphs and matches desk placement (off-edge parks still clip).
+
 ## Pre-release
 
 ## Released

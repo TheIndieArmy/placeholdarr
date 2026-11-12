@@ -1016,13 +1016,10 @@ def _draw_layout_chip(
         chip_h = max(text_h, icon_h) + pad_y * 2
 
     ax, ay = int(anchor[0]), int(anchor[1])
-    # Allow partial off-canvas placement; Draw/paste clip to the image.
-    box = [
-        ax - chip_w // 2,
-        ay - chip_h // 2,
-        ax - chip_w // 2 + chip_w,
-        ay - chip_h // 2 + chip_h,
-    ]
+    # Draw the full chip on its own tile first. Drawing straight onto the poster
+    # clipped leading glyphs when the unrotated plate hung past the canvas, and
+    # rotate-then-crop made corner ribbons lose the first letter (e.g. PLACEHOLDER → LACEHOLDER).
+    local_box = [0, 0, int(chip_w), int(chip_h)]
 
     fill_opacity = max(0.0, min(1.0, float(fill_opacity)))
     border_opacity = max(0.0, min(1.0, float(border_opacity)))
@@ -1032,9 +1029,9 @@ def _draw_layout_chip(
     border_rgb = _parse_hex_rgba(border_color, alpha=255)[:3]
     text_rgb = _parse_hex_rgba(text_color, alpha=255)[:3]
     base = out.convert("RGBA") if out.mode != "RGBA" else out
-    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-    radius = max(6, int(min(box[2] - box[0], box[3] - box[1]) * 0.22))
+    chip_layer = Image.new("RGBA", (int(chip_w), int(chip_h)), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(chip_layer)
+    radius = max(6, int(min(chip_w, chip_h) * 0.22))
     auto_stroke = max(2, int(round(fitted_size * 0.09)))
     if border_thickness is None:
         stroke = auto_stroke
@@ -1050,20 +1047,20 @@ def _draw_layout_chip(
     has_border = (
         border_a > 0
         and stroke > 0
-        and box[2] - box[0] > stroke * 2
-        and box[3] - box[1] > stroke * 2
+        and chip_w > stroke * 2
+        and chip_h > stroke * 2
     )
     if has_border:
         draw.rounded_rectangle(
-            box,
+            local_box,
             radius=radius,
             fill=(*border_rgb, border_a),
         )
         inner = [
-            box[0] + stroke,
-            box[1] + stroke,
-            box[2] - stroke,
-            box[3] - stroke,
+            stroke,
+            stroke,
+            chip_w - stroke,
+            chip_h - stroke,
         ]
         draw.rounded_rectangle(
             inner,
@@ -1072,8 +1069,8 @@ def _draw_layout_chip(
         )
         content_box = inner
     else:
-        draw.rounded_rectangle(box, radius=radius, fill=(*fill_rgb, fill_a))
-        content_box = box
+        draw.rounded_rectangle(local_box, radius=radius, fill=(*fill_rgb, fill_a))
+        content_box = local_box
 
     content_w = content_box[2] - content_box[0]
     content_h = content_box[3] - content_box[1]
@@ -1082,7 +1079,7 @@ def _draw_layout_chip(
 
     def _paste_logo(lx: int, ly: int) -> None:
         """Composite the logo onto the plate so logo_opacity reveals fill, not the poster."""
-        nonlocal logo, overlay, draw
+        nonlocal logo, chip_layer, draw
         if logo is None:
             return
         mark = logo
@@ -1093,10 +1090,10 @@ def _draw_layout_chip(
             a = a.point(lambda p: int(p * logo_a / 255))
             mark = Image.merge("RGBA", (r, g, b, a))
         # paste() replaces destination pixels; alpha_composite keeps the fill under a faded mark.
-        layer = Image.new("RGBA", overlay.size, (0, 0, 0, 0))
+        layer = Image.new("RGBA", chip_layer.size, (0, 0, 0, 0))
         layer.paste(mark, (lx, ly), mark)
-        overlay = Image.alpha_composite(overlay, layer)
-        draw = ImageDraw.Draw(overlay)
+        chip_layer = Image.alpha_composite(chip_layer, layer)
+        draw = ImageDraw.Draw(chip_layer)
 
     def _draw_label(cx: int, cy: int) -> None:
         if not label:
@@ -1166,26 +1163,20 @@ def _draw_layout_chip(
     from services.poster_layouts import normalize_rotation
 
     rot = normalize_rotation(rotation)
-    out_box = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
+    tile = chip_layer
     if rot % 360 != 0:
-        cx = (box[0] + box[2]) // 2
-        cy = (box[1] + box[3]) // 2
-        chip = overlay.crop((box[0], box[1], box[2], box[3]))
-        ImageDraw.Draw(overlay).rectangle(box, fill=(0, 0, 0, 0))
         # CSS clockwise ↔ Pillow counter-clockwise.
-        rotated = chip.rotate(-rot, expand=True, resample=Image.Resampling.BICUBIC)
-        rw, rh = rotated.size
-        px = cx - rw // 2
-        py = cy - rh // 2
-        _paste_rgba_clipped(overlay, rotated, (px, py))
-        out_box = [
-            max(0, px),
-            max(0, py),
-            min(img_w, px + rw),
-            min(img_h, py + rh),
-        ]
-        if out_box[2] <= out_box[0] or out_box[3] <= out_box[1]:
-            out_box = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
+        tile = chip_layer.rotate(-rot, expand=True, resample=Image.Resampling.BICUBIC)
+    rw, rh = tile.size
+    # Same center as the desk sprite placement. Do not nudge on-canvas: if the user
+    # parks a chip off the edge, bake should clip the same way. The offscreen tile
+    # above is what fixes corner ribbons that used to lose leading glyphs while the
+    # plate still looked on-poster (desk sprites render centered, then move).
+    px = ax - rw // 2
+    py = ay - rh // 2
+    out_box = [int(px), int(py), int(px + rw), int(py + rh)]
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    _paste_rgba_clipped(overlay, tile, (px, py))
     return Image.alpha_composite(base, overlay), out_box
 
 
