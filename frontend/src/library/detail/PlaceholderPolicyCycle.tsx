@@ -3,13 +3,13 @@ import type { ThemeMode } from "../../brandTypes";
 import {
   clearMovieArrPolicyTags,
   clearSeriesArrPolicyTags,
-  getEntityReconcileStatus,
   setEpisodePlaceholderPolicy,
   setMoviePlaceholderPolicy,
   setSeasonPlaceholderPolicy,
   setSeriesPlaceholderPolicy,
 } from "../../api/dashboard";
 import type { PolicyTagControl } from "../../types/api";
+import { useLibraryReconcile } from "../LibraryReconcileContext";
 import { PinGlyph, type PlaceholderPolicy } from "./PinGlyph";
 import { PolicyTagControlModal } from "./PolicyTagControlModal";
 import {
@@ -24,18 +24,6 @@ const APPLY_DEBOUNCE_MS = 1100;
 
 export type PolicySyncPhase = "idle" | "creating" | "removing" | "working" | "saved";
 export type PolicyMediaType = "movie" | "episode" | "series" | "season";
-
-async function waitForReconcileJob(jobId: number): Promise<void> {
-  for (let i = 0; i < 80; i += 1) {
-    const status = await getEntityReconcileStatus(jobId);
-    if (status.status === "done") return;
-    if (status.status === "failed") {
-      throw new Error(status.error_message || "Sync failed");
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, 1000));
-  }
-  throw new Error("Timed out waiting for placeholder sync");
-}
 
 function phaseForPolicy(
   policy: PlaceholderPolicy,
@@ -98,6 +86,7 @@ export function PlaceholderPolicyCycle(props: {
   const locked = Boolean(props.locked);
   const progressSide = props.inlineProgressSide ?? "end";
   const hasPlaceholder = Boolean(props.hasPlaceholder);
+  const { trackReconcileJob } = useLibraryReconcile();
   const hasFile = Boolean(props.hasFile);
   const tagControl = props.policyTagControl || null;
   const tagConflict = Boolean(tagControl?.conflict);
@@ -184,39 +173,15 @@ export function PlaceholderPolicyCycle(props: {
         if (!out.ok) {
           throw new Error(out.message || "Failed to update placeholder policy");
         }
-        if (out.job_id != null) {
-          await waitForReconcileJob(out.job_id);
-        }
-        if (gen !== generationRef.current || desiredPolicyRef.current !== policy) {
-          const latest = desiredPolicyRef.current;
-          if (latest !== policy) {
-            await savePolicyRef.current(latest);
-          } else {
-            confirmedPolicyRef.current = policy;
-            inFlightRef.current = false;
-            updatePhase("saved");
-            if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
-            savedTimerRef.current = setTimeout(() => updatePhase("idle"), 1500);
-            props.onApplied?.();
-          }
-          return;
-        }
-        if (out.followup_job_id != null) {
-          await waitForReconcileJob(out.followup_job_id);
-        }
-        if (gen !== generationRef.current || desiredPolicyRef.current !== policy) {
-          const latest = desiredPolicyRef.current;
-          if (latest !== policy) {
-            await savePolicyRef.current(latest);
-          } else {
-            confirmedPolicyRef.current = policy;
-            inFlightRef.current = false;
-            updatePhase("saved");
-            if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
-            savedTimerRef.current = setTimeout(() => updatePhase("idle"), 1500);
-            props.onApplied?.();
-          }
-          return;
+        // Auto (and season Auto) enqueue a title reconcile: accept on the chip and
+        // show Creating…/steps in the library sidebar instead of a stuck Saving….
+        if (out.job_id != null && Number(out.job_id) > 0) {
+          trackReconcileJob({
+            jobId: Number(out.job_id),
+            followupJobId: out.followup_job_id,
+            message: out.step_label || "Refreshing placeholders…",
+            step: "queued",
+          });
         }
 
         confirmedPolicyRef.current = policy;
@@ -248,6 +213,7 @@ export function PlaceholderPolicyCycle(props: {
       hasPlaceholder,
       hasFile,
       updatePhase,
+      trackReconcileJob,
     ],
   );
 
