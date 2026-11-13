@@ -12,9 +12,11 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 ### Summary
 
 - **Execution contract (session holds)**: Long Arr, player, FS, and density work no longer keeps a DB session open the whole time, so lite sync / season density should stop wedging other writers behind lock timeouts.
+- **Density stub player status**: Season/series density placeholders project status into Plex/Jellyfin/Emby like movies (#175).
 
 ### Fixed
 
+- **Density stub player status**: Season/series density placeholders project status into Plex/Jellyfin/Emby episode title/summary via the on-disk SxxE01 anchor (#175).
 - **Full sync Arr progress cadence**: Restore pre-#152 live emits (every batch or ~1.5s) and drop the extra scheduled_sync 3s throttle so instance bars fill during catalog upserts again.
 - **Full sync art live timing**: Mat-enqueued art no longer takes over Tasks live while Arr→calendar bars are still open, so Never-off recreate no longer snaps those bars to 100% before Updating.
 - **Never obsolete teardown**: Never (and other live-title obsolete reasons) remove placeholders again; the stale-obsolete guard only skips Arr delete-then-quick-readd (#177).
