@@ -6,8 +6,9 @@ export type LiveUnitBar = {
   index: number;
   done: number;
   total: number;
-  status: "working" | "done";
+  status: "working" | "done" | "failed";
   label?: string;
+  reason?: string;
 };
 
 export type LiveDetailMetric = {
@@ -522,23 +523,24 @@ export function TaskLiveProgress(props: {
         <ul className={compact ? "space-y-2" : "space-y-2.5"}>
           {units.map((unit) => {
             const working = unit.status === "working";
-            const finished = unit.status === "done" || (unit.total > 0 && unit.done >= unit.total);
-            const pct =
-              unit.total <= 0
-                ? finished
-                  ? 100
-                  : 0
-                : finished
-                  ? 100
-                  : Math.min(99, Math.floor((100 * unit.done) / unit.total));
+            const unitFailed = unit.status === "failed";
+            const finished = unit.status === "done" || (!unitFailed && unit.total > 0 && unit.done >= unit.total);
+            const pct = phaseBarPct(unit.done, unit.total, unitFailed ? "failed" : finished ? "done" : "working");
             const name = unit.label || (compact ? `B${unit.index}` : `Batch ${unit.index}`);
+            const unitNote = finished
+              ? "done"
+              : unitFailed
+                ? unit.reason === "timed_out"
+                  ? "timed out"
+                  : "failed"
+                : null;
             return (
               <li key={unit.index} className="space-y-1">
                 <div className={`flex items-center justify-between gap-2 ${compact ? "text-[11px]" : "text-[12px]"}`}>
                   <span className={`font-headline uppercase tracking-wider ${working && !finished ? fg : muted}`}>
                     {name}
-                    {finished ? (
-                      <span className="ml-1.5 normal-case tracking-normal opacity-70">done</span>
+                    {unitNote ? (
+                      <span className="ml-1.5 normal-case tracking-normal opacity-70">{unitNote}</span>
                     ) : null}
                   </span>
                   <span className={`tabular-nums ${muted}`}>
@@ -548,7 +550,7 @@ export function TaskLiveProgress(props: {
                 <div className={`h-1.5 w-full overflow-hidden rounded-full ${track}`}>
                   <div
                     className={`h-full rounded-full transition-[width] duration-500 ease-out ${
-                      finished ? fillDone : fill
+                      finished ? fillDone : unitFailed ? fillFailed : fill
                     }`}
                     style={{ width: `${Math.max(0, Math.min(100, pct))}%` }}
                   />

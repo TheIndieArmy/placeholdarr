@@ -38,6 +38,17 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Orphan cleanup refresh hold**: Close before folder prune FS and player library refresh.
 - **Settings save nested sessions**: Release the request session before Arr transplants/reconcile and post-save refresh work.
 - **Apply-now enqueue hold**: Snapshot placeholder ids, close, then enqueue NFO/art in short sessions.
+- **TV-only layout art**: Saving a TV poster profile no longer rebakes episode stills (layout filter used to force `art_scope=all`).
+- **Episode-only layout art**: Saving an Episode profile skips series/season poster bakes for that refresh.
+- **Season poster copy**: When a season uses the series poster and the same overlay, copy `poster.jpg` instead of rebaking every season.
+- **Art refresh batch size**: All art refresh jobs use `ART_REFRESH_BATCH_SIZE` (default 25; `LAYOUT_ART_BATCH_SIZE` still honored) so studio bakes finish under the handler watchdog. NFO/status keep `STATUS_JOB_BATCH_SIZE`.
+- **Art batch numbering**: Worker claim locks one PENDING job at a time so parallel workers no longer jump by 20 (`1` / `21` / `41`) under `SKIP LOCKED`.
+- **Timed-out art batches**: Tasks details mark failed/timed-out art batches amber with a note instead of leaving them as stuck blue working bars.
+- **Layout desk preview tokens**: Real-time desk chips refresh with randomize / TMDB preview art (Title, ratings, runtime, and other tokens). Sprite cache was keyed only on chip style, so the poster swapped while Breaking Bad sample text stayed.
+- **Layout preview demo ratings**: Preview art drops catalog demo scores (for example Metacritic 78) and uses the selected title’s Arr/TMDB values; sources with no score for that title show —.
+- **Layout preview library ratings**: Entering a TMDB id that exists in the library merges Arr ratings onto the desk tokens so rating chips match that title when Arr has them.
+- **TV/Episode rating sources**: Designer only offers IMDb for TV and Episode (Sonarr bake data); Movie keeps the full Radarr provider list.
+- **TV rating source coerce**: Copy/import onto TV or Episode (and load/normalize) remaps non-IMDb Rating chips to IMDb.
 
 ### Changed
 

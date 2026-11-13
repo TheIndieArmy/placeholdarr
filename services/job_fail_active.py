@@ -158,6 +158,14 @@ def fail_claimed_job_for_watchdog(
         except Exception:
             pass
 
+    try:
+        publish_art_batch_failed_for_job(jid, reason=reason_text)
+    except Exception as publish_exc:
+        logger.debug(
+            f"Watchdog art batch live fail publish skipped job_id={jid}: {publish_exc}",
+            extra={"emoji_type": "debug"},
+        )
+
     if job_type in ("placeholder_art_refresh", "nfo_refresh"):
         try:
             from services.source_of_truth.placeholder_refresh import (
@@ -205,3 +213,40 @@ def fail_claimed_job_for_watchdog(
                 extra={"emoji_type": "debug"},
             )
     return True
+
+
+def publish_art_batch_failed_for_job(job_id: int, *, reason: str) -> None:
+    """Mark the matching art-refresh batch bar failed in Tasks live progress."""
+    from services.source_of_truth.placeholder_art_reconciler import (
+        PLACEHOLDER_ART_REFRESH_JOB_TYPE,
+        _art_task_run_id_from_payload,
+    )
+    from services.task_live_progress import mark_art_refresh_batch_failed
+
+    session = get_session()
+    try:
+        row = session.query(Job).filter(Job.id == int(job_id)).first()
+        if row is None or str(getattr(row, "job_type", "") or "") != PLACEHOLDER_ART_REFRESH_JOB_TYPE:
+            return
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        task_run_id = _art_task_run_id_from_payload(payload)
+        try:
+            batch_index = int(payload.get("batch_index") or 0)
+        except Exception:
+            batch_index = 0
+        if task_run_id is None or batch_index <= 0:
+            return
+        ids = payload.get("placeholder_ids") or []
+        total = len(ids) if isinstance(ids, list) else 0
+        reason_key = "timed_out" if "watchdog" in str(reason or "").lower() else "failed"
+        mark_art_refresh_batch_failed(
+            int(task_run_id),
+            batch_index=batch_index,
+            total=total if total > 0 else None,
+            reason=reason_key,
+        )
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass

@@ -419,13 +419,20 @@ export function taskLiveFromApi(live: TaskRunLiveProgress | null | undefined): T
     unitsTotal,
     unitLabel: String(live.unit_label || "batches"),
     phases,
-    activeUnits: active.map((unit) => ({
-      index: Number(unit.index),
-      done: Number(unit.done ?? 0),
-      total: Number(unit.total ?? 0),
-      status: unit.status === "done" ? "done" : "working",
-      label: unit.label ? String(unit.label) : undefined,
-    })),
+    activeUnits: active.map((unit) => {
+      const statusRaw = String(unit.status || "working").toLowerCase();
+      const status =
+        statusRaw === "done" ? "done" : statusRaw === "failed" ? "failed" : "working";
+      const reasonRaw = unit.reason ? String(unit.reason).toLowerCase() : "";
+      return {
+        index: Number(unit.index),
+        done: Number(unit.done ?? 0),
+        total: Number(unit.total ?? 0),
+        status: status as "working" | "done" | "failed",
+        label: unit.label ? String(unit.label) : undefined,
+        reason: reasonRaw || undefined,
+      };
+    }),
     detailSections: leftoverDetailSections,
   };
 }

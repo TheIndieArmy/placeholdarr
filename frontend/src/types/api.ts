@@ -65,6 +65,7 @@ export interface TaskRunLiveProgress {
     total?: number;
     status?: string;
     label?: string;
+    reason?: string;
     finished_at?: string;
   }>;
   detail_sections?: Array<{

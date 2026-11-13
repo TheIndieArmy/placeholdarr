@@ -79,7 +79,7 @@ def _normalize_unit(raw: dict[str, Any] | None) -> dict[str, Any] | None:
     except Exception:
         total = 0
     status = str(raw.get("status") or "working").strip().lower()
-    if status not in ("working", "done"):
+    if status not in ("working", "done", "failed"):
         status = "working"
     out: dict[str, Any] = {
         "index": index,
@@ -90,10 +90,13 @@ def _normalize_unit(raw: dict[str, Any] | None) -> dict[str, Any] | None:
     label = raw.get("label")
     if label is not None and str(label).strip():
         out["label"] = str(label).strip()
+    reason = raw.get("reason")
+    if reason is not None and str(reason).strip():
+        out["reason"] = str(reason).strip().lower()
     finished_at = raw.get("finished_at")
     if finished_at:
         out["finished_at"] = str(finished_at)
-    elif status == "done":
+    elif status in ("done", "failed"):
         out["finished_at"] = _iso()
     return out
 
@@ -102,7 +105,8 @@ def _prune_active_units(units: list[dict[str, Any]], *, now: datetime) -> list[d
     kept: list[dict[str, Any]] = []
     for unit in units:
         status = str(unit.get("status") or "").lower()
-        if status == "working":
+        if status in ("working", "failed"):
+            # Keep failed bars for the rest of the run (unlike done, which ages out).
             kept.append(unit)
             continue
         finished = _parse_iso(unit.get("finished_at"))
@@ -133,10 +137,20 @@ def _merge_active_units(
             continue
         idx = int(normalized["index"])
         prev = by_index.get(idx)
-        if prev and str(prev.get("status")) == "done" and str(normalized.get("status")) == "working":
-            # Do not reopen a finished unit from a stale heartbeat.
+        prev_status = str((prev or {}).get("status") or "")
+        next_status = str(normalized.get("status") or "")
+        if prev and prev_status in ("done", "failed") and next_status == "working":
+            # Do not reopen a finished or timed-out unit from a stale heartbeat.
             continue
-        if prev and str(normalized.get("status")) == "done" and not normalized.get("finished_at"):
+        if prev and next_status == "failed":
+            # Preserve last progress when a fail event omits done/total.
+            if int(normalized.get("done") or 0) <= 0 and int(prev.get("done") or 0) > 0:
+                normalized["done"] = int(prev["done"])
+            if int(normalized.get("total") or 0) <= 0 and int(prev.get("total") or 0) > 0:
+                normalized["total"] = int(prev["total"])
+            if not normalized.get("reason") and prev.get("reason"):
+                normalized["reason"] = prev["reason"]
+        if prev and next_status in ("done", "failed") and not normalized.get("finished_at"):
             normalized["finished_at"] = prev.get("finished_at") or _iso(now)
         by_index[idx] = normalized
     return _prune_active_units(list(by_index.values()), now=now)
@@ -1588,3 +1602,42 @@ def publish_art_refresh_live(
 
     mutate_task_run_summary(run_id, _mutator)
     return built
+
+
+def mark_art_refresh_batch_failed(
+    task_run_id: int,
+    *,
+    batch_index: int,
+    done: int | None = None,
+    total: int | None = None,
+    reason: str = "failed",
+) -> dict[str, Any] | None:
+    """Flip one art batch bar to ``failed`` (watchdog timeout or handler error).
+
+    Preserves the last known done/total from live state when callers omit them so
+    the Tasks UI shows a frozen amber bar instead of a stuck blue working bar.
+    """
+    try:
+        run_id = int(task_run_id)
+        index = int(batch_index)
+    except Exception:
+        return None
+    if run_id <= 0 or index <= 0:
+        return None
+    reason_text = str(reason or "failed").strip().lower() or "failed"
+    batch: dict[str, Any] = {
+        "index": index,
+        "status": "failed",
+        "reason": reason_text,
+    }
+    if done is not None:
+        try:
+            batch["done"] = max(0, int(done))
+        except Exception:
+            pass
+    if total is not None:
+        try:
+            batch["total"] = max(0, int(total))
+        except Exception:
+            pass
+    return publish_art_refresh_live(run_id, active_batch=batch)
