@@ -9,6 +9,10 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Fixed
+
+- **Density stub player status**: Season/series density placeholders project status into Plex/Jellyfin/Emby episode title/summary via the on-disk SxxE01 anchor (#175).
+
 ## Pre-release
 
 ## Released

@@ -945,6 +945,55 @@ def _run_projection_fallback_refreshes(fallback: ProjectionFallbackAccumulator) 
     )
 
 
+def _is_density_stub(placeholder: Placeholder) -> bool:
+    from services.source_of_truth.tv_density import (
+        PLACEHOLDER_KIND_SEASON_STUB,
+        PLACEHOLDER_KIND_SERIES_STUB,
+    )
+
+    kind = str(getattr(placeholder, "placeholder_kind", "") or "").strip()
+    return kind in {PLACEHOLDER_KIND_SEASON_STUB, PLACEHOLDER_KIND_SERIES_STUB}
+
+
+def _resolve_density_stub_anchor_episode(session, placeholder: Placeholder) -> Episode | None:
+    """Resolve the on-disk SxxE01 episode a season/series density stub stands in for.
+
+    Density stubs intentionally leave ``episode_id`` null (keyed by series/season only).
+    Player projection still needs an Episode row so title/summary can be pushed to the
+    Plex/Jellyfin/Emby item that indexes that stub file (always ``…sXXe01…``).
+    """
+    if not _is_density_stub(placeholder):
+        return None
+
+    from services.source_of_truth.tv_density import PLACEHOLDER_KIND_SERIES_STUB
+
+    kind = str(getattr(placeholder, "placeholder_kind", "") or "").strip()
+    season = None
+    season_id = getattr(placeholder, "season_id", None)
+    series_id = getattr(placeholder, "series_id", None)
+
+    if season_id is not None:
+        season = session.query(Season).get(int(season_id))
+    elif kind == PLACEHOLDER_KIND_SERIES_STUB and series_id is not None:
+        # series_density_stub_path always writes s01e01
+        season = (
+            session.query(Season)
+            .filter(Season.series_id == int(series_id), Season.season_number == 1)
+            .order_by(Season.id.asc())
+            .first()
+        )
+
+    if season is None:
+        return None
+
+    return (
+        session.query(Episode)
+        .filter(Episode.season_id == int(season.id), Episode.episode_number == 1)
+        .order_by(Episode.id.asc())
+        .first()
+    )
+
+
 def push_placeholder_player_metadata(
     session,
     placeholder: Placeholder,
@@ -976,6 +1025,10 @@ def push_placeholder_player_metadata(
 
     movie = session.query(Movie).get(placeholder.movie_id) if placeholder.movie_id else None
     episode = session.query(Episode).get(placeholder.episode_id) if placeholder.episode_id else None
+    stub_anchor = False
+    if movie is None and episode is None:
+        episode = _resolve_density_stub_anchor_episode(session, placeholder)
+        stub_anchor = episode is not None
 
     # Release DB connection back to the pool before starting media-server HTTP calls
     try:
@@ -997,7 +1050,25 @@ def push_placeholder_player_metadata(
     if movie:
         _push_movie(session, movie, placeholder, acc, run_summary)
     elif episode:
+        if stub_anchor:
+            logger.debug(
+                "Player metadata push via density-stub anchor episode "
+                f"placeholder_id={getattr(placeholder, 'id', None)} "
+                f"kind={getattr(placeholder, 'placeholder_kind', None)!r} "
+                f"episode_id={int(getattr(episode, 'id', 0) or 0)} "
+                f"episode_number={int(getattr(episode, 'episode_number', 0) or 0)}",
+                extra={"emoji_type": "debug"},
+            )
         _push_episode(session, placeholder, episode, acc, run_summary)
+    elif _is_density_stub(placeholder):
+        logger.debug(
+            "Skipping player metadata push (density stub has no resolvable SxxE01 episode) "
+            f"placeholder_id={getattr(placeholder, 'id', None)} "
+            f"kind={getattr(placeholder, 'placeholder_kind', None)!r} "
+            f"series_id={getattr(placeholder, 'series_id', None)} "
+            f"season_id={getattr(placeholder, 'season_id', None)}",
+            extra={"emoji_type": "debug"},
+        )
 
     try:
         session.commit()
