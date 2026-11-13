@@ -482,29 +482,29 @@ def _claim_next_job() -> Optional[ClaimedJobDescriptor]:
         try:
             # Priority-aware claim with per-type concurrency caps. Interactive
             # types are never capped here (UX-first).
-            candidates = (
-                session.query(Job)
-                .filter(
-                    and_(
-                        Job.status == "PENDING",
-                        (Job.run_after.is_(None) | (Job.run_after <= now)),
-                        Job.attempts < func.greatest(func.coalesce(Job.max_attempts, 1), 1),
-                    )
-                )
-                .order_by(
-                    func.coalesce(Job.priority, 0).desc(),
-                    Job.run_after.asc().nullsfirst(),
-                    Job.id.asc(),
-                )
-                .with_for_update(skip_locked=True)
-                .limit(20)
-                .all()
+            #
+            # Lock ONE candidate at a time. A prior ``LIMIT 20 … FOR UPDATE
+            # SKIP LOCKED`` held locks on a whole window, so parallel workers
+            # jumped to jobs 21 / 41 / … and art batch bars looked scrambled.
+            pending_filter = and_(
+                Job.status == "PENDING",
+                (Job.run_after.is_(None) | (Job.run_after <= now)),
+                Job.attempts < func.greatest(func.coalesce(Job.max_attempts, 1), 1),
+            )
+            claim_order = (
+                func.coalesce(Job.priority, 0).desc(),
+                Job.run_after.asc().nullsfirst(),
+                Job.id.asc(),
             )
             # Reserve at least one worker for short interactive types when any
             # interactive PENDING exists and non-interactive CLAIMED already fill
             # worker_count - 1.
-            interactive_pending = any(
-                str(c.job_type or "") in _INTERACTIVE_JOB_TYPES for c in candidates
+            interactive_pending = (
+                session.query(Job.id)
+                .filter(pending_filter, Job.job_type.in_(tuple(_INTERACTIVE_JOB_TYPES)))
+                .limit(1)
+                .first()
+                is not None
             )
             non_interactive_claimed = 0
             if interactive_pending:
@@ -521,21 +521,45 @@ def _claim_next_job() -> Optional[ClaimedJobDescriptor]:
                 1, _worker_count() - 1
             )
 
-            for cand in candidates:
-                jtype = str(cand.job_type or "")
-                if reserve_interactive and jtype not in _INTERACTIVE_JOB_TYPES:
-                    continue
-                cap = _CLAIM_CONCURRENCY_CAPS.get(jtype)
-                if cap is not None and jtype not in _INTERACTIVE_JOB_TYPES:
-                    active = (
-                        session.query(func.count(Job.id))
-                        .filter(Job.job_type == jtype, Job.status == "CLAIMED")
-                        .scalar()
-                    )
-                    if int(active or 0) >= int(cap):
+            excluded_ids: list[int] = []
+            for _ in range(40):
+                nested = session.begin_nested()
+                try:
+                    q = session.query(Job).filter(pending_filter).order_by(*claim_order)
+                    if excluded_ids:
+                        q = q.filter(~Job.id.in_(excluded_ids))
+                    cand = q.with_for_update(skip_locked=True).limit(1).first()
+                    if not cand:
+                        nested.rollback()
+                        break
+                    jtype = str(cand.job_type or "")
+                    skip = False
+                    if reserve_interactive and jtype not in _INTERACTIVE_JOB_TYPES:
+                        skip = True
+                    else:
+                        cap = _CLAIM_CONCURRENCY_CAPS.get(jtype)
+                        if cap is not None and jtype not in _INTERACTIVE_JOB_TYPES:
+                            active = (
+                                session.query(func.count(Job.id))
+                                .filter(Job.job_type == jtype, Job.status == "CLAIMED")
+                                .scalar()
+                            )
+                            if int(active or 0) >= int(cap):
+                                skip = True
+                    if skip:
+                        excluded_ids.append(int(cand.id))
+                        nested.rollback()
                         continue
-                job = cand
-                break
+                    # RELEASE SAVEPOINT keeps the row lock for the claim UPDATE.
+                    nested.commit()
+                    job = cand
+                    break
+                except Exception:
+                    try:
+                        nested.rollback()
+                    except Exception:
+                        pass
+                    raise
         except OperationalError as exc:
             if _is_lock_timeout_error(exc):
                 session.rollback()
