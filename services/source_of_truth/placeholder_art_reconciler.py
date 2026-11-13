@@ -294,16 +294,25 @@ def art_scope_for_layout_filter(layout_filter: dict[str, Any]) -> str:
     return "all"
 
 
-def layout_art_job_batch_size() -> int:
-    """Smaller batches for layout-designer art so complex studio bakes finish under the watchdog."""
+def art_refresh_job_batch_size() -> int:
+    """Smaller batches for art refresh so studio bakes finish under the handler watchdog."""
     from core.config import settings
     from services.source_of_truth.placeholder_job_enqueue import job_batch_size
 
     try:
-        raw = int(getattr(settings, "LAYOUT_ART_BATCH_SIZE", 25) or 25)
+        raw = int(
+            getattr(settings, "ART_REFRESH_BATCH_SIZE", None)
+            or getattr(settings, "LAYOUT_ART_BATCH_SIZE", None)
+            or 25
+        )
     except Exception:
         raw = 25
     return max(1, min(raw, job_batch_size()))
+
+
+def layout_art_job_batch_size() -> int:
+    """Deprecated alias for ``art_refresh_job_batch_size``."""
+    return art_refresh_job_batch_size()
 
 
 def collect_placeholder_ids_for_art_scope(session, art_scope: str | None) -> list[int]:
@@ -770,6 +779,12 @@ def enqueue_placeholder_art_refresh(
                 "reason": "no_art_mismatch",
             }
 
+        try:
+            effective_batch_size = (
+                max(1, int(batch_size)) if batch_size is not None else art_refresh_job_batch_size()
+            )
+        except Exception:
+            effective_batch_size = art_refresh_job_batch_size()
         out = enqueue_batched_placeholder_job(
             PLACEHOLDER_ART_REFRESH_JOB_TYPE,
             ids,
@@ -777,7 +792,7 @@ def enqueue_placeholder_art_refresh(
             merge_into_pending=merge_into_pending,
             payload_extras=payload_extras,
             include_player_metadata_refresh=False,
-            batch_size=batch_size,
+            batch_size=effective_batch_size,
         )
         if isinstance(out, dict):
             out["skipped_determination"] = skipped
@@ -931,7 +946,6 @@ def enqueue_placeholder_art_backfill_all(
     layout_filter = layout_art if isinstance(layout_art, dict) else None
     session = get_session()
     try:
-        layout_batch_size: int | None = None
         effective_art_scope = scope
         if layout_filter and not bool(layout_filter.get("full")):
             ids = collect_placeholder_ids_for_layout_art(
@@ -941,11 +955,8 @@ def enqueue_placeholder_art_backfill_all(
             )
             scope = "layout_filtered"
             effective_art_scope = art_scope_for_layout_filter(layout_filter)
-            layout_batch_size = layout_art_job_batch_size()
         else:
             ids = collect_placeholder_ids_for_art_scope(session, scope)
-            if layout_filter and bool(layout_filter.get("full")):
-                layout_batch_size = layout_art_job_batch_size()
         if not ids:
             return {
                 "ok": True,
@@ -989,7 +1000,6 @@ def enqueue_placeholder_art_backfill_all(
             merge_into_pending=False,
             payload_extras=extras,
             skip_determination=bool(skip_determination),
-            batch_size=layout_batch_size,
         )
         batch_count = int(out.get("jobs_created") or 0)
         phase_task_run_id = task_run_id if task_run_id is not None else placeholder_refresh_task_run_id
