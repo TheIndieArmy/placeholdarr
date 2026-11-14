@@ -62,6 +62,59 @@ def _art_task_run_id_from_payload(payload: dict[str, Any]) -> int | None:
         return None
 
 
+def payload_extras_for_active_full_sync_art(*, source: str) -> dict[str, Any] | None:
+    """Link art jobs to the active full_sync task run (Updating bar + completion gate).
+
+    Returns None when no full_sync task_run is in scope (webhooks, lite, UI chips).
+    """
+    from services.task_run_cancel import active_task_run_id
+    from services.task_run_phases import _task_run_key, ensure_working_art_backfill_run
+
+    tid = active_task_run_id()
+    if tid is None:
+        return None
+    if _task_run_key(int(tid)) != "full_sync":
+        return None
+    run_id, batch_index_base = ensure_working_art_backfill_run(
+        int(tid),
+        source=str(source or "full_sync_materialization"),
+        determination_skipped=True,
+    )
+    if not run_id:
+        return None
+    return {
+        FULL_SYNC_TASK_RUN_ID_KEY: int(tid),
+        ART_BACKFILL_TASK_RUN_ID_KEY: int(tid),
+        ART_BACKFILL_RUN_ID_KEY: run_id,
+        ART_BACKFILL_REFRESH_ON_COMPLETION_KEY: True,
+        "art_backfill_source": str(source or "full_sync_materialization"),
+        "art_scope": "all",
+        "batch_index_base": int(batch_index_base),
+    }
+
+
+def note_active_full_sync_art_enqueue(out: dict[str, Any] | None, *, extras: dict[str, Any] | None) -> None:
+    """After enqueue, fold job counts into the shared full_sync art_backfill summary."""
+    if not isinstance(extras, dict) or not isinstance(out, dict) or not out.get("ok"):
+        return
+    tid = _art_task_run_id_from_payload(extras)
+    run_id = str(extras.get(ART_BACKFILL_RUN_ID_KEY) or "").strip()
+    if tid is None or not run_id:
+        return
+    try:
+        from services.task_run_phases import note_art_backfill_jobs_enqueued
+
+        note_art_backfill_jobs_enqueued(
+            int(tid),
+            art_run_id=run_id,
+            placeholder_count=int(out.get("placeholder_count") or 0),
+            batch_count=int(out.get("jobs_created") or 0),
+            source=str(extras.get("art_backfill_source") or "") or None,
+        )
+    except Exception as exc:
+        logger.debug(f"note full_sync art enqueue skipped: {exc}", extra={"emoji_type": "debug"})
+
+
 def _publish_art_batch_live(
     task_run_id: int,
     *,
@@ -967,17 +1020,36 @@ def enqueue_placeholder_art_backfill_all(
                 "coming_soon_only": scope == "coming_soon",
                 "layout_art": layout_filter,
             }
-        run_id = uuid.uuid4().hex
         # Kind-filtered layout refreshes still need section completion like full overlay passes.
         section_completion = art_scope_uses_section_completion_refresh(
             "all" if scope == "layout_filtered" else scope
         )
+        phase_task_run_id = task_run_id if task_run_id is not None else placeholder_refresh_task_run_id
+        run_id = uuid.uuid4().hex
+        batch_index_base = 0
+        reuse_existing = False
+        if phase_task_run_id is not None:
+            # Reuse an in-progress wave (e.g. mat already linked art) without creating an
+            # empty working art_backfill when this enqueue finds nothing new.
+            try:
+                from services.task_run_phases import _load_summary
+
+                summary = _load_summary(int(phase_task_run_id))
+                art = summary.get("art_backfill") if isinstance(summary.get("art_backfill"), dict) else {}
+                existing_id = str(art.get("run_id") or "").strip()
+                if existing_id and str(art.get("status") or "").strip().lower() == "working":
+                    run_id = existing_id
+                    batch_index_base = max(0, int(art.get("batch_count") or 0))
+                    reuse_existing = True
+            except Exception as exc:
+                logger.debug(f"art backfill run reuse skipped: {exc}", extra={"emoji_type": "debug"})
         extras: dict[str, Any] = {
             ART_BACKFILL_RUN_ID_KEY: run_id,
             ART_BACKFILL_REFRESH_ON_COMPLETION_KEY: section_completion,
             "art_backfill_source": source,
             "art_scope": effective_art_scope if scope == "layout_filtered" else scope,
             "coming_soon_only": scope == "coming_soon",
+            "batch_index_base": int(batch_index_base),
         }
         if layout_filter:
             extras["layout_art"] = {
@@ -1002,7 +1074,9 @@ def enqueue_placeholder_art_backfill_all(
             skip_determination=bool(skip_determination),
         )
         batch_count = int(out.get("jobs_created") or 0)
-        phase_task_run_id = task_run_id if task_run_id is not None else placeholder_refresh_task_run_id
+        queued_count = out.get("placeholder_count")
+        if queued_count is None:
+            queued_count = len(ids)
         if phase_task_run_id is not None and out.get("ok"):
             try:
                 from services.task_live_progress import seed_art_refresh_live_phases
@@ -1013,21 +1087,28 @@ def enqueue_placeholder_art_backfill_all(
                 )
             except Exception as exc:
                 logger.debug(f"art live phase seed skipped: {exc}", extra={"emoji_type": "debug"})
-            # Only begin Updating once batches exist (avoids a false "done" race).
             if batch_count > 0:
-                from services.task_run_phases import begin_art_backfill_phase
+                if reuse_existing:
+                    from services.task_run_phases import note_art_backfill_jobs_enqueued
 
-                queued_count = out.get("placeholder_count")
-                if queued_count is None:
-                    queued_count = len(ids)
-                begin_art_backfill_phase(
-                    int(phase_task_run_id),
-                    art_run_id=run_id,
-                    placeholder_count=int(queued_count),
-                    batch_count=batch_count,
-                    source=source,
-                    determination_skipped=bool(skip_determination),
-                )
+                    note_art_backfill_jobs_enqueued(
+                        int(phase_task_run_id),
+                        art_run_id=run_id,
+                        placeholder_count=int(queued_count),
+                        batch_count=batch_count,
+                        source=source,
+                    )
+                else:
+                    from services.task_run_phases import begin_art_backfill_phase
+
+                    begin_art_backfill_phase(
+                        int(phase_task_run_id),
+                        art_run_id=run_id,
+                        placeholder_count=int(queued_count),
+                        batch_count=batch_count,
+                        source=source,
+                        determination_skipped=bool(skip_determination),
+                    )
                 try:
                     from services.task_live_progress import publish_art_refresh_live
 

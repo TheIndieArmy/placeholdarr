@@ -360,9 +360,18 @@ export function taskLiveFromApi(live: TaskRunLiveProgress | null | undefined): T
   const active = Array.isArray(live.active_units) ? live.active_units : [];
   const stage = live.stage ? String(live.stage) : undefined;
   // Empty Updating queue (0 enqueued after determination) is complete, not 0%.
+  // Keep Updating/queued/determining below 100% while those stages are still active.
   let overallPct = Math.max(0, Math.min(100, Number(live.overall_pct ?? 0)));
-  if (unitsTotal <= 0 && String(stage || "").toLowerCase() !== "determining") {
+  const stageKey = String(stage || "").toLowerCase();
+  const progressStage =
+    stageKey === "determining" ||
+    stageKey === "updating" ||
+    stageKey === "queued" ||
+    stageKey === "refreshing";
+  if (unitsTotal <= 0 && !progressStage) {
     overallPct = 100;
+  } else if (unitsTotal <= 0 && progressStage && overallPct >= 100) {
+    overallPct = 99;
   }
   const detailSections = Array.isArray(live.detail_sections)
     ? live.detail_sections.map((section) => {
@@ -370,7 +379,7 @@ export function taskLiveFromApi(live: TaskRunLiveProgress | null | undefined): T
           ? section.status
           : "working") as "working" | "done" | "pending" | "failed" | "skipped";
         // Empty Updating queue after determination: treat leftover WORKING cards as skipped.
-        if (unitsTotal <= 0 && String(stage || "").toLowerCase() !== "determining" && status === "working") {
+        if (unitsTotal <= 0 && !progressStage && status === "working") {
           const name = String(section.name || "").toLowerCase();
           status = name === "run" || name === "outcomes" ? "skipped" : "done";
         }

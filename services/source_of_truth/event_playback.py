@@ -1214,57 +1214,125 @@ def _upgrade_unknown_kind_via_density_stub(
     return merged
 
 
-def _resolve_playback_context(session, payload: dict[str, Any]) -> dict[str, Any]:
-    tmdb_id = _extract_movie_tmdb_id(payload)
-    sonarr_series_id, tvdb_id = _extract_series_ids(payload)
-    imdb_id = _extract_imdb_id(payload)
-    season_number, episode_number = _extract_season_episode(payload)
-    file_path = _extract_file_path(payload)
-    plex_id = _extract_plex_rating_key(payload)
-    jellyfin_id = _extract_jellyfin_item_id(payload)
-    # If no path found in the payload, attempt to fetch it from Jellyfin using ItemId/UserId
+def _prefetch_playback_media_http(payload: dict[str, Any]) -> dict[str, Any]:
+    """Jellyfin/Plex path + id enrichment with no DB session held.
+
+    Mutates a shallow copy so callers can open a short session afterward.
+    """
+    out = dict(payload or {})
+    file_path = _extract_file_path(out)
     if not file_path:
         try:
             item_id = None
-            # Payload may include ItemId or nested Item.Id
-            if isinstance(payload.get('ItemId'), (str, int)):
-                item_id = str(payload.get('ItemId'))
-            elif isinstance(payload.get('Item'), dict) and payload.get('Item').get('Id'):
-                item_id = str(payload.get('Item').get('Id'))
-
-            if item_id and getattr(settings, 'ENABLE_JELLYFIN', False):
+            if isinstance(out.get("ItemId"), (str, int)):
+                item_id = str(out.get("ItemId"))
+            elif isinstance(out.get("Item"), dict) and out.get("Item").get("Id"):
+                item_id = str(out.get("Item").get("Id"))
+            if item_id and getattr(settings, "ENABLE_JELLYFIN", False):
                 user_id = None
-                user_obj = payload.get('User') or payload.get('user') or {}
+                user_obj = out.get("User") or out.get("user") or {}
                 if isinstance(user_obj, dict):
-                    user_id = user_obj.get('Id') or user_obj.get('id')
+                    user_id = user_obj.get("Id") or user_obj.get("id")
                 if not user_id:
-                    user_id = payload.get('UserId') or payload.get('userId')
-
+                    user_id = out.get("UserId") or out.get("userId")
                 fetched_path = get_jellyfin_file_path(item_id, user_id)
                 if fetched_path:
                     file_path = _normalize_path(fetched_path)
-                    logger.debug(f"Fetched Jellyfin file path for item {item_id}: {file_path}", extra={'emoji_type': 'debug'})
+                    out["file_path"] = file_path
+                    logger.debug(
+                        f"Fetched Jellyfin file path for item {item_id}: {file_path}",
+                        extra={"emoji_type": "debug"},
+                    )
         except Exception as e:
-            logger.debug(f"Error fetching Jellyfin file path: {e}", extra={'emoji_type': 'debug'})
-    declared_media_type = _extract_declared_media_type(payload)
+            logger.debug(f"Error fetching Jellyfin file path: {e}", extra={"emoji_type": "debug"})
 
+    plex_id = _extract_plex_rating_key(out)
     enriched = _enrich_ids_and_path_from_plex_rating_key(
         plex_id=plex_id,
-        file_path=file_path,
-        tmdb_id=tmdb_id,
-        tvdb_id=tvdb_id,
-        imdb_id=imdb_id,
-        season_number=season_number,
-        episode_number=episode_number,
-        declared_media_type=declared_media_type,
+        file_path=_extract_file_path(out),
+        tmdb_id=_extract_movie_tmdb_id(out),
+        tvdb_id=_extract_series_ids(out)[1],
+        imdb_id=_extract_imdb_id(out),
+        season_number=_extract_season_episode(out)[0],
+        episode_number=_extract_season_episode(out)[1],
+        declared_media_type=_extract_declared_media_type(out),
     )
-    file_path = enriched['file_path']
-    tmdb_id = enriched['tmdb_id']
-    tvdb_id = enriched['tvdb_id']
-    imdb_id = enriched['imdb_id']
-    season_number = enriched['season_number']
-    episode_number = enriched['episode_number']
-    declared_media_type = enriched['declared_media_type']
+    if enriched.get("file_path"):
+        out["file_path"] = enriched["file_path"]
+    # Stash enriched ids for `_resolve_playback_context` without a second Plex round-trip.
+    out["_playback_http_enriched"] = enriched
+    return out
+
+
+def _resolve_playback_context(session, payload: dict[str, Any]) -> dict[str, Any]:
+    # Prefer caller prefetch (`_prefetch_playback_media_http`) so Plex/JF HTTP
+    # does not run under an open pooled session.
+    pre = payload.get("_playback_http_enriched") if isinstance(payload, dict) else None
+    if isinstance(pre, dict):
+        file_path = pre.get("file_path") or _extract_file_path(payload)
+        tmdb_id = pre.get("tmdb_id") if pre.get("tmdb_id") is not None else _extract_movie_tmdb_id(payload)
+        tvdb_id = pre.get("tvdb_id") if pre.get("tvdb_id") is not None else _extract_series_ids(payload)[1]
+        imdb_id = pre.get("imdb_id") if pre.get("imdb_id") is not None else _extract_imdb_id(payload)
+        season_number = (
+            pre.get("season_number")
+            if pre.get("season_number") is not None
+            else _extract_season_episode(payload)[0]
+        )
+        episode_number = (
+            pre.get("episode_number")
+            if pre.get("episode_number") is not None
+            else _extract_season_episode(payload)[1]
+        )
+        declared_media_type = pre.get("declared_media_type") or _extract_declared_media_type(payload)
+        plex_id = _extract_plex_rating_key(payload)
+        jellyfin_id = _extract_jellyfin_item_id(payload)
+        sonarr_series_id, _ = _extract_series_ids(payload)
+    else:
+        tmdb_id = _extract_movie_tmdb_id(payload)
+        sonarr_series_id, tvdb_id = _extract_series_ids(payload)
+        imdb_id = _extract_imdb_id(payload)
+        season_number, episode_number = _extract_season_episode(payload)
+        file_path = _extract_file_path(payload)
+        plex_id = _extract_plex_rating_key(payload)
+        jellyfin_id = _extract_jellyfin_item_id(payload)
+        # Legacy callers: still enrich, but prefer prefetch at the entrypoints.
+        if not file_path:
+            try:
+                item_id = None
+                if isinstance(payload.get("ItemId"), (str, int)):
+                    item_id = str(payload.get("ItemId"))
+                elif isinstance(payload.get("Item"), dict) and payload.get("Item").get("Id"):
+                    item_id = str(payload.get("Item").get("Id"))
+                if item_id and getattr(settings, "ENABLE_JELLYFIN", False):
+                    user_id = None
+                    user_obj = payload.get("User") or payload.get("user") or {}
+                    if isinstance(user_obj, dict):
+                        user_id = user_obj.get("Id") or user_obj.get("id")
+                    if not user_id:
+                        user_id = payload.get("UserId") or payload.get("userId")
+                    fetched_path = get_jellyfin_file_path(item_id, user_id)
+                    if fetched_path:
+                        file_path = _normalize_path(fetched_path)
+            except Exception as e:
+                logger.debug(f"Error fetching Jellyfin file path: {e}", extra={"emoji_type": "debug"})
+        declared_media_type = _extract_declared_media_type(payload)
+        enriched = _enrich_ids_and_path_from_plex_rating_key(
+            plex_id=plex_id,
+            file_path=file_path,
+            tmdb_id=tmdb_id,
+            tvdb_id=tvdb_id,
+            imdb_id=imdb_id,
+            season_number=season_number,
+            episode_number=episode_number,
+            declared_media_type=declared_media_type,
+        )
+        file_path = enriched["file_path"]
+        tmdb_id = enriched["tmdb_id"]
+        tvdb_id = enriched["tvdb_id"]
+        imdb_id = enriched["imdb_id"]
+        season_number = enriched["season_number"]
+        episode_number = enriched["episode_number"]
+        declared_media_type = enriched["declared_media_type"]
 
     path_info = _resolve_media_from_path(session, file_path)
     path_info = _merge_path_info_with_catalog_ids(
@@ -2223,98 +2291,105 @@ def _refresh_playback_movie_flags_from_radarr(
     return changed
 
 
-def _refresh_playback_episode_flags_from_sonarr(
-    session,
-    series_row: Series,
-    targets: list[Episode],
+def _fetch_playback_episode_flags_from_sonarr(
     *,
+    sonarr_series_id: int | None,
+    target_sonarr_ids: set[int],
     base_url: str,
     api_key: str,
-) -> int:
-    """Pull live Sonarr monitored + hasFile onto series/targets before partition.
-
-    Local DB flags can lag Arr UI changes and imports; playback decisions use current Arr state.
-    """
-    updated = 0
-    if getattr(series_row, "sonarrid", None):
-        try:
-            series_entry = fetch_sonarr_series_item(
-                int(series_row.sonarrid),
-                base_url,
-                api_key,
-                bypass_cache=True,
-            )
-        except Exception as exc:
-            logger.warning(
-                "playback: live Sonarr series flag refresh failed series_id=%s sonarrid=%s: %s",
-                getattr(series_row, "id", None),
-                getattr(series_row, "sonarrid", None),
-                exc,
-            )
-            series_entry = None
-        if isinstance(series_entry, dict) and "monitored" in series_entry:
-            live_series = bool(series_entry.get("monitored"))
-            if bool(getattr(series_row, "sonarr_monitored", False)) != live_series:
-                series_row.sonarr_monitored = live_series
-                session.add(series_row)
-                updated += 1
-        # Keep local season flags aligned with Sonarr so season-mode suppress uses live state.
-        if isinstance(series_entry, dict):
-            seasons_payload = series_entry.get("seasons")
-            if isinstance(seasons_payload, list):
-                live_season_mon: dict[int, bool] = {}
-                for season_obj in seasons_payload:
-                    if not isinstance(season_obj, dict) or "seasonNumber" not in season_obj:
-                        continue
-                    if "monitored" not in season_obj:
-                        continue
-                    try:
-                        sn = int(season_obj.get("seasonNumber"))
-                    except (TypeError, ValueError):
-                        continue
-                    live_season_mon[sn] = bool(season_obj.get("monitored"))
-                if live_season_mon:
-                    season_rows = (
-                        session.query(Season)
-                        .filter(Season.series_id == int(series_row.id))
-                        .all()
-                    )
-                    for season_row in season_rows:
-                        sn = int(getattr(season_row, "season_number", 0) or 0)
-                        if sn not in live_season_mon:
-                            continue
-                        live = live_season_mon[sn]
-                        if bool(getattr(season_row, "sonarr_monitored", False)) != live:
-                            season_row.sonarr_monitored = live
-                            session.add(season_row)
-                            updated += 1
-
-    target_ids = {
-        int(ep.sonarrid)
-        for ep in targets
-        if getattr(ep, "sonarrid", None)
-    }
-    if not target_ids or not getattr(series_row, "sonarrid", None):
-        return updated
-
+    series_id_for_log: int | None = None,
+) -> tuple[Any, Any]:
+    """Arr HTTP only: live series entry + episode rows (no DB session)."""
+    series_entry = None
+    episode_rows = None
+    if not sonarr_series_id:
+        return series_entry, episode_rows
     try:
-        rows = fetch_sonarr_episodes(
-            int(series_row.sonarrid),
+        series_entry = fetch_sonarr_series_item(
+            int(sonarr_series_id),
             base_url,
             api_key,
             bypass_cache=True,
         )
     except Exception as exc:
         logger.warning(
-            "playback: live Sonarr episode flag refresh failed series_id=%s sonarrid=%s: %s",
-            getattr(series_row, "id", None),
-            getattr(series_row, "sonarrid", None),
+            "playback: live Sonarr series flag refresh failed series_id=%s sonarrid=%s: %s",
+            series_id_for_log,
+            sonarr_series_id,
             exc,
         )
+        series_entry = None
+    if target_sonarr_ids:
+        try:
+            episode_rows = fetch_sonarr_episodes(
+                int(sonarr_series_id),
+                base_url,
+                api_key,
+                bypass_cache=True,
+            )
+        except Exception as exc:
+            logger.warning(
+                "playback: live Sonarr episode flag refresh failed series_id=%s sonarrid=%s: %s",
+                series_id_for_log,
+                sonarr_series_id,
+                exc,
+            )
+            episode_rows = None
+    return series_entry, episode_rows
+
+
+def _apply_playback_episode_flags_from_sonarr(
+    session,
+    series_row: Series,
+    targets: list[Episode],
+    *,
+    series_entry: Any,
+    episode_rows: Any,
+    target_ids: set[int],
+) -> int:
+    """Apply previously fetched Sonarr flag payloads onto local rows."""
+    updated = 0
+    if isinstance(series_entry, dict) and "monitored" in series_entry:
+        live_series = bool(series_entry.get("monitored"))
+        if bool(getattr(series_row, "sonarr_monitored", False)) != live_series:
+            series_row.sonarr_monitored = live_series
+            session.add(series_row)
+            updated += 1
+    if isinstance(series_entry, dict):
+        seasons_payload = series_entry.get("seasons")
+        if isinstance(seasons_payload, list):
+            live_season_mon: dict[int, bool] = {}
+            for season_obj in seasons_payload:
+                if not isinstance(season_obj, dict) or "seasonNumber" not in season_obj:
+                    continue
+                if "monitored" not in season_obj:
+                    continue
+                try:
+                    sn = int(season_obj.get("seasonNumber"))
+                except (TypeError, ValueError):
+                    continue
+                live_season_mon[sn] = bool(season_obj.get("monitored"))
+            if live_season_mon:
+                season_rows = (
+                    session.query(Season)
+                    .filter(Season.series_id == int(series_row.id))
+                    .all()
+                )
+                for season_row in season_rows:
+                    sn = int(getattr(season_row, "season_number", 0) or 0)
+                    if sn not in live_season_mon:
+                        continue
+                    live = live_season_mon[sn]
+                    if bool(getattr(season_row, "sonarr_monitored", False)) != live:
+                        season_row.sonarr_monitored = live
+                        session.add(season_row)
+                        updated += 1
+
+    if not target_ids or episode_rows is None:
         return updated
 
     live_by_id: dict[int, tuple[bool | None, bool]] = {}
-    for row in rows or []:
+    for row in episode_rows or []:
         if not isinstance(row, dict) or row.get("id") is None:
             continue
         eid = int(row["id"])
@@ -2343,42 +2418,124 @@ def _refresh_playback_episode_flags_from_sonarr(
     return updated
 
 
+def _refresh_playback_episode_flags_from_sonarr(
+    session,
+    series_row: Series,
+    targets: list[Episode],
+    *,
+    base_url: str,
+    api_key: str,
+) -> int:
+    """Pull live Sonarr monitored + hasFile onto series/targets before partition.
+
+    Arr HTTP runs with no session I/O after a prior commit so the checkout stays free.
+    """
+    sonarr_series_id = getattr(series_row, "sonarrid", None)
+    target_ids = {
+        int(ep.sonarrid)
+        for ep in targets
+        if getattr(ep, "sonarrid", None)
+    }
+    series_entry, episode_rows = _fetch_playback_episode_flags_from_sonarr(
+        sonarr_series_id=int(sonarr_series_id) if sonarr_series_id else None,
+        target_sonarr_ids=target_ids,
+        base_url=base_url,
+        api_key=api_key,
+        series_id_for_log=int(series_row.id) if getattr(series_row, "id", None) else None,
+    )
+    return _apply_playback_episode_flags_from_sonarr(
+        session,
+        series_row,
+        targets,
+        series_entry=series_entry,
+        episode_rows=episode_rows,
+        target_ids=target_ids,
+    )
+
+
 def _run_movie_search_for_row(session, movie_row: Movie) -> dict[str, Any]:
+    """Compatibility wrapper: prefer ``_run_movie_search_for_movie_id`` for new call sites."""
+    return _run_movie_search_for_movie_id(int(movie_row.id))
+
+
+def _run_movie_search_for_movie_id(movie_pk: int) -> dict[str, Any]:
     # Playback may enable Radarr monitoring and trigger search. Placeholder removal for
     # monitored titles is deferred to sync/determination (SKIP_PLACEHOLDERS_WHEN_MONITORED);
     # import still removes placeholders when a real file lands.
-    instance_key = _row_instance_key(movie_row)
-    if bool(getattr(movie_row, 'is_deleted', False)):
-        return {'ok': True, 'skipped': 'deleted_in_arr', 'movie_id': int(movie_row.id), 'instance': instance_key}
-
-    base_url, api_key = _resolve_endpoint('movie', instance_key=instance_key or None)
-    if not base_url or not api_key:
-        return {'ok': False, 'reason': 'missing_movie_arr_config', 'movie_id': int(movie_row.id), 'instance': instance_key}
-
-    # End any open txn before Arr HTTP so we are not idle-in-transaction during network I/O.
+    session = get_session()
     try:
-        session.commit()
-    except Exception:
-        pass
-    _refresh_playback_movie_flags_from_radarr(
-        session, movie_row, base_url=base_url, api_key=api_key
-    )
+        movie_row = session.get(Movie, int(movie_pk))
+        if movie_row is None:
+            return {"ok": False, "skipped": "movie_not_found", "movie_id": int(movie_pk)}
+        instance_key = _row_instance_key(movie_row)
+        if bool(getattr(movie_row, "is_deleted", False)):
+            return {
+                "ok": True,
+                "skipped": "deleted_in_arr",
+                "movie_id": int(movie_pk),
+                "instance": instance_key,
+            }
 
-    if bool(getattr(movie_row, 'has_file', False)):
-        return {'ok': True, 'skipped': 'has_file', 'movie_id': int(movie_row.id), 'instance': instance_key}
+        base_url, api_key = _resolve_endpoint("movie", instance_key=instance_key or None)
+        if not base_url or not api_key:
+            return {
+                "ok": False,
+                "reason": "missing_movie_arr_config",
+                "movie_id": int(movie_pk),
+                "instance": instance_key,
+            }
 
-    was_monitored = bool(getattr(movie_row, 'radarr_monitored', False))
-    is_future = movie_is_future_for_playback_search(movie_row)
-    from services.playback_dest_filters import dest_folder_for_movie_row
+        from services.playback_dest_filters import dest_folder_for_movie_row
 
-    dest_folder = dest_folder_for_movie_row(movie_row)
+        dest_folder = dest_folder_for_movie_row(movie_row)
+        radarr_id = int(movie_row.radarrid) if getattr(movie_row, "radarrid", None) else None
+        was_monitored = bool(getattr(movie_row, "radarr_monitored", False))
+        is_future = movie_is_future_for_playback_search(movie_row)
+        try:
+            session.commit()
+        except Exception:
+            pass
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
+
+    live_mon = None
+    live_hf = None
+    if radarr_id is not None:
+        try:
+            entry = fetch_radarr_movie(int(radarr_id), base_url, api_key, bypass_cache=True)
+        except Exception as exc:
+            logger.warning(
+                "playback: live Radarr flag refresh failed movie_id=%s radarrid=%s: %s",
+                movie_pk,
+                radarr_id,
+                exc,
+            )
+            entry = None
+        if isinstance(entry, dict):
+            if "monitored" in entry:
+                live_mon = bool(entry.get("monitored"))
+            live_hf = _arr_entry_has_file(entry)
+
+    if live_hf is True:
+        write = get_session()
+        try:
+            movie_row = write.get(Movie, movie_pk)
+            if movie_row is not None:
+                if live_mon is not None:
+                    movie_row.radarr_monitored = live_mon
+                movie_row.has_file = True
+                write.add(movie_row)
+                write.commit()
+        finally:
+            write.close()
+        return {"ok": True, "skipped": "has_file", "movie_id": movie_pk, "instance": instance_key}
 
     monitored_updated = False
-    if not was_monitored and getattr(movie_row, 'radarrid', None):
-        monitored_updated = set_radarr_movie_monitored(int(movie_row.radarrid), True, url=base_url, api_key=api_key)
-        if monitored_updated:
-            movie_row.radarr_monitored = True
-            session.add(movie_row)
+    if not was_monitored and radarr_id is not None:
+        monitored_updated = set_radarr_movie_monitored(radarr_id, True, url=base_url, api_key=api_key)
 
     search_triggered = False
     skipped_search_reason: str | None = None
@@ -2388,28 +2545,45 @@ def _run_movie_search_for_row(session, movie_row: Movie) -> dict[str, Any]:
         skipped_search_reason = "already_monitored"
     elif is_future and _suppress_search_for_future_titles(dest_folder):
         skipped_search_reason = "future_only"
-    elif getattr(movie_row, 'radarrid', None):
-        search_triggered = trigger_radarr_movie_search(int(movie_row.radarrid), url=base_url, api_key=api_key)
+    elif radarr_id is not None:
+        search_triggered = trigger_radarr_movie_search(radarr_id, url=base_url, api_key=api_key)
 
-    intents = _placeholder_intents_for_targets(session, [], movie_row=movie_row)
-    if intents:
-        StatusOrchestrator(session=session).apply_and_project_statuses(intents)
-
-    _activate_queue_monitor_after_playback_search(session, intents, search_triggered=bool(search_triggered))
+    intents: list = []
+    write = get_session()
+    try:
+        movie_row = write.get(Movie, movie_pk)
+        if movie_row is None:
+            return {"ok": False, "reason": "movie_not_found", "movie_id": movie_pk, "instance": instance_key}
+        if live_mon is not None:
+            movie_row.radarr_monitored = live_mon
+        if live_hf is not None:
+            movie_row.has_file = bool(live_hf)
+        if monitored_updated:
+            movie_row.radarr_monitored = True
+        write.add(movie_row)
+        intents = _placeholder_intents_for_targets(write, [], movie_row=movie_row)
+        if intents:
+            StatusOrchestrator(session=write).apply_and_project_statuses(intents)
+        _activate_queue_monitor_after_playback_search(
+            write, intents, search_triggered=bool(search_triggered)
+        )
+        write.commit()
+    finally:
+        write.close()
 
     return {
-        'ok': True,
-        'event': 'playback_start',
-        'media_type': 'movie',
-        'movie_id': int(movie_row.id),
-        'instance': instance_key,
-        'dest_folder': dest_folder or '',
-        'monitored_updated': monitored_updated,
-        'search_triggered': bool(search_triggered),
-        'skipped_search_reason': skipped_search_reason,
-        'was_monitored': was_monitored,
-        'is_future': is_future,
-        'status_intents_applied': len(intents),
+        "ok": True,
+        "event": "playback_start",
+        "media_type": "movie",
+        "movie_id": movie_pk,
+        "instance": instance_key,
+        "dest_folder": dest_folder or "",
+        "monitored_updated": monitored_updated,
+        "search_triggered": bool(search_triggered),
+        "skipped_search_reason": skipped_search_reason,
+        "was_monitored": was_monitored,
+        "is_future": is_future,
+        "status_intents_applied": len(intents),
     }
 
 
@@ -2516,6 +2690,58 @@ def _search_eligible_ids(search_eligible: list[Episode]) -> list[int]:
     return [int(ep.sonarrid) for ep in search_eligible if getattr(ep, "sonarrid", None)]
 
 
+def _apply_local_series_monitored_after_playback(
+    session,
+    series_pk: int,
+    *,
+    season_numbers: list[int] | None = None,
+) -> None:
+    """Mirror Sonarr series/season On onto local rows after a successful Arr monitor call."""
+    series_row = session.get(Series, int(series_pk))
+    if series_row is None:
+        return
+    series_row.sonarr_monitored = True
+    session.add(series_row)
+    for sn in [int(s) for s in (season_numbers or [])]:
+        season_row = (
+            session.query(Season)
+            .filter(
+                Season.series_id == int(series_pk),
+                Season.season_number == int(sn),
+            )
+            .first()
+        )
+        if season_row is None:
+            continue
+        if not bool(getattr(season_row, "sonarr_monitored", False)):
+            season_row.sonarr_monitored = True
+            session.add(season_row)
+
+
+def _sonarr_series_monitor_http(
+    sonarr_series_id: int,
+    *,
+    base_url: str,
+    api_key: str,
+    monitor_new_items: str | None = None,
+    season_numbers: list[int] | None = None,
+) -> bool:
+    """Arr HTTP only: turn series monitored On (optionally seasons + monitorNewItems)."""
+    if not sonarr_series_id:
+        return False
+    return bool(
+        set_sonarr_series_monitored(
+            int(sonarr_series_id),
+            True,
+            include_specials=bool(getattr(settings, "INCLUDE_SPECIALS", False)),
+            season_numbers=[int(s) for s in (season_numbers or [])] or None,
+            monitor_new_items=monitor_new_items,
+            url=base_url,
+            api_key=api_key,
+        )
+    )
+
+
 def _ensure_playback_series_monitored(
     session,
     series_row: Series,
@@ -2525,36 +2751,31 @@ def _ensure_playback_series_monitored(
     monitor_new_items: str | None = None,
     season_numbers: list[int] | None = None,
 ) -> bool:
-    """Turn Sonarr series monitored On (optionally seasons + monitorNewItems); sync local flags."""
+    """Turn Sonarr series monitored On; sync local flags.
+
+    Prefer ``_sonarr_series_monitor_http`` + ``_apply_local_series_monitored_after_playback``
+    when the caller already released its checkout across Arr HTTP.
+    """
     if not getattr(series_row, "sonarrid", None):
         return False
     season_list = [int(s) for s in (season_numbers or [])]
-    ok = set_sonarr_series_monitored(
+    try:
+        session.commit()
+    except Exception:
+        pass
+    ok = _sonarr_series_monitor_http(
         int(series_row.sonarrid),
-        True,
-        include_specials=bool(getattr(settings, "INCLUDE_SPECIALS", False)),
-        season_numbers=season_list or None,
-        monitor_new_items=monitor_new_items,
-        url=base_url,
+        base_url=base_url,
         api_key=api_key,
+        monitor_new_items=monitor_new_items,
+        season_numbers=season_list,
     )
     if ok:
-        series_row.sonarr_monitored = True
-        session.add(series_row)
-        for sn in season_list:
-            season_row = (
-                session.query(Season)
-                .filter(
-                    Season.series_id == int(series_row.id),
-                    Season.season_number == int(sn),
-                )
-                .first()
-            )
-            if season_row is None:
-                continue
-            if not bool(getattr(season_row, "sonarr_monitored", False)):
-                season_row.sonarr_monitored = True
-                session.add(season_row)
+        _apply_local_series_monitored_after_playback(
+            session,
+            int(series_row.id),
+            season_numbers=season_list,
+        )
     return bool(ok)
 
 
@@ -2571,36 +2792,28 @@ def _playback_target_season_numbers(session, targets: list[Episode]) -> list[int
     return out
 
 
-def _trigger_playback_sonarr_search_for_row(
+def _plan_playback_sonarr_search(
     session,
     *,
-    series_row: Series,
     targets: list[Episode],
     search_eligible: list[Episode],
     mode: str,
-    target_meta: dict[str, Any],
-    base_url: str,
-    api_key: str,
 ) -> dict[str, Any]:
-    """Trigger Arr search for playback. Returns status including per-season results."""
+    """DB-only: decide SeasonSearch vs EpisodeSearch scopes. No Arr HTTP."""
     empty: dict[str, Any] = {
-        "search_triggered": False,
-        "season_searches": {},
-        "season_searches_failed": [],
-        "episode_search": None,
+        "kind": "none",
+        "season_full_searches": [],
+        "episode_ids": [],
         "episode_search_seasons": [],
+        "eligible_ids": [],
     }
-    if not search_eligible or not getattr(series_row, "sonarrid", None):
+    if not search_eligible:
         return empty
 
-    series_id = int(series_row.sonarrid)
     eligible_ids = _search_eligible_ids(search_eligible)
     if not eligible_ids:
         return empty
 
-    # Season mode: per season, SeasonSearch when every target ep in that season is
-    # still search-eligible (whole missing season / packs); otherwise EpisodeSearch
-    # for the remaining ids (partial season, future filter, already-monitored, etc.).
     if mode == "season":
         by_season_targets: dict[int, list[Episode]] = {}
         by_season_eligible: dict[int, list[Episode]] = {}
@@ -2611,7 +2824,7 @@ def _trigger_playback_sonarr_search_for_row(
             sn = _episode_season_number(session, ep)
             by_season_eligible.setdefault(int(sn), []).append(ep)
 
-        season_searches: dict[str, bool] = {}
+        season_full_searches: list[int] = []
         episode_ids: list[int] = []
         episode_search_seasons: list[int] = []
         for sn, elig in sorted(by_season_eligible.items()):
@@ -2623,24 +2836,80 @@ def _trigger_playback_sonarr_search_for_row(
                 int(ep.id) for ep in season_targets if getattr(ep, "id", None) is not None
             }
             if target_ids and elig_ids == target_ids:
-                ok = bool(
-                    trigger_sonarr_search(
-                        series_id=series_id,
-                        season_number=int(sn),
-                        url=base_url,
-                        api_key=api_key,
-                    )
-                )
-                season_searches[str(int(sn))] = ok
+                season_full_searches.append(int(sn))
             else:
                 episode_search_seasons.append(int(sn))
                 for ep in elig:
                     if getattr(ep, "sonarrid", None):
                         episode_ids.append(int(ep.sonarrid))
+        return {
+            "kind": "season",
+            "season_full_searches": season_full_searches,
+            "episode_ids": episode_ids,
+            "episode_search_seasons": episode_search_seasons,
+            "eligible_ids": eligible_ids,
+        }
+
+    eligible_set = {int(ep.id) for ep in search_eligible if getattr(ep, "id", None) is not None}
+    target_set = {int(ep.id) for ep in targets if getattr(ep, "id", None) is not None}
+    full_target_scope = eligible_set == target_set and len(target_set) > 0
+    if mode == "series" and full_target_scope:
+        return {
+            "kind": "series",
+            "season_full_searches": [],
+            "episode_ids": [],
+            "episode_search_seasons": [],
+            "eligible_ids": eligible_ids,
+        }
+    return {
+        "kind": "episodes",
+        "season_full_searches": [],
+        "episode_ids": list(eligible_ids),
+        "episode_search_seasons": [],
+        "eligible_ids": eligible_ids,
+    }
+
+
+def _execute_playback_sonarr_search(
+    plan: dict[str, Any],
+    *,
+    sonarr_series_id: int,
+    series_id_for_log: int | None,
+    base_url: str,
+    api_key: str,
+) -> dict[str, Any]:
+    """Arr HTTP only: run the search plan from ``_plan_playback_sonarr_search``."""
+    empty: dict[str, Any] = {
+        "search_triggered": False,
+        "season_searches": {},
+        "season_searches_failed": [],
+        "episode_search": None,
+        "episode_search_seasons": [],
+    }
+    if not sonarr_series_id or not isinstance(plan, dict):
+        return empty
+    kind = str(plan.get("kind") or "none")
+    if kind == "none":
+        return empty
+
+    series_id = int(sonarr_series_id)
+    if kind == "season":
+        season_searches: dict[str, bool] = {}
+        for sn in plan.get("season_full_searches") or []:
+            ok = bool(
+                trigger_sonarr_search(
+                    series_id=series_id,
+                    season_number=int(sn),
+                    url=base_url,
+                    api_key=api_key,
+                )
+            )
+            season_searches[str(int(sn))] = ok
 
         episode_search_ok: bool | None = None
+        episode_ids = [int(x) for x in (plan.get("episode_ids") or [])]
+        episode_search_seasons = [int(x) for x in (plan.get("episode_search_seasons") or [])]
         if episode_ids:
-            # Dedupe while preserving order.
             seen_ids: set[int] = set()
             unique_ids: list[int] = []
             for eid in episode_ids:
@@ -2661,13 +2930,13 @@ def _trigger_playback_sonarr_search_for_row(
         if failed:
             logger.warning(
                 "playback: season search failed for series_id=%s seasons=%s",
-                getattr(series_row, "id", None),
+                series_id_for_log,
                 failed,
             )
         if episode_search_ok is False:
             logger.warning(
                 "playback: episode search failed for series_id=%s seasons=%s",
-                getattr(series_row, "id", None),
+                series_id_for_log,
                 episode_search_seasons,
             )
         any_ok = any(season_searches.values()) or bool(episode_search_ok)
@@ -2679,11 +2948,7 @@ def _trigger_playback_sonarr_search_for_row(
             "episode_search_seasons": episode_search_seasons,
         }
 
-    eligible_set = {int(ep.id) for ep in search_eligible if getattr(ep, "id", None) is not None}
-    target_set = {int(ep.id) for ep in targets if getattr(ep, "id", None) is not None}
-    full_target_scope = eligible_set == target_set and len(target_set) > 0
-
-    if mode == "series" and full_target_scope:
+    if kind == "series":
         ok = bool(trigger_sonarr_search(series_id=series_id, url=base_url, api_key=api_key))
         return {
             "search_triggered": ok,
@@ -2693,6 +2958,7 @@ def _trigger_playback_sonarr_search_for_row(
             "episode_search_seasons": [],
         }
 
+    eligible_ids = [int(x) for x in (plan.get("eligible_ids") or plan.get("episode_ids") or [])]
     ok = bool(
         trigger_sonarr_search(
             series_id=series_id,
@@ -2710,131 +2976,245 @@ def _trigger_playback_sonarr_search_for_row(
     }
 
 
-def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, Any]) -> dict[str, Any]:
-    # Same as movie playback: do not run determination/materialization here; monitored
-    # cleanup is handled on the next ARR sync when SKIP_PLACEHOLDERS_WHEN_MONITORED is on.
-    instance_key = _row_instance_key(series_row)
-    if bool(getattr(series_row, 'is_deleted', False)):
-        return {'ok': True, 'skipped': 'deleted_in_arr', 'series_id': int(series_row.id), 'instance': instance_key}
-
-    file_path = _extract_file_path(payload)
-    season_stub_row = _path_is_season_density_stub(session, series_row, file_path, payload)
-    series_density_stub = False if season_stub_row else _path_is_series_density_stub(
-        session, series_row, file_path, payload
-    )
-    density_stub = bool(series_density_stub or season_stub_row)
-    # When Tracearr omitted path, density detection still works via stub markers; inject
-    # the stub path so status intents and path-based helpers share one code path.
-    if density_stub and not file_path:
-        stub_ph = season_stub_row or _find_active_series_density_stub(session, int(series_row.id))
-        if stub_ph and getattr(stub_ph, 'path', None):
-            file_path = _normalize_path(stub_ph.path) or str(stub_ph.path)
-            payload['file_path'] = file_path
-    season_number, episode_number = _extract_season_episode(payload)
-    if density_stub:
-        restrict_sn = None
-        if season_stub_row is not None and getattr(season_stub_row, "season_id", None):
-            season_row = session.query(Season).filter(Season.id == int(season_stub_row.season_id)).first()
-            if season_row is not None:
-                restrict_sn = int(getattr(season_row, "season_number", 0) or 0)
-                season_number = restrict_sn
-        # Stub filename is always e01; resolve search window from catalog state.
-        anchor_s, anchor_e = _catalog_anchor_season_episode(
-            session,
-            series_row,
-            restrict_season_number=restrict_sn,
-        )
-        if anchor_s is not None:
-            season_number = anchor_s
-        if anchor_e is not None:
-            episode_number = anchor_e
-
-    targets, target_meta = _collect_episode_targets(session, series_row, season_number, episode_number)
-    if density_stub:
-        target_meta = dict(target_meta or {})
-        target_meta["density_stub"] = True
-        target_meta["density_stub_kind"] = "season" if season_stub_row else "series"
-        target_meta["catalog_anchor"] = {"season": season_number, "episode": episode_number}
-    if not targets:
+def _trigger_playback_sonarr_search_for_row(
+    session,
+    *,
+    series_row: Series,
+    targets: list[Episode],
+    search_eligible: list[Episode],
+    mode: str,
+    target_meta: dict[str, Any],
+    base_url: str,
+    api_key: str,
+) -> dict[str, Any]:
+    """Compatibility: plan under session, commit, then Arr HTTP with no further DB I/O."""
+    if not search_eligible or not getattr(series_row, "sonarrid", None):
         return {
-            'ok': True,
-            'event': 'playback_start',
-            'media_type': 'episode',
-            'series_id': int(series_row.id),
-            'instance': instance_key,
-            'skipped': 'no_targets',
-            'target_meta': target_meta,
+            "search_triggered": False,
+            "season_searches": {},
+            "season_searches_failed": [],
+            "episode_search": None,
+            "episode_search_seasons": [],
         }
-
-    # Seed media player IDs directly from playback payload if available
-    plex_key = _extract_plex_rating_key(payload)
-    jelly_key = _extract_jellyfin_item_id(payload)
-    if plex_key or jelly_key:
-        stamp_targets = _episodes_for_media_id_stamp(
-            session,
-            targets,
-            file_path=file_path,
-            season_number=season_number,
-            episode_number=episode_number,
-        )
-        stamp_kind = "unknown"
-        if file_path:
-            try:
-                from services.source_of_truth.filesystem import is_path_under_configured_roots
-
-                stamp_kind = (
-                    "placeholder" if is_path_under_configured_roots(file_path) else "real"
-                )
-            except Exception:
-                stamp_kind = "unknown"
-        _stamp_episode_media_ids(
-            session,
-            stamp_targets,
-            plex_key=plex_key or "",
-            jelly_key=jelly_key or "",
-            playback_kind=stamp_kind,
-        )
-
-    base_url, api_key = _resolve_endpoint('series', instance_key=instance_key or None)
-    if not base_url or not api_key:
-        return {'ok': False, 'reason': 'missing_series_arr_config', 'series_id': int(series_row.id), 'instance': instance_key}
-
-    from services.playback_dest_filters import dest_folder_for_series_row
-
-    dest_folder = dest_folder_for_series_row(series_row)
+    plan = _plan_playback_sonarr_search(
+        session,
+        targets=targets,
+        search_eligible=search_eligible,
+        mode=mode,
+    )
     try:
         session.commit()
     except Exception:
         pass
-    _refresh_playback_episode_flags_from_sonarr(
-        session,
-        series_row,
-        targets,
+    return _execute_playback_sonarr_search(
+        plan,
+        sonarr_series_id=int(series_row.sonarrid),
+        series_id_for_log=int(series_row.id) if getattr(series_row, "id", None) else None,
         base_url=base_url,
         api_key=api_key,
     )
-    # Structural candidates may include on-disk episodes; drop those after live hasFile.
-    targets = [ep for ep in targets if not bool(getattr(ep, "has_file", False))]
-    if isinstance(target_meta, dict):
-        target_meta = dict(target_meta)
-        target_meta["search_target_count"] = len(targets)
-    if not targets:
-        return {
-            "ok": True,
-            "event": "playback_start",
-            "media_type": "episode",
-            "series_id": int(series_row.id),
-            "instance": instance_key,
-            "skipped": "has_file",
-            "target_meta": target_meta,
+
+
+def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, Any]) -> dict[str, Any]:
+    """Compatibility wrapper: prefer ``_run_episode_search_for_series_id`` for new call sites."""
+    return _run_episode_search_for_series_id(int(series_row.id), payload)
+
+
+def _run_episode_search_for_series_id(series_pk: int, payload: dict[str, Any]) -> dict[str, Any]:
+    # Same as movie playback: short DB scopes around Sonarr HTTP. Monitored cleanup
+    # is handled on the next ARR sync when SKIP_PLACEHOLDERS_WHEN_MONITORED is on.
+    event_payload = dict(payload) if isinstance(payload, dict) else {}
+
+    session = get_session()
+    try:
+        series_row = session.get(Series, int(series_pk))
+        if series_row is None:
+            return {"ok": False, "skipped": "series_not_found", "series_id": int(series_pk)}
+        instance_key = _row_instance_key(series_row)
+        if bool(getattr(series_row, "is_deleted", False)):
+            return {
+                "ok": True,
+                "skipped": "deleted_in_arr",
+                "series_id": int(series_pk),
+                "instance": instance_key,
+            }
+
+        file_path = _extract_file_path(event_payload)
+        season_stub_row = _path_is_season_density_stub(session, series_row, file_path, event_payload)
+        series_density_stub = False if season_stub_row else _path_is_series_density_stub(
+            session, series_row, file_path, event_payload
+        )
+        density_stub = bool(series_density_stub or season_stub_row)
+        season_stub_ph_id = int(season_stub_row.id) if season_stub_row is not None and getattr(season_stub_row, "id", None) else None
+        if density_stub and not file_path:
+            stub_ph = season_stub_row or _find_active_series_density_stub(session, int(series_pk))
+            if stub_ph and getattr(stub_ph, "path", None):
+                file_path = _normalize_path(stub_ph.path) or str(stub_ph.path)
+                event_payload["file_path"] = file_path
+        season_number, episode_number = _extract_season_episode(event_payload)
+        if density_stub:
+            restrict_sn = None
+            if season_stub_row is not None and getattr(season_stub_row, "season_id", None):
+                season_row = session.query(Season).filter(Season.id == int(season_stub_row.season_id)).first()
+                if season_row is not None:
+                    restrict_sn = int(getattr(season_row, "season_number", 0) or 0)
+                    season_number = restrict_sn
+            anchor_s, anchor_e = _catalog_anchor_season_episode(
+                session,
+                series_row,
+                restrict_season_number=restrict_sn,
+            )
+            if anchor_s is not None:
+                season_number = anchor_s
+            if anchor_e is not None:
+                episode_number = anchor_e
+
+        targets, target_meta = _collect_episode_targets(session, series_row, season_number, episode_number)
+        if density_stub:
+            target_meta = dict(target_meta or {})
+            target_meta["density_stub"] = True
+            target_meta["density_stub_kind"] = "season" if season_stub_row else "series"
+            target_meta["catalog_anchor"] = {"season": season_number, "episode": episode_number}
+        if not targets:
+            return {
+                "ok": True,
+                "event": "playback_start",
+                "media_type": "episode",
+                "series_id": int(series_pk),
+                "instance": instance_key,
+                "skipped": "no_targets",
+                "target_meta": target_meta,
+            }
+
+        plex_key = _extract_plex_rating_key(event_payload)
+        jelly_key = _extract_jellyfin_item_id(event_payload)
+        if plex_key or jelly_key:
+            stamp_targets = _episodes_for_media_id_stamp(
+                session,
+                targets,
+                file_path=file_path,
+                season_number=season_number,
+                episode_number=episode_number,
+            )
+            stamp_kind = "unknown"
+            if file_path:
+                try:
+                    from services.source_of_truth.filesystem import is_path_under_configured_roots
+
+                    stamp_kind = (
+                        "placeholder" if is_path_under_configured_roots(file_path) else "real"
+                    )
+                except Exception:
+                    stamp_kind = "unknown"
+            _stamp_episode_media_ids(
+                session,
+                stamp_targets,
+                plex_key=plex_key or "",
+                jelly_key=jelly_key or "",
+                playback_kind=stamp_kind,
+            )
+
+        base_url, api_key = _resolve_endpoint("series", instance_key=instance_key or None)
+        if not base_url or not api_key:
+            return {
+                "ok": False,
+                "reason": "missing_series_arr_config",
+                "series_id": int(series_pk),
+                "instance": instance_key,
+            }
+
+        from services.playback_dest_filters import dest_folder_for_series_row
+
+        dest_folder = dest_folder_for_series_row(series_row)
+        sonarr_series_id = int(series_row.sonarrid) if getattr(series_row, "sonarrid", None) else None
+        target_episode_pks = [int(ep.id) for ep in targets if getattr(ep, "id", None) is not None]
+        target_sonarr_ids = {
+            int(ep.sonarrid)
+            for ep in targets
+            if getattr(ep, "sonarrid", None)
         }
-    mode = _play_mode()
-    partition = _partition_playback_targets(session, series_row, targets, dest_folder=dest_folder)
-    to_monitor: list[Episode] = partition["to_monitor"]
-    search_eligible: list[Episode] = partition["search_eligible"]
-    monitor_ids: list[int] = partition["monitor_ids"]
-    skipped_search_reason = partition.get("skipped_search_reason")
-    target_season_numbers = _playback_target_season_numbers(session, targets)
+        try:
+            session.commit()
+        except Exception:
+            pass
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
+
+    series_entry, episode_rows = _fetch_playback_episode_flags_from_sonarr(
+        sonarr_series_id=sonarr_series_id,
+        target_sonarr_ids=target_sonarr_ids,
+        base_url=base_url,
+        api_key=api_key,
+        series_id_for_log=int(series_pk),
+    )
+
+    session = get_session()
+    try:
+        series_row = session.get(Series, int(series_pk))
+        if series_row is None:
+            return {"ok": False, "reason": "series_not_found", "series_id": int(series_pk), "instance": instance_key}
+        by_id = {
+            int(ep.id): ep
+            for ep in session.query(Episode).filter(Episode.id.in_(tuple(target_episode_pks))).all()
+            if getattr(ep, "id", None) is not None
+        }
+        targets = [by_id[pk] for pk in target_episode_pks if pk in by_id]
+        _apply_playback_episode_flags_from_sonarr(
+            session,
+            series_row,
+            targets,
+            series_entry=series_entry,
+            episode_rows=episode_rows,
+            target_ids=target_sonarr_ids,
+        )
+        targets = [ep for ep in targets if not bool(getattr(ep, "has_file", False))]
+        if isinstance(target_meta, dict):
+            target_meta = dict(target_meta)
+            target_meta["search_target_count"] = len(targets)
+        if not targets:
+            try:
+                session.commit()
+            except Exception:
+                pass
+            return {
+                "ok": True,
+                "event": "playback_start",
+                "media_type": "episode",
+                "series_id": int(series_pk),
+                "instance": instance_key,
+                "skipped": "has_file",
+                "target_meta": target_meta,
+            }
+
+        mode = _play_mode()
+        partition = _partition_playback_targets(session, series_row, targets, dest_folder=dest_folder)
+        to_monitor: list[Episode] = partition["to_monitor"]
+        search_eligible: list[Episode] = partition["search_eligible"]
+        monitor_ids: list[int] = partition["monitor_ids"]
+        skipped_search_reason = partition.get("skipped_search_reason")
+        future_count = int(partition.get("future_count") or 0)
+        target_season_numbers = _playback_target_season_numbers(session, targets)
+        to_monitor_pks = [int(ep.id) for ep in to_monitor if getattr(ep, "id", None) is not None]
+        search_eligible_pks = [int(ep.id) for ep in search_eligible if getattr(ep, "id", None) is not None]
+        target_pks_after = [int(ep.id) for ep in targets if getattr(ep, "id", None) is not None]
+        search_plan = _plan_playback_sonarr_search(
+            session,
+            targets=targets,
+            search_eligible=search_eligible,
+            mode=mode,
+        )
+        try:
+            session.commit()
+        except Exception:
+            pass
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
 
     monitor_result: dict[str, Any] = {
         "updated": 0,
@@ -2845,29 +3225,40 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
     if monitor_ids:
         monitor_result = set_sonarr_episode_monitored(monitor_ids, True, url=base_url, api_key=api_key)
         ok_ids = {int(x) for x in (monitor_result.get("updated_ids") or [])}
-        for ep in to_monitor:
-            if not getattr(ep, "sonarrid", None):
-                continue
-            if int(ep.sonarrid) not in ok_ids:
-                continue
-            ep.sonarr_monitored = True
-            session.add(ep)
+        if ok_ids:
+            write = get_session()
+            try:
+                eps = (
+                    write.query(Episode)
+                    .filter(Episode.id.in_(tuple(to_monitor_pks)))
+                    .all()
+                )
+                for ep in eps:
+                    if not getattr(ep, "sonarrid", None):
+                        continue
+                    if int(ep.sonarrid) not in ok_ids:
+                        continue
+                    ep.sonarr_monitored = True
+                    write.add(ep)
+                write.commit()
+            finally:
+                try:
+                    write.close()
+                except Exception:
+                    pass
         if int(monitor_result.get("failed") or 0) > 0:
             logger.warning(
                 "playback: episode monitor failed series_id=%s failed_ids=%s",
-                getattr(series_row, "id", None),
+                series_pk,
                 monitor_result.get("failed_ids") or [],
             )
 
     # Season/series play modes: series On (SeasonSearch) and mark involved seasons so
-    # Sonarr UI/RSS match that scope. Also set monitorNewItems=all so new seasons
-    # follow (matches normal Sonarr bookmark expectations after careful/pilot adds).
-    # Episode mode leaves seasons Off on purpose; reached_end below still sets all.
+    # Sonarr UI/RSS match that scope. Also set monitorNewItems=all so new seasons follow.
     series_ensure_ok: bool | None = None
-    if mode in {"season", "series"} and targets:
-        series_ensure_ok = _ensure_playback_series_monitored(
-            session,
-            series_row,
+    if mode in {"season", "series"} and target_pks_after and sonarr_series_id:
+        series_ensure_ok = _sonarr_series_monitor_http(
+            int(sonarr_series_id),
             base_url=base_url,
             api_key=api_key,
             season_numbers=target_season_numbers,
@@ -2876,7 +3267,7 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
         if not series_ensure_ok:
             logger.warning(
                 "playback: series/season monitor ensure failed series_id=%s mode=%s; skipping search",
-                getattr(series_row, "id", None),
+                series_pk,
                 mode,
             )
 
@@ -2887,72 +3278,99 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
         "episode_search": None,
         "episode_search_seasons": [],
     }
-    if search_eligible and series_ensure_ok is not False:
-        search_result = _trigger_playback_sonarr_search_for_row(
-            session,
-            series_row=series_row,
-            targets=targets,
-            search_eligible=search_eligible,
-            mode=mode,
-            target_meta=target_meta,
+    if search_eligible_pks and series_ensure_ok is not False and sonarr_series_id:
+        search_result = _execute_playback_sonarr_search(
+            search_plan,
+            sonarr_series_id=int(sonarr_series_id),
+            series_id_for_log=int(series_pk),
             base_url=base_url,
             api_key=api_key,
         )
-    elif search_eligible and series_ensure_ok is False:
+    elif search_eligible_pks and series_ensure_ok is False:
         skipped_search_reason = skipped_search_reason or "series_monitor_failed"
     search_triggered = bool(search_result.get("search_triggered"))
 
-    # Episode and season lookahead modes both set reached_end when the window hits
-    # the last known episode. Flip series On and monitorNewItems=all so newly
-    # discovered seasons follow without requiring a "Future Episodes" UI action.
     reached_end_marked = False
-    if bool(target_meta.get('reached_end')) and getattr(series_row, 'sonarrid', None):
-        reached_end_marked = _ensure_playback_series_monitored(
-            session,
-            series_row,
+    if bool((target_meta or {}).get("reached_end")) and sonarr_series_id:
+        reached_end_marked = _sonarr_series_monitor_http(
+            int(sonarr_series_id),
             base_url=base_url,
             api_key=api_key,
             monitor_new_items="all",
         )
 
-    series_stub_row = _find_active_series_density_stub(session, int(series_row.id)) if series_density_stub else None
-    density_stub_ph = season_stub_row or series_stub_row
-    # Density stubs: only project SEARCHING when an Arr search was actually triggered.
-    # Monitor-only, future suppress, or empty eligible must not flip the stub to SEARCHING.
-    intents = _placeholder_intents_for_targets(
-        session,
-        search_eligible if not density_stub_ph else [],
-        series_stub=density_stub_ph if (density_stub_ph is not None and search_triggered) else None,
-    )
-    if intents:
-        StatusOrchestrator(session=session).apply_and_project_statuses(intents)
+    write = get_session()
+    try:
+        series_row = write.get(Series, int(series_pk))
+        if series_row is None:
+            return {"ok": False, "reason": "series_not_found", "series_id": int(series_pk), "instance": instance_key}
+        if series_ensure_ok:
+            _apply_local_series_monitored_after_playback(
+                write,
+                int(series_pk),
+                season_numbers=target_season_numbers,
+            )
+        elif reached_end_marked:
+            _apply_local_series_monitored_after_playback(write, int(series_pk))
 
-    _activate_queue_monitor_after_playback_search(session, intents, search_triggered=bool(search_triggered))
+        by_id = {
+            int(ep.id): ep
+            for ep in write.query(Episode).filter(Episode.id.in_(tuple(target_pks_after or [0]))).all()
+            if getattr(ep, "id", None) is not None
+        }
+        search_eligible = [by_id[pk] for pk in search_eligible_pks if pk in by_id]
+        season_stub_row = write.get(Placeholder, int(season_stub_ph_id)) if season_stub_ph_id else None
+        series_stub_row = (
+            _find_active_series_density_stub(write, int(series_pk)) if series_density_stub else None
+        )
+        density_stub_ph = season_stub_row or series_stub_row
+        intents = _placeholder_intents_for_targets(
+            write,
+            search_eligible if not density_stub_ph else [],
+            series_stub=density_stub_ph if (density_stub_ph is not None and search_triggered) else None,
+        )
+        if intents:
+            StatusOrchestrator(session=write).apply_and_project_statuses(intents)
+        _activate_queue_monitor_after_playback_search(
+            write, intents, search_triggered=bool(search_triggered)
+        )
+        write.commit()
+    except Exception:
+        try:
+            write.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            write.close()
+        except Exception:
+            pass
 
     return {
-        'ok': True,
-        'event': 'playback_start',
-        'media_type': 'episode',
-        'series_id': int(series_row.id),
-        'instance': instance_key,
-        'mode': mode,
-        'targets': len(targets),
-        'target_meta': target_meta,
-        'future_targets': int(partition.get('future_count') or 0),
-        'search_targets': len(search_eligible),
-        'monitor_only_targets': max(0, len(targets) - len(search_eligible)),
-        'skipped_search_reason': skipped_search_reason,
-        'monitor_updated': int(monitor_result.get('updated', 0)),
-        'monitor_failed': int(monitor_result.get('failed', 0)),
-        'monitor_failed_ids': list(monitor_result.get('failed_ids') or []),
-        'series_ensure_ok': series_ensure_ok,
-        'search_triggered': bool(search_triggered),
-        'season_searches': search_result.get("season_searches") or {},
-        'season_searches_failed': list(search_result.get("season_searches_failed") or []),
-        'episode_search': search_result.get("episode_search"),
-        'episode_search_seasons': list(search_result.get("episode_search_seasons") or []),
-        'reached_end_marked': bool(reached_end_marked),
-        'status_intents_applied': len(intents),
+        "ok": True,
+        "event": "playback_start",
+        "media_type": "episode",
+        "series_id": int(series_pk),
+        "instance": instance_key,
+        "mode": mode,
+        "targets": len(target_pks_after),
+        "target_meta": target_meta,
+        "future_targets": future_count,
+        "search_targets": len(search_eligible_pks),
+        "monitor_only_targets": max(0, len(target_pks_after) - len(search_eligible_pks)),
+        "skipped_search_reason": skipped_search_reason,
+        "monitor_updated": int(monitor_result.get("updated", 0)),
+        "monitor_failed": int(monitor_result.get("failed", 0)),
+        "monitor_failed_ids": list(monitor_result.get("failed_ids") or []),
+        "series_ensure_ok": series_ensure_ok,
+        "search_triggered": bool(search_triggered),
+        "season_searches": search_result.get("season_searches") or {},
+        "season_searches_failed": list(search_result.get("season_searches_failed") or []),
+        "episode_search": search_result.get("episode_search"),
+        "episode_search_seasons": list(search_result.get("episode_search_seasons") or []),
+        "reached_end_marked": bool(reached_end_marked),
+        "status_intents_applied": len(intents),
     }
 
 
@@ -3024,174 +3442,260 @@ def _enqueue_delayed_fallback(
     return int(job.id)
 
 
-def _process_movie_playback(session, payload: dict[str, Any], context: dict[str, Any], source_instance: str | None) -> dict[str, Any]:
-    movie_rows = _find_movie_rows(
-        session,
-        tmdb_id=context.get('tmdb_id'),
-        imdb_id=context.get('imdb_id'),
-        file_path=context.get('file_path'),
-    )
-    playback_kind = str(context.get('playback_kind') or 'unknown')
-    # Seed media player IDs directly from playback payload if available
-    plex_key = str(context.get('plex_id') or '').strip()
-    jelly_key = str(context.get('jellyfin_id') or '').strip()
-    if plex_key or jelly_key:
-        stamp_rows = _movies_for_media_id_stamp(session, movie_rows, context)
-        _stamp_movie_media_ids(
+def _process_movie_playback(payload: dict[str, Any], context: dict[str, Any], source_instance: str | None) -> dict[str, Any]:
+    session = get_session()
+    try:
+        movie_rows = _find_movie_rows(
             session,
-            stamp_rows,
-            plex_key=plex_key,
-            jelly_key=jelly_key,
-            playback_kind=playback_kind,
+            tmdb_id=context.get("tmdb_id"),
+            imdb_id=context.get("imdb_id"),
+            file_path=context.get("file_path"),
         )
-
-    active_rows = _active_rows_by_instance(movie_rows)
-
-    if playback_kind == 'real':
-        selection = _select_movie_real_rows(active_rows, context.get('file_path'))
-    elif playback_kind == 'placeholder':
-        selection = _select_placeholder_rows(
-            active_rows,
-            media_type='movie',
-            file_path=context.get('file_path'),
-        )
-    else:
-        return {'ok': False, 'reason': 'unresolved_movie_playback_kind'}
-
-    selected_rows = selection.get('rows') or []
-    if not selected_rows:
-        return {
-            'ok': True,
-            'event': 'playback_start',
-            'media_type': 'movie',
-            'playback_kind': playback_kind,
-            'skipped': 'real_movie_noop' if playback_kind == 'real' else 'no_active_row',
-            'selection_reason': selection.get('selection_reason'),
-            'root_match': selection.get('root_match'),
-            'qualifying_instances': selection.get('qualifying_instances') or sorted(active_rows.keys()),
-        }
-
-    per_instance_results: list[dict[str, Any]] = []
-    fallback_job_id: int | None = None
-    for row in selected_rows:
-        result = _run_movie_search_for_row(session, row)
-        per_instance_results.append(result)
-        chosen_instance = str(result.get('instance') or '')
-        # Ambiguous real movie plays reuse Placeholder Always/Fallback selection, including
-        # delayed Fallback tries after timeout (same as placeholder / real TV).
-        if result.get('search_triggered') and _should_schedule_delayed_fallback(
-            selection, chosen_instance, media_type='movie'
-        ):
-            fallback_job_id = _enqueue_delayed_fallback(
+        playback_kind = str(context.get("playback_kind") or "unknown")
+        plex_key = str(context.get("plex_id") or "").strip()
+        jelly_key = str(context.get("jellyfin_id") or "").strip()
+        if plex_key or jelly_key:
+            stamp_rows = _movies_for_media_id_stamp(session, movie_rows, context)
+            _stamp_movie_media_ids(
                 session,
-                media_type='movie',
-                payload=payload,
-                preferred_instance=str(selection.get('preferred_instance') or ''),
-                fallback_instances=list(
-                    selection.get('fallback_instances')
-                    or ([selection.get('fallback_instance')] if selection.get('fallback_instance') else [])
-                ),
-                source_instance=source_instance,
+                stamp_rows,
+                plex_key=plex_key,
+                jelly_key=jelly_key,
+                playback_kind=playback_kind,
             )
 
-    return {
-        'ok': True,
-        'event': 'playback_start',
-        'media_type': 'movie',
-        'playback_kind': playback_kind,
-        'selection_reason': selection.get('selection_reason'),
-        'qualifying_instances': selection.get('qualifying_instances') or [],
-        'chosen_instances': selection.get('chosen_instances') or [],
-        'root_match': selection.get('root_match'),
-        'fallback_job_id': fallback_job_id,
-        'results': per_instance_results,
-    }
+        active_rows = _active_rows_by_instance(movie_rows)
+
+        if playback_kind == "real":
+            selection = _select_movie_real_rows(active_rows, context.get("file_path"))
+        elif playback_kind == "placeholder":
+            selection = _select_placeholder_rows(
+                active_rows,
+                media_type="movie",
+                file_path=context.get("file_path"),
+            )
+        else:
+            return {"ok": False, "reason": "unresolved_movie_playback_kind"}
+
+        selected_rows = selection.get("rows") or []
+        if not selected_rows:
+            return {
+                "ok": True,
+                "event": "playback_start",
+                "media_type": "movie",
+                "playback_kind": playback_kind,
+                "skipped": "real_movie_noop" if playback_kind == "real" else "no_active_row",
+                "selection_reason": selection.get("selection_reason"),
+                "root_match": selection.get("root_match"),
+                "qualifying_instances": selection.get("qualifying_instances") or sorted(active_rows.keys()),
+            }
+
+        selected_ids = [int(r.id) for r in selected_rows if getattr(r, "id", None)]
+        selection_meta = {
+            "preferred_instance": selection.get("preferred_instance"),
+            "fallback_instances": list(
+                selection.get("fallback_instances")
+                or ([selection.get("fallback_instance")] if selection.get("fallback_instance") else [])
+            ),
+            "chosen_instances": selection.get("chosen_instances") or [],
+            "selection_reason": selection.get("selection_reason"),
+            "qualifying_instances": selection.get("qualifying_instances") or [],
+            "root_match": selection.get("root_match"),
+        }
+        try:
+            session.commit()
+        except Exception:
+            pass
+        try:
+            session.close()
+        except Exception:
+            pass
+        session = None
+
+        per_instance_results: list[dict[str, Any]] = []
+        fallback_job_id: int | None = None
+        for mid in selected_ids:
+            result = _run_movie_search_for_movie_id(mid)
+            if result.get("skipped") == "movie_not_found":
+                continue
+            per_instance_results.append(result)
+            chosen_instance = str(result.get("instance") or "")
+            if result.get("search_triggered") and _should_schedule_delayed_fallback(
+                {
+                    "preferred_instance": selection_meta["preferred_instance"],
+                    "fallback_instances": selection_meta["fallback_instances"],
+                    "fallback_instance": (selection_meta["fallback_instances"] or [None])[0],
+                },
+                chosen_instance,
+                media_type="movie",
+            ):
+                fb = get_session()
+                try:
+                    fallback_job_id = _enqueue_delayed_fallback(
+                        fb,
+                        media_type="movie",
+                        payload=payload,
+                        preferred_instance=str(selection_meta["preferred_instance"] or ""),
+                        fallback_instances=list(selection_meta["fallback_instances"]),
+                        source_instance=source_instance,
+                    )
+                    fb.commit()
+                finally:
+                    try:
+                        fb.close()
+                    except Exception:
+                        pass
+
+        return {
+            "ok": True,
+            "event": "playback_start",
+            "media_type": "movie",
+            "playback_kind": playback_kind,
+            "selection_reason": selection_meta["selection_reason"],
+            "qualifying_instances": selection_meta["qualifying_instances"],
+            "chosen_instances": selection_meta["chosen_instances"],
+            "root_match": selection_meta["root_match"],
+            "fallback_job_id": fallback_job_id,
+            "results": per_instance_results,
+        }
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
 
 
-def _process_episode_playback(session, payload: dict[str, Any], context: dict[str, Any], source_instance: str | None) -> dict[str, Any]:
+def _process_episode_playback(payload: dict[str, Any], context: dict[str, Any], source_instance: str | None) -> dict[str, Any]:
     # Ensure density-stub path from context is visible to search helpers that read payload.
     event_payload = payload
-    ctx_path = context.get('file_path')
+    ctx_path = context.get("file_path")
     if ctx_path and not _extract_file_path(payload):
         event_payload = dict(payload)
-        event_payload['file_path'] = ctx_path
+        event_payload["file_path"] = ctx_path
 
-    sonarr_id, _ = _extract_series_ids(event_payload)
-    series_rows = _find_series_rows(
-        session,
-        sonarr_id=sonarr_id,
-        tvdb_id=context.get('tvdb_id'),
-        imdb_id=context.get('imdb_id'),
-        file_path=context.get('file_path') or _extract_file_path(event_payload),
-    )
-    # Density stub / Tracearr may only give us series_id on path_info.
-    if not series_rows:
-        path_info = context.get('path_info') if isinstance(context.get('path_info'), dict) else {}
-        sid = path_info.get('series_id') or context.get('series_id')
-        if sid is not None:
-            row = session.query(Series).filter(Series.id == int(sid), Series.is_deleted == False).first()  # noqa: E712
-            if row is not None:
-                series_rows = [row]
-    active_rows = _active_rows_by_instance(series_rows)
-    playback_kind = str(context.get('playback_kind') or 'unknown')
-
-    if playback_kind == 'placeholder':
-        selection = _select_placeholder_rows(
-            active_rows,
-            media_type='tv',
-            file_path=context.get('file_path') or _extract_file_path(event_payload),
+    session = get_session()
+    try:
+        sonarr_id, _ = _extract_series_ids(event_payload)
+        series_rows = _find_series_rows(
+            session,
+            sonarr_id=sonarr_id,
+            tvdb_id=context.get("tvdb_id"),
+            imdb_id=context.get("imdb_id"),
+            file_path=context.get("file_path") or _extract_file_path(event_payload),
         )
-    elif playback_kind == 'real':
-        selection = _select_tv_real_rows(
-            active_rows,
-            context.get('file_path') or _extract_file_path(event_payload),
-        )
-    else:
-        return {'ok': False, 'reason': 'unresolved_episode_playback_kind'}
+        # Density stub / Tracearr may only give us series_id on path_info.
+        if not series_rows:
+            path_info = context.get("path_info") if isinstance(context.get("path_info"), dict) else {}
+            sid = path_info.get("series_id") or context.get("series_id")
+            if sid is not None:
+                row = session.query(Series).filter(Series.id == int(sid), Series.is_deleted == False).first()  # noqa: E712
+                if row is not None:
+                    series_rows = [row]
+        active_rows = _active_rows_by_instance(series_rows)
+        playback_kind = str(context.get("playback_kind") or "unknown")
 
-    selected_rows = selection.get('rows') or []
-    if not selected_rows:
-        return {
-            'ok': True,
-            'event': 'playback_start',
-            'media_type': 'episode',
-            'playback_kind': playback_kind,
-            'skipped': 'no_active_row',
-            'qualifying_instances': selection.get('qualifying_instances') or [],
-            'selection_reason': selection.get('selection_reason'),
-            'root_match': selection.get('root_match'),
-        }
-
-    per_instance_results: list[dict[str, Any]] = []
-    fallback_job_id: int | None = None
-    for row in selected_rows:
-        result = _run_episode_search_for_row(session, row, event_payload)
-        per_instance_results.append(result)
-        chosen_instance = str(result.get('instance') or '')
-        if result.get('search_triggered') and _should_schedule_delayed_fallback(
-            selection, chosen_instance, media_type='episode'
-        ):
-            fallback_job_id = _enqueue_delayed_fallback(
-                session,
-                media_type='episode',
-                payload=event_payload,
-                preferred_instance=str(selection.get('preferred_instance') or ''),
-                fallback_instances=list(selection.get('fallback_instances') or ([selection.get('fallback_instance')] if selection.get('fallback_instance') else [])),
-                source_instance=source_instance,
+        if playback_kind == "placeholder":
+            selection = _select_placeholder_rows(
+                active_rows,
+                media_type="tv",
+                file_path=context.get("file_path") or _extract_file_path(event_payload),
             )
+        elif playback_kind == "real":
+            selection = _select_tv_real_rows(
+                active_rows,
+                context.get("file_path") or _extract_file_path(event_payload),
+            )
+        else:
+            return {"ok": False, "reason": "unresolved_episode_playback_kind"}
 
-    return {
-        'ok': True,
-        'event': 'playback_start',
-        'media_type': 'episode',
-        'playback_kind': playback_kind,
-        'selection_reason': selection.get('selection_reason'),
-        'qualifying_instances': selection.get('qualifying_instances') or [],
-        'chosen_instances': selection.get('chosen_instances') or [],
-        'root_match': selection.get('root_match'),
-        'fallback_job_id': fallback_job_id,
-        'results': per_instance_results,
-    }
+        selected_rows = selection.get("rows") or []
+        if not selected_rows:
+            return {
+                "ok": True,
+                "event": "playback_start",
+                "media_type": "episode",
+                "playback_kind": playback_kind,
+                "skipped": "no_active_row",
+                "qualifying_instances": selection.get("qualifying_instances") or [],
+                "selection_reason": selection.get("selection_reason"),
+                "root_match": selection.get("root_match"),
+            }
+
+        selected_ids = [int(r.id) for r in selected_rows if getattr(r, "id", None)]
+        selection_meta = {
+            "preferred_instance": selection.get("preferred_instance"),
+            "fallback_instances": list(
+                selection.get("fallback_instances")
+                or ([selection.get("fallback_instance")] if selection.get("fallback_instance") else [])
+            ),
+            "chosen_instances": selection.get("chosen_instances") or [],
+            "selection_reason": selection.get("selection_reason"),
+            "qualifying_instances": selection.get("qualifying_instances") or [],
+            "root_match": selection.get("root_match"),
+        }
+        try:
+            session.commit()
+        except Exception:
+            pass
+        try:
+            session.close()
+        except Exception:
+            pass
+        session = None
+
+        per_instance_results: list[dict[str, Any]] = []
+        fallback_job_id: int | None = None
+        for sid in selected_ids:
+            result = _run_episode_search_for_series_id(sid, event_payload)
+            if result.get("skipped") == "series_not_found":
+                continue
+            per_instance_results.append(result)
+            chosen_instance = str(result.get("instance") or "")
+            if result.get("search_triggered") and _should_schedule_delayed_fallback(
+                {
+                    "preferred_instance": selection_meta["preferred_instance"],
+                    "fallback_instances": selection_meta["fallback_instances"],
+                    "fallback_instance": (selection_meta["fallback_instances"] or [None])[0],
+                },
+                chosen_instance,
+                media_type="episode",
+            ):
+                fb = get_session()
+                try:
+                    fallback_job_id = _enqueue_delayed_fallback(
+                        fb,
+                        media_type="episode",
+                        payload=event_payload,
+                        preferred_instance=str(selection_meta["preferred_instance"] or ""),
+                        fallback_instances=list(selection_meta["fallback_instances"]),
+                        source_instance=source_instance,
+                    )
+                    fb.commit()
+                finally:
+                    try:
+                        fb.close()
+                    except Exception:
+                        pass
+
+        return {
+            "ok": True,
+            "event": "playback_start",
+            "media_type": "episode",
+            "playback_kind": playback_kind,
+            "selection_reason": selection_meta["selection_reason"],
+            "qualifying_instances": selection_meta["qualifying_instances"],
+            "chosen_instances": selection_meta["chosen_instances"],
+            "root_match": selection_meta["root_match"],
+            "fallback_job_id": fallback_job_id,
+            "results": per_instance_results,
+        }
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
 
 
 def _preferred_movie_import_succeeded(preferred_row: Movie | None) -> bool:
@@ -3199,33 +3703,106 @@ def _preferred_movie_import_succeeded(preferred_row: Movie | None) -> bool:
 
 
 def _preferred_episode_import_succeeded(session, preferred_row: Series | None, payload: dict[str, Any]) -> bool:
-    if preferred_row is None or bool(getattr(preferred_row, 'is_deleted', False)):
+    """Compatibility wrapper; prefer ``_preferred_episode_import_succeeded_for_series_id``."""
+    if preferred_row is None or getattr(preferred_row, "id", None) is None:
         return False
-    season_number, episode_number = _extract_season_episode(payload)
-    targets, target_meta = _collect_episode_targets(session, preferred_row, season_number, episode_number)
-    if target_meta.get('reason'):
+    return _preferred_episode_import_succeeded_for_series_id(int(preferred_row.id), payload)
+
+
+def _preferred_episode_import_succeeded_for_series_id(
+    series_pk: int | None,
+    payload: dict[str, Any],
+) -> bool:
+    """True when preferred-instance targets already have files (live Sonarr hasFile).
+
+    Owns short sessions around Arr HTTP so the caller can release its checkout first.
+    """
+    if series_pk is None:
         return False
-    if not targets:
-        # Empty structural scope (e.g. past catalog end): nothing left to search on preferred.
-        return True
-    instance_key = _row_instance_key(preferred_row)
-    base_url, api_key = _resolve_endpoint('series', instance_key=instance_key or None)
-    if base_url and api_key:
-        _refresh_playback_episode_flags_from_sonarr(
-            session,
+
+    session = get_session()
+    try:
+        preferred_row = session.get(Series, int(series_pk))
+        if preferred_row is None or bool(getattr(preferred_row, "is_deleted", False)):
+            return False
+        season_number, episode_number = _extract_season_episode(payload)
+        targets, target_meta = _collect_episode_targets(
+            session, preferred_row, season_number, episode_number
+        )
+        if target_meta.get("reason"):
+            return False
+        if not targets:
+            return True
+        instance_key = _row_instance_key(preferred_row)
+        base_url, api_key = _resolve_endpoint("series", instance_key=instance_key or None)
+        sonarr_series_id = (
+            int(preferred_row.sonarrid) if getattr(preferred_row, "sonarrid", None) else None
+        )
+        target_episode_pks = [int(ep.id) for ep in targets if getattr(ep, "id", None) is not None]
+        target_ids = {
+            int(ep.sonarrid)
+            for ep in targets
+            if getattr(ep, "sonarrid", None)
+        }
+        local_all_have_file = all(bool(getattr(ep, "has_file", False)) for ep in targets)
+        try:
+            session.commit()
+        except Exception:
+            pass
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
+
+    if not base_url or not api_key or not sonarr_series_id:
+        return bool(local_all_have_file)
+
+    series_entry, episode_rows = _fetch_playback_episode_flags_from_sonarr(
+        sonarr_series_id=sonarr_series_id,
+        target_sonarr_ids=target_ids,
+        base_url=base_url,
+        api_key=api_key,
+        series_id_for_log=int(series_pk),
+    )
+
+    write = get_session()
+    try:
+        preferred_row = write.get(Series, int(series_pk))
+        if preferred_row is None:
+            return False
+        by_id = {
+            int(ep.id): ep
+            for ep in write.query(Episode).filter(Episode.id.in_(tuple(target_episode_pks or [0]))).all()
+            if getattr(ep, "id", None) is not None
+        }
+        targets = [by_id[pk] for pk in target_episode_pks if pk in by_id]
+        _apply_playback_episode_flags_from_sonarr(
+            write,
             preferred_row,
             targets,
-            base_url=base_url,
-            api_key=api_key,
+            series_entry=series_entry,
+            episode_rows=episode_rows,
+            target_ids=target_ids,
         )
-    return all(bool(getattr(ep, 'has_file', False)) for ep in targets)
+        write.commit()
+        return all(bool(getattr(ep, "has_file", False)) for ep in targets)
+    finally:
+        try:
+            write.close()
+        except Exception:
+            pass
 
 
 def process_playback_fallback_job(session, job: Job) -> dict[str, Any]:
+    from services.postgres.db import release_handler_session
+
     payload = job.payload or {}
     media_type = str(payload.get('media_type') or '').strip().lower()
     preferred_raw = str(payload.get('preferred_instance') or '').strip().lower()
     event_payload = payload.get('payload') if isinstance(payload.get('payload'), dict) else {}
+    event_payload = _prefetch_playback_media_http(event_payload if isinstance(event_payload, dict) else {})
+    source_instance = payload.get('source_instance')
 
     if media_type not in {'movie', 'episode'}:
         return {'ok': False, 'reason': 'invalid_media_type'}
@@ -3251,6 +3828,10 @@ def process_playback_fallback_job(session, job: Job) -> dict[str, Any]:
     context = _resolve_playback_context(session, event_payload)
     head, *tail = fallback_instances
 
+    preferred_pk: int | None = None
+    fallback_pk: int | None = None
+    preferred_movie_has_file = False
+
     if media_type == 'movie':
         movie_rows = _find_movie_rows(
             session,
@@ -3260,45 +3841,94 @@ def process_playback_fallback_job(session, job: Job) -> dict[str, Any]:
         )
         active_rows = _active_rows_by_instance(movie_rows)
         preferred_row = active_rows.get(preferred_instance)
-        if _preferred_movie_import_succeeded(preferred_row):
+        preferred_movie_has_file = _preferred_movie_import_succeeded(preferred_row)
+        if preferred_row is not None and getattr(preferred_row, "id", None) is not None:
+            preferred_pk = int(preferred_row.id)
+        fallback_row = active_rows.get(head)
+        if fallback_row is not None and getattr(fallback_row, "id", None) is not None:
+            fallback_pk = int(fallback_row.id)
+    else:
+        sonarr_id, _ = _extract_series_ids(event_payload)
+        series_rows = _find_series_rows(
+            session,
+            sonarr_id=sonarr_id,
+            tvdb_id=context.get('tvdb_id'),
+            imdb_id=context.get('imdb_id'),
+            file_path=context.get('file_path'),
+        )
+        active_rows = _active_rows_by_instance(series_rows)
+        preferred_row = active_rows.get(preferred_instance)
+        if preferred_row is not None and getattr(preferred_row, "id", None) is not None:
+            preferred_pk = int(preferred_row.id)
+        fallback_row = active_rows.get(head)
+        if fallback_row is not None and getattr(fallback_row, "id", None) is not None:
+            fallback_pk = int(fallback_row.id)
+
+    # Nested Arr search owns short sessions; do not pin the claim checkout across HTTP.
+    release_handler_session(session)
+
+    if media_type == 'movie':
+        if preferred_movie_has_file:
             return {'ok': True, 'skipped': 'preferred_imported', 'preferred_instance': preferred_instance}
 
-        fallback_row = active_rows.get(head)
-        if fallback_row is None:
+        if fallback_pk is None:
+            requeue_id = None
             if tail:
-                requeue_id = _enqueue_delayed_fallback(
-                    session,
-                    media_type='movie',
-                    payload=event_payload,
-                    preferred_instance=preferred_instance,
-                    fallback_instances=tail,
-                    source_instance=payload.get('source_instance'),
-                )
-                return {
-                    'ok': True,
-                    'skipped': 'fallback_no_active_row',
-                    'fallback_instance': head,
-                    'fallback_instances': fallback_instances,
-                    'requeue_job_id': requeue_id,
-                }
+                fb = get_session()
+                try:
+                    requeue_id = _enqueue_delayed_fallback(
+                        fb,
+                        media_type='movie',
+                        payload=event_payload,
+                        preferred_instance=preferred_instance,
+                        fallback_instances=tail,
+                        source_instance=source_instance,
+                    )
+                    fb.commit()
+                finally:
+                    try:
+                        fb.close()
+                    except Exception:
+                        pass
             return {
                 'ok': True,
                 'skipped': 'fallback_no_active_row',
                 'fallback_instance': head,
                 'fallback_instances': fallback_instances,
+                'requeue_job_id': requeue_id,
             }
 
-        result = _run_movie_search_for_row(session, fallback_row)
+        result = _run_movie_search_for_movie_id(int(fallback_pk))
         requeue_id = None
-        if result.get('search_triggered') and tail and not _preferred_movie_import_succeeded(preferred_row):
-            requeue_id = _enqueue_delayed_fallback(
-                session,
-                media_type='movie',
-                payload=event_payload,
-                preferred_instance=preferred_instance,
-                fallback_instances=tail,
-                source_instance=payload.get('source_instance'),
-            )
+        if result.get('search_triggered') and tail:
+            still_waiting = True
+            if preferred_pk is not None:
+                check = get_session()
+                try:
+                    preferred_row = check.get(Movie, int(preferred_pk))
+                    still_waiting = not _preferred_movie_import_succeeded(preferred_row)
+                finally:
+                    try:
+                        check.close()
+                    except Exception:
+                        pass
+            if still_waiting:
+                fb = get_session()
+                try:
+                    requeue_id = _enqueue_delayed_fallback(
+                        fb,
+                        media_type='movie',
+                        payload=event_payload,
+                        preferred_instance=preferred_instance,
+                        fallback_instances=tail,
+                        source_instance=source_instance,
+                    )
+                    fb.commit()
+                finally:
+                    try:
+                        fb.close()
+                    except Exception:
+                        pass
         return {
             'ok': True,
             'event': 'playback_fallback',
@@ -3310,55 +3940,59 @@ def process_playback_fallback_job(session, job: Job) -> dict[str, Any]:
             'result': result,
         }
 
-    sonarr_id, _ = _extract_series_ids(event_payload)
-    series_rows = _find_series_rows(
-        session,
-        sonarr_id=sonarr_id,
-        tvdb_id=context.get('tvdb_id'),
-        imdb_id=context.get('imdb_id'),
-        file_path=context.get('file_path'),
-    )
-    active_rows = _active_rows_by_instance(series_rows)
-    preferred_row = active_rows.get(preferred_instance)
-    if _preferred_episode_import_succeeded(session, preferred_row, event_payload):
+    if _preferred_episode_import_succeeded_for_series_id(preferred_pk, event_payload):
         return {'ok': True, 'skipped': 'preferred_imported', 'preferred_instance': preferred_instance}
 
-    fallback_row = active_rows.get(head)
-    if fallback_row is None:
+    if fallback_pk is None:
+        requeue_id = None
         if tail:
-            requeue_id = _enqueue_delayed_fallback(
-                session,
-                media_type='episode',
-                payload=event_payload,
-                preferred_instance=preferred_instance,
-                fallback_instances=tail,
-                source_instance=payload.get('source_instance'),
-            )
-            return {
-                'ok': True,
-                'skipped': 'fallback_no_active_row',
-                'fallback_instance': head,
-                'fallback_instances': fallback_instances,
-                'requeue_job_id': requeue_id,
-            }
+            fb = get_session()
+            try:
+                requeue_id = _enqueue_delayed_fallback(
+                    fb,
+                    media_type='episode',
+                    payload=event_payload,
+                    preferred_instance=preferred_instance,
+                    fallback_instances=tail,
+                    source_instance=source_instance,
+                )
+                fb.commit()
+            finally:
+                try:
+                    fb.close()
+                except Exception:
+                    pass
         return {
             'ok': True,
             'skipped': 'fallback_no_active_row',
             'fallback_instance': head,
             'fallback_instances': fallback_instances,
+            'requeue_job_id': requeue_id,
         }
 
-    result = _run_episode_search_for_row(session, fallback_row, event_payload)
+    result = _run_episode_search_for_series_id(int(fallback_pk), event_payload)
     requeue_id = None
-    if result.get('search_triggered') and tail and not _preferred_episode_import_succeeded(session, preferred_row, event_payload):
-        requeue_id = _enqueue_delayed_fallback(
-            session,
-            media_type='episode',
-            payload=event_payload,
-            preferred_instance=preferred_instance,
-            fallback_instances=tail,
-            source_instance=payload.get('source_instance'),
-        )
+    if (
+        result.get('search_triggered')
+        and tail
+        and not _preferred_episode_import_succeeded_for_series_id(preferred_pk, event_payload)
+    ):
+        fb = get_session()
+        try:
+            requeue_id = _enqueue_delayed_fallback(
+                fb,
+                media_type='episode',
+                payload=event_payload,
+                preferred_instance=preferred_instance,
+                fallback_instances=tail,
+                source_instance=source_instance,
+            )
+            fb.commit()
+        finally:
+            try:
+                fb.close()
+            except Exception:
+                pass
     return {
         'ok': True,
         'event': 'playback_fallback',
@@ -3372,36 +4006,58 @@ def process_playback_fallback_job(session, job: Job) -> dict[str, Any]:
 
 
 def process_playback_start_event(payload: dict[str, Any], instance: str | None = None) -> dict[str, Any]:
+    # Plex/Jellyfin path enrichment with no DB checkout held.
+    payload = _prefetch_playback_media_http(payload if isinstance(payload, dict) else {})
     session = get_session()
     try:
         context = _resolve_playback_context(session, payload)
-        media_type = str(context.get('media_type') or 'unknown')
+        media_type = str(context.get("media_type") or "unknown")
 
         logger.info(
-            f"Playback routing source={instance or 'unknown'} media_type={media_type} kind={context.get('playback_kind')} path={context.get('file_path')}",
-            extra={'emoji_type': 'playback'},
+            f"Playback routing source={instance or 'unknown'} media_type={media_type} "
+            f"kind={context.get('playback_kind')} path={context.get('file_path')}",
+            extra={"emoji_type": "playback"},
         )
 
-        if media_type == 'movie':
-            result = _process_movie_playback(session, payload, context, instance)
-        elif media_type == 'episode':
-            result = _process_episode_playback(session, payload, context, instance)
-        else:
-            result = {'ok': False, 'reason': 'unresolved_playback_media_type'}
+        # Snapshot routing context, release checkout before Arr-heavy search paths.
+        try:
+            session.commit()
+        except Exception:
+            pass
+        try:
+            session.close()
+        except Exception:
+            pass
+        session = None
 
-        session.commit()
+        # Selection + Arr search own short sessions; do not hold a parent checkout.
+        if media_type == "movie":
+            result = _process_movie_playback(payload, context, instance)
+        elif media_type == "episode":
+            result = _process_episode_playback(payload, context, instance)
+        else:
+            result = {"ok": False, "reason": "unresolved_playback_media_type"}
+
         # Wake queue monitor only after flags are visible to other connections.
         _notify_queue_monitor_signal()
         logger.info(
             f"Processed playback_start media_type={media_type} result={result}",
-            extra={'emoji_type': 'processing'},
+            extra={"emoji_type": "processing"},
         )
         return result
     except Exception:
-        session.rollback()
+        if session is not None:
+            try:
+                session.rollback()
+            except Exception:
+                pass
         raise
     finally:
-        session.close()
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
 
 
 def apply_search_queued_for_playback(session, payload: dict[str, Any]) -> int:
@@ -3415,13 +4071,15 @@ def apply_search_queued_for_playback(session, payload: dict[str, Any]) -> int:
     Returns: number of intents successfully applied (0 if no matching placeholders).
 
     Caller is responsible for owning the transaction. We DO NOT commit here.
+    Does not call Plex/Jellyfin; path enrichment belongs in
+    ``_prefetch_playback_media_http`` before the session is opened.
     """
     try:
         context = _resolve_playback_context(session, payload)
     except Exception as exc:
         logger.debug(
             f"apply_search_queued_for_playback: context resolution failed: {exc}",
-            extra={'emoji_type': 'debug'},
+            extra={"emoji_type": "debug"},
         )
         return 0
 

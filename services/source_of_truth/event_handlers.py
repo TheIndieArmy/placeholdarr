@@ -228,7 +228,7 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
     if not isinstance(series_entry, dict):
         raise ValueError("seriesadd_missing_series_payload")
 
-    # Episode catalog fetch before opening a DB session (movie-add already fetches Arr first).
+    # Episode catalog + optional per-ep detail/art HTTP before opening a DB session.
     episodes = fetch_sonarr_episodes(series_id, base_url, api_key)
     if not episodes and isinstance(payload.get("episodes"), list):
         logger.warning(
@@ -237,10 +237,46 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
         )
         episodes = payload.get("episodes") or []
 
-    session = get_session()
     allow_episode_detail = _episode_detail_fetches_enabled()
+    prepared_episodes: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
+    for ep in episodes or []:
+        if not isinstance(ep, dict):
+            continue
+        ep_effective = _resolve_episode_sync_payload(
+            ep,
+            base_url,
+            api_key,
+            allow_still_detail=allow_episode_detail,
+            stats=stats,
+        )
+        episode_file = _resolve_episode_file_payload(
+            ep_effective,
+            base_url,
+            api_key,
+            allow_file_detail=allow_episode_detail,
+            stats=stats,
+        )
+        prepared_episodes.append((ep, ep_effective, episode_file if isinstance(episode_file, dict) else {}))
+
+    s_fields_preview = _series_fields(series_entry, resolved_instance_key)
+    filled_art: dict[str, Any] = {}
     try:
-        s_fields = _series_fields(series_entry, resolved_instance_key)
+        art_fields = {
+            "remote_poster": s_fields_preview.get("remote_poster"),
+            "remote_fanart": s_fields_preview.get("remote_fanart"),
+            "remote_banner": s_fields_preview.get("remote_banner"),
+            "sonarr_payload_raw": s_fields_preview.get("sonarr_payload_raw"),
+        }
+        filled_art = _fill_missing_series_art(art_fields, series_entry, base_url, api_key) or {}
+    except Exception as art_exc:
+        logger.debug(
+            f"Series add fill-missing art skipped: {art_exc}",
+            extra={"emoji_type": "debug"},
+        )
+
+    session = get_session()
+    try:
+        s_fields = s_fields_preview
         if not s_fields.get("tvdbid"):
             raise ValueError("seriesadd_missing_tvdbid")
 
@@ -253,29 +289,13 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
         touched_episode_rows: list[Episode] = []
         missing_placeholder_episode_rows: list[Episode] = []
 
-        for ep in episodes:
+        for ep, ep_effective, episode_file in prepared_episodes:
             season_number = int(ep.get("seasonNumber") or 0)
             season_row, season_created = _upsert_season(session, series_row, season_number)
             season_rows_by_number[season_number] = season_row
             if season_created:
                 stats["seasons_upserted"] += 1
 
-            sonarr_ep_id = ep.get("id")
-            ep_effective = _resolve_episode_sync_payload(
-                ep,
-                base_url,
-                api_key,
-                allow_still_detail=allow_episode_detail,
-                stats=stats,
-            )
-
-            episode_file = _resolve_episode_file_payload(
-                ep_effective,
-                base_url,
-                api_key,
-                allow_file_detail=allow_episode_detail,
-                stats=stats,
-            )
             ep_fields = _episode_fields(series_row, season_row, ep_effective, episode_file)
 
             overview = str(ep.get("overview") or "").strip()
@@ -328,37 +348,48 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
             session.add(season_row)
 
         _apply_season_remote_posters(season_rows_by_number, series_entry)
-        try:
-            art_fields = {
-                "remote_poster": getattr(series_row, "remote_poster", None),
-                "remote_fanart": getattr(series_row, "remote_fanart", None),
-                "remote_banner": getattr(series_row, "remote_banner", None),
-                "sonarr_payload_raw": getattr(series_row, "sonarr_payload_raw", None),
-            }
-            filled = _fill_missing_series_art(art_fields, series_entry, base_url, api_key)
-            if filled.get("remote_poster"):
-                series_row.remote_poster = filled["remote_poster"]
-            if filled.get("remote_fanart"):
-                series_row.remote_fanart = filled["remote_fanart"]
-            if filled.get("remote_banner"):
-                series_row.remote_banner = filled["remote_banner"]
+        if filled_art.get("remote_poster"):
+            series_row.remote_poster = filled_art["remote_poster"]
+        if filled_art.get("remote_fanart"):
+            series_row.remote_fanart = filled_art["remote_fanart"]
+        if filled_art.get("remote_banner"):
+            series_row.remote_banner = filled_art["remote_banner"]
+        if filled_art:
             session.add(series_row)
-        except Exception as art_exc:
-            logger.debug(
-                f"Series add fill-missing art skipped: {art_exc}",
-                extra={"emoji_type": "debug"},
-            )
 
         from services.poster_language import (
             resolve_localized_poster_for_season,
             resolve_localized_poster_for_series,
         )
 
+        session.commit()
+        series_pk = int(series_row.id)
+        season_pks = {
+            int(sn): int(srow.id)
+            for sn, srow in season_rows_by_number.items()
+            if getattr(srow, "id", None)
+        }
+        session.expunge(series_row)
+        for srow in list(season_rows_by_number.values()):
+            try:
+                session.expunge(srow)
+            except Exception:
+                pass
+        try:
+            session.close()
+        except Exception:
+            pass
+        session = None
+
         resolve_localized_poster_for_series(series_row, persist=False)
-        session.add(series_row)
-        for season_row in season_rows_by_number.values():
-            resolve_localized_poster_for_season(season_row, series_row, persist=False)
-            session.add(season_row)
+        for srow in season_rows_by_number.values():
+            resolve_localized_poster_for_season(srow, series_row, persist=False)
+
+        session = get_session()
+        series_row = session.merge(series_row)
+        season_rows_by_number = {
+            sn: session.merge(srow) for sn, srow in season_rows_by_number.items()
+        }
 
         missing_episode_ids = [
             int(ep.id) for ep in missing_placeholder_episode_rows if getattr(ep, "id", None)
@@ -469,11 +500,23 @@ def process_movie_add_event(payload: dict[str, Any], instance: str | None = None
 
         movie_row, _, _ = _upsert_movie(session, fields)
         movie_row.last_found_in_radarr = datetime.now(timezone.utc)
+        session.add(movie_row)
+        session.commit()
+        movie_pk = int(movie_row.id)
+        session.expunge(movie_row)
+        try:
+            session.close()
+        except Exception:
+            pass
+        session = None
 
+        # TMDB poster resolve with no pooled checkout held.
         from services.poster_language import resolve_localized_poster_for_movie
 
         resolve_localized_poster_for_movie(movie_row, persist=False)
-        session.add(movie_row)
+
+        session = get_session()
+        movie_row = session.merge(movie_row)
 
         # Event-scoped FS truth check: if users manually removed placeholder files
         # out-of-band, clear stale DB placeholder flags for this movie before determination.
@@ -590,7 +633,17 @@ def process_movie_imported_event(payload: dict[str, Any], instance: str | None =
 
         # Self-heal: if MovieAdded failed or was skipped, ingest from Radarr like movie add.
         if not movie_row and base_url and api_key:
+            try:
+                session.commit()
+            except Exception:
+                pass
+            try:
+                session.close()
+            except Exception:
+                pass
+            session = None
             movie_entry = fetch_radarr_movie(movie_id, base_url, api_key)
+            session = get_session()
             if not isinstance(movie_entry, dict):
                 movie_entry = payload.get("movie") if isinstance(payload.get("movie"), dict) else None
             if isinstance(movie_entry, dict):
@@ -683,10 +736,18 @@ def process_movie_imported_event(payload: dict[str, Any], instance: str | None =
             "real_library_scan_scheduled": real_scan_job is not None,
         }
     except Exception:
-        session.rollback()
+        if session is not None:
+            try:
+                session.rollback()
+            except Exception:
+                pass
         raise
     finally:
-        session.close()
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
 
 
 def process_episode_imported_event(payload: dict[str, Any], instance: str | None = None) -> dict[str, Any]:

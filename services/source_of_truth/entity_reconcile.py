@@ -1297,9 +1297,11 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
                         if season and season.series_id is not None:
                             tag_series_ids = [int(season.series_id)]
                 if tag_movie_ids or tag_series_ids:
+                    # Stamp only; this reconcile path runs determination/materialization next.
                     apply_arr_tag_placeholder_policies(
                         movie_row_ids=tag_movie_ids,
                         series_row_ids=tag_series_ids,
+                        follow_up_materialize=False,
                     )
             except Exception as tag_exc:
                 _log_reconcile_warning(

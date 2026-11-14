@@ -45,6 +45,7 @@ def recompute_catalog_placeholder_folders(session) -> dict[str, Any]:
         "episodes_cleared_filepath": 0,
         "touched_movie_row_ids": [],
         "touched_episode_row_ids": [],
+        "pending_unlinks": [],
     }
 
     ensure_dest_folders_exist()
@@ -73,9 +74,10 @@ def recompute_catalog_placeholder_folders(session) -> dict[str, Any]:
         movie.placeholder_folder = new_folder
         stats["movies_updated"] += 1
         if old_filepath:
+            # Defer unlink until after commit (caller collects pending_unlinks).
             safe = filter_movie_disk_cleanup_paths(session, movie, [str(old_filepath)])
             if safe:
-                _safe_unlink(safe[0])
+                stats.setdefault("pending_unlinks", []).append(safe[0])
             movie.placeholder_filepath = None
             stats["movies_cleared_filepath"] += 1
         rid = getattr(movie, "id", None)
@@ -141,7 +143,7 @@ def recompute_catalog_placeholder_folders(session) -> dict[str, Any]:
                             paths=[str(old_filepath)],
                         )
                         if safe:
-                            _safe_unlink(safe[0])
+                            stats.setdefault("pending_unlinks", []).append(safe[0])
                         episode.placeholder_filepath = None
                         stats["episodes_cleared_filepath"] += 1
                     eid = getattr(episode, "id", None)
@@ -160,11 +162,22 @@ def enqueue_destination_rematerialize(*, source: str = "settings_save", apply_no
     out: dict[str, Any] = {"ok": True, "source": source, "apply_now": bool(apply_now)}
     try:
         stats = recompute_catalog_placeholder_folders(session)
+        pending_unlinks = list(stats.get("pending_unlinks") or [])
         session.commit()
+        for path in pending_unlinks:
+            try:
+                _safe_unlink(path)
+            except Exception:
+                pass
         out["recompute"] = {
             k: v
             for k, v in stats.items()
-            if k not in {"touched_movie_row_ids", "touched_episode_row_ids"}
+            if k
+            not in {
+                "touched_movie_row_ids",
+                "touched_episode_row_ids",
+                "pending_unlinks",
+            }
         }
         movie_ids = list(stats.get("touched_movie_row_ids") or [])
         episode_ids = list(stats.get("touched_episode_row_ids") or [])

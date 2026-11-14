@@ -108,6 +108,37 @@ def _series_has_active_episode_placeholders(session, *, series_id: int) -> bool:
 	return bool(stub_count)
 
 
+def prepare_episode_placeholder_cleanup(
+	session,
+	*,
+	series: Any,
+	candidate_paths: list[str],
+) -> tuple[list[str], bool]:
+	"""Resolve path filters + sibling guards while a session is open.
+
+	Callers should commit/close, then pass the result into
+	``cleanup_episode_placeholder_files`` via ``paths_prefiltered`` /
+	``series_has_placeholders`` with ``session=None``.
+	"""
+	paths = filter_episode_disk_cleanup_paths(
+		session, series=series, paths=_unique_paths(candidate_paths)
+	)
+	series_has_placeholders = _series_has_active_episode_placeholders(
+		session, series_id=int(series.id)
+	)
+	allowed_son = configured_instance_keys("sonarr")
+	tvdbid = int(getattr(series, "tvdbid", 0) or 0)
+	if protect_shared_placeholder_disk_paths("sonarr") and allowed_son and tvdbid:
+		if active_sibling_series_exists(
+			session,
+			exclude_series_id=int(series.id),
+			tvdbid=tvdbid,
+			allowed_instance_keys=allowed_son,
+		):
+			series_has_placeholders = True
+	return paths, bool(series_has_placeholders)
+
+
 def _derive_series_folder(series: Any, season: Any, candidate_paths: list[str]) -> str | None:
 	series_folder = getattr(series, "placeholder_folder", None)
 	if series_folder:
@@ -204,14 +235,27 @@ def cleanup_episode_placeholder_files(
 	season: Any,
 	series: Any,
 	candidate_paths: list[str],
+	paths_prefiltered: list[str] | None = None,
+	series_has_placeholders: bool | None = None,
 ) -> dict[str, Any]:
+	"""Remove episode placeholder files.
+
+	Prefer resolving path filters + sibling guards with a short session, then
+	calling again with ``paths_prefiltered`` / ``series_has_placeholders`` and
+	``session=None`` so FS does not hold a pooled connection.
+	"""
 	deleted_any = False
 	nfo_deleted_any = False
 	series_nfo_deleted = False
 	directories_deleted = 0
 	refresh_paths: set[str] = set()
-	paths = _unique_paths(candidate_paths)
-	paths = filter_episode_disk_cleanup_paths(session, series=series, paths=paths)
+	if paths_prefiltered is not None:
+		paths = _unique_paths(paths_prefiltered)
+	else:
+		paths = _unique_paths(candidate_paths)
+		if session is None:
+			raise ValueError("cleanup_episode_placeholder_files requires session or paths_prefiltered")
+		paths = filter_episode_disk_cleanup_paths(session, series=series, paths=paths)
 
 	for path in paths:
 		deleted_any = remove_placeholder_file(path) or deleted_any
@@ -227,17 +271,20 @@ def cleanup_episode_placeholder_files(
 	series_folder = _derive_series_folder(series, season, paths)
 	if series_folder:
 		candidate_series_folders.add(series_folder)
-	series_has_placeholders = _series_has_active_episode_placeholders(session, series_id=int(series.id))
-	allowed_son = configured_instance_keys("sonarr")
-	tvdbid = int(getattr(series, "tvdbid", 0) or 0)
-	if protect_shared_placeholder_disk_paths("sonarr") and allowed_son and tvdbid:
-		if active_sibling_series_exists(
-			session,
-			exclude_series_id=int(series.id),
-			tvdbid=tvdbid,
-			allowed_instance_keys=allowed_son,
-		):
-			series_has_placeholders = True
+	if series_has_placeholders is None:
+		if session is None:
+			raise ValueError("cleanup_episode_placeholder_files requires session or series_has_placeholders")
+		series_has_placeholders = _series_has_active_episode_placeholders(session, series_id=int(series.id))
+		allowed_son = configured_instance_keys("sonarr")
+		tvdbid = int(getattr(series, "tvdbid", 0) or 0)
+		if protect_shared_placeholder_disk_paths("sonarr") and allowed_son and tvdbid:
+			if active_sibling_series_exists(
+				session,
+				exclude_series_id=int(series.id),
+				tvdbid=tvdbid,
+				allowed_instance_keys=allowed_son,
+			):
+				series_has_placeholders = True
 
 	if not series_has_placeholders:
 		for folder in sorted(candidate_series_folders):
@@ -298,20 +345,29 @@ def cleanup_deleted_series_placeholder_files(
 	*,
 	series: Any,
 	candidate_paths: list[str],
+	paths_prefiltered: list[str] | None = None,
 ) -> dict[str, Any]:
 	"""Bulk cleanup for a deleted series.
 
 	When the derived series folder is entirely placeholder-shaped, remove the whole tree first
 	(fast path), then only handle candidate paths that live outside that tree. Otherwise keep
 	the conservative per-file pass, then attempt the same whole-tree delete as a second step.
+
+	Prefer filtering paths with a short session, then call with ``paths_prefiltered`` and
+	``session=None`` so FS does not hold a pooled connection.
 	"""
 	files_deleted = 0
 	nfos_deleted = 0
 	series_nfo_deleted = False
 	directories_deleted = 0
 	refresh_paths: set[str] = set()
-	paths = _unique_paths(candidate_paths)
-	paths = filter_episode_disk_cleanup_paths(session, series=series, paths=paths)
+	if paths_prefiltered is not None:
+		paths = _unique_paths(paths_prefiltered)
+	else:
+		if session is None:
+			raise ValueError("cleanup_deleted_series_placeholder_files requires session or paths_prefiltered")
+		paths = _unique_paths(candidate_paths)
+		paths = filter_episode_disk_cleanup_paths(session, series=series, paths=paths)
 	started_mono = time.monotonic()
 	series_title = str(getattr(series, "title", "") or "Unknown Series")
 	logger.info(
@@ -478,6 +534,8 @@ def run_orphan_placeholder_cleanup(
 		candidates = [row for row in q.all() if str(getattr(row, "path", "") or "").strip()]
 		stats["candidates"] = len(candidates)
 
+		# Plan under a short read; do not hold the txn across FS deletes.
+		planned: list[dict[str, Any]] = []
 		for row in candidates:
 			path = str(row.path or "").strip()
 			try:
@@ -505,26 +563,60 @@ def run_orphan_placeholder_cleanup(
 					stats["removed_rows"] += 1
 					continue
 
+				planned.append(
+					{
+						"id": int(row.id),
+						"path": path,
+						"tv_ok": bool(tv_ok),
+						"movie_ok": bool(movie_ok),
+					}
+				)
+			except Exception as exc:
+				stats["row_errors"] += 1
+				logger.warning(
+					f"Orphan placeholder cleanup plan failed for id={getattr(row, 'id', None)} path={path!r}: {exc}",
+					extra={"emoji_type": "warning"},
+				)
+
+		session.commit()
+		session.close()
+		session = None
+
+		# Delete catalog rows before FS so a failed/cancelled FS pass cannot leave
+		# has_placeholder=True rows pointing at already-removed files.
+		to_delete_ids = [int(item["id"]) for item in planned if item.get("id") is not None]
+		session = get_session()
+		if to_delete_ids:
+			rows = session.query(Placeholder).filter(Placeholder.id.in_(to_delete_ids)).all()
+			for row in rows:
+				session.delete(row)
+				stats["removed_rows"] += 1
+		session.commit()
+		session.close()
+		session = None
+
+		for item in planned:
+			path = str(item.get("path") or "")
+			row_id = int(item["id"])
+			try:
 				had_media = os.path.isfile(path)
 				if had_media:
 					remove_placeholder_file(path)
 				if remove_nfo_sidecar(path):
 					stats["removed_nfos"] += 1
 				if os.path.isfile(path):
-					# File still present (e.g. permission); keep DB row.
 					stats["row_errors"] += 1
 					logger.warning(
-						f"Orphan placeholder cleanup could not remove file; keeping row id={row.id} path={path!r}",
+						f"Orphan placeholder cleanup could not remove file after row delete "
+						f"id={row_id} path={path!r}",
 						extra={"emoji_type": "warning"},
 					)
 					continue
 
 				if had_media:
 					stats["removed_files"] += 1
-				session.delete(row)
-				stats["removed_rows"] += 1
 
-				if tv_ok:
+				if item.get("tv_ok"):
 					touched_tv = True
 					deleted_tv_paths.append(path)
 					season_folder = os.path.dirname(path)
@@ -541,14 +633,12 @@ def run_orphan_placeholder_cleanup(
 			except Exception as exc:
 				stats["row_errors"] += 1
 				logger.warning(
-					f"Orphan placeholder cleanup failed for id={getattr(row, 'id', None)} path={path!r}: {exc}",
+					f"Orphan placeholder cleanup FS failed for id={row_id} path={path!r}: {exc}",
 					extra={"emoji_type": "warning"},
 				)
 
-		session.commit()
-
-		# Decide which folders are empty of placeholders while session is still open,
-		# then release before FS prune + player library refresh.
+		# Folder emptiness checks need a short session; release before prune FS.
+		session = get_session()
 		series_folders_empty: list[str] = []
 		for folder in sorted(series_folders_to_prune):
 			try:

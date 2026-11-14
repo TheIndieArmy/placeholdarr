@@ -12,7 +12,7 @@ from core.logger import logger
 from sqlalchemy.orm.attributes import flag_modified
 
 from services.messages import render as render_message
-from services.postgres.db import get_session
+from services.postgres.db import bind_worker_pool_role, get_session
 from services.postgres.models import Episode, Movie, Placeholder, Season, Series
 from services.activity_snapshot import clear_queue_download_snapshot, set_queue_download_snapshot
 from services.source_of_truth.arr_api import (
@@ -528,6 +528,8 @@ class QueueMonitorProducer:
 
     def _run_loop(self) -> None:
         """Idle until NOTIFY / safety timeout while no flagged placeholders; tight poll while active."""
+        # Long-lived daemon: keep polling/Arr nudges on the worker pool.
+        bind_worker_pool_role()
         poll_iv = float(self._poll_interval)
         refresh_iv = float(max(0, int(self._arr_refresh_interval)))
         safety = float(self._notify_safety_seconds)

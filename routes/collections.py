@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import queue
 import threading
@@ -276,7 +277,7 @@ async def create_recipe(body: RecipePayload):
 @router.get("/api/collections/plex-sections")
 async def plex_sections(refresh: bool = Query(False)):
     try:
-        sections = plex_collections.list_plex_sections(refresh=refresh)
+        sections = await asyncio.to_thread(plex_collections.list_plex_sections, refresh)
     except plex_collections.PlexCollectionsError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     return {"sections": sections}
@@ -287,20 +288,23 @@ async def tmdb_meta(
     media_type: str = Query("movie", pattern="^(movie|tv)$"),
     region: str = Query("US", min_length=2, max_length=2),
 ):
-    if not tmdb_client.tmdb_configured():
-        return {
-            "configured": False,
-            "genres": [],
-            "providers": [],
-            "regions": [],
-        }
-    try:
+    def _work() -> dict[str, Any]:
+        if not tmdb_client.tmdb_configured():
+            return {
+                "configured": False,
+                "genres": [],
+                "providers": [],
+                "regions": [],
+            }
         return {
             "configured": True,
             "genres": tmdb_client.fetch_genres(media_type),
             "providers": tmdb_client.fetch_watch_providers(media_type, region),
             "regions": tmdb_client.fetch_regions(),
         }
+
+    try:
+        return await asyncio.to_thread(_work)
     except tmdb_client.TmdbError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
@@ -391,8 +395,7 @@ def _arr_instances_for_media(media_type: str) -> list[dict[str, Any]]:
     ]
 
 
-@router.get("/api/collections/builder-meta")
-async def builder_meta(media_type: str = Query("movie", pattern="^(movie|show)$")):
+def _builder_meta_sync(media_type: str) -> dict[str, Any]:
     """Catalog-backed builder metadata for filter pickers and ARR-scoped options."""
     arr_type = "radarr" if media_type == "movie" else "sonarr"
     instances = [
@@ -508,6 +511,11 @@ async def builder_meta(media_type: str = Query("movie", pattern="^(movie|show)$"
     }
 
 
+@router.get("/api/collections/builder-meta")
+async def builder_meta(media_type: str = Query("movie", pattern="^(movie|show)$")):
+    return await asyncio.to_thread(_builder_meta_sync, media_type)
+
+
 class TitleConflictsPayload(BaseModel):
     plex_section_id: int = Field(..., ge=1)
     plex_section_ids: list[int] | None = None
@@ -520,24 +528,20 @@ class TitleConflictsPayload(BaseModel):
 @router.post("/api/collections/title-conflicts")
 async def title_conflicts(body: TitleConflictsPayload):
     """Detect same-title Plex collections in any selected library (would create a twin)."""
-    try:
+
+    def _work() -> dict[str, Any]:
         section_ids = normalize_section_ids(body.plex_section_id, body.plex_section_ids)
         titles = titles_for_conflict_check(
             collection_title=body.collection_title,
             definition=body.definition or {},
             section_type=body.plex_section_type,
         )
-    except RecipeValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    known_keys = None
-    if body.recipe_id is not None:
-        with session_scope() as session:
-            row = session.query(CollectionRecipe).filter(CollectionRecipe.id == body.recipe_id).first()
-            if row is not None and isinstance(row.plex_collection_keys, dict):
-                known_keys = dict(row.plex_collection_keys)
-
-    try:
+        known_keys = None
+        if body.recipe_id is not None:
+            with session_scope() as session:
+                row = session.query(CollectionRecipe).filter(CollectionRecipe.id == body.recipe_id).first()
+                if row is not None and isinstance(row.plex_collection_keys, dict):
+                    known_keys = dict(row.plex_collection_keys)
         conflicts = plex_collections.find_title_conflicts(
             section_ids,
             body.plex_section_type,
@@ -545,27 +549,33 @@ async def title_conflicts(body: TitleConflictsPayload):
             recipe_id=body.recipe_id,
             known_keys=known_keys,
         )
+        return {"conflicts": conflicts, "titles_checked": titles}
+
+    try:
+        return await asyncio.to_thread(_work)
+    except RecipeValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except plex_collections.PlexCollectionsError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return {"conflicts": conflicts, "titles_checked": titles}
 
 
 @router.post("/api/collections/preview")
 async def preview(body: PreviewPayload):
-    try:
+    def _work() -> Any:
         validate_definition(body.definition)
-    except RecipeValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    try:
-        result = preview_definition(
+        return preview_definition(
             body.definition,
             body.plex_section_id,
             body.plex_section_type,
             extra_section_ids=body.plex_section_ids,
         )
+
+    try:
+        return await asyncio.to_thread(_work)
+    except RecipeValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except (tmdb_client.TmdbError, list_sources.ListSourceError) as exc:
         raise HTTPException(status_code=502, detail=str(exc))
-    return result
 
 
 class ValidateSourcePayload(BaseModel):
@@ -580,7 +590,8 @@ async def validate_source(body: ValidateSourcePayload):
     """Resolve a pasted source URL/ref without running a full recipe preview."""
     from services.collections.source_validate import validate_source_reference
 
-    return validate_source_reference(
+    return await asyncio.to_thread(
+        validate_source_reference,
         source_type=body.source_type,
         media_type=body.media_type,
         reference=body.reference,
@@ -618,18 +629,22 @@ ARR_ADD_BATCH_CAP = 100
 
 @router.get("/api/collections/arr-add-options")
 async def arr_add_options(media_type: str = Query("movie", pattern="^(movie|show)$")):
-    instances = _arr_instances_for_media(media_type)
-    payload = []
-    for item in instances:
-        payload.append(
-            {
-                "instance_key": item.get("instance_key"),
-                "label": item.get("label") or item.get("instance_key"),
-                "arr_type": item.get("arr_type"),
-                "quality_profiles": _fetch_instance_quality_profiles(item),
-                "root_folders": _fetch_instance_root_folders(item),
-            }
-        )
+    def _work() -> list[dict[str, Any]]:
+        instances = _arr_instances_for_media(media_type)
+        payload = []
+        for item in instances:
+            payload.append(
+                {
+                    "instance_key": item.get("instance_key"),
+                    "label": item.get("label") or item.get("instance_key"),
+                    "arr_type": item.get("arr_type"),
+                    "quality_profiles": _fetch_instance_quality_profiles(item),
+                    "root_folders": _fetch_instance_root_folders(item),
+                }
+            )
+        return payload
+
+    payload = await asyncio.to_thread(_work)
     return {"instances": payload}
 
 
@@ -807,7 +822,13 @@ class ExplainPayload(BaseModel):
 async def explain_item(body: ExplainPayload):
     """Trace one catalog title through a definition and report per-stage verdicts."""
     try:
-        return explain_definition_item(body.definition, body.plex_section_id, body.plex_section_type, body.item)
+        return await asyncio.to_thread(
+            explain_definition_item,
+            body.definition,
+            body.plex_section_id,
+            body.plex_section_type,
+            body.item,
+        )
     except RecipeValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except (tmdb_client.TmdbError, list_sources.ListSourceError) as exc:

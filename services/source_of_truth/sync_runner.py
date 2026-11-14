@@ -828,14 +828,42 @@ def run_full_sync(
             session = get_session()
         return session
 
+    def _release_session() -> None:
+        """Commit + close so Arr HTTP does not hold a pooled checkout."""
+        nonlocal session
+        if session is None:
+            return
+        try:
+            session.commit()
+        except Exception:
+            try:
+                session.rollback()
+            except Exception:
+                pass
+            try:
+                session.close()
+            except Exception:
+                pass
+            session = None
+            raise
+        try:
+            session.close()
+        except Exception:
+            pass
+        session = None
+
     def _emit_arr_progress(*, force: bool = False) -> None:
         if not callable(on_progress):
             return
         now = time.monotonic()
-        # Time-throttle only (do not also fire on every batch commit). Progress
-        # callbacks often take a DB lock on scheduled_task_run; coupling them to
-        # every batch made ARR catalog sync stall under concurrent workers.
-        if not force and (now - last_live_mono[0]) < 3.0:
+        # Pre-#152 cadence: every batch commit, or at least ~1.5s. The later hard 3s
+        # throttle (plus a second throttle in scheduled_sync) made quiet syncs look
+        # stuck at 0% until the instance finished.
+        if (
+            not force
+            and (now - last_live_mono[0]) < 1.5
+            and progress_done % max(1, int(batch_size or 50)) != 0
+        ):
             return
         last_live_mono[0] = now
         try:
@@ -873,11 +901,8 @@ def run_full_sync(
                 sess = _ensure_session()
                 for movie in movies:
                     _check_cancel()
-                    # End txn before optional art-detail Arr HTTP.
-                    try:
-                        sess.commit()
-                    except Exception:
-                        pass
+                    # End txn + return checkout before optional art-detail Arr HTTP.
+                    _release_session()
                     fields = _movie_fields(movie, sync_instance_key)
                     fields = _fill_missing_movie_art(fields, movie, base_url, api_key)
                     if not fields['tmdbid']:
@@ -886,6 +911,7 @@ def run_full_sync(
                         continue
                     seen_tmdbids.add(fields['tmdbid'])
                     stats['movies_seen'] += 1
+                    sess = _ensure_session()
                     movie_row, created, _ = _upsert_movie(sess, fields)
                     if movie_row is not None and getattr(movie_row, "id", None) is not None:
                         touched_movie_row_ids.append(int(movie_row.id))
@@ -930,11 +956,7 @@ def run_full_sync(
                 for series_idx, series_entry in enumerate(series_items, start=1):
                     _check_cancel()
                     # Commit/close txn before per-series Arr episode + art HTTP.
-                    if session is not None:
-                        try:
-                            session.commit()
-                        except Exception:
-                            pass
+                    _release_session()
                     s_fields = _series_fields(series_entry, sync_instance_key)
                     s_fields = _fill_missing_series_art(s_fields, series_entry, base_url, api_key)
                     if not s_fields['tvdbid']:
@@ -1135,6 +1157,7 @@ def run_full_sync(
                 stats["tag_policies"] = apply_arr_tag_placeholder_policies(
                     movie_row_ids=movie_ids,
                     series_row_ids=series_ids,
+                    follow_up_materialize=False,
                 )
             except Exception as tag_exc:
                 logger.warning(
@@ -1160,6 +1183,7 @@ def run_full_sync(
                     stats["tag_policies"] = apply_arr_tag_placeholder_policies(
                         movie_row_ids=drift_movies,
                         series_row_ids=drift_series,
+                        follow_up_materialize=False,
                     )
             except Exception as tag_exc:
                 logger.warning(
@@ -1245,18 +1269,37 @@ def sync_radarr_movies_by_ids(
 
     session = None
     touched_movie_row_ids: list[int] = []
+
+    def _release_movie_session() -> None:
+        nonlocal session
+        if session is None:
+            return
+        try:
+            session.commit()
+        except Exception:
+            try:
+                session.rollback()
+            except Exception:
+                pass
+            try:
+                session.close()
+            except Exception:
+                pass
+            session = None
+            raise
+        try:
+            session.close()
+        except Exception:
+            pass
+        session = None
+
     try:
         _emit_progress(0, force=True)
         for idx, movie_id in enumerate(ids, start=1):
-            # Arr GET with no DB session held.
+            # Arr GET with no DB session held (commit+close previous title before this fetch).
+            _release_movie_session()
             movie = fetch_radarr_movie(movie_id, base_url, api_key, bypass_cache=True)
-            if session is None:
-                session = get_session()
-            else:
-                try:
-                    session.commit()
-                except Exception:
-                    pass
+            session = get_session()
             if not isinstance(movie, dict):
                 tomb_mids = [
                     int(r[0])
@@ -1272,11 +1315,13 @@ def sync_radarr_movies_by_ids(
                     .update({'is_deleted': True}, synchronize_session=False)
                 )
                 stats['movies_marked_deleted'] += int(marked or 0)
+                session.commit()
                 _emit_progress(idx)
                 continue
 
             fields = _movie_fields(movie, effective_instance_key)
             if not fields['tmdbid']:
+                session.commit()
                 _emit_progress(idx)
                 continue
             stats['movies_seen'] += 1
@@ -1288,10 +1333,9 @@ def sync_radarr_movies_by_ids(
             if created or changed:
                 session.flush()
                 touched_movie_row_ids.append(int(row.id))
+            session.commit()
             _emit_progress(idx)
 
-        if session is not None:
-            session.commit()
         stats['touched_movie_row_ids'] = touched_movie_row_ids
         _emit_progress(total, force=True)
         return stats
@@ -1400,11 +1444,26 @@ def sync_sonarr_series_specials_season0_backfill(
 
         for series_idx, series_entry in enumerate(items, start=1):
             t_series = time.monotonic()
-            # End txn before Arr art / episode catalog HTTP.
-            try:
-                session.commit()
-            except Exception:
-                pass
+            # End txn + return checkout before Arr art / episode catalog HTTP.
+            if session is not None:
+                try:
+                    session.commit()
+                except Exception:
+                    try:
+                        session.rollback()
+                    except Exception:
+                        pass
+                    try:
+                        session.close()
+                    except Exception:
+                        pass
+                    session = None
+                    raise
+                try:
+                    session.close()
+                except Exception:
+                    pass
+                session = None
             sonarr_series_id = series_entry.get("id")
             label = _sonarr_series_display_name(series_entry, int(sonarr_series_id))
             s_fields = _series_fields(series_entry, effective_instance_key)
@@ -1415,6 +1474,7 @@ def sync_sonarr_series_specials_season0_backfill(
                     f"{time.monotonic() - t_series:.1f}s",
                     extra={"emoji_type": "debug"},
                 )
+                session = get_session()
                 _maybe_specials_backfill_overall(series_idx)
                 continue
 
@@ -1450,6 +1510,7 @@ def sync_sonarr_series_specials_season0_backfill(
                 )
                 prepared_episodes.append((ep, ep_effective, episode_file))
 
+            session = get_session()
             stats["series_seen"] += 1
             series_row, series_created, series_changed = _upsert_series(session, s_fields)
             if series_created:
@@ -1614,12 +1675,30 @@ def sync_sonarr_series_by_ids(
         nonlocal session
         if session is None:
             session = get_session()
-        else:
+        return session
+
+    def _release_session() -> None:
+        nonlocal session
+        if session is None:
+            return
+        try:
+            session.commit()
+        except Exception:
             try:
-                session.commit()
+                session.rollback()
             except Exception:
                 pass
-        return session
+            try:
+                session.close()
+            except Exception:
+                pass
+            session = None
+            raise
+        try:
+            session.close()
+        except Exception:
+            pass
+        session = None
 
     try:
         _ep_log_every = 100
@@ -1627,7 +1706,8 @@ def sync_sonarr_series_by_ids(
         _emit_progress(0, force=True)
         for series_idx, series_id in enumerate(ids, start=1):
             t_series = time.monotonic()
-            # Arr GETs first (series item, art fill, episode catalog, detail enrich).
+            # Arr GETs first with no prior title locks held (commit+close at end of each series).
+            _release_session()
             series_entry = fetch_sonarr_series_item(series_id, base_url, api_key, bypass_cache=True)
             label = _sonarr_series_display_name(series_entry if isinstance(series_entry, dict) else None, series_id)
             if not isinstance(series_entry, dict):
@@ -1674,6 +1754,7 @@ def sync_sonarr_series_by_ids(
                             .update({'is_deleted': True}, synchronize_session=False)
                         )
                         stats['episodes_marked_deleted'] += int(marked_episodes or 0)
+                sess.commit()
                 _emit_progress(series_idx)
                 continue
 
@@ -1850,10 +1931,9 @@ def sync_sonarr_series_by_ids(
                 f'{int(series_episodes_done or 0)}/{episodes_to_process} checked · {time.monotonic() - t_series:.1f}s',
                 extra={'emoji_type': 'info'},
             )
+            sess.commit()
             _emit_progress(series_idx)
 
-        if session is not None:
-            session.commit()
         stats['touched_episode_row_ids'] = sorted(touched_episode_ids)
         _emit_progress(total_series, force=True)
         return stats

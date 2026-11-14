@@ -562,6 +562,12 @@ def _build_live_payload(
     else:
         merged_phases = _merge_phases(prev_phases, phases, replace=replace_phases)
 
+    sections = detail_sections
+    if sections is None and isinstance(prev.get("detail_sections"), list):
+        sections = list(prev.get("detail_sections") or [])
+
+    stage_key = str(stage or prev.get("stage") or "working").strip().lower() or "working"
+
     total = max(0, int(units_total or 0))
     done = max(0, int(units_done or 0))
     if total > 0:
@@ -572,16 +578,18 @@ def _build_live_payload(
         overall_pct = int(round((100.0 * done) / total))
         if done < total:
             overall_pct = min(overall_pct, 99)
+    elif stage_key in ("updating", "queued", "refreshing", "determining"):
+        # Art refresh: empty/unknown totals while still in a progress stage must not
+        # snap the pill to 100% (create-wave follow-up / draining Updating).
+        if any(str(p.get("status") or "").lower() in ("working", "pending") for p in merged_phases):
+            overall_pct = 99
+        else:
+            overall_pct = 100
+        done = 0
     else:
         # Nothing queued (e.g. determination found no art mismatches): treat as complete.
         overall_pct = 100
         done = 0
-
-    sections = detail_sections
-    if sections is None and isinstance(prev.get("detail_sections"), list):
-        sections = list(prev.get("detail_sections") or [])
-
-    stage_key = str(stage or prev.get("stage") or "working").strip().lower() or "working"
     stage_text = str(stage_label or prev.get("stage_label") or "").strip()
     if not stage_text:
         if stage_key == "determining":
@@ -698,6 +706,30 @@ FULL_SYNC_CORE_PHASES: list[tuple[str, str]] = [
     ("catalog_gc", "Catalog cleanup"),
     ("calendar", "Calendar status"),
 ]
+
+_FULL_SYNC_CORE_PHASE_KEYS = frozenset(key for key, _label in FULL_SYNC_CORE_PHASES)
+
+
+def full_sync_core_live_still_open(live: dict[str, Any] | None) -> bool:
+    """True while Arr→calendar phase bars are still pending/working on a full sync.
+
+    Mat-enqueued art must not rewrite ``summary.live`` until those bars finish, or the
+    UI snaps every prior phase to 100% and jumps straight to Updating.
+    """
+    if not isinstance(live, dict):
+        return False
+    phases = live.get("phases")
+    if not isinstance(phases, list):
+        return False
+    for raw in phases:
+        if not isinstance(raw, dict):
+            continue
+        key = str(raw.get("key") or "").strip().lower()
+        if key not in _FULL_SYNC_CORE_PHASE_KEYS:
+            continue
+        if str(raw.get("status") or "").strip().lower() in ("working", "pending"):
+            return True
+    return False
 
 # Boot full path (no catalog_gc batch; calendar dates fold into the pipeline before determination).
 STARTUP_FULL_SYNC_CORE_PHASES: list[tuple[str, str]] = [
@@ -1245,6 +1277,10 @@ def seed_art_refresh_live_phases(
         stage = "determining"
         stage_label = "Determining"
     if merge_sync:
+        prev = _load_summary(int(task_run_id)).get(LIVE_KEY)
+        if full_sync_core_live_still_open(prev if isinstance(prev, dict) else None):
+            # Keep Arr→calendar bars owning live until the core pipeline ends.
+            return None
         return append_or_update_live_phases(
             int(task_run_id),
             kind=kind,
@@ -1303,6 +1339,9 @@ def publish_art_determination_live(
     )
     kind, label, merge_sync = _art_live_parent_identity(int(task_run_id))
     if merge_sync:
+        prev = _load_summary(int(task_run_id)).get(LIVE_KEY)
+        if full_sync_core_live_still_open(prev if isinstance(prev, dict) else None):
+            return None
         return append_or_update_live_phases(
             int(task_run_id),
             kind=kind,
@@ -1353,6 +1392,12 @@ def apply_art_refresh_live_into_summary(
         trigger = str(summary.get("trigger") or "").strip() or "-"
     source = str(art.get("source") or summary.get("art_backfill_source") or "-")
     prev_live = summary.get(LIVE_KEY) if isinstance(summary.get(LIVE_KEY), dict) else {}
+    # Full-sync mat may enqueue art early for the completion gate. Do not steal live
+    # from Arr/FS/det/mat/calendar while those phases are still open.
+    if task_run_id is not None:
+        _kind, _label, merge_sync_early = _art_live_parent_identity(int(task_run_id), summary)
+        if merge_sync_early and full_sync_core_live_still_open(prev_live):
+            return None
     items_done, items_total = _art_items_progress(art, active_batch=active_batch, prev_live=prev_live)
     art_working = str(art.get("status") or "").lower() == "working"
     prev_det = _prev_phase(prev_live, "determining")

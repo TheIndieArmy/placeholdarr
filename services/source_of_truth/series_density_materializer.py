@@ -30,6 +30,7 @@ from services.source_of_truth.determiner import (
 )
 from services.source_of_truth.placeholder_cleanup import (
     cleanup_episode_placeholder_files,
+    prepare_episode_placeholder_cleanup,
 )
 from services.source_of_truth.tv_density import (
     DENSITY_PLACEHOLDER_TITLE,
@@ -210,7 +211,8 @@ def _mark_series_stub_active(
     path: str,
     season_id: int | None,
     activity_reason: str | None = None,
-) -> Placeholder:
+) -> tuple[Placeholder, str | None]:
+    """Mark stub active. Returns ``(row, old_path_to_delete_after_commit)``."""
     row = _active_series_stub(session, int(series.id))
     if not row:
         candidate = (
@@ -240,17 +242,10 @@ def _mark_series_stub_active(
 
     old_path = str(getattr(row, "path", "") or "").strip()
     new_path = str(path or "").strip()
+    relocated_from: str | None = None
     if old_path and new_path and _norm_stub_path(old_path) != _norm_stub_path(new_path):
-        # Destination / Library Root moves must not leave a playable stub behind.
-        season = None
-        if season_id is not None:
-            season = session.query(Season).filter(Season.id == int(season_id)).first()
-        cleanup_episode_placeholder_files(
-            session,
-            season=season,
-            series=series,
-            candidate_paths=[old_path],
-        )
+        # Caller must commit, then delete old_path (commit-before-FS).
+        relocated_from = old_path
 
     row.movie_id = None
     row.episode_id = None
@@ -301,7 +296,7 @@ def _mark_series_stub_active(
     row.determination = DETERMINATION_NEEDS
     row.determination_updated_at = func.now()
     session.add(row)
-    return row
+    return row, relocated_from
 
 
 def _mark_series_stub_deleted(
@@ -365,17 +360,17 @@ def apply_series_density_materialization(
                 series_id=int(series.id),
                 activity_reason=activity_reason or "density_not_series",
             )
+            season01 = None
+            disk_paths: list[str] = []
+            series_has = False
             if paths:
                 season01 = (
                     session.query(Season)
                     .filter(Season.series_id == int(series.id), Season.season_number == 1)
                     .first()
                 )
-                cleanup_episode_placeholder_files(
-                    session,
-                    season=season01,
-                    series=series,
-                    candidate_paths=paths,
+                disk_paths, series_has = prepare_episode_placeholder_cleanup(
+                    session, series=series, candidate_paths=paths
                 )
             try:
                 from services.series_episode_stats_hooks import refresh_series_stats_after_bulk
@@ -383,8 +378,16 @@ def apply_series_density_materialization(
                 refresh_series_stats_after_bulk(session, series_ids={int(series.id)})
             except Exception:
                 pass
-            if owns_session:
-                session.commit()
+            session.commit()
+            if disk_paths:
+                cleanup_episode_placeholder_files(
+                    None,
+                    season=season01,
+                    series=series,
+                    candidate_paths=[],
+                    paths_prefiltered=disk_paths,
+                    series_has_placeholders=series_has,
+                )
             return {
                 "ok": True,
                 "action": "skipped_density",
@@ -403,6 +406,41 @@ def apply_series_density_materialization(
 
         if needed:
             target_path = series_density_stub_path(series)
+            series_folder = getattr(series, "placeholder_folder", None)
+            if not series_folder:
+                series.placeholder_folder = os.path.dirname(os.path.dirname(target_path))
+                session.add(series)
+
+            row, relocated_from = _mark_series_stub_active(
+                session,
+                series=series,
+                path=target_path,
+                season_id=season_id,
+                activity_reason=activity_reason,
+            )
+            disk_paths: list[str] = []
+            series_has = False
+            if relocated_from:
+                disk_paths, series_has = prepare_episode_placeholder_cleanup(
+                    session, series=series, candidate_paths=[relocated_from]
+                )
+            try:
+                from services.series_episode_stats_hooks import refresh_series_stats_after_bulk
+
+                refresh_series_stats_after_bulk(session, series_ids={int(series.id)})
+            except Exception:
+                pass
+            # Commit before FS so a later shared-session rollback cannot leave orphan stubs.
+            session.commit()
+            if disk_paths:
+                cleanup_episode_placeholder_files(
+                    None,
+                    season=season01,
+                    series=series,
+                    candidate_paths=[],
+                    paths_prefiltered=disk_paths,
+                    series_has_placeholders=series_has,
+                )
             created = ensure_placeholder_file(target_path, dummy_file_path=_dummy_path())
             ep_proxy, season_proxy = _stub_nfo_proxies(series, season01)
             nfo_written = False
@@ -413,7 +451,6 @@ def apply_series_density_materialization(
                     f"Series density stub NFO skipped for series_id={series.id}: {exc}",
                     extra={"emoji_type": "debug"},
                 )
-            series_folder = getattr(series, "placeholder_folder", None)
             try:
                 series_nfo_written = ensure_series_nfo(series, folder=series_folder)
             except Exception:
@@ -423,31 +460,6 @@ def apply_series_density_materialization(
                     ensure_series_art(series, series_folder=series_folder)
                 except Exception:
                     pass
-
-            if not series_folder:
-                series.placeholder_folder = os.path.dirname(os.path.dirname(target_path))
-                session.add(series)
-
-            prior = _active_series_stub(session, int(series.id))
-            relocated_from = str(getattr(prior, "path", "") or "").strip() if prior else ""
-            if relocated_from and _norm_stub_path(relocated_from) == _norm_stub_path(target_path):
-                relocated_from = ""
-
-            row = _mark_series_stub_active(
-                session,
-                series=series,
-                path=target_path,
-                season_id=season_id,
-                activity_reason=activity_reason,
-            )
-            try:
-                from services.series_episode_stats_hooks import refresh_series_stats_after_bulk
-
-                refresh_series_stats_after_bulk(session, series_ids={int(series.id)})
-            except Exception:
-                pass
-            if owns_session:
-                session.commit()
             return {
                 "ok": True,
                 "action": "created_or_exists",
@@ -465,12 +477,11 @@ def apply_series_density_materialization(
             series_id=int(series.id),
             activity_reason=activity_reason or "series_placeholder_retired",
         )
+        disk_paths: list[str] = []
+        series_has = False
         if paths:
-            cleanup_episode_placeholder_files(
-                session,
-                season=season01,
-                series=series,
-                candidate_paths=paths,
+            disk_paths, series_has = prepare_episode_placeholder_cleanup(
+                session, series=series, candidate_paths=paths
             )
         try:
             from services.series_episode_stats_hooks import refresh_series_stats_after_bulk
@@ -478,8 +489,16 @@ def apply_series_density_materialization(
             refresh_series_stats_after_bulk(session, series_ids={int(series.id)})
         except Exception:
             pass
-        if owns_session:
-            session.commit()
+        session.commit()
+        if disk_paths:
+            cleanup_episode_placeholder_files(
+                None,
+                season=season01,
+                series=series,
+                candidate_paths=[],
+                paths_prefiltered=disk_paths,
+                series_has_placeholders=series_has,
+            )
         return {
             "ok": True,
             "action": "retired" if paths else "noop",
@@ -488,8 +507,10 @@ def apply_series_density_materialization(
             "paths": paths,
         }
     except Exception as exc:
-        if owns_session:
+        try:
             session.rollback()
+        except Exception:
+            pass
         logger.error(
             f"Series density materialization failed for series_id={series_id}: {exc}",
             extra={"emoji_type": "error"},

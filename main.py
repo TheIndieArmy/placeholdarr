@@ -436,7 +436,11 @@ async def lifespan(app: FastAPI):
         # until this finishes, so a startup_sync_runner Job would deadlock.
         def _run_startup_sync():
             try:
+                from services.postgres.db import bind_worker_pool_role
                 from services.source_of_truth.startup import run_startup_source_of_truth
+
+                # Long boot sync must not consume the API pool (UI checkouts).
+                bind_worker_pool_role()
                 startup_result = run_startup_source_of_truth()
                 if startup_result.get('ran'):
                     run_ids = startup_result.get('run_ids', [])

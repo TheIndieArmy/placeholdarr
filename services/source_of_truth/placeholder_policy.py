@@ -46,6 +46,23 @@ def _policy_fast_action_counts(action: Any) -> tuple[int, int]:
     return 0, 0
 
 
+def _enqueue_policy_art(placeholder_ids: list[Any] | None) -> None:
+    """Post-commit art enqueue so policy-fast never holds Arr/TMDB on the mat session."""
+    pids = [
+        int(pid)
+        for pid in (placeholder_ids or [])
+        if pid is not None and int(pid) > 0
+    ]
+    if not pids:
+        return
+    try:
+        from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_refresh
+
+        enqueue_placeholder_art_refresh(pids, session=None, skip_determination=True)
+    except Exception:
+        pass
+
+
 def policy_from_entity(entity) -> PlaceholderPolicy:
     if bool(getattr(entity, "force_placeholder", False)):
         return "pinned"
@@ -283,6 +300,7 @@ def apply_movie_placeholder_policy_fast(movie_id: int) -> dict[str, Any]:
             session=session,
             activity_reason=_ACTIVITY_REASON,
             defer_empty_folder_delete=True,
+            ensure_art=False,
         )
         if not out.get("ok", True):
             session.rollback()
@@ -297,6 +315,7 @@ def apply_movie_placeholder_policy_fast(movie_id: int) -> dict[str, Any]:
 
         refresh_pinned_entity_calendar_status(session, movie)
         session.commit()
+        _enqueue_policy_art([out.get("placeholder_id")])
         action = str(out.get("action") or "noop")
         _schedule_media_refresh_for_policy_action(
             action=action,
@@ -363,6 +382,7 @@ def apply_episode_placeholder_policy_fast(episode_id: int) -> dict[str, Any]:
             int(episode_id),
             session=session,
             activity_reason=_ACTIVITY_REASON,
+            ensure_art=False,
         )
         if not out.get("ok", True):
             session.rollback()
@@ -377,6 +397,7 @@ def apply_episode_placeholder_policy_fast(episode_id: int) -> dict[str, Any]:
 
         refresh_pinned_entity_calendar_status(session, episode)
         session.commit()
+        _enqueue_policy_art([out.get("placeholder_id")])
         action = str(out.get("action") or "noop")
         _schedule_media_refresh_for_policy_action(
             action=action,

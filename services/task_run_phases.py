@@ -802,6 +802,131 @@ def begin_art_backfill_phase(
         logger.debug("art live progress begin skipped: %s", exc, extra={"emoji_type": "debug"})
 
 
+def has_pending_full_sync_follow_up_jobs(task_run_id: int) -> bool:
+    """True while linked art/NFO follow-up jobs are still PENDING or CLAIMED."""
+    return _pending_jobs_for_full_sync_task(int(task_run_id))
+
+
+def ensure_working_art_backfill_run(
+    task_run_id: int,
+    *,
+    source: str,
+    determination_skipped: bool = True,
+) -> tuple[str, int]:
+    """Return ``(art_backfill_run_id, batch_index_base)`` for a working full-sync art wave.
+
+    Reuses an in-progress ``art_backfill`` so mid-sync mat enqueue and end-of-sync
+    backfill share one Updating bar / run id. ``batch_index_base`` is the current
+    ``batch_count`` (next job should stamp ``base + 1``).
+    """
+    import uuid
+
+    from services.task_run_history import mutate_task_run_summary
+
+    run_id_out = ""
+    batch_base = 0
+    created_new = False
+
+    def _mutator(summary: dict[str, Any]) -> dict[str, Any] | None:
+        nonlocal run_id_out, batch_base, created_new
+        art = summary.get("art_backfill") if isinstance(summary.get("art_backfill"), dict) else {}
+        existing_id = str(art.get("run_id") or "").strip()
+        working = existing_id and str(art.get("status") or "").strip().lower() == "working"
+        if working:
+            run_id_out = existing_id
+            batch_base = max(0, int(art.get("batch_count") or 0))
+            return None
+        run_id_out = uuid.uuid4().hex
+        batch_base = 0
+        created_new = True
+        summary["art_backfill"] = {
+            "run_id": run_id_out,
+            "batch_count": 0,
+            "batches_done": 0,
+            "items_total": 0,
+            "items_done": 0,
+            "status": "working",
+            "source": source,
+            "determination_skipped": bool(determination_skipped),
+            "counts": empty_art_counts(),
+        }
+        phases = phases_from_summary(summary) or list(summary.get("phases") or [])
+        now = _utc_now()
+        phase = {
+            "key": "art_refresh",
+            "name": "Art refresh",
+            "status": "working",
+            "started_at": _iso(now),
+            "metrics": [
+                {"label": "Placeholders queued", "value": 0},
+                {"label": "Batches", "value": 0},
+                {"label": "Source", "value": source},
+            ],
+        }
+        summary["phases"] = [p for p in phases if p.get("key") != "art_refresh"] + [phase]
+        return summary
+
+    mutate_task_run_summary(int(task_run_id), _mutator)
+    if created_new:
+        reopen_task_run(int(task_run_id))
+        # Do not seed Updating live here. Mid-mat enqueue links jobs for the
+        # completion gate only; live stays on Arr→calendar until those phases end
+        # (begin_art_backfill / worker publishes after core bars finish).
+    return run_id_out, batch_base
+
+
+def note_art_backfill_jobs_enqueued(
+    task_run_id: int,
+    *,
+    art_run_id: str,
+    placeholder_count: int,
+    batch_count: int,
+    source: str | None = None,
+) -> None:
+    """Add newly queued art placeholders/batches onto the working art_backfill summary."""
+    from services.task_run_history import mutate_task_run_summary
+
+    add_ph = max(0, int(placeholder_count or 0))
+    add_batches = max(0, int(batch_count or 0))
+    if add_ph <= 0 and add_batches <= 0:
+        return
+
+    def _mutator(summary: dict[str, Any]) -> dict[str, Any] | None:
+        art = summary.get("art_backfill") if isinstance(summary.get("art_backfill"), dict) else {}
+        if str(art.get("run_id") or "").strip() != str(art_run_id or "").strip():
+            return None
+        art = dict(art)
+        art["items_total"] = int(art.get("items_total") or 0) + add_ph
+        art["batch_count"] = int(art.get("batch_count") or 0) + add_batches
+        art["status"] = "working"
+        if source and not str(art.get("source") or "").strip():
+            art["source"] = source
+        summary["art_backfill"] = art
+        phases = phases_from_summary(summary) or list(summary.get("phases") or [])
+        for phase in phases:
+            if phase.get("key") != "art_refresh":
+                continue
+            phase["status"] = "working"
+            phase.pop("ended_at", None)
+            phase["metrics"] = [
+                {"label": "Placeholders queued", "value": int(art.get("items_total") or 0)},
+                {"label": "Batches", "value": int(art.get("batch_count") or 0)},
+                {"label": "Source", "value": str(art.get("source") or source or "-")},
+            ]
+        summary["phases"] = phases
+        try:
+            from services.task_live_progress import apply_art_refresh_live_into_summary
+
+            apply_art_refresh_live_into_summary(summary, task_run_id=int(task_run_id))
+        except Exception as exc:
+            logger.debug("art live note enqueue skipped: %s", exc, extra={"emoji_type": "debug"})
+        return summary
+
+    mutate_task_run_summary(int(task_run_id), _mutator)
+    reopen_task_run(int(task_run_id))
+    refresh_full_sync_task_progress(int(task_run_id), overall_status="WORKING")
+
+
 def begin_nfo_backfill_phase(
     task_run_id: int,
     *,

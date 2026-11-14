@@ -9,8 +9,14 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Summary
+
+- **Execution contract (session holds)**: Long Arr, player, FS, and density work no longer keeps a DB session open the whole time, so lite sync / season density should stop wedging other writers behind lock timeouts.
+
 ### Fixed
 
+- **Full sync Arr progress cadence**: Restore pre-#152 live emits (every batch or ~1.5s) and drop the extra scheduled_sync 3s throttle so instance bars fill during catalog upserts again.
+- **Full sync art live timing**: Mat-enqueued art no longer takes over Tasks live while Arr→calendar bars are still open, so Never-off recreate no longer snaps those bars to 100% before Updating.
 - **Never obsolete teardown**: Never (and other live-title obsolete reasons) remove placeholders again; the stale-obsolete guard only skips Arr delete-then-quick-readd (#177).
 - **Series stats after Never/Pinned**: Series gate apply refreshes `episode_placeholders` so Seasons & Episodes matches season PH chips (#177).
 - **Rotated chip edge clip**: Corner chips draw on an offscreen tile before rotate/paste so bake keeps leading glyphs and matches desk placement (off-edge parks still clip).
@@ -38,6 +44,22 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Orphan cleanup refresh hold**: Close before folder prune FS and player library refresh.
 - **Settings save nested sessions**: Release the request session before Arr transplants/reconcile and post-save refresh work.
 - **Apply-now enqueue hold**: Snapshot placeholder ids, close, then enqueue NFO/art in short sessions.
+- **Density once + short sessions**: Lite/reconcile/tag mats run TV density once after all placeholder chunks, in per-series short sessions with art deferred.
+- **Art-needs pure check**: `*_art_needs_refresh` reads sidecars/fingerprints only; no Arr/TMDB localize on the caller session.
+- **Policy-fast art defer**: Never/Pinned fast paths call materialization with `ensure_art=False`, then enqueue art with `skip_determination=True`.
+- **Lite snapshot session**: Startup lite commits/closes after diff SELECTs before monitored-drift Arr fetches and nested targeted syncs.
+- **Targeted sync commit order**: Per-title Arr GET never runs while a prior title's upsert txn is still open.
+- **FS scan chunking**: Full and incremental placeholder root scans walk with no session, then upsert/touch in short DB chunks.
+- **Calendar dummy swap**: Calendar phase plans variants in a short read, swaps files with no session, then writes status/extra without inline art enqueue.
+- **Import grace mat session**: Finalize releases the handler session before nested entity materialization.
+- **Playback Arr release**: Live flag refresh, monitor PUTs, and search POSTs commit before Arr HTTP.
+- **Episode playback Arr hold**: Episode search matches movie: short plan/write sessions with Sonarr HTTP only while no checkout is held.
+- **Playback fallback Arr hold**: Fallback jobs release the claim session before preferred hasFile checks and Arr search; requeue uses a short write session.
+- **Series-add detail prefetch**: Episode still/file detail and series art-fill HTTP run before the write session opens.
+- **Route to_thread**: Collections meta/preview/explain, Plex OAuth, Arr root/test, and detail Arr tags/TMDB collection leave the event loop.
+- **Tag clear Arr PUT**: Policy tag clear closes the read session before Radarr/Sonarr tag updates.
+- **Obsolete FS mid-commit**: Obsolete teardown commits (releases FOR UPDATE) before placeholder file cleanup.
+- **Orphan prune FS**: Orphan cleanup plans rows, deletes files with no session, then short-writes row deletes before empty-folder prune.
 - **TV-only layout art**: Saving a TV poster profile no longer rebakes episode stills (layout filter used to force `art_scope=all`).
 - **Episode-only layout art**: Saving an Episode profile skips series/season poster bakes for that refresh.
 - **Season poster copy**: When a season uses the series poster and the same overlay, copy `poster.jpg` instead of rebaking every season.
@@ -52,6 +74,8 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ### Changed
 
+- **Full-sync art live progress**: Materialization-enqueued art jobs link to the parent full sync (shared Updating bar / completion gate) so create waves no longer sit at 100% with a frozen 0/0 Updating bar until the run snaps done.
+- **Arr tag policy on lite/full sync**: Sync stamps Never/Pinned/Auto from Arr tags only; create/delete runs in the normal determination and materialization phases (no mid-sync tag materialize wave). Library tag-clear still applies placeholders immediately.
 - **Auto pin sidebar progress**: After the pin debounce, Auto marks Saved on the chip and shows title refresh progress in the library sidebar instead of holding Saving… until reconcile finishes.
 - **Never/Pinned sidebar progress**: Fast create/remove also flashes Creating…/Removing… then Done in the library sidebar, even when no reconcile job is queued.
 - **DB dual pools**: Separate API and worker SQLAlchemy pools so UI checkouts are not starved by long worker holds.

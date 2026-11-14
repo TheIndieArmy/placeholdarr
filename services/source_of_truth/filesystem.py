@@ -27,6 +27,7 @@ NON_PLACEHOLDER_EXTENSIONS = {
 
 FS_SCAN_PROGRESS_EVERY_FILES = 2000
 FS_STALE_PROGRESS_EVERY_ROWS = 5000
+FS_SCAN_DB_CHUNK = 200
 
 _NEEDS_PLACEHOLDER = "needs_placeholder"
 
@@ -321,200 +322,293 @@ def _heal_tombstoned_placeholder_paths(session) -> int:
     return int(healed or 0)
 
 
-def _incremental_placeholder_scan(session, roots: list[str]) -> tuple[int, dict[str, Any]]:
+def _incremental_canonical_path_for_row(session, row: Placeholder, scanned_roots: list[str]) -> str | None:
+    """DB-only: compute a candidate canonical path string (no ``isfile``)."""
+    try:
+        mid = getattr(row, "movie_id", None)
+        if mid:
+            mv = session.query(Movie).filter(Movie.id == int(mid)).first()
+            if mv and not getattr(mv, "is_deleted", False):
+                cp = _norm_scan_path(movie_placeholder_path(mv))
+                if looks_like_placeholder_file(cp) and _is_path_under_roots(cp, scanned_roots):
+                    return cp
+        eid = getattr(row, "episode_id", None)
+        if eid:
+            ep = session.query(Episode).filter(Episode.id == int(eid)).first()
+            if ep and not getattr(ep, "is_deleted", False):
+                season = session.query(Season).filter(Season.id == ep.season_id).first()
+                series = (
+                    session.query(Series).filter(Series.id == season.series_id).first()
+                    if season
+                    else None
+                )
+                if (
+                    season
+                    and series
+                    and not getattr(season, "is_deleted", False)
+                    and not getattr(series, "is_deleted", False)
+                ):
+                    cp = _norm_scan_path(episode_placeholder_path(ep, season, series))
+                    if looks_like_placeholder_file(cp) and _is_path_under_roots(cp, scanned_roots):
+                        return cp
+    except Exception:
+        return None
+    return None
+
+
+def _incremental_placeholder_scan(roots: list[str]) -> tuple[int, dict[str, Any]]:
     """Re-stat known placeholder paths + canonical NEEDS paths (no ``os.walk`` full-tree pass).
 
+    Short DB plan → close → disk ``isfile`` with no checkout → short write chunks.
     Global stale marking is skipped here; the hourly scheduled self-heal (full scan) covers drift.
     """
-    healed = _heal_tombstoned_placeholder_paths(session)
     scanned_roots = [os.path.abspath(root) for root in roots if root]
+
+    session = get_session()
+    try:
+        healed = _heal_tombstoned_placeholder_paths(session)
+        session.commit()
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
+
+    ph_plans: list[dict[str, Any]] = []
+    needs_movies: list[tuple[int, str]] = []
+    needs_episodes: list[tuple[int, int, int, str]] = []
+
+    session = get_session()
+    try:
+        for row in session.query(Placeholder).filter(Placeholder.has_placeholder == True).all():  # noqa: E712
+            pid = int(row.id) if getattr(row, "id", None) is not None else None
+            if pid is None:
+                continue
+            eligible = _placeholder_row_eligible_for_fs_refresh(session, row)
+            lifecycle_deleted = _placeholder_lifecycle_is_deleted(row)
+            media_linked = bool(getattr(row, "movie_id", None) or getattr(row, "episode_id", None))
+            raw = getattr(row, "path", None)
+            abs_path = None
+            if raw:
+                try:
+                    abs_path = _norm_scan_path(str(raw))
+                except Exception:
+                    abs_path = None
+            canonical = None
+            if eligible and media_linked:
+                canonical = _incremental_canonical_path_for_row(session, row, scanned_roots)
+            ph_plans.append(
+                {
+                    "id": pid,
+                    "eligible": eligible,
+                    "lifecycle_deleted": lifecycle_deleted,
+                    "media_linked": media_linked,
+                    "abs_path": abs_path,
+                    "canonical_path": canonical,
+                }
+            )
+
+        for mv in session.query(Movie).filter(
+            Movie.determination == _NEEDS_PLACEHOLDER,
+            Movie.is_deleted == False,  # noqa: E712
+        ).all():
+            try:
+                ap = _norm_scan_path(movie_placeholder_path(mv))
+            except Exception:
+                continue
+            if not looks_like_placeholder_file(ap) or not _is_path_under_roots(ap, scanned_roots):
+                continue
+            needs_movies.append((int(mv.id), ap))
+
+        ep_rows = (
+            session.query(Episode, Season, Series)
+            .join(Season, Episode.season_id == Season.id)
+            .join(Series, Season.series_id == Series.id)
+            .filter(
+                Episode.determination == _NEEDS_PLACEHOLDER,
+                Episode.is_deleted == False,  # noqa: E712
+                Season.is_deleted == False,  # noqa: E712
+                Series.is_deleted == False,  # noqa: E712
+            )
+            .all()
+        )
+        for ep, season, series in ep_rows:
+            try:
+                ap = _norm_scan_path(episode_placeholder_path(ep, season, series))
+            except Exception:
+                continue
+            if not looks_like_placeholder_file(ap) or not _is_path_under_roots(ap, scanned_roots):
+                continue
+            needs_episodes.append((int(ep.id), int(season.id), int(series.id), ap))
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
+
+    # Disk stats with no DB checkout held.
+    actions: list[dict[str, Any]] = []
+    for plan in ph_plans:
+        pid = int(plan["id"])
+        if not plan["eligible"]:
+            actions.append(
+                {
+                    "op": "ineligible",
+                    "id": pid,
+                    "lifecycle_deleted": bool(plan["lifecycle_deleted"]),
+                }
+            )
+            continue
+        abs_path = plan.get("abs_path")
+        if not abs_path:
+            actions.append({"op": "stale", "id": pid})
+            continue
+        under = _is_path_under_roots(str(abs_path), scanned_roots)
+        if under and os.path.isfile(str(abs_path)):
+            actions.append({"op": "refresh", "id": pid, "path": str(abs_path)})
+            continue
+        canonical = plan.get("canonical_path")
+        if canonical and os.path.isfile(str(canonical)):
+            actions.append({"op": "refresh", "id": pid, "path": str(canonical)})
+            continue
+        # Path-only rows: defer orphan stale detection to the scheduled full walk.
+        if not plan["media_linked"]:
+            continue
+        actions.append({"op": "stale", "id": pid})
+
+    for mid, ap in needs_movies:
+        if os.path.isfile(ap):
+            actions.append({"op": "needs_movie", "movie_id": int(mid), "path": ap})
+
+    for eid, season_id, series_id, ap in needs_episodes:
+        if os.path.isfile(ap):
+            actions.append(
+                {
+                    "op": "needs_episode",
+                    "episode_id": int(eid),
+                    "season_id": int(season_id),
+                    "series_id": int(series_id),
+                    "path": ap,
+                }
+            )
+
     upserted = 0
     refreshed = 0
     stale_marked = 0
     disconnected = 0
     needs_canonical_hits = 0
 
-    def _refresh_row(row: Placeholder, abs_p: str) -> None:
-        nonlocal refreshed
-        if row.path != abs_p:
-            row.path = abs_p
-        row.has_placeholder = True
-        row.last_observed_at = func.now()
-        session.add(row)
-        refreshed += 1
-
-    def _try_canonical_remap(row: Placeholder) -> bool:
-        """If linked to Movie/Episode, move row.path to canonical materialized path when that file exists."""
-        if not _placeholder_row_eligible_for_fs_refresh(session, row):
-            return False
+    for offset in range(0, len(actions), FS_SCAN_DB_CHUNK):
+        chunk = actions[offset : offset + FS_SCAN_DB_CHUNK]
+        chunk_session = get_session()
         try:
-            mid = getattr(row, "movie_id", None)
-            if mid:
-                mv = session.query(Movie).filter(Movie.id == int(mid)).first()
-                if mv and not getattr(mv, "is_deleted", False):
-                    cp = _norm_scan_path(movie_placeholder_path(mv))
-                    if (
-                        looks_like_placeholder_file(cp)
-                        and _is_path_under_roots(cp, scanned_roots)
-                        and os.path.isfile(cp)
-                    ):
-                        _refresh_row(row, cp)
-                        return True
-            eid = getattr(row, "episode_id", None)
-            if eid:
-                ep = session.query(Episode).filter(Episode.id == int(eid)).first()
-                if ep and not getattr(ep, "is_deleted", False):
-                    season = session.query(Season).filter(Season.id == ep.season_id).first()
-                    series = (
-                        session.query(Series).filter(Series.id == season.series_id).first()
-                        if season
-                        else None
+            for action in chunk:
+                op = action.get("op")
+                if op == "ineligible":
+                    row = chunk_session.get(Placeholder, int(action["id"]))
+                    if row is None:
+                        continue
+                    row.has_placeholder = False
+                    if hasattr(row, "lifecycle_status") and not bool(action.get("lifecycle_deleted")):
+                        row.lifecycle_status = "DELETED"
+                    if getattr(row, "path", None):
+                        row.path = ""
+                    if _disconnect_placeholder_row(row):
+                        disconnected += 1
+                    chunk_session.add(row)
+                    stale_marked += 1
+                elif op == "refresh":
+                    row = chunk_session.get(Placeholder, int(action["id"]))
+                    if row is None:
+                        continue
+                    abs_p = str(action["path"])
+                    if row.path != abs_p:
+                        row.path = abs_p
+                    row.has_placeholder = True
+                    row.last_observed_at = func.now()
+                    chunk_session.add(row)
+                    refreshed += 1
+                elif op == "stale":
+                    row = chunk_session.get(Placeholder, int(action["id"]))
+                    if row is None:
+                        continue
+                    row.has_placeholder = False
+                    if hasattr(row, "lifecycle_status"):
+                        row.lifecycle_status = "MISSING"
+                    if _disconnect_placeholder_row(row):
+                        disconnected += 1
+                    chunk_session.add(row)
+                    stale_marked += 1
+                elif op == "needs_movie":
+                    needs_canonical_hits += 1
+                    mid = int(action["movie_id"])
+                    ap = str(action["path"])
+                    plink = (
+                        chunk_session.query(Placeholder)
+                        .filter(Placeholder.movie_id == mid)
+                        .order_by(Placeholder.id.desc())
+                        .first()
                     )
-                    if (
-                        season
-                        and series
-                        and not getattr(season, "is_deleted", False)
-                        and not getattr(series, "is_deleted", False)
-                    ):
-                        cp = _norm_scan_path(episode_placeholder_path(ep, season, series))
-                        if (
-                            looks_like_placeholder_file(cp)
-                            and _is_path_under_roots(cp, scanned_roots)
-                            and os.path.isfile(cp)
-                        ):
-                            _refresh_row(row, cp)
-                            return True
+                    if plink:
+                        if plink.path != ap:
+                            plink.path = ap
+                        plink.has_placeholder = True
+                        plink.last_observed_at = func.now()
+                        chunk_session.add(plink)
+                        refreshed += 1
+                    else:
+                        chunk_session.add(
+                            Placeholder(
+                                path=ap,
+                                movie_id=mid,
+                                has_placeholder=True,
+                                created_by="fs_scan_incremental",
+                                last_observed_at=func.now(),
+                            )
+                        )
+                        upserted += 1
+                elif op == "needs_episode":
+                    needs_canonical_hits += 1
+                    eid = int(action["episode_id"])
+                    ap = str(action["path"])
+                    plink = (
+                        chunk_session.query(Placeholder)
+                        .filter(Placeholder.episode_id == eid)
+                        .order_by(Placeholder.id.desc())
+                        .first()
+                    )
+                    if plink:
+                        if plink.path != ap:
+                            plink.path = ap
+                        plink.has_placeholder = True
+                        plink.last_observed_at = func.now()
+                        chunk_session.add(plink)
+                        refreshed += 1
+                    else:
+                        chunk_session.add(
+                            Placeholder(
+                                path=ap,
+                                episode_id=eid,
+                                series_id=int(action["series_id"]),
+                                season_id=int(action["season_id"]),
+                                has_placeholder=True,
+                                created_by="fs_scan_incremental",
+                                last_observed_at=func.now(),
+                            )
+                        )
+                        upserted += 1
+            chunk_session.commit()
         except Exception:
-            return False
-        return False
-
-    def _placeholder_media_linked(row: Placeholder) -> bool:
-        return bool(getattr(row, "movie_id", None) or getattr(row, "episode_id", None))
-
-    for row in session.query(Placeholder).filter(Placeholder.has_placeholder == True).all():  # noqa: E712
-        if not _placeholder_row_eligible_for_fs_refresh(session, row):
-            # Defensive: clear accidental reactivation of tombstoned / deleted-entity rows.
-            row.has_placeholder = False
-            if hasattr(row, "lifecycle_status") and not _placeholder_lifecycle_is_deleted(row):
-                row.lifecycle_status = "DELETED"
-            if getattr(row, "path", None):
-                row.path = ""
-            if _disconnect_placeholder_row(row):
-                disconnected += 1
-            session.add(row)
-            stale_marked += 1
-            continue
-        raw = getattr(row, "path", None)
-        if not raw:
-            row.has_placeholder = False
-            if hasattr(row, "lifecycle_status"):
-                row.lifecycle_status = "MISSING"
-            if _disconnect_placeholder_row(row):
-                disconnected += 1
-            session.add(row)
-            stale_marked += 1
-            continue
-        try:
-            ap = _norm_scan_path(str(raw))
-        except Exception:
-            continue
-
-        under = _is_path_under_roots(ap, scanned_roots)
-        if under and os.path.isfile(ap):
-            _refresh_row(row, ap)
-            continue
-
-        if _try_canonical_remap(row):
-            continue
-
-        # Path-only rows (typical of ``fs_scan`` upserts with no movie_id/episode_id) cannot be
-        # canonical-remapped here. Marking them MISSING when ``under``/``isfile`` disagrees with
-        # DB strings would clear thousands of TV placeholders before reconcile → episodes_linked=0
-        # and mass ``needs_placeholder``. Defer orphan stale detection to the scheduled full walk.
-        if not _placeholder_media_linked(row):
-            continue
-
-        if not under:
-            row.has_placeholder = False
-            if hasattr(row, "lifecycle_status"):
-                row.lifecycle_status = "MISSING"
-            if _disconnect_placeholder_row(row):
-                disconnected += 1
-            session.add(row)
-            stale_marked += 1
-            continue
-
-        row.has_placeholder = False
-        if hasattr(row, "lifecycle_status"):
-            row.lifecycle_status = "MISSING"
-        if _disconnect_placeholder_row(row):
-            disconnected += 1
-        session.add(row)
-        stale_marked += 1
-
-    for mv in session.query(Movie).filter(Movie.determination == _NEEDS_PLACEHOLDER, Movie.is_deleted == False).all():  # noqa: E712
-        try:
-            ap = _norm_scan_path(movie_placeholder_path(mv))
-        except Exception:
-            continue
-        if not looks_like_placeholder_file(ap) or not _is_path_under_roots(ap, scanned_roots):
-            continue
-        if not os.path.isfile(ap):
-            continue
-        needs_canonical_hits += 1
-        plink = session.query(Placeholder).filter(Placeholder.movie_id == mv.id).order_by(Placeholder.id.desc()).first()
-        if plink:
-            _refresh_row(plink, ap)
-        else:
-            session.add(
-                Placeholder(
-                    path=ap,
-                    movie_id=mv.id,
-                    has_placeholder=True,
-                    created_by="fs_scan_incremental",
-                    last_observed_at=func.now(),
-                )
-            )
-            upserted += 1
-
-    ep_rows = (
-        session.query(Episode, Season, Series)
-        .join(Season, Episode.season_id == Season.id)
-        .join(Series, Season.series_id == Series.id)
-        .filter(
-            Episode.determination == _NEEDS_PLACEHOLDER,
-            Episode.is_deleted == False,  # noqa: E712
-            Season.is_deleted == False,  # noqa: E712
-            Series.is_deleted == False,  # noqa: E712
-        )
-        .all()
-    )
-    for ep, season, series in ep_rows:
-        try:
-            ap = _norm_scan_path(episode_placeholder_path(ep, season, series))
-        except Exception:
-            continue
-        if not looks_like_placeholder_file(ap) or not _is_path_under_roots(ap, scanned_roots):
-            continue
-        if not os.path.isfile(ap):
-            continue
-        needs_canonical_hits += 1
-        plink = session.query(Placeholder).filter(Placeholder.episode_id == ep.id).order_by(Placeholder.id.desc()).first()
-        if plink:
-            _refresh_row(plink, ap)
-        else:
-            session.add(
-                Placeholder(
-                    path=ap,
-                    episode_id=ep.id,
-                    series_id=series.id,
-                    season_id=season.id,
-                    has_placeholder=True,
-                    created_by="fs_scan_incremental",
-                    last_observed_at=func.now(),
-                )
-            )
-            upserted += 1
+            try:
+                chunk_session.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            try:
+                chunk_session.close()
+            except Exception:
+                pass
 
     meta: dict[str, Any] = {
         "full_scan": False,
@@ -568,8 +662,13 @@ def scan_placeholder_roots(
 
     try:
         if not full_scan:
-            upserted, meta = _incremental_placeholder_scan(session, roots)
-            session.commit()
+            # Incremental owns its short sessions; release the opener before plan/stat/write.
+            try:
+                session.close()
+            except Exception:
+                pass
+            session = None
+            upserted, meta = _incremental_placeholder_scan(roots)
             elapsed = time.monotonic() - started_mono
             logger.info(
                 "FS incremental scan complete: "
@@ -583,11 +682,15 @@ def scan_placeholder_roots(
             return upserted, meta
 
         healed = _heal_tombstoned_placeholder_paths(session)
+        session.commit()
+        session.close()
+        session = None
         logger.info(
             f"FS scan started roots={len(scanned_roots)} full_scan=True "
             f"tombstoned_paths_cleared={healed}",
             extra={'emoji_type': 'info'},
         )
+        # Walk with no DB session so os.walk cannot hold row locks.
         for root in roots:
             if not root:
                 continue
@@ -603,18 +706,32 @@ def scan_placeholder_roots(
                         continue
                     scanned_media_candidates += 1
                     observed_paths.add(path)
+                    if scanned_media_candidates % FS_SCAN_PROGRESS_EVERY_FILES == 0:
+                        elapsed = time.monotonic() - started_mono
+                        logger.info(
+                            "FS scan walk progress: "
+                            f"media_candidates={scanned_media_candidates} "
+                            f"total_files_seen={scanned_files} "
+                            f"elapsed_s={elapsed:.1f}",
+                            extra={'emoji_type': 'info'},
+                        )
+                    _emit_fs_progress()
 
-                    existing = _pick_placeholder_row_for_observed_path(session, path)
+        observed_list = sorted(observed_paths)
+        for offset in range(0, len(observed_list), FS_SCAN_DB_CHUNK):
+            chunk = observed_list[offset : offset + FS_SCAN_DB_CHUNK]
+            chunk_session = get_session()
+            try:
+                for path in chunk:
+                    existing = _pick_placeholder_row_for_observed_path(chunk_session, path)
                     if existing:
                         existing.has_placeholder = True
                         if hasattr(existing, "lifecycle_status"):
                             existing.lifecycle_status = "ACTIVE"
                         existing.last_observed_at = func.now()
-                        session.add(existing)
+                        chunk_session.add(existing)
                     else:
-                        # Do not reactivate tombstoned / deleted-entity rows that still
-                        # share this path; open a path-only row for reconcile instead.
-                        session.add(
+                        chunk_session.add(
                             Placeholder(
                                 path=path,
                                 has_placeholder=True,
@@ -623,52 +740,80 @@ def scan_placeholder_roots(
                             )
                         )
                         upserted += 1
-                    if scanned_media_candidates % FS_SCAN_PROGRESS_EVERY_FILES == 0:
-                        elapsed = time.monotonic() - started_mono
-                        logger.info(
-                            "FS scan progress: "
-                            f"media_candidates={scanned_media_candidates} "
-                            f"total_files_seen={scanned_files} "
-                            f"upserted={upserted} "
-                            f"elapsed_s={elapsed:.1f}",
-                            extra={'emoji_type': 'info'},
-                        )
-                    _emit_fs_progress()
+                chunk_session.commit()
+            except Exception:
+                try:
+                    chunk_session.rollback()
+                except Exception:
+                    pass
+                raise
+            finally:
+                try:
+                    chunk_session.close()
+                except Exception:
+                    pass
 
-        # Mark stale placeholder rows as missing whenever they were previously active
-        # but were not observed in this scan. This intentionally includes rows whose
-        # path drifted outside configured roots to self-heal legacy mismatches.
-        active_query = session.query(Placeholder).filter(Placeholder.has_placeholder == True)  # noqa: E712
+        # Stale-mark active rows not observed (chunked so we do not lock the whole table).
+        stale_session = get_session()
+        try:
+            active_ids = [
+                int(r[0])
+                for r in stale_session.query(Placeholder.id)
+                .filter(Placeholder.has_placeholder == True)  # noqa: E712
+                .all()
+                if r and r[0] is not None
+            ]
+        finally:
+            try:
+                stale_session.close()
+            except Exception:
+                pass
 
-        active_rows = active_query.all()
-        for idx, row in enumerate(active_rows, start=1):
-            row_path = getattr(row, 'path', None)
-            if not row_path:
-                continue
-            if row_path in observed_paths:
-                continue
-
-            row.has_placeholder = False
-            if hasattr(row, 'lifecycle_status'):
-                row.lifecycle_status = 'MISSING'
-            if _disconnect_placeholder_row(row):
-                disconnected += 1
-            if hasattr(row, 'updated_at'):
-                row.updated_at = func.now()
-            session.add(row)
-            stale_marked += 1
-            if idx % FS_STALE_PROGRESS_EVERY_ROWS == 0:
+        for offset in range(0, len(active_ids), FS_SCAN_DB_CHUNK):
+            id_chunk = active_ids[offset : offset + FS_SCAN_DB_CHUNK]
+            chunk_session = get_session()
+            try:
+                rows = (
+                    chunk_session.query(Placeholder)
+                    .filter(Placeholder.id.in_(id_chunk))
+                    .all()
+                )
+                for row in rows:
+                    row_path = getattr(row, 'path', None)
+                    if not row_path or row_path in observed_paths:
+                        continue
+                    row.has_placeholder = False
+                    if hasattr(row, 'lifecycle_status'):
+                        row.lifecycle_status = 'MISSING'
+                    if _disconnect_placeholder_row(row):
+                        disconnected += 1
+                    if hasattr(row, 'updated_at'):
+                        row.updated_at = func.now()
+                    chunk_session.add(row)
+                    stale_marked += 1
+                chunk_session.commit()
+            except Exception:
+                try:
+                    chunk_session.rollback()
+                except Exception:
+                    pass
+                raise
+            finally:
+                try:
+                    chunk_session.close()
+                except Exception:
+                    pass
+            if (offset + len(id_chunk)) % FS_STALE_PROGRESS_EVERY_ROWS < FS_SCAN_DB_CHUNK:
                 elapsed = time.monotonic() - started_mono
                 logger.info(
                     "FS stale-mark progress: "
-                    f"checked={idx}/{len(active_rows)} "
+                    f"checked={min(offset + len(id_chunk), len(active_ids))}/{len(active_ids)} "
                     f"stale_marked={stale_marked} "
                     f"disconnected={disconnected} "
                     f"elapsed_s={elapsed:.1f}",
                     extra={'emoji_type': 'info'},
                 )
 
-        session.commit()
         _emit_fs_progress(force=True)
         elapsed = time.monotonic() - started_mono
         meta = {
@@ -694,10 +839,18 @@ def scan_placeholder_roots(
             )
         return upserted, meta
     except Exception:
-        session.rollback()
+        if session is not None:
+            try:
+                session.rollback()
+            except Exception:
+                pass
         raise
     finally:
-        session.close()
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
 
 
 def scan_once_if_needed(

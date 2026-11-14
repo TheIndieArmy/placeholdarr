@@ -384,8 +384,6 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
             }
             phases.progress("arr_sync", units=list(arr_units), unit_label="titles")
 
-            _arr_progress_published_at = [0.0]
-
             def _on_arr_progress(done: int, total: int, *, _idx: int = inst_idx) -> None:
                 arr_units[_idx] = {
                     **arr_units[_idx],
@@ -393,18 +391,6 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
                     "done": max(0, int(done or 0)),
                     "total": max(0, int(total or 0)),
                 }
-                # Extra throttle on top of sync_runner's emit cadence: live publish
-                # takes a task_run row lock and must not pace catalog upserts.
-                now = time.monotonic()
-                total_i = max(0, int(total or 0))
-                done_i = max(0, int(done or 0))
-                if (
-                    total_i > 0
-                    and done_i not in (0, total_i)
-                    and (now - _arr_progress_published_at[0]) < 3.0
-                ):
-                    return
-                _arr_progress_published_at[0] = now
                 phases.progress("arr_sync", units=list(arr_units), unit_label="titles")
 
             key = _run_full_sync_with_deadlock_retry(
@@ -610,6 +596,30 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
             pipeline_stats["orphan_placeholders"] = run_orphan_placeholder_cleanup()
             phases.end("calendar", metrics=metrics_from_pipeline(pipeline_stats).get("calendar"))
 
+            # Mat may have already enqueued art for the completion gate. Promote
+            # Updating live only now that Arr→calendar bars are finished.
+            try:
+                from services.task_live_progress import (
+                    publish_art_refresh_live,
+                    seed_art_refresh_live_phases,
+                )
+
+                summary_now = _load_summary(int(task_run_id)) if task_run_id is not None else {}
+                art_now = (
+                    summary_now.get("art_backfill")
+                    if isinstance(summary_now, dict) and isinstance(summary_now.get("art_backfill"), dict)
+                    else {}
+                )
+                if str(art_now.get("status") or "").strip().lower() == "working":
+                    seed_art_refresh_live_phases(int(task_run_id), skip_determination=True)
+                    publish_art_refresh_live(int(task_run_id), replace_active_units=True)
+            except Exception as art_live_exc:
+                logger.debug(
+                    "full_sync art live promote after calendar skipped: %s",
+                    art_live_exc,
+                    extra={"emoji_type": "debug"},
+                )
+
             # Day-rollover New Ep. / CS label art (same follow-up as calendar_sync).
             try:
                 from services.source_of_truth.placeholder_art_reconciler import (
@@ -697,10 +707,14 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
             )
 
         phase_list = phases_from_summary(_load_summary(task_run_id)) or phase_list
-        if follow_ups_started:
+        from services.task_run_phases import has_pending_full_sync_follow_up_jobs
+
+        pending_follow_ups = bool(follow_ups_started) or has_pending_full_sync_follow_up_jobs(int(task_run_id))
+        if pending_follow_ups:
+            # Keep WORKING while mat-linked art/NFO jobs drain (even if end-of-sync
+            # backfill itself enqueued nothing).
             refresh_full_sync_task_progress(task_run_id, phases=phase_list, overall_status="WORKING")
-        else:
-            try_complete_full_sync_task_run(task_run_id)
+        try_complete_full_sync_task_run(task_run_id)
         return result
     except TaskRunCancelled as cancel_exc:
         logger.warning(

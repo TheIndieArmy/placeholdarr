@@ -311,17 +311,34 @@ def _sonarr_episode_monitored_drift_series_ids(
     base_url: str,
     api_key: str,
     candidate_series_ids: set[int],
+    release_session_after_snapshot: bool = False,
 ) -> set[int]:
-    """Series whose per-episode monitored flags differ between DB and Sonarr."""
+    """Series whose per-episode monitored flags differ between DB and Sonarr.
+
+    Snapshot DB rows first, then Arr GETs. When ``release_session_after_snapshot``
+    is true, commit+close before HTTP (caller must reopen).
+    """
     if not candidate_series_ids:
         return set()
     db_by_series = _db_episode_monitored_rows_by_series(session, instance_key)
-    drift: set[int] = set()
+    # Copy signatures so callers can commit/close before Arr HTTP.
+    pending: list[tuple[int, object]] = []
     for sid in candidate_series_ids:
         db_rows = db_by_series.get(int(sid))
         if not db_rows:
             continue
-        db_sig = _episode_monitored_signature(db_rows)
+        pending.append((int(sid), _episode_monitored_signature(db_rows)))
+    if release_session_after_snapshot and session is not None:
+        try:
+            session.commit()
+        except Exception:
+            pass
+        try:
+            session.close()
+        except Exception:
+            pass
+    drift: set[int] = set()
+    for sid, db_sig in pending:
         api_eps = fetch_sonarr_episodes(int(sid), base_url, api_key) or []
         api_rows: list[tuple[int, bool]] = []
         for ep in api_eps:
@@ -719,11 +736,16 @@ def _run_startup_lite_snapshot_for_instances(
             hb_stop = None
             try:
                 row = _get_or_create_arr_state(session, instance_key, instance['arr_type'])
-                # Release txn before long Arr catalog GET.
+                # Release txn + checkout before long Arr catalog GET.
                 try:
                     session.commit()
                 except Exception:
                     pass
+                try:
+                    session.close()
+                except Exception:
+                    pass
+                session = None
                 t0 = time.monotonic()
                 logger.info(
                     f"Startup lite · {instance_key} · {'movies' if instance['arr_type'] == 'radarr' else 'TV shows'} · catalog check",
@@ -733,6 +755,7 @@ def _run_startup_lite_snapshot_for_instances(
                 hb_stop, _hb_thread = _start_instance_heartbeat(inst_idx, done_ref, total_ref)
                 if instance['arr_type'] == 'radarr':
                     api_movies = fetch_radarr_movies(instance['base_url'], instance['api_key'], bypass_cache=True)
+                    session = get_session()
                     if api_movies is None:
                         logger.warning(
                             f"Startup lite · {instance_key} · movies: Radarr catalog fetch failed; "
@@ -838,6 +861,16 @@ def _run_startup_lite_snapshot_for_instances(
                                 total=total_ref[0],
                             )
 
+                        # Targeted sync opens its own sessions; release this checkout first.
+                        try:
+                            session.commit()
+                        except Exception:
+                            pass
+                        try:
+                            session.close()
+                        except Exception:
+                            pass
+                        session = None
                         sync_stats = sync_radarr_movies_by_ids(
                             target_ids,
                             base_url=instance['base_url'],
@@ -845,6 +878,7 @@ def _run_startup_lite_snapshot_for_instances(
                             instance_key=instance_key,
                             on_progress=_on_movie_sync_progress,
                         )
+                        session = get_session()
                         stats['targeted_sync_runs'] += 1
                         stats['movies_seen'] += int(sync_stats.get('movies_seen', 0) or 0)
                         stats['movies_marked_deleted'] += int(sync_stats.get('movies_marked_deleted', 0) or 0)
@@ -880,6 +914,7 @@ def _run_startup_lite_snapshot_for_instances(
                         _emit_instance(inst_idx, "working", done=instance_done, total=instance_total)
                 else:
                     api_series = fetch_sonarr_series(instance['base_url'], instance['api_key'], bypass_cache=True)
+                    session = get_session()
                     if api_series is None:
                         logger.warning(
                             f"Startup lite · {instance_key} · TV shows: Sonarr catalog fetch failed; "
@@ -1012,13 +1047,16 @@ def _run_startup_lite_snapshot_for_instances(
 
                     if bool(getattr(settings, "SKIP_PLACEHOLDERS_WHEN_MONITORED", False)):
                         episode_mon_candidates = set(db_by_id.keys()) - changed_ids
+                        # Snapshot under session, then release checkout before Sonarr GETs.
                         ep_mon_drift = _sonarr_episode_monitored_drift_series_ids(
                             session,
                             instance_key=instance_key,
                             base_url=instance["base_url"],
                             api_key=instance["api_key"],
                             candidate_series_ids=episode_mon_candidates,
+                            release_session_after_snapshot=True,
                         )
+                        session = get_session()
                         if ep_mon_drift:
                             changed_ids |= ep_mon_drift
 
@@ -1093,6 +1131,16 @@ def _run_startup_lite_snapshot_for_instances(
                                 total=total_ref[0],
                             )
 
+                        # Targeted sync opens its own sessions; release this checkout first.
+                        try:
+                            session.commit()
+                        except Exception:
+                            pass
+                        try:
+                            session.close()
+                        except Exception:
+                            pass
+                        session = None
                         sync_stats = sync_sonarr_series_by_ids(
                             target_ids,
                             base_url=instance['base_url'],
@@ -1100,6 +1148,7 @@ def _run_startup_lite_snapshot_for_instances(
                             instance_key=instance_key,
                             on_progress=_on_series_sync_progress,
                         )
+                        session = get_session()
                         stats['targeted_sync_runs'] += 1
                         stats['series_seen'] += int(sync_stats.get('series_seen', 0) or 0)
                         stats['episodes_seen'] += int(sync_stats.get('episodes_seen', 0) or 0)
@@ -1159,7 +1208,17 @@ def _run_startup_lite_snapshot_for_instances(
                 if hb_stop is not None:
                     hb_stop.set()
                     hb_stop = None
-                session.rollback()
+                if session is not None:
+                    try:
+                        session.rollback()
+                    except Exception:
+                        pass
+                    try:
+                        session.close()
+                    except Exception:
+                        pass
+                    session = None
+                session = get_session()
                 stats['instances_failed'] += 1
                 logger.warning(
                     f"Startup lite snapshot sync failed for {instance_key}: {e}",
@@ -1174,6 +1233,7 @@ def _run_startup_lite_snapshot_for_instances(
             from services.source_of_truth.tag_placeholder_policy import (
                 apply_arr_tag_placeholder_policies,
                 collect_tag_policy_drift_row_ids,
+                episode_row_ids_for_series_ids,
             )
 
             # Union drift so tags that landed via concurrent entity_reconcile (or other
@@ -1200,7 +1260,20 @@ def _run_startup_lite_snapshot_for_instances(
             stats["tag_policies"] = apply_arr_tag_placeholder_policies(
                 movie_row_ids=movie_ids,
                 series_row_ids=series_ids,
+                follow_up_materialize=False,
             )
+            # Stamp-only: fold policy-changed rows into lite determine/mat scopes
+            # (especially drift titles that were not in the catalog touched set).
+            tp = stats.get("tag_policies") if isinstance(stats.get("tag_policies"), dict) else {}
+            changed_movies = [int(x) for x in (tp.get("movie_ids_changed") or []) if x is not None]
+            changed_series = [int(x) for x in (tp.get("series_ids_changed") or []) if x is not None]
+            if changed_movies:
+                stats["movie_row_ids"] = sorted(set(stats["movie_row_ids"]) | set(changed_movies))
+            if changed_series:
+                stats["series_row_ids"] = sorted(set(stats["series_row_ids"]) | set(changed_series))
+                extra_eps = episode_row_ids_for_series_ids(changed_series)
+                if extra_eps:
+                    stats["episode_row_ids"] = sorted(set(stats["episode_row_ids"]) | set(extra_eps))
         except Exception as tag_exc:
             logger.warning(
                 f"Arr tag placeholder policies failed after lite snapshot: {tag_exc}",
@@ -1210,7 +1283,11 @@ def _run_startup_lite_snapshot_for_instances(
             stats["tag_policies"] = {"ok": False, "error": str(tag_exc)}
         return stats
     finally:
-        session.close()
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
 
 
 def _resolve_startup_sync_mode(
