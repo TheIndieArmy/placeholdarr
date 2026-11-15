@@ -2894,7 +2894,8 @@ def run_materialization_for_entities(
                         schedule_scoped_placeholder_media_refresh(
                             created_paths=density_created,
                             delete_paths=density_deleted,
-                            empty_trash_on_delete=bool(density_deleted),
+                            has_movies=False,
+                            has_episodes=True,
                         )
                     except Exception as refresh_exc:
                         logger.warning(
