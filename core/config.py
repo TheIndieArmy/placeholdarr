@@ -519,7 +519,9 @@ class Settings(BaseSettings):
     MATERIALIZATION_COMMIT_LOCK_TIMEOUT_SECONDS: int = int(
         os.getenv("MATERIALIZATION_COMMIT_LOCK_TIMEOUT_SECONDS", "15").split("#")[0].strip() or "15"
     )
-    MEDIA_REFRESH_SECTION_FALLBACK_ENABLED: bool = os.getenv("MEDIA_REFRESH_SECTION_FALLBACK_ENABLED", "true").split('#')[0].strip().lower() == "true"
+    # When true: allow whole-section scans as a safety net (projection miss, optional
+    # end-of-full-sync). Default off (#181); path refreshes are the primary mechanism.
+    MEDIA_REFRESH_SECTION_FALLBACK_ENABLED: bool = os.getenv("MEDIA_REFRESH_SECTION_FALLBACK_ENABLED", "false").split('#')[0].strip().lower() == "true"
     MATERIALIZATION_OVERLAP_ENABLED: bool = True
     MATERIALIZATION_OVERLAP_MOVIE_CHECKPOINT_COUNT: int = 200
     MATERIALIZATION_OVERLAP_EPISODE_CHECKPOINT_COUNT: int = 400

@@ -399,6 +399,7 @@ def process_media_refresh_job(session, job: Job) -> dict[str, Any]:
                     include_plex=include_plex,
                     include_jellyfin=include_jellyfin,
                     include_emby=include_emby,
+                    bypass_suppression=bypass_suppression,
                 )
                 logger.info(
                     f"{log_prefix} completed bulk initial media server library refresh: "

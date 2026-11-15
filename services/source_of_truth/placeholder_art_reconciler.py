@@ -12,7 +12,6 @@ from typing import Any
 from core.logger import logger
 from services.media_servers.refresh import (
     refresh_all_paths,
-    refresh_all_sections,
     refresh_players_after_local_art_rewrite,
 )
 from services.placeholder_poster_art import (
@@ -1180,6 +1179,11 @@ def _art_refresh_completion_scan_if_last_batch(
     run_id: str,
     log_prefix: str = "Placeholder art backfill",
 ) -> None:
+    """Finalize bulk art backfill without a force full-section metadata refresh (#181).
+
+    Path + item refreshes run per batch when posters are rewritten. This last-batch
+    hook only claims completion, busts UI cache, and finishes the task phase.
+    """
     # Capture before commit/close: expire_on_commit would detach Job and make
     # later ``job.id`` access raise DetachedInstanceError (fails the whole batch).
     job_id = int(job.id)
@@ -1196,42 +1200,23 @@ def _art_refresh_completion_scan_if_last_batch(
     ):
         return
 
-    # Close the worker DB session before long media-server HTTP (same pattern as nfo_refresh).
     try:
         session.commit()
     except Exception:
         session.rollback()
-    try:
-        session.close()
-    except Exception:
-        pass
 
     _art_refresh_bust_ui_library_cache(run_id=run_id, log_prefix=log_prefix)
 
-    # Mark the full-sync task DONE before Plex/JF/Emby refresh so the Tasks UI does not
-    # sit on WORKING for tens of minutes while library scans run.
     if task_run_id:
         from services.task_run_phases import finalize_art_backfill_phase
 
         finalize_art_backfill_phase(task_run_id, run_id, exclude_job_id=job_id)
 
-    try:
-        refresh_stats = refresh_all_sections(
-            has_movies=True,
-            has_episodes=True,
-            plex_force_metadata_refresh=True,
-        )
-        logger.info(
-            f"{log_prefix} run complete; triggered library section refresh "
-            f"run_id={run_id} refreshed={int(refresh_stats.get('refreshed', 0) or 0)} "
-            f"failed={int(refresh_stats.get('failed', 0) or 0)}",
-            extra={"emoji_type": "success"},
-        )
-    except Exception as exc:
-        logger.warning(
-            f"{log_prefix} completion refresh failed run_id={run_id}: {exc}",
-            extra={"emoji_type": "warning"},
-        )
+    logger.info(
+        f"{log_prefix} run complete; skipped force library section refresh "
+        f"run_id={run_id} (path/item refreshes cover rewritten art; #181)",
+        extra={"emoji_type": "success"},
+    )
 
 
 def _art_refresh_load_work_items(session, ids: list[int], *, art_scope: str) -> list[dict[str, Any]]:
@@ -1599,7 +1584,9 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
             "series_count": len(processed_series),
         }
 
-    if refresh_paths and not bulk_completion:
+    # Always path/item refresh rewritten art (#181). Bulk runs used to defer to a
+    # force full-section metadata refresh on the last batch.
+    if refresh_paths:
         try:
             refresh_all_paths(
                 refresh_paths,
@@ -1612,7 +1599,7 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
             logger.warning(f"placeholder_art_refresh path refresh failed: {exc}", extra={"emoji_type": "warning"})
 
     # Path scans do not update Plex posters; refresh rewritten titles at item level.
-    if (rewritten_movies or rewritten_series) and not bulk_completion:
+    if rewritten_movies or rewritten_series:
         try:
             refresh_players_after_local_art_rewrite(
                 movies=rewritten_movies,

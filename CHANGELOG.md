@@ -13,6 +13,15 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 - **Execution contract (session holds)**: Long Arr, player, FS, and density work no longer keeps a DB session open the whole time, so lite sync / season density should stop wedging other writers behind lock timeouts.
 - **Density stub player status**: Season/series density placeholders project status into Plex/Jellyfin/Emby like movies (#175).
+- **TV density path refresh**: Existing stubs no longer queue player path refreshes (#181).
+- **Lite density once per request**: Density is not re-run on every materialization chunk (#181).
+- **Event/lite bulk section skip**: Scoped mats rely on path refresh instead of `bulk_initial` section scans (#181).
+- **Full sync path refreshes**: Progressive path batches replace phase and 5-minute section scans (#181).
+- **Section fallback default off**: `MEDIA_REFRESH_SECTION_FALLBACK_ENABLED` defaults to false (#181).
+- **Projection path fallback**: Misses path-refresh folders before any section scan (#181).
+- **Art backfill**: No force full-section metadata refresh on completion (#181).
+- **NFO backfill**: No force full-section metadata refresh on completion (#181).
+- **media_refresh coalesce retry**: UniqueViolation retries coalesce instead of Timer bypass (#181).
 
 ### Fixed
 
@@ -75,7 +84,15 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **TV rating source coerce**: Copy/import onto TV or Episode (and load/normalize) remaps non-IMDb Rating chips to IMDb.
 
 ### Changed
-
+- **TV density path refresh**: Existing season/series stubs are not added to `created_paths` unless newly created or relocated (#181).
+- **Lite/scoped density once**: TV density runs once after entity chunks, not on every commit chunk (#181).
+- **Bulk section skip list**: Event, lite, destination remap, and Arr detach mats skip `bulk_initial` section scans and rely on path refresh (#181).
+- **Full sync player refresh**: Progressive path overlap + delayed_final; removed phase initial/final and 5-minute section scans (#181).
+- **Section fallback default**: `MEDIA_REFRESH_SECTION_FALLBACK_ENABLED` defaults to false and gates projection miss + optional full-sync end section (#181).
+- **Projection fallback**: Unresolved titles path-refresh their folders first; section scan only when the fallback flag is on (#181).
+- **Art backfill completion**: Last-batch force full-section metadata refresh removed; batches always path/item refresh rewritten titles (#181).
+- **NFO backfill completion**: Last-batch force full-section metadata refresh removed (#181).
+- **media_refresh coalesce race**: UniqueViolation on coalesce retries once instead of immediately falling back to `threading.Timer` (#181).
 - **Full-sync art live progress**: Materialization-enqueued art jobs link to the parent full sync (shared Updating bar / completion gate) so create waves no longer sit at 100% with a frozen 0/0 Updating bar until the run snaps done.
 - **Arr tag policy on lite/full sync**: Sync stamps Never/Pinned/Auto from Arr tags only; create/delete runs in the normal determination and materialization phases (no mid-sync tag materialize wave). Library tag-clear still applies placeholders immediately.
 - **Auto pin sidebar progress**: After the pin debounce, Auto marks Saved on the chip and shows title refresh progress in the library sidebar instead of holding Saving… until reconcile finishes.

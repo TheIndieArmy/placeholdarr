@@ -586,10 +586,13 @@ def apply_season_density_for_series(
             if action == "created_or_exists":
                 if out.get("created"):
                     stats["created"] += 1
+                    if path:
+                        stats["created_paths"].append(path)
                 else:
                     stats["skipped"] += 1
-                if path:
-                    stats["created_paths"].append(path)
+                    # Existing stub: only path-refresh when relocated.
+                    if path and relocated_from:
+                        stats["created_paths"].append(path)
                 if relocated_from:
                     stats["deleted_paths"].append(relocated_from)
             elif action == "retired" or (action == "skipped_density" and out.get("deleted")):
