@@ -2799,7 +2799,7 @@ def run_materialization_for_entities(
         _scoped_t.start()
 
     try:
-# Build chunks: movies first, then episodes. Density runs once after all
+        # Build chunks: movies first, then episodes. Density runs once after all
         # chunks (not per chunk) in per-series short sessions (#181: avoids
         # path-refreshing unchanged season stubs on every commit chunk).
         remaining_movies = list(movie_ids)
@@ -2856,7 +2856,7 @@ def run_materialization_for_entities(
                         extra={"emoji_type": "processing"},
                     )
 
-# One density pass for the whole request (touched series + leftover stubs).
+            # One density pass for the whole request (touched series + leftover stubs).
             density_series_ids = _resolve_scoped_density_series_ids(episode_ids)
             if density_series_ids:
                 stall_state["phase"] = "tv_density_short_sessions"
@@ -2876,6 +2876,31 @@ def run_materialization_for_entities(
                     f"errors={int(series_stats.get('errors') or 0) + int(season_stats.get('errors') or 0)}",
                     extra={"emoji_type": "info"},
                 )
+                # Mirror full-sync density: path-refresh only newly created/deleted stubs (#181).
+                density_created = [
+                    str(p).strip()
+                    for p in list(series_stats.get("created_paths") or [])
+                    + list(season_stats.get("created_paths") or [])
+                    if str(p or "").strip()
+                ]
+                density_deleted = [
+                    str(p).strip()
+                    for p in list(series_stats.get("deleted_paths") or [])
+                    + list(season_stats.get("deleted_paths") or [])
+                    if str(p or "").strip()
+                ]
+                if density_created or density_deleted:
+                    try:
+                        schedule_scoped_placeholder_media_refresh(
+                            created_paths=density_created,
+                            delete_paths=density_deleted,
+                            empty_trash_on_delete=bool(density_deleted),
+                        )
+                    except Exception as refresh_exc:
+                        logger.warning(
+                            f"Scoped density media refresh skipped{subject_part}: {refresh_exc}",
+                            extra={"emoji_type": "warning"},
+                        )
                 try:
                     art_n = _enqueue_art_for_density_stub_series(density_series_ids)
                     if art_n:
