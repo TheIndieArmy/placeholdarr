@@ -1083,7 +1083,7 @@ def push_placeholder_player_metadata(
         )
         return acc
 
-raw_path = str(getattr(placeholder, "placeholder_filepath", "") or "").strip()
+    raw_path = str(getattr(placeholder, "placeholder_filepath", "") or "").strip()
     if raw_path:
         abs_path = os.path.abspath(raw_path)
         acc._current_path = os.path.dirname(abs_path) if os.path.isfile(abs_path) else abs_path
