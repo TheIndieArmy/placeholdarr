@@ -565,6 +565,9 @@ async def lifespan(app: FastAPI):
             media_ok = not bool(status.get("media_has_failure"))
             if integrations_ready_for_boot_sync() and media_ok:
                 all_green_seen = True
+            else:
+                # Speed back up after a later disconnect so Settings ! recovers sooner.
+                all_green_seen = False
             await asyncio.sleep(steady_interval if all_green_seen else burst_interval)
 
     if refresh_integration_connection_status:

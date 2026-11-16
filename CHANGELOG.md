@@ -19,6 +19,8 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 ### Changed
 
 - **Integration probe loop**: Connection checks keep running after boot (60s until all-green, then every 5 minutes) so late recovery updates badges without a restart (#184).
+- **Integration probe after disconnect**: An unhealthy probe returns the loop to the 60s cadence until all-green again (#184).
+- **Integration connect error copy**: Probe failures show ``Error while connecting to …`` instead of ``ConnectionError while connecting to …`` (#184).
 
 ## Pre-release
 
