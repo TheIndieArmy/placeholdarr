@@ -436,11 +436,20 @@ async def lifespan(app: FastAPI):
         # until this finishes, so a startup_sync_runner Job would deadlock.
         def _run_startup_sync():
             try:
+                from services.integration_status import wait_for_arr_boot_readiness
                 from services.postgres.db import bind_worker_pool_role
                 from services.source_of_truth.startup import run_startup_source_of_truth
 
                 # Long boot sync must not consume the API pool (UI checkouts).
                 bind_worker_pool_role()
+                # Do not race a hollow calendar/full/lite pass while Arr is still down.
+                if not wait_for_arr_boot_readiness():
+                    logger.warning(
+                        "Startup source-of-truth skipped reason=arr_not_ready "
+                        "(configured Arr never became reachable in time)",
+                        extra={"emoji_type": "warning"},
+                    )
+                    return
                 startup_result = run_startup_source_of_truth()
                 if startup_result.get('ran'):
                     run_ids = startup_result.get('run_ids', [])
@@ -531,9 +540,20 @@ async def lifespan(app: FastAPI):
         )
 
     async def integration_connection_check_loop():
-        max_attempts = 10
-        interval = 60
-        for attempt in range(max_attempts):
+        # Keep probing for the process lifetime so late Arr/media recovery clears
+        # Settings ! without a container restart or manual Test.
+        from core.config import settings
+        from services.integration_status import integrations_ready_for_boot_sync
+
+        burst_interval = 60
+        steady_interval = 300
+        attempt = 0
+        all_green_seen = False
+        arrs_configured = bool(getattr(settings, "configured_arr_instances", []) or [])
+        if not arrs_configured:
+            logger.warning("No *arr services configured", extra={"emoji_type": "warning"})
+        while True:
+            attempt += 1
             try:
                 status = await asyncio.to_thread(refresh_integration_connection_status)
             except Exception as exc:
@@ -542,21 +562,13 @@ async def lifespan(app: FastAPI):
                     extra={"emoji_type": "warning"},
                 )
                 status = {}
-            arr = status.get("arr") or {}
-            if arr and any(bool(item.get("ok")) for item in arr.values()):
-                break
-            if attempt == 0:
-                from core.config import settings
-
-                arrs_configured = bool(getattr(settings, "configured_arr_instances", []) or [])
-                if not arrs_configured:
-                    logger.warning("No *arr services configured", extra={"emoji_type": "warning"})
-            await asyncio.sleep(interval)
-        else:
-            logger.warning(
-                "Timed out waiting for a reachable *arr instance during startup connection checks.",
-                extra={"emoji_type": "warning"},
-            )
+            media_ok = not bool(status.get("media_has_failure"))
+            if integrations_ready_for_boot_sync() and media_ok:
+                all_green_seen = True
+            else:
+                # Speed back up after a later disconnect so Settings ! recovers sooner.
+                all_green_seen = False
+            await asyncio.sleep(steady_interval if all_green_seen else burst_interval)
 
     if refresh_integration_connection_status:
         asyncio.create_task(integration_connection_check_loop())

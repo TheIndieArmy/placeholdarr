@@ -141,6 +141,16 @@ def _safe_url(url: str) -> str:
         return url
 
 
+def _connect_failure_message(exc: BaseException, safe_url: str) -> str:
+    """User-facing probe failure; drop the redundant Connection prefix on ConnectionError."""
+    name = type(exc).__name__
+    if name == "ConnectionError":
+        name = "Error"
+    elif name.startswith("Connection") and len(name) > len("Connection"):
+        name = name[len("Connection") :]
+    return f"{name} while connecting to {safe_url}"
+
+
 def _test_get(url: str, headers: dict[str, str] | None = None, params: dict[str, str] | None = None) -> tuple[bool, str]:
     safe_url = _safe_url(url)
     try:
@@ -149,7 +159,7 @@ def _test_get(url: str, headers: dict[str, str] | None = None, params: dict[str,
             return False, f'HTTP {response.status_code} from {safe_url}'
         return True, 'Connected'
     except Exception as exc:
-        return False, f'{type(exc).__name__} while connecting to {safe_url}'
+        return False, _connect_failure_message(exc, safe_url)
 
 
 def _test_get_json(
@@ -171,7 +181,7 @@ def _test_get_json(
             return False, f'Unexpected JSON shape from {safe_url}', None
         return True, 'Connected', data
     except Exception as exc:
-        return False, f'{type(exc).__name__} while connecting to {safe_url}', None
+        return False, _connect_failure_message(exc, safe_url), None
 
 
 def _jellyfin_emby_signature_text(data: dict[str, Any]) -> str:
@@ -292,7 +302,7 @@ def test_arr_connection(url: str, api_key: str, arr_type: str) -> dict[str, Any]
             'service': expected,
         }
     except Exception as exc:
-        return {'ok': False, 'message': f'{type(exc).__name__} while connecting to {safe_url}', 'service': expected}
+        return {'ok': False, 'message': _connect_failure_message(exc, safe_url), 'service': expected}
 
     if not isinstance(data, dict):
         return {'ok': False, 'message': 'Unexpected response from server.', 'service': expected}
