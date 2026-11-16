@@ -277,7 +277,10 @@ async def create_recipe(body: RecipePayload):
 @router.get("/api/collections/plex-sections")
 async def plex_sections(refresh: bool = Query(False)):
     try:
-        sections = await asyncio.to_thread(plex_collections.list_plex_sections, refresh)
+        # list_plex_sections is keyword-only for refresh=; to_thread must not pass it positionally.
+        sections = await asyncio.to_thread(
+            lambda: plex_collections.list_plex_sections(refresh=refresh)
+        )
     except plex_collections.PlexCollectionsError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     return {"sections": sections}

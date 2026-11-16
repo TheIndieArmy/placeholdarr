@@ -424,7 +424,7 @@ function SettingsDensityFrame(props: {
   );
 }
 
-/** Red circle with ! for sticky Media/ARR connectivity failures (nav + cards). */
+/** Red circle with ! for Media/ARR connectivity failures (nav + cards). */
 function IntegrationFailureBadge(props: { title?: string; size?: "sm" | "md" }) {
   const size = props.size ?? "md";
   const dim = size === "sm" ? "h-4 w-4 text-[10px]" : "h-5 w-5 text-[11px]";
@@ -11755,8 +11755,9 @@ function SettingsPanel(props: {
                         Fail every queued or in-flight worker job (imports, webhooks, reconcile, materialization jobs),
                         then restart Placeholdarr so any thread stuck in disk I/O drops its locks. Titles involved in
                         those failed jobs can be briefly out of sync until a later import, webhook, or library sync
-                        catches them up. Use this when a hung job is blocking sync. The app will be briefly unreachable
-                        while it comes back up.
+                        catches them up. Use this when a hung job is blocking sync. The container must use a restart
+                        policy such as unless-stopped (or equivalent); without one the process exits and stays down.
+                        The UI waits for the app to answer again, same as Restart.
                       </p>
                     }
                   >
@@ -11880,7 +11881,7 @@ function SettingsPanel(props: {
     {failActiveConfirmOpen ? (
       <ConfirmModal
         title="Fail active jobs and restart?"
-        message="This marks every queued or in-flight worker job as failed (imports, webhooks, reconcile, materialization), then restarts Placeholdarr so wedged handler threads drop their locks. Titles involved in those jobs can be briefly out of sync until a later import, webhook, or library sync. The app will be unreachable for a few seconds."
+        message="This marks every queued or in-flight worker job as failed (imports, webhooks, reconcile, materialization), then restarts Placeholdarr so wedged handler threads drop their locks. Titles involved in those jobs can be briefly out of sync until a later import, webhook, or library sync. Requires a container restart policy (unless-stopped or equivalent); without one the process exits and stays down. The UI will wait for Placeholdarr to come back."
         confirmLabel="Fail and restart"
         cancelLabel="Cancel"
         accentHex={accent.hex}
@@ -11894,20 +11895,36 @@ function SettingsPanel(props: {
           setFailActivePending(true);
           setFailActiveError(null);
           setFailActiveFeedback(null);
-          void failActiveJobs()
-            .then((res) => {
+          void (async () => {
+            let failPart = "Fail-active requested.";
+            try {
+              const res = await failActiveJobs();
               const n = Number(res.failed_count || 0);
-              const failPart =
+              failPart =
                 n === 0 ? "No active jobs to fail." : `Failed ${n} active job${n === 1 ? "" : "s"}.`;
-              setFailActiveFeedback(`${failPart} Restarting…`);
-              setFailActiveConfirmOpen(false);
-            })
-            .catch((err: unknown) => {
-              const msg = err instanceof Error ? err.message : String(err || "Failed to fail active jobs");
-              setFailActiveError(msg);
-              setFailActiveConfirmOpen(false);
-              setFailActivePending(false);
-            });
+            } catch {
+              // Process may terminate before the HTTP response flushes; treat like Restart.
+            }
+            setFailActiveFeedback(`${failPart} Restarting…`);
+            setFailActiveConfirmOpen(false);
+            // Same reconnect poll as Settings Restart.
+            const deadline = Date.now() + 120_000;
+            while (Date.now() < deadline) {
+              await new Promise((resolve) => setTimeout(resolve, 1500));
+              try {
+                await getHealth();
+                window.location.reload();
+                return;
+              } catch {
+                /* keep polling until the app answers again */
+              }
+            }
+            setFailActiveError(
+              "Placeholdarr did not come back within 2 minutes. Check that the container has a restart policy (unless-stopped or equivalent), then start it again.",
+            );
+            setFailActiveFeedback(null);
+            setFailActivePending(false);
+          })();
         }}
       />
     ) : null}

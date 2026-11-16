@@ -9,6 +9,17 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Fixed
+
+- **Integration ! after recovery**: Connectivity probe successes clear Settings warnings again; only auth failures (401/403) stay sticky until Test (#184).
+- **Boot sync before Arr ready**: Startup sync waits for configured Arr instances (up to ~10 minutes) and skips a hollow pass if they never answer (#184).
+- **Fail-active restart reconnect**: Fail active jobs uses the same health reconnect poll as Restart and notes that a container restart policy is required (#184).
+- **Collections Plex sections 500**: `/api/collections/plex-sections` no longer passes `refresh` positionally into keyword-only `list_plex_sections` (#184).
+
+### Changed
+
+- **Integration probe loop**: Connection checks keep running after boot (60s until all-green, then every 5 minutes) so late recovery updates badges without a restart (#184).
+
 ## Pre-release
 
 ## Released
