@@ -170,6 +170,47 @@ def _normalize_layers_stamp(raw: Any) -> dict[str, Any] | None:
     }
 
 
+def _layout_studio_owns_overlay() -> bool:
+    """True when Layout Studio profiles are the art source of truth.
+
+    After migrate / when profiles have labels, legacy global PLACEHOLDER banner
+    toggles must not alone invalidate sidecars.
+    """
+    try:
+        from services.poster_layouts import layout_art_library_synced, layouts_have_any_labels
+
+        return bool(layout_art_library_synced() or layouts_have_any_labels())
+    except Exception:
+        return False
+
+
+def _layers_stamps_equivalent(stored: dict[str, Any], want: dict[str, Any]) -> bool:
+    """Compare layer stamps; ignore legacy placeholder_banner when studio owns overlay."""
+    left = dict(stored)
+    right = dict(want)
+    if _layout_studio_owns_overlay():
+        left.pop("placeholder_banner", None)
+        right.pop("placeholder_banner", None)
+    return left == right
+
+
+def _overlay_text_mismatch(stored_text: str, desired_text: str | None, *, mode: str) -> bool:
+    """True when overlay_text drift should force regenerate."""
+    desired = str(desired_text or "").strip()
+    stored = str(stored_text or "").strip()
+    if str(mode or "").strip().lower() == "top_banner" and not stored:
+        from services.poster_overlay_text import OVERLAY_BANNER_PLACEHOLDER
+
+        stored = OVERLAY_BANNER_PLACEHOLDER
+    if stored == desired:
+        return False
+    if _layout_studio_owns_overlay():
+        # Layout chips own static PLACEHOLDER glyphs; ignore legacy toggle text drift.
+        if {stored, desired} <= {"", "PLACEHOLDER"}:
+            return False
+    return True
+
+
 def _normalize_outputs_map(raw: Any) -> dict[str, dict[str, Any]]:
     """Per-artifact entries: meta_key -> {file, source_url, source_kind?, overlay_text?, layers?}.
 
@@ -498,15 +539,12 @@ def _needs_regenerate(
     stored_layers = _normalize_layers_stamp(entry.get("layers"))
     if stored_layers is None:
         return True
-    if stored_layers != _layers_stamp_from_settings(grayscale=grayscale, profile_key=profile_key):
+    want_layers = _layers_stamp_from_settings(grayscale=grayscale, profile_key=profile_key)
+    if not _layers_stamps_equivalent(stored_layers, want_layers):
         return True
     desired_text = _effective_overlay_text(mode, overlay_text)
     stored_text = str(entry.get("overlay_text") or "").strip()
-    if str(mode or "").strip().lower() == "top_banner" and not stored_text:
-        from services.poster_overlay_text import OVERLAY_BANNER_PLACEHOLDER
-
-        stored_text = OVERLAY_BANNER_PLACEHOLDER
-    if stored_text != desired_text:
+    if _overlay_text_mismatch(stored_text, desired_text, mode=str(mode or "")):
         return True
     return False
 
@@ -844,11 +882,13 @@ def ensure_library_grid_poster_for_series(series: Any, series_folder: str) -> bo
 
 
 def movie_art_needs_refresh(movie: Any, media_path: str) -> bool:
-    """True when ``ensure_movie_art`` would rewrite the composited poster."""
-    from services.poster_language import effective_poster_url, ensure_localized_poster_current
+    """True when ``ensure_movie_art`` would rewrite the composited poster.
 
-    # Match write path: Arr fill then TMDB language resolve before comparing sidecars.
-    ensure_localized_poster_current(movie)
+    Fingerprint/sidecar only. Do not call Arr/TMDB here; localized resolve belongs
+    in the art job after the caller session is closed.
+    """
+    from services.poster_language import effective_poster_url
+
     mode = poster_overlay_mode()
     folder = os.path.dirname(os.path.abspath(media_path))
     out_path = os.path.join(folder, POSTER_JPEG)
@@ -872,13 +912,12 @@ def movie_art_needs_refresh(movie: Any, media_path: str) -> bool:
 
 
 def season_art_needs_refresh(season: Any, series: Any, series_folder: str) -> bool:
-    """True when ``ensure_season_art`` would rewrite the season poster."""
+    """True when ``ensure_season_art`` would rewrite the season poster.
+
+    Fingerprint/sidecar only (no Arr/TMDB while a caller session may be open).
+    """
     if not series_folder:
         return False
-    from services.poster_language import ensure_localized_poster_current
-
-    ensure_localized_poster_current(series)
-    ensure_localized_poster_current(season, series=series)
     mode = poster_overlay_mode()
     folder = os.path.abspath(series_folder)
     season_number = int(getattr(season, "season_number", 0) or 0)
@@ -911,10 +950,12 @@ def series_art_needs_refresh(
     series_folder: str | None = None,
     seasons: list[Any] | None = None,
 ) -> bool:
-    """True when ``ensure_series_art`` would rewrite series or season posters."""
-    from services.poster_language import effective_poster_url, ensure_localized_poster_current
+    """True when ``ensure_series_art`` would rewrite series or season posters.
 
-    ensure_localized_poster_current(series)
+    Fingerprint/sidecar only (no Arr/TMDB while a caller session may be open).
+    """
+    from services.poster_language import effective_poster_url
+
     folder = series_folder or _resolve_series_folder(series)
     if not folder:
         return False
@@ -1033,6 +1074,114 @@ def ensure_movie_art(movie: Any, media_path: str) -> ArtResult:
     return result
 
 
+def _tv_layout_uses_season_sensitive_date_token(*, coming_soon: bool) -> bool:
+    """True when the active TV profile draws a season-scoped Coming Soon date token."""
+    try:
+        from services.poster_layouts import get_profile, pick_profile_key
+
+        profile = get_profile(pick_profile_key("tv", coming_soon=coming_soon))
+        blob = json.dumps(profile.get("labels") or [], sort_keys=True)
+        return "ComingSoonOrNewEpDate" in blob
+    except Exception:
+        return True
+
+
+def _season_can_copy_series_poster(
+    season: Any,
+    series: Any,
+    *,
+    series_url: str,
+    series_overlay: tuple[str | None, bool, str | None],
+    mode: str,
+) -> bool:
+    """Season poster matches the series poster when source is series fallback and banners match."""
+    url, kind = _season_poster_source(season, series)
+    if kind != "series_fallback" or not url or url != series_url:
+        return False
+    season_overlay = _series_or_season_banner_state(mode, series=series, season=season)
+    if season_overlay != series_overlay:
+        return False
+    _overlay_text, coming_soon, _cs_label = series_overlay
+    if not _tv_layout_uses_season_sensitive_date_token(coming_soon=coming_soon):
+        return True
+    from services.poster_layouts import resolve_label_tokens
+
+    series_tokens = resolve_label_tokens(
+        media_kind="tv",
+        series=series,
+        coming_soon_label=_cs_label,
+    )
+    season_tokens = resolve_label_tokens(
+        media_kind="tv",
+        series=series,
+        season=season,
+        coming_soon_label=season_overlay[2],
+    )
+    return str(series_tokens.get("ComingSoonOrNewEpDate") or "") == str(
+        season_tokens.get("ComingSoonOrNewEpDate") or ""
+    )
+
+
+def _copy_series_poster_to_season(
+    series_poster_path: str,
+    season_out_path: str,
+    *,
+    mode: str,
+    meta_key: str,
+    source_url: str,
+    source_kind: str,
+    overlay_text: str | None,
+    layout_labels: list | None = None,
+    layout_tokens: dict | None = None,
+    layout_cols: int | None = None,
+    layout_rows: int | None = None,
+    grayscale: bool | None = None,
+    profile_key: str | None = None,
+) -> bool:
+    """Copy series poster.jpg onto a season poster file and stamp matching meta."""
+    if not os.path.isfile(series_poster_path):
+        return False
+    effective_mode, layout_labels, layout_tokens, layout_cols, layout_rows = _active_layout_kwargs(
+        mode=mode,
+        layout_labels=layout_labels,
+        layout_tokens=layout_tokens,
+        layout_cols=layout_cols,
+        layout_rows=layout_rows,
+    )
+    if not _needs_regenerate(
+        season_out_path,
+        mode=effective_mode,
+        source_url=source_url,
+        meta_key=meta_key,
+        source_kind=source_kind,
+        overlay_text=overlay_text,
+        grayscale=grayscale,
+        profile_key=profile_key,
+    ):
+        return False
+    parent = os.path.dirname(os.path.abspath(season_out_path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    try:
+        shutil.copy2(series_poster_path, season_out_path)
+    except OSError:
+        return False
+    meta_path = _meta_path_for_output(season_out_path)
+    _write_meta(
+        meta_path,
+        mode=effective_mode,
+        meta_key=meta_key,
+        source_url=source_url,
+        output_basename=os.path.basename(season_out_path),
+        source_kind=source_kind,
+        overlay_text=overlay_text,
+        grayscale=grayscale,
+        profile_key=profile_key,
+    )
+    _apply_art_file_permissions(season_out_path, season_out_path, meta_path)
+    return True
+
+
 def ensure_season_art(season: Any, series: Any, series_folder: str) -> ArtResult:
     """Write seasonNN-poster.jpg at the series root."""
     from services.poster_language import ensure_localized_poster_current
@@ -1096,6 +1245,7 @@ def ensure_series_art(
     url = _normalize_art_url(effective_poster_url(series))
     kind = "series" if url else "none"
     overlay_text, coming_soon, cs_label = _series_or_season_banner_state(mode, series=series)
+    series_overlay = (overlay_text, coming_soon, cs_label)
     layout_kw = _layout_compose_kwargs(
         "tv",
         coming_soon=coming_soon,
@@ -1133,6 +1283,57 @@ def ensure_series_art(
                     .all()
                 )
     for season in rows or []:
+        season_number = int(getattr(season, "season_number", 0) or 0)
+        season_filename = season_poster_filename(season_number)
+        season_path = os.path.join(folder, season_filename)
+        if url and _season_can_copy_series_poster(
+            season,
+            series,
+            series_url=url,
+            series_overlay=series_overlay,
+            mode=mode,
+        ):
+            from services.poster_language import ensure_localized_poster_current
+
+            ensure_localized_poster_current(season, series=series)
+            if _copy_series_poster_to_season(
+                out_path,
+                season_path,
+                mode=mode,
+                meta_key=_season_poster_meta_key(season_number),
+                source_url=url,
+                source_kind="series_fallback",
+                overlay_text=overlay_text,
+                layout_labels=layout_kw.get("layout_labels"),
+                layout_tokens=layout_kw.get("layout_tokens"),
+                layout_cols=layout_kw.get("layout_cols"),
+                layout_rows=layout_kw.get("layout_rows"),
+                grayscale=layout_kw.get("grayscale"),
+                profile_key=layout_kw.get("profile_key"),
+            ):
+                result.local_art.poster = result.local_art.poster or POSTER_JPEG
+                result.wrote_any = True
+                result.art_counts["season"] = int(result.art_counts.get("season", 0)) + 1
+                continue
+            # Copy skipped because season art is already current.
+            eff_mode, _, _, _, _ = _active_layout_kwargs(
+                mode=mode,
+                layout_labels=layout_kw.get("layout_labels"),
+                layout_tokens=layout_kw.get("layout_tokens"),
+                layout_cols=layout_kw.get("layout_cols"),
+                layout_rows=layout_kw.get("layout_rows"),
+            )
+            if not _needs_regenerate(
+                season_path,
+                mode=eff_mode,
+                source_url=url,
+                meta_key=_season_poster_meta_key(season_number),
+                source_kind="series_fallback",
+                overlay_text=overlay_text,
+                grayscale=layout_kw.get("grayscale"),
+                profile_key=layout_kw.get("profile_key"),
+            ):
+                continue
         one = ensure_season_art(season, series, folder)
         if one.wrote_any:
             result.wrote_any = True

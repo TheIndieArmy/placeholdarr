@@ -104,6 +104,9 @@ def schedule_library_poster_grid_backfill() -> None:
         _BACKFILL_THREAD_STARTED = True
 
     def _run() -> None:
+        from services.postgres.db import bind_worker_pool_role
+
+        bind_worker_pool_role()
         started = time.monotonic()
         try:
             written = backfill_library_grid_posters()

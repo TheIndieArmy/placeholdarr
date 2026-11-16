@@ -64,13 +64,17 @@ def enqueue_batched_placeholder_job(
     merge_into_pending: bool = True,
     payload_extras: dict[str, Any] | None = None,
     include_player_metadata_refresh: bool = False,
+    batch_size: int | None = None,
 ) -> dict:
     """Enqueue one or more batched jobs for ``placeholder_ids``."""
     ids_remaining = normalize_placeholder_ids(placeholder_ids)
     if not ids_remaining:
         return {"ok": False, "reason": "no_placeholder_ids"}
 
-    batch_size = job_batch_size()
+    try:
+        batch_size = max(1, int(batch_size)) if batch_size is not None else job_batch_size()
+    except Exception:
+        batch_size = job_batch_size()
     debounce_seconds = job_debounce_seconds()
     now = datetime.now(timezone.utc)
     run_after = now if debounce_seconds <= 0 else now + timedelta(seconds=debounce_seconds)
@@ -130,7 +134,9 @@ def enqueue_batched_placeholder_job(
 
         if job_modified:
             if payload_extras:
-                payload.update(payload_extras)
+                extras_merge = dict(payload_extras)
+                extras_merge.pop("batch_index_base", None)
+                payload.update(extras_merge)
             job.payload = payload
             job.updated_at = now
             session.add(job)
@@ -146,6 +152,14 @@ def enqueue_batched_placeholder_job(
         isinstance(payload_extras, dict)
         and (payload_extras.get("art_backfill_run_id") or payload_extras.get("nfo_backfill_run_id"))
     )
+    try:
+        batch_index_base = (
+            max(0, int(payload_extras.get("batch_index_base") or 0))
+            if isinstance(payload_extras, dict)
+            else 0
+        )
+    except Exception:
+        batch_index_base = 0
     planned_new_batches = 0
     if stamp_batches and ids_remaining:
         planned_new_batches = (len(ids_remaining) + batch_size - 1) // batch_size
@@ -153,15 +167,17 @@ def enqueue_batched_placeholder_job(
     while ids_remaining:
         chunk = ids_remaining[:batch_size]
         ids_remaining = ids_remaining[batch_size:]
-        payload: dict[str, Any] = {"placeholder_ids": chunk, **(payload_extras or {})}
+        extras_for_payload = dict(payload_extras or {})
+        extras_for_payload.pop("batch_index_base", None)
+        payload: dict[str, Any] = {"placeholder_ids": chunk, **extras_for_payload}
         if include_player_metadata_refresh:
             payload["player_metadata_refresh"] = _placeholder_player_merge_flag(
                 chunk, player_metadata_refresh_by_id
             )
         if stamp_batches:
             created_jobs += 1
-            payload["batch_index"] = int(created_jobs)
-            payload["batch_total"] = int(planned_new_batches or created_jobs)
+            payload["batch_index"] = int(batch_index_base + created_jobs)
+            payload["batch_total"] = int(batch_index_base + (planned_new_batches or created_jobs))
         job = Job(
             job_type=job_type,
             payload=payload,
@@ -183,8 +199,8 @@ def enqueue_batched_placeholder_job(
             if not job:
                 continue
             payload = dict(job.payload or {}) if isinstance(job.payload, dict) else {}
-            payload["batch_index"] = int(index)
-            payload["batch_total"] = int(total)
+            payload["batch_index"] = int(batch_index_base + index)
+            payload["batch_total"] = int(batch_index_base + total)
             job.payload = payload
             session.add(job)
 

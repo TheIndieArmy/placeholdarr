@@ -301,33 +301,62 @@ def handle_webhook(
         session.flush()
         _enqueue_event_job(session, event.id, event_type)
 
-        # If this is a playback_start event arriving while the startup-sync gate
-        # is closed, set an immediate "Search queued" status on matching
-        # placeholders so the user gets visible feedback right away. The worker
-        # will eventually process the queued Job and transition through the
-        # normal SEARCHING -> DOWNLOADING -> ... lifecycle once the gate opens.
-        gated_intents_applied = 0
-        if event_type == 'playback_start' and isinstance(payload, dict):
-            gated_intents_applied = _apply_gated_playback_search_queued(session, payload)
-
+        # Persist accept first, then optional gated SEARCH_QUEUED with Plex/JF
+        # enrichment off-session so the API pool is not held across media HTTP.
+        event_log_id = int(event.id)
         session.commit()
+        try:
+            session.close()
+        except Exception:
+            pass
+        session = None
+
+        gated_intents_applied = 0
+        if event_type == "playback_start" and isinstance(payload, dict):
+            from services.source_of_truth.event_playback import _prefetch_playback_media_http
+
+            enriched = _prefetch_playback_media_http(payload)
+            session = get_session()
+            try:
+                gated_intents_applied = _apply_gated_playback_search_queued(session, enriched)
+                session.commit()
+            except Exception:
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
+            finally:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+                session = None
+
         logger.info(
-            f'Accepted webhook event {event_type} as event_log_id={event.id} instance={instance} '
-            f'gated_search_queued={gated_intents_applied} payload={_payload_preview(payload_to_store)}',
-            extra={'emoji_type': 'info'},
+            f"Accepted webhook event {event_type} as event_log_id={event_log_id} instance={instance} "
+            f"gated_search_queued={gated_intents_applied} payload={_payload_preview(payload_to_store)}",
+            extra={"emoji_type": "info"},
         )
         return {
-            'status': 'accepted',
-            'event_log_id': event.id,
-            'event_type': event_type,
-            'gated_search_queued_intents': int(gated_intents_applied),
+            "status": "accepted",
+            "event_log_id": event_log_id,
+            "event_type": event_type,
+            "gated_search_queued_intents": int(gated_intents_applied),
         }
     except Exception as e:
-        session.rollback()
-        logger.error(f'Failed to persist webhook event: {e}', extra={'emoji_type': 'error'})
+        if session is not None:
+            try:
+                session.rollback()
+            except Exception:
+                pass
+        logger.error(f"Failed to persist webhook event: {e}", extra={"emoji_type": "error"})
         raise
     finally:
-        session.close()
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
 
 
 def handle_event(event: Dict[str, Any]) -> bool:

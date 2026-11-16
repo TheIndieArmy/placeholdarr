@@ -226,6 +226,9 @@ def _ensure_refresh_retry_worker() -> None:
 
     def _run() -> None:
         global _retry_worker
+        from services.postgres.db import bind_worker_pool_role
+
+        bind_worker_pool_role()
         backoff_s = 2.0
         while True:
             if _WAKE_STATS.is_set():
@@ -470,6 +473,9 @@ def schedule_series_stats_backfill() -> None:
         _backfill_thread_started = True
 
     def _run() -> None:
+        from services.postgres.db import bind_worker_pool_role
+
+        bind_worker_pool_role()
         ensure_series_stats_backfilled()
 
     threading.Thread(target=_run, name="series-stats-backfill", daemon=True).start()

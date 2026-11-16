@@ -327,6 +327,9 @@ async def tasks_run(body: TaskRunRequest):
                 raise HTTPException(status_code=409, detail="Another maintenance task is already running")
 
         def _runner():
+            from services.postgres.db import bind_worker_pool_role
+
+            bind_worker_pool_role()
             try:
                 if key == "full_sync":
                     run_scheduled_full_sync(trigger="manual")

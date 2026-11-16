@@ -494,6 +494,17 @@ class Settings(BaseSettings):
     IMPORT_GRACE_STEP_SECONDS: int = int(os.getenv("IMPORT_GRACE_STEP_SECONDS", "60").split('#')[0].strip())
     IMPORT_GRACE_ACCELERATED_STEP_SECONDS: int = int(os.getenv("IMPORT_GRACE_ACCELERATED_STEP_SECONDS", "5").split('#')[0].strip())
     STATUS_JOB_BATCH_SIZE: int = int(os.getenv("STATUS_JOB_BATCH_SIZE", "100").split('#')[0].strip())
+    # Art refresh jobs bake overlays; keep batches smaller than status/NFO jobs so the
+    # handler watchdog does not fail mid-batch on complex studio layouts.
+    # LAYOUT_ART_BATCH_SIZE remains as a legacy env alias.
+    ART_REFRESH_BATCH_SIZE: int = int(
+        (
+            os.getenv("ART_REFRESH_BATCH_SIZE")
+            or os.getenv("LAYOUT_ART_BATCH_SIZE")
+            or "25"
+        ).split("#")[0].strip()
+        or "25"
+    )
     STATUS_JOB_DEBOUNCE_SECONDS: float = float(os.getenv("STATUS_JOB_DEBOUNCE_SECONDS", "0.5").split('#')[0].strip())
     # Entity materialization jobs (off webhook path): coalesce pending ids up to this size.
     MATERIALIZATION_JOB_BATCH_SIZE: int = int(
@@ -508,7 +519,9 @@ class Settings(BaseSettings):
     MATERIALIZATION_COMMIT_LOCK_TIMEOUT_SECONDS: int = int(
         os.getenv("MATERIALIZATION_COMMIT_LOCK_TIMEOUT_SECONDS", "15").split("#")[0].strip() or "15"
     )
-    MEDIA_REFRESH_SECTION_FALLBACK_ENABLED: bool = os.getenv("MEDIA_REFRESH_SECTION_FALLBACK_ENABLED", "true").split('#')[0].strip().lower() == "true"
+    # When true: allow whole-section scans as a safety net (projection miss, optional
+    # end-of-full-sync). Default off (#181); path refreshes are the primary mechanism.
+    MEDIA_REFRESH_SECTION_FALLBACK_ENABLED: bool = os.getenv("MEDIA_REFRESH_SECTION_FALLBACK_ENABLED", "false").split('#')[0].strip().lower() == "true"
     MATERIALIZATION_OVERLAP_ENABLED: bool = True
     MATERIALIZATION_OVERLAP_MOVIE_CHECKPOINT_COUNT: int = 200
     MATERIALIZATION_OVERLAP_EPISODE_CHECKPOINT_COUNT: int = 400
@@ -616,6 +629,20 @@ class Settings(BaseSettings):
     )
     DB_POOL_MAX_OVERFLOW: int = int(
         os.getenv("DB_POOL_MAX_OVERFLOW", "20").split('#')[0].strip() or "20"
+    )
+    # Dual pools: API (UI) vs worker. Defaults split DB_POOL_SIZE / overflow.
+    # Leave unset to use half of DB_POOL_SIZE each (see services.postgres.db).
+    DB_API_POOL_SIZE: int = int(
+        os.getenv("DB_API_POOL_SIZE", "0").split('#')[0].strip() or "0"
+    )
+    DB_WORKER_POOL_SIZE: int = int(
+        os.getenv("DB_WORKER_POOL_SIZE", "0").split('#')[0].strip() or "0"
+    )
+    DB_API_POOL_MAX_OVERFLOW: int = int(
+        os.getenv("DB_API_POOL_MAX_OVERFLOW", "0").split('#')[0].strip() or "0"
+    )
+    DB_WORKER_POOL_MAX_OVERFLOW: int = int(
+        os.getenv("DB_WORKER_POOL_MAX_OVERFLOW", "0").split('#')[0].strip() or "0"
     )
     DB_POOL_TIMEOUT_SECONDS: int = int(
         os.getenv("DB_POOL_TIMEOUT_SECONDS", "10").split('#')[0].strip() or "10"

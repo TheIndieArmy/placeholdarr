@@ -91,7 +91,7 @@ def _tokens_from_tmdb_movie(data: dict[str, Any]) -> dict[str, str]:
     year = _year_from_date(release)
     genres = _genres_short([g.get("name") for g in (data.get("genres") or []) if isinstance(g, dict)])
     runtime = _format_runtime_minutes(data.get("runtime"))
-    rating = _format_rating_value(data.get("vote_average"))
+    rating = _format_rating_value(data.get("vote_average"), source="tmdb")
     theatrical = _token_date(release)
     coming = _coming_soon_from_dates(kind="movie", theatrical=theatrical, digital="")
     out: dict[str, str] = {
@@ -124,7 +124,7 @@ def _tokens_from_tmdb_tv(data: dict[str, Any], *, episode_name: str = "", air_da
     episode_run_times = data.get("episode_run_time") if isinstance(data.get("episode_run_time"), list) else []
     runtime_mins = episode_run_times[0] if episode_run_times else None
     runtime = _format_runtime_minutes(runtime_mins)
-    rating = _format_rating_value(data.get("vote_average"))
+    rating = _format_rating_value(data.get("vote_average"), source="tmdb")
     status = series_status_label(data.get("status"))
     premiere = _token_date(first_air)
     air = _token_date(air_date)
@@ -167,6 +167,86 @@ def _payload(*, kind: str, tmdb_id: int | None, poster_url: str, title: str, sou
         "source": source,
         "tokens": cleaned,
     }
+
+
+def _merge_token_maps(*maps: dict[str, str] | None) -> dict[str, str]:
+    """Later maps win for non-empty values (library Arr ratings over TMDB stubs)."""
+    out: dict[str, str] = {}
+    for raw in maps:
+        if not isinstance(raw, dict):
+            continue
+        for key, value in raw.items():
+            name = str(key or "").strip()
+            text = str(value or "").strip()
+            if name and text:
+                out[name] = text
+    return out
+
+
+def _library_preview_tokens(*, kind: str, tmdb_id: int) -> dict[str, str] | None:
+    """Arr-backed tokens for a TMDB id already in the library (ratings, runtime, …)."""
+    want = _normalize_kind(kind)
+    tid = int(tmdb_id)
+    if tid <= 0:
+        return None
+    session = get_session()
+    try:
+        if want == "movie":
+            row = (
+                session.query(Movie)
+                .filter(Movie.is_deleted == False, Movie.tmdbid == tid)  # noqa: E712
+                .order_by(Movie.id.asc())
+                .first()
+            )
+            if row is None:
+                return None
+            theatrical = _token_date(getattr(row, "theater_release_date", None))
+            digital = _token_date(getattr(row, "digital_release_date", None))
+            coming = _coming_soon_from_dates(kind="movie", theatrical=theatrical, digital=digital)
+            return resolve_label_tokens(media_kind="movie", movie=row, coming_soon_label=coming)
+
+        row = (
+            session.query(Series)
+            .filter(Series.is_deleted == False, Series.sonarr_tmdbid == tid)  # noqa: E712
+            .order_by(Series.id.asc())
+            .first()
+        )
+        if row is None:
+            return None
+        if want == "episode":
+            season = (
+                session.query(Season)
+                .filter(Season.series_id == int(row.id), Season.is_deleted == False)  # noqa: E712
+                .order_by(Season.season_number.asc().nullsfirst(), Season.id.asc())
+                .first()
+            )
+            episode = None
+            if season is not None:
+                episode = (
+                    session.query(Episode)
+                    .filter(Episode.season_id == int(season.id), Episode.is_deleted == False)  # noqa: E712
+                    .order_by(Episode.episode_number.asc().nullsfirst(), Episode.id.asc())
+                    .first()
+                )
+            air = _token_date(getattr(episode, "air_date", None) if episode is not None else None)
+            coming = _coming_soon_from_dates(kind="episode", air=air)
+            tokens = resolve_label_tokens(
+                media_kind="episode",
+                series=row,
+                season=season,
+                episode=episode,
+                coming_soon_label=coming,
+            )
+            ep_title = str(getattr(episode, "title", "") or "").strip() if episode is not None else ""
+            if ep_title:
+                tokens["Title"] = ep_title
+            return tokens
+
+        premiere = _token_date(getattr(row, "sonarr_first_aired", None))
+        coming = _coming_soon_from_dates(kind="series", air=premiere)
+        return resolve_label_tokens(media_kind="series", series=row, coming_soon_label=coming)
+    finally:
+        session.close()
 
 
 def resolve_from_tmdb(*, kind: str, tmdb_id: int) -> dict[str, Any]:
@@ -223,6 +303,12 @@ def resolve_from_tmdb(*, kind: str, tmdb_id: int) -> dict[str, Any]:
         return {"ok": False, "message": str(exc)}
     if not url:
         return {"ok": False, "message": "No poster art found for that TMDB id"}
+    # Prefer Arr ratings/runtime/etc. when this TMDB id is already in the library.
+    lib_tokens = _library_preview_tokens(kind=want, tmdb_id=tid)
+    if lib_tokens:
+        tokens = _merge_token_maps(tokens, lib_tokens)
+        if lib_tokens.get("Title"):
+            title = lib_tokens["Title"]
     return _payload(kind=want, tmdb_id=tid, poster_url=url, title=title, source="tmdb", tokens=tokens)
 
 

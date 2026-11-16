@@ -233,6 +233,8 @@ BANNER_TOKEN = FILL_RECTANGLE_TOKEN  # alias
 _LEGACY_BANNER_TOKEN = "Banner"
 _ARTED_TOKENS = frozenset({"Rating"})
 _RATING_SOURCES: tuple[str, ...] = ("imdb", "tmdb", "trakt", "rottentomatoes", "metacritic")
+# Sonarr series ratings are a flat IMDb score only; do not offer sources we cannot bake.
+_TV_RATING_SOURCES: tuple[str, ...] = ("imdb",)
 _RATING_SOURCE_PRIORITY: tuple[str, ...] = (
     "imdb",
     "tmdb",
@@ -242,6 +244,14 @@ _RATING_SOURCE_PRIORITY: tuple[str, ...] = (
     "rotten_tomatoes",
     "metacritic",
 )
+
+
+def rating_sources_for_media(media_kind: str | None) -> tuple[str, ...]:
+    """Rating providers offered in the designer / available at bake for this media kind."""
+    kind = str(media_kind or "movie").strip().lower()
+    if kind in {"tv", "series", "show", "episode"}:
+        return _TV_RATING_SOURCES
+    return _RATING_SOURCES
 
 _SERIES_STATUS_LABELS = {
     "continuing": "Airing",
@@ -790,13 +800,23 @@ def _normalize_rating_source(raw: Any) -> str:
     return "auto"
 
 
-def _rating_source_for_label(*, token: str, arted: bool, raw: Any) -> str:
+def _rating_source_for_label(
+    *,
+    token: str,
+    arted: bool,
+    raw: Any,
+    media_kind: str | None = None,
+) -> str:
     if token != "Rating":
         return "auto"
     source = _normalize_rating_source(raw)
     # Arted chips always pick a concrete source; legacy ``auto`` becomes IMDb.
     if arted and source == "auto":
-        return "imdb"
+        source = "imdb"
+    allowed = rating_sources_for_media(media_kind)
+    if source != "auto" and source not in allowed:
+        # Copy/import from Movie or older layouts: drop providers we cannot bake.
+        return allowed[0] if allowed else "imdb"
     return source
 
 
@@ -919,7 +939,14 @@ def normalize_rating_art_layout(raw: Any, *, arted: bool) -> str:
     return _RATING_ART_LAYOUT_DEFAULT
 
 
-def normalize_label(raw: Any, *, cols: int, rows: int, landscape: bool = False) -> dict[str, Any] | None:
+def normalize_label(
+    raw: Any,
+    *,
+    cols: int,
+    rows: int,
+    landscape: bool = False,
+    media_kind: str | None = None,
+) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
     token = _normalize_fill_rectangle_token(str(raw.get("token") or "").strip())
@@ -1005,7 +1032,12 @@ def normalize_label(raw: Any, *, cols: int, rows: int, landscape: bool = False) 
         "fade_left": fade_left,
         "style": style,
         "arted": arted,
-        "rating_source": _rating_source_for_label(token=token, arted=arted, raw=raw.get("rating_source")),
+        "rating_source": _rating_source_for_label(
+            token=token,
+            arted=arted,
+            raw=raw.get("rating_source"),
+            media_kind=media_kind,
+        ),
         "rating_art_layout": rating_art_layout if token == "Rating" else _RATING_ART_LAYOUT_DEFAULT,
         "custom_text": _normalize_custom_text(custom_text_raw, token=token),
     }
@@ -1077,13 +1109,20 @@ def _legacy_global_grayscale() -> bool:
 
 def normalize_profile(profile_key: str, raw: Any) -> dict[str, Any]:
     cols, rows = grid_size_for_profile(profile_key)
-    landscape = str(profile_key or "").startswith("episode.")
+    media_kind, _availability, _variant = parse_profile_key(profile_key)
+    landscape = media_kind == "episode"
     allowed = tokens_for_profile(profile_key)
     labels_in = raw.get("labels") if isinstance(raw, dict) else None
     labels: list[dict[str, Any]] = []
     if isinstance(labels_in, list):
         for item in _expand_legacy_text_banners(labels_in, cols=cols, rows=rows):
-            norm = normalize_label(item, cols=cols, rows=rows, landscape=landscape)
+            norm = normalize_label(
+                item,
+                cols=cols,
+                rows=rows,
+                landscape=landscape,
+                media_kind=media_kind,
+            )
             if norm is None:
                 continue
             if norm["token"] not in allowed:
@@ -1942,6 +1981,53 @@ def resolve_label_tokens(
     return out
 
 
+# Kept when merging TMDB/library preview-art over catalog samples (not title-specific).
+_SAMPLE_STRUCTURAL_TOKENS = frozenset({"FillRectangle", "PLACEHOLDER", "Badge", "Sep", "Custom"})
+
+
+def apply_sample_token_overrides(
+    base: dict[str, str] | None,
+    overrides: dict[str, Any] | None,
+) -> dict[str, str]:
+    """Merge designer preview-art tokens onto catalog samples.
+
+    When overrides are present (TMDB id / randomize), drop title-specific demo values
+    so Metacritic/IMDb/etc. update to this title (or blank). Blank rating sources still
+    draw as ``—`` on arted Rating chips; they must not keep the catalog sample score.
+    Structural tokens stay for empty-label sizing.
+    """
+    out = {str(k): str(v) for k, v in (base or {}).items()}
+    if not isinstance(overrides, dict) or not overrides:
+        return out
+    for key in list(out.keys()):
+        if key in _SAMPLE_STRUCTURAL_TOKENS:
+            continue
+        del out[key]
+    for raw_key, raw_val in overrides.items():
+        name = str(raw_key or "").strip()
+        if not name:
+            continue
+        text = str(raw_val or "").strip()
+        if text:
+            out[name] = text
+        else:
+            out[name] = ""
+    if "Sep" not in out:
+        sep = str((base or {}).get("Sep") or "").strip()
+        if sep:
+            out["Sep"] = sep
+    # Every known source is present so chips refresh (score or dash), never leftover demos.
+    for source in _RATING_SOURCES:
+        key = f"Rating:{source}"
+        if key not in out:
+            out[key] = ""
+    if "Rating" not in out:
+        out["Rating"] = ""
+    if "RatingSource" not in out:
+        out["RatingSource"] = ""
+    return out
+
+
 def sample_tokens_for_profile(profile_key: str) -> dict[str, str]:
     """Demo tokens for Settings preview / designer sizing (prefer longest realistic values).
 
@@ -1974,16 +2060,16 @@ def sample_tokens_for_profile(profile_key: str) -> dict[str, str]:
         "Rating": "8.8",
         "RatingSource": "imdb",
         "Rating:imdb": "8.8",
-        "Rating:tmdb": "7.4",
-        "Rating:trakt": "8.1",
-        "Rating:rottentomatoes": "91%",
-        "Rating:metacritic": "78",
-
         "SeriesStatus": "Returning",
     }
     if kind == "movie":
         base["ComingSoonOrNewEp"] = "Theatrical - Sep 30"
         base["ComingSoonOrNewEpDate"] = "2026-09-30"
+        # Radarr often has nested multi-provider ratings; keep samples for chip sizing.
+        base["Rating:tmdb"] = "7.4"
+        base["Rating:trakt"] = "8.1"
+        base["Rating:rottentomatoes"] = "91%"
+        base["Rating:metacritic"] = "78"
     elif kind == "episode":
         base["Title"] = "Ozymandias"
         base["Year"] = "2013"
@@ -2035,6 +2121,11 @@ def serialize_layout_catalog() -> dict[str, Any]:
         "styles": list(LABEL_STYLES),
         "arted_tokens": sorted(_ARTED_TOKENS),
         "rating_sources": list(_RATING_SOURCES),
+        "rating_sources_by_kind": {
+            "movie": list(rating_sources_for_media("movie")),
+            "tv": list(rating_sources_for_media("tv")),
+            "episode": list(rating_sources_for_media("episode")),
+        },
         "rating_art_layouts": list(_RATING_ART_LAYOUTS),
         "size_scale_min": _SIZE_SCALE_MIN,
         "size_scale_max": _SIZE_SCALE_MAX,

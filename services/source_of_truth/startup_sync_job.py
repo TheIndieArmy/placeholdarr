@@ -176,6 +176,9 @@ def _heartbeat_sync_gate(*, owner: str) -> None:
     Also touches the CLAIMED ``job`` row when ``owner`` is ``job:<id>`` so the
     stale-CLAIMED reaper does not requeue a long ARR full sync mid-run.
     """
+    from services.postgres.db import bind_worker_pool_role
+
+    bind_worker_pool_role()
     session = get_session()
     try:
         row = (

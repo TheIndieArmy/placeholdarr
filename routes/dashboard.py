@@ -106,7 +106,10 @@ def _launch_post_onboarding_startup_sync() -> None:
         pass
 
     def _runner() -> None:
+        from services.postgres.db import bind_worker_pool_role
         from services.startup_gate import startup_sync_complete
+
+        bind_worker_pool_role()
         try:
             from main import ensure_sync_scheduler_started, start_runtime_background_services
             from services.source_of_truth.startup import run_startup_source_of_truth
@@ -264,6 +267,9 @@ def _launch_arr_change_full_sync(reason: str) -> None:
         pass
 
     def _runner() -> None:
+        from services.postgres.db import bind_worker_pool_role
+
+        bind_worker_pool_role()
         try:
             from services.source_of_truth.sync_runner import run_full_sync
 
@@ -4176,20 +4182,32 @@ def _pick_collection_library_row(prev: Movie | None, candidate: Movie, anchor: M
     return prev
 
 
-def _movie_collection_members(session, anchor: Movie) -> tuple[list[dict[str, Any]], int]:
+def _fetch_movie_collection_tmdb_parts(collection_tmdb_id: int | None) -> list[dict[str, Any]]:
+    """TMDB collection parts (no DB session). Call after releasing any open txn."""
+    if collection_tmdb_id is None:
+        return []
+    try:
+        from services import tmdb_client
+
+        if tmdb_client.tmdb_configured():
+            return list(tmdb_client.fetch_collection(str(collection_tmdb_id), "movie") or [])
+    except Exception:
+        return []
+    return []
+
+
+def _movie_collection_members(
+    session,
+    anchor: Movie,
+    *,
+    tmdb_parts: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
     title, collection_tmdb_id = _collection_fields(getattr(anchor, "radarr_collection", None))
     if not title and not collection_tmdb_id:
         return ([], 0)
 
-    tmdb_parts: list[dict[str, Any]] = []
-    if collection_tmdb_id is not None:
-        try:
-            from services import tmdb_client
-
-            if tmdb_client.tmdb_configured():
-                tmdb_parts = tmdb_client.fetch_collection(str(collection_tmdb_id), "movie")
-        except Exception:
-            tmdb_parts = []
+    if tmdb_parts is None:
+        tmdb_parts = _fetch_movie_collection_tmdb_parts(collection_tmdb_id)
 
     part_tmdb_ids = [int(p["tmdb_id"]) for p in tmdb_parts if p.get("tmdb_id") is not None]
     needle = (title or "").strip().lower()
@@ -4336,9 +4354,8 @@ def _episode_display_status_map(session, episode_ids: list[int]) -> dict[int, st
     return out
 
 
-@router.get("/api/detail/movie/{movie_id}")
-async def movie_detail(movie_id: int):
-    """Return full detail for a single movie."""
+def _movie_detail_payload(movie_id: int) -> dict[str, Any] | JSONResponse:
+    """Build movie detail: short DB snapshot → close → Arr/TMDB HTTP → short DB for members."""
     from services.source_of_truth.tag_placeholder_policy import resolve_policy_tag_control
 
     session = get_session()
@@ -4355,14 +4372,13 @@ async def movie_detail(movie_id: int):
         )
         instance_meta = _arr_instance_meta(movie.instance_key, getattr(movie, "instance_id", None))
         collection_title, collection_tmdb_id = _collection_fields(movie.radarr_collection)
-        collection_members, collection_total = _movie_collection_members(session, movie)
         tag_control = resolve_policy_tag_control(
             instance_key=movie.instance_key,
             arr_type="radarr",
             payload=movie.radarr_payload_raw,
             policy_source=getattr(movie, "placeholder_policy_source", None),
         )
-        return {
+        payload = {
             "ok": True,
             "type": "movie",
             "id": movie.id,
@@ -4380,8 +4396,6 @@ async def movie_detail(movie_id: int):
             "collection": movie.radarr_collection,
             "collection_title": collection_title,
             "collection_tmdb_id": collection_tmdb_id,
-            "collection_members": collection_members,
-            "collection_total": collection_total,
             "actors": _people_display(movie.radarr_actors, cap=8),
             "directors": _people_display(movie.radarr_directors, cap=4),
             "trailer_url": _youtube_trailer_url(movie.radarr_trailer),
@@ -4429,11 +4443,6 @@ async def movie_detail(movie_id: int):
             "radarr_quality": movie.radarr_quality,
             "radarr_monitored": bool(movie.radarr_monitored),
             "radarr_release_status": movie.radarr_release_status,
-            "radarr_tags": _arr_tag_labels_for_payload(
-                instance_key=movie.instance_key,
-                arr_type="radarr",
-                payload=movie.radarr_payload_raw,
-            ),
             "theater_release_date": _iso(movie.theater_release_date),
             "digital_release_date": _iso(movie.digital_release_date),
             "physical_release_date": _iso(movie.physical_release_date),
@@ -4449,17 +4458,47 @@ async def movie_detail(movie_id: int):
                 imdb_id=movie.imdbid,
             ),
         }
+        tag_instance_key = movie.instance_key
+        tag_payload = movie.radarr_payload_raw
+        movie_pk = int(movie.id)
     finally:
         session.close()
 
+    payload["radarr_tags"] = _arr_tag_labels_for_payload(
+        instance_key=tag_instance_key,
+        arr_type="radarr",
+        payload=tag_payload,
+    )
+    tmdb_parts = _fetch_movie_collection_tmdb_parts(payload.get("collection_tmdb_id"))
+    session = get_session()
+    try:
+        movie = session.query(Movie).filter(Movie.id == movie_pk).first()
+        if movie is None:
+            payload["collection_members"] = []
+            payload["collection_total"] = 0
+        else:
+            members, total = _movie_collection_members(session, movie, tmdb_parts=tmdb_parts)
+            payload["collection_members"] = members
+            payload["collection_total"] = total
+    finally:
+        session.close()
+    return payload
 
-@router.get("/api/detail/series/{series_id}")
-async def series_detail(series_id: int):
-    """Return full detail for a series, including all seasons and their episodes."""
+
+@router.get("/api/detail/movie/{movie_id}")
+async def movie_detail(movie_id: int):
+    """Return full detail for a single movie."""
+    return await asyncio.to_thread(_movie_detail_payload, movie_id)
+
+
+def _series_detail_payload(series_id: int) -> dict[str, Any] | JSONResponse:
+    """Build series detail; Arr tag labels resolve after the DB session closes."""
     from services.library_future_semantics import episode_row_is_future_outside_lookahead
     from services.source_of_truth.tag_placeholder_policy import resolve_policy_tag_control
 
     session = get_session()
+    tag_instance_key: str | None = None
+    tag_payload: Any = None
     try:
         series = session.query(Series).filter(Series.id == series_id, Series.is_deleted == False).first()
         if not series:
@@ -4604,7 +4643,9 @@ async def series_detail(series_id: int):
 
         stats = _episode_stats_for_series(session, int(series.id))
         last_aired_map = series_last_aired_map(session, [int(series.id)])
-        return {
+        tag_instance_key = series.instance_key
+        tag_payload = series.sonarr_payload_raw
+        payload = {
             "ok": True,
             "type": "series",
             "id": series.id,
@@ -4630,11 +4671,6 @@ async def series_detail(series_id: int):
             "status": series.status,
             "sonarr_status": series.sonarr_status,
             "sonarr_monitored": bool(series.sonarr_monitored),
-            "sonarr_tags": _arr_tag_labels_for_payload(
-                instance_key=series.instance_key,
-                arr_type="sonarr",
-                payload=series.sonarr_payload_raw,
-            ),
             "placeholder_policy": series_policy,
             "force_placeholder": bool(getattr(series, "force_placeholder", False)),
             "block_placeholder": bool(getattr(series, "block_placeholder", False)),
@@ -4674,6 +4710,19 @@ async def series_detail(series_id: int):
         }
     finally:
         session.close()
+
+    payload["sonarr_tags"] = _arr_tag_labels_for_payload(
+        instance_key=tag_instance_key,
+        arr_type="sonarr",
+        payload=tag_payload,
+    )
+    return payload
+
+
+@router.get("/api/detail/series/{series_id}")
+async def series_detail(series_id: int):
+    """Return full detail for a series, including all seasons and their episodes."""
+    return await asyncio.to_thread(_series_detail_payload, series_id)
 
 
 def _watchlist_section_for_library_item(
@@ -5593,6 +5642,7 @@ async def settings_poster_overlay_label_sprite(request: Request):
     sample_overrides = body.get("sample_tokens") if isinstance(body.get("sample_tokens"), dict) else None
     try:
         from services.poster_layouts import (
+            apply_sample_token_overrides,
             get_profile,
             grid_size_for_profile,
             sample_tokens_for_profile,
@@ -5605,13 +5655,7 @@ async def settings_poster_overlay_label_sprite(request: Request):
         )
         # Touch profile so missing keys still resolve sample/grid defaults.
         get_profile(key)
-        tokens = sample_tokens_for_profile(key)
-        if sample_overrides:
-            for raw_key, raw_val in sample_overrides.items():
-                name = str(raw_key or "").strip()
-                text = str(raw_val or "").strip()
-                if name and text:
-                    tokens[name] = text
+        tokens = apply_sample_token_overrides(sample_tokens_for_profile(key), sample_overrides)
         cols, rows = grid_size_for_profile(key)
         result = render_layout_label_sprite_png(
             raw_label,
@@ -5643,22 +5687,26 @@ async def settings_poster_overlay_label_sprite(request: Request):
 @router.get("/api/settings/arr-root-folders")
 async def settings_arr_root_folders():
     """Live Arr root folders per configured instance (for destination map UX)."""
-    from routes.collections import _arr_instances_for_media, _fetch_instance_root_folders
 
-    out: list[dict] = []
-    for media_type, arr_type in (("movie", "radarr"), ("show", "sonarr")):
-        for item in _arr_instances_for_media(media_type):
-            folders = _fetch_instance_root_folders(item)
-            out.append(
-                {
-                    "instance_key": item.get("instance_key"),
-                    "instance_id": item.get("instance_id"),
-                    "label": item.get("label") or item.get("instance_key"),
-                    "arr_type": arr_type,
-                    "root_folders": folders,
-                }
-            )
-    return JSONResponse(content={"ok": True, "instances": out})
+    def _work() -> dict[str, Any]:
+        from routes.collections import _arr_instances_for_media, _fetch_instance_root_folders
+
+        out: list[dict] = []
+        for media_type, arr_type in (("movie", "radarr"), ("show", "sonarr")):
+            for item in _arr_instances_for_media(media_type):
+                folders = _fetch_instance_root_folders(item)
+                out.append(
+                    {
+                        "instance_key": item.get("instance_key"),
+                        "instance_id": item.get("instance_id"),
+                        "label": item.get("label") or item.get("instance_key"),
+                        "arr_type": arr_type,
+                        "root_folders": folders,
+                    }
+                )
+        return {"ok": True, "instances": out}
+
+    return JSONResponse(content=await asyncio.to_thread(_work))
 
 
 @router.post("/api/settings/ensure-dest-folder")
@@ -5740,64 +5788,64 @@ async def integrations_test(request: Request):
     if not isinstance(payload, dict):
         return JSONResponse(content={"ok": False, "message": "expected request object"}, status_code=400)
 
-    service = str(payload.get("service") or "").strip().lower()
-    url = str(payload.get("url") or "").strip()
-    credential = str(payload.get("credential") or "").strip()
-    credential_key = str(payload.get("credential_key") or "").strip() or None
-    instance_id = str(payload.get("instance_id") or "").strip() or None
+    def _work() -> tuple[dict[str, Any], int]:
+        service = str(payload.get("service") or "").strip().lower()
+        url = str(payload.get("url") or "").strip()
+        credential = str(payload.get("credential") or "").strip()
+        credential_key = str(payload.get("credential_key") or "").strip() or None
+        instance_id = str(payload.get("instance_id") or "").strip() or None
 
-    if service not in {"plex", "jellyfin", "emby", "radarr", "sonarr"}:
-        return JSONResponse(content={"ok": False, "message": "unsupported service"}, status_code=400)
-    if not url:
-        return JSONResponse(content={"ok": False, "message": "url is required"}, status_code=400)
+        if service not in {"plex", "jellyfin", "emby", "radarr", "sonarr"}:
+            return {"ok": False, "message": "unsupported service"}, 400
+        if not url:
+            return {"ok": False, "message": "url is required"}, 400
 
-    resolved, resolve_err = resolve_integration_test_credential(
-        service=service,
-        url=url,
-        credential=credential,
-        credential_key=credential_key,
-        instance_id=instance_id,
-    )
-    if resolve_err or not resolved:
-        return JSONResponse(
-            content={"ok": False, "message": resolve_err or "credential is required"},
-            status_code=400,
+        resolved, resolve_err = resolve_integration_test_credential(
+            service=service,
+            url=url,
+            credential=credential,
+            credential_key=credential_key,
+            instance_id=instance_id,
         )
+        if resolve_err or not resolved:
+            return {"ok": False, "message": resolve_err or "credential is required"}, 400
 
-    result = test_integration_connection(service=service, url=url, token_or_key=resolved)
-    try:
-        from services.integration_status import record_arr_status, record_media_status
+        result = test_integration_connection(service=service, url=url, token_or_key=resolved)
+        try:
+            from services.integration_status import record_arr_status, record_media_status
 
-        ok = bool(result.get("ok"))
-        message = str(result.get("message") or "")
-        # Successful Test clears a sticky !. Failed Test does not sticky: the modal
-        # shows the error, and Cancel must not leave Settings with a warning !.
-        if ok:
-            if service in {"plex", "jellyfin", "emby"}:
-                record_media_status(service, ok=True, message=message, source="test")
-            elif service in {"radarr", "sonarr"}:
-                iid = str(instance_id or "").strip().lower()
-                label = ""
-                instance_key = ""
-                if iid:
-                    for item in getattr(settings, "configured_arr_instances", []) or []:
-                        if str(item.get("instance_id") or "").strip().lower() == iid:
-                            label = str(item.get("label") or "")
-                            instance_key = str(item.get("instance_key") or "")
-                            break
-                if iid:
-                    record_arr_status(
-                        instance_id=iid,
-                        arr_type=service,
-                        instance_key=instance_key,
-                        label=label,
-                        ok=True,
-                        message=message,
-                        source="test",
-                    )
-    except Exception:
-        pass
-    status_code = 200 if result.get("ok") else 400
+            ok = bool(result.get("ok"))
+            message = str(result.get("message") or "")
+            # Successful Test clears a sticky !. Failed Test does not sticky: the modal
+            # shows the error, and Cancel must not leave Settings with a warning !.
+            if ok:
+                if service in {"plex", "jellyfin", "emby"}:
+                    record_media_status(service, ok=True, message=message, source="test")
+                elif service in {"radarr", "sonarr"}:
+                    iid = str(instance_id or "").strip().lower()
+                    label = ""
+                    instance_key = ""
+                    if iid:
+                        for item in getattr(settings, "configured_arr_instances", []) or []:
+                            if str(item.get("instance_id") or "").strip().lower() == iid:
+                                label = str(item.get("label") or "")
+                                instance_key = str(item.get("instance_key") or "")
+                                break
+                    if iid:
+                        record_arr_status(
+                            instance_id=iid,
+                            arr_type=service,
+                            instance_key=instance_key,
+                            label=label,
+                            ok=True,
+                            message=message,
+                            source="test",
+                        )
+        except Exception:
+            pass
+        return result, (200 if result.get("ok") else 400)
+
+    result, status_code = await asyncio.to_thread(_work)
     return JSONResponse(content=result, status_code=status_code)
 
 

@@ -77,6 +77,7 @@ export function SeriesDetailView(props: {
             <PlaceholderPolicyCycle
               mediaType="series"
               entityId={payload.id}
+              displayTitle={payload.title}
               placeholderPolicy={payload.placeholder_policy}
               forcePlaceholder={payload.force_placeholder}
               blockPlaceholder={payload.block_placeholder}
@@ -224,6 +225,7 @@ export function SeriesDetailView(props: {
                         <PlaceholderPolicyCycle
                           mediaType="season"
                           entityId={season.id}
+                          displayTitle={payload.title}
                           placeholderPolicy={season.placeholder_policy}
                           forcePlaceholder={season.force_placeholder}
                           blockPlaceholder={season.block_placeholder}
@@ -251,6 +253,7 @@ export function SeriesDetailView(props: {
                             episode={ep}
                             themeMode={props.themeMode}
                             accentHex={props.accent.hex}
+                            displayTitle={payload.title}
                             tvPlaceholderDensity={tvDensity}
                             onPolicyApplied={props.onPolicyApplied}
                             refreshControl={

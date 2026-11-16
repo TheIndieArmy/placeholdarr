@@ -12,7 +12,6 @@ from typing import Any
 from core.logger import logger
 from services.media_servers.refresh import (
     refresh_all_paths,
-    refresh_all_sections,
     refresh_players_after_local_art_rewrite,
 )
 from services.placeholder_poster_art import (
@@ -62,6 +61,59 @@ def _art_task_run_id_from_payload(payload: dict[str, Any]) -> int | None:
         return None
 
 
+def payload_extras_for_active_full_sync_art(*, source: str) -> dict[str, Any] | None:
+    """Link art jobs to the active full_sync task run (Updating bar + completion gate).
+
+    Returns None when no full_sync task_run is in scope (webhooks, lite, UI chips).
+    """
+    from services.task_run_cancel import active_task_run_id
+    from services.task_run_phases import _task_run_key, ensure_working_art_backfill_run
+
+    tid = active_task_run_id()
+    if tid is None:
+        return None
+    if _task_run_key(int(tid)) != "full_sync":
+        return None
+    run_id, batch_index_base = ensure_working_art_backfill_run(
+        int(tid),
+        source=str(source or "full_sync_materialization"),
+        determination_skipped=True,
+    )
+    if not run_id:
+        return None
+    return {
+        FULL_SYNC_TASK_RUN_ID_KEY: int(tid),
+        ART_BACKFILL_TASK_RUN_ID_KEY: int(tid),
+        ART_BACKFILL_RUN_ID_KEY: run_id,
+        ART_BACKFILL_REFRESH_ON_COMPLETION_KEY: True,
+        "art_backfill_source": str(source or "full_sync_materialization"),
+        "art_scope": "all",
+        "batch_index_base": int(batch_index_base),
+    }
+
+
+def note_active_full_sync_art_enqueue(out: dict[str, Any] | None, *, extras: dict[str, Any] | None) -> None:
+    """After enqueue, fold job counts into the shared full_sync art_backfill summary."""
+    if not isinstance(extras, dict) or not isinstance(out, dict) or not out.get("ok"):
+        return
+    tid = _art_task_run_id_from_payload(extras)
+    run_id = str(extras.get(ART_BACKFILL_RUN_ID_KEY) or "").strip()
+    if tid is None or not run_id:
+        return
+    try:
+        from services.task_run_phases import note_art_backfill_jobs_enqueued
+
+        note_art_backfill_jobs_enqueued(
+            int(tid),
+            art_run_id=run_id,
+            placeholder_count=int(out.get("placeholder_count") or 0),
+            batch_count=int(out.get("jobs_created") or 0),
+            source=str(extras.get("art_backfill_source") or "") or None,
+        )
+    except Exception as exc:
+        logger.debug(f"note full_sync art enqueue skipped: {exc}", extra={"emoji_type": "debug"})
+
+
 def _publish_art_batch_live(
     task_run_id: int,
     *,
@@ -69,18 +121,22 @@ def _publish_art_batch_live(
     done: int,
     total: int,
     status: str,
+    reason: str | None = None,
 ) -> None:
     try:
         from services.task_live_progress import publish_art_refresh_live
 
+        batch: dict[str, Any] = {
+            "index": int(batch_index),
+            "done": int(done),
+            "total": int(total),
+            "status": status,
+        }
+        if reason:
+            batch["reason"] = str(reason).strip().lower()
         publish_art_refresh_live(
             int(task_run_id),
-            active_batch={
-                "index": int(batch_index),
-                "done": int(done),
-                "total": int(total),
-                "status": status,
-            },
+            active_batch=batch,
         )
     except Exception as exc:
         logger.debug(f"art live batch publish skipped: {exc}", extra={"emoji_type": "debug"})
@@ -254,6 +310,61 @@ def art_scope_writes_episode_stills(art_scope: str | None, display_status: str |
     if scope == "tv_new_ep":
         return False
     return True
+
+
+def _layout_art_kinds(layout_art: dict[str, Any] | None) -> set[str] | None:
+    """Normalized media kinds from a layout-designer filter, or None when not narrowed."""
+    if not isinstance(layout_art, dict) or bool(layout_art.get("full")):
+        return None
+    kinds = {str(k).strip().lower() for k in (layout_art.get("kinds") or []) if str(k).strip()}
+    return kinds or None
+
+
+def layout_art_writes_series_posters(layout_art: dict[str, Any] | None) -> bool | None:
+    """Whether layout filter should bake series/season posters. None = use default."""
+    kinds = _layout_art_kinds(layout_art)
+    if kinds is None:
+        return None
+    return "tv" in kinds
+
+
+def layout_art_writes_episode_stills(layout_art: dict[str, Any] | None) -> bool | None:
+    """Whether layout filter should bake episode stills. None = use art_scope."""
+    kinds = _layout_art_kinds(layout_art)
+    if kinds is None:
+        return None
+    return "episode" in kinds
+
+
+def art_scope_for_layout_filter(layout_filter: dict[str, Any]) -> str:
+    """Map layout kinds to an art_scope that does not over-write stills for TV-only saves."""
+    kinds = {str(k).strip().lower() for k in (layout_filter.get("kinds") or []) if str(k).strip()}
+    if "episode" in kinds:
+        return "all"
+    if "tv" in kinds and "movie" not in kinds:
+        return "tv_new_ep"
+    return "all"
+
+
+def art_refresh_job_batch_size() -> int:
+    """Smaller batches for art refresh so studio bakes finish under the handler watchdog."""
+    from core.config import settings
+    from services.source_of_truth.placeholder_job_enqueue import job_batch_size
+
+    try:
+        raw = int(
+            getattr(settings, "ART_REFRESH_BATCH_SIZE", None)
+            or getattr(settings, "LAYOUT_ART_BATCH_SIZE", None)
+            or 25
+        )
+    except Exception:
+        raw = 25
+    return max(1, min(raw, job_batch_size()))
+
+
+def layout_art_job_batch_size() -> int:
+    """Deprecated alias for ``art_refresh_job_batch_size``."""
+    return art_refresh_job_batch_size()
 
 
 def collect_placeholder_ids_for_art_scope(session, art_scope: str | None) -> list[int]:
@@ -654,6 +765,7 @@ def enqueue_placeholder_art_refresh(
     merge_into_pending: bool = True,
     payload_extras: dict[str, Any] | None = None,
     skip_determination: bool = False,
+    batch_size: int | None = None,
 ) -> dict:
     owns_session = session is None
     session = session or get_session()
@@ -719,6 +831,12 @@ def enqueue_placeholder_art_refresh(
                 "reason": "no_art_mismatch",
             }
 
+        try:
+            effective_batch_size = (
+                max(1, int(batch_size)) if batch_size is not None else art_refresh_job_batch_size()
+            )
+        except Exception:
+            effective_batch_size = art_refresh_job_batch_size()
         out = enqueue_batched_placeholder_job(
             PLACEHOLDER_ART_REFRESH_JOB_TYPE,
             ids,
@@ -726,6 +844,7 @@ def enqueue_placeholder_art_refresh(
             merge_into_pending=merge_into_pending,
             payload_extras=payload_extras,
             include_player_metadata_refresh=False,
+            batch_size=effective_batch_size,
         )
         if isinstance(out, dict):
             out["skipped_determination"] = skipped
@@ -879,6 +998,7 @@ def enqueue_placeholder_art_backfill_all(
     layout_filter = layout_art if isinstance(layout_art, dict) else None
     session = get_session()
     try:
+        effective_art_scope = scope
         if layout_filter and not bool(layout_filter.get("full")):
             ids = collect_placeholder_ids_for_layout_art(
                 session,
@@ -886,6 +1006,7 @@ def enqueue_placeholder_art_backfill_all(
                 variants=layout_filter.get("variants") or [],
             )
             scope = "layout_filtered"
+            effective_art_scope = art_scope_for_layout_filter(layout_filter)
         else:
             ids = collect_placeholder_ids_for_art_scope(session, scope)
         if not ids:
@@ -898,17 +1019,36 @@ def enqueue_placeholder_art_backfill_all(
                 "coming_soon_only": scope == "coming_soon",
                 "layout_art": layout_filter,
             }
-        run_id = uuid.uuid4().hex
         # Kind-filtered layout refreshes still need section completion like full overlay passes.
         section_completion = art_scope_uses_section_completion_refresh(
             "all" if scope == "layout_filtered" else scope
         )
+        phase_task_run_id = task_run_id if task_run_id is not None else placeholder_refresh_task_run_id
+        run_id = uuid.uuid4().hex
+        batch_index_base = 0
+        reuse_existing = False
+        if phase_task_run_id is not None:
+            # Reuse an in-progress wave (e.g. mat already linked art) without creating an
+            # empty working art_backfill when this enqueue finds nothing new.
+            try:
+                from services.task_run_phases import _load_summary
+
+                summary = _load_summary(int(phase_task_run_id))
+                art = summary.get("art_backfill") if isinstance(summary.get("art_backfill"), dict) else {}
+                existing_id = str(art.get("run_id") or "").strip()
+                if existing_id and str(art.get("status") or "").strip().lower() == "working":
+                    run_id = existing_id
+                    batch_index_base = max(0, int(art.get("batch_count") or 0))
+                    reuse_existing = True
+            except Exception as exc:
+                logger.debug(f"art backfill run reuse skipped: {exc}", extra={"emoji_type": "debug"})
         extras: dict[str, Any] = {
             ART_BACKFILL_RUN_ID_KEY: run_id,
             ART_BACKFILL_REFRESH_ON_COMPLETION_KEY: section_completion,
             "art_backfill_source": source,
-            "art_scope": scope if scope != "layout_filtered" else "all",
+            "art_scope": effective_art_scope if scope == "layout_filtered" else scope,
             "coming_soon_only": scope == "coming_soon",
+            "batch_index_base": int(batch_index_base),
         }
         if layout_filter:
             extras["layout_art"] = {
@@ -933,7 +1073,9 @@ def enqueue_placeholder_art_backfill_all(
             skip_determination=bool(skip_determination),
         )
         batch_count = int(out.get("jobs_created") or 0)
-        phase_task_run_id = task_run_id if task_run_id is not None else placeholder_refresh_task_run_id
+        queued_count = out.get("placeholder_count")
+        if queued_count is None:
+            queued_count = len(ids)
         if phase_task_run_id is not None and out.get("ok"):
             try:
                 from services.task_live_progress import seed_art_refresh_live_phases
@@ -944,21 +1086,28 @@ def enqueue_placeholder_art_backfill_all(
                 )
             except Exception as exc:
                 logger.debug(f"art live phase seed skipped: {exc}", extra={"emoji_type": "debug"})
-            # Only begin Updating once batches exist (avoids a false "done" race).
             if batch_count > 0:
-                from services.task_run_phases import begin_art_backfill_phase
+                if reuse_existing:
+                    from services.task_run_phases import note_art_backfill_jobs_enqueued
 
-                queued_count = out.get("placeholder_count")
-                if queued_count is None:
-                    queued_count = len(ids)
-                begin_art_backfill_phase(
-                    int(phase_task_run_id),
-                    art_run_id=run_id,
-                    placeholder_count=int(queued_count),
-                    batch_count=batch_count,
-                    source=source,
-                    determination_skipped=bool(skip_determination),
-                )
+                    note_art_backfill_jobs_enqueued(
+                        int(phase_task_run_id),
+                        art_run_id=run_id,
+                        placeholder_count=int(queued_count),
+                        batch_count=batch_count,
+                        source=source,
+                    )
+                else:
+                    from services.task_run_phases import begin_art_backfill_phase
+
+                    begin_art_backfill_phase(
+                        int(phase_task_run_id),
+                        art_run_id=run_id,
+                        placeholder_count=int(queued_count),
+                        batch_count=batch_count,
+                        source=source,
+                        determination_skipped=bool(skip_determination),
+                    )
                 try:
                     from services.task_live_progress import publish_art_refresh_live
 
@@ -968,7 +1117,7 @@ def enqueue_placeholder_art_backfill_all(
         out["art_backfill_run_id"] = run_id
         out["batch_count"] = batch_count
         out["enqueued"] = bool(out.get("ok")) and batch_count > 0
-        out["art_scope"] = "all" if scope == "layout_filtered" else scope
+        out["art_scope"] = effective_art_scope if scope == "layout_filtered" else scope
         out["coming_soon_only"] = scope == "coming_soon"
         if layout_filter:
             out["layout_art"] = extras.get("layout_art")
@@ -1030,6 +1179,11 @@ def _art_refresh_completion_scan_if_last_batch(
     run_id: str,
     log_prefix: str = "Placeholder art backfill",
 ) -> None:
+    """Finalize bulk art backfill without a force full-section metadata refresh (#181).
+
+    Path + item refreshes run per batch when posters are rewritten. This last-batch
+    hook only claims completion, busts UI cache, and finishes the task phase.
+    """
     # Capture before commit/close: expire_on_commit would detach Job and make
     # later ``job.id`` access raise DetachedInstanceError (fails the whole batch).
     job_id = int(job.id)
@@ -1046,42 +1200,138 @@ def _art_refresh_completion_scan_if_last_batch(
     ):
         return
 
-    # Close the worker DB session before long media-server HTTP (same pattern as nfo_refresh).
     try:
         session.commit()
     except Exception:
         session.rollback()
-    try:
-        session.close()
-    except Exception:
-        pass
 
     _art_refresh_bust_ui_library_cache(run_id=run_id, log_prefix=log_prefix)
 
-    # Mark the full-sync task DONE before Plex/JF/Emby refresh so the Tasks UI does not
-    # sit on WORKING for tens of minutes while library scans run.
     if task_run_id:
         from services.task_run_phases import finalize_art_backfill_phase
 
         finalize_art_backfill_phase(task_run_id, run_id, exclude_job_id=job_id)
 
+    logger.info(
+        f"{log_prefix} run complete; skipped force library section refresh "
+        f"run_id={run_id} (path/item refreshes cover rewritten art; #181)",
+        extra={"emoji_type": "success"},
+    )
+
+
+def _art_refresh_load_work_items(session, ids: list[int], *, art_scope: str) -> list[dict[str, Any]]:
+    """Eager-load placeholder + related rows so the handler can close the DB session before HTTP/FS."""
+    placeholders = session.query(Placeholder).filter(Placeholder.id.in_(ids)).all()
+    items: list[dict[str, Any]] = []
+    for placeholder in placeholders:
+        if not bool(getattr(placeholder, "has_placeholder", False)):
+            continue
+
+        movie = session.query(Movie).get(placeholder.movie_id) if placeholder.movie_id else None
+        episode = session.query(Episode).get(placeholder.episode_id) if placeholder.episode_id else None
+
+        if movie and bool(getattr(movie, "has_placeholder", False)):
+            path = str(
+                getattr(placeholder, "path", "") or getattr(movie, "placeholder_filepath", "") or ""
+            ).strip()
+            if not path:
+                continue
+            # Touch attrs used by ensure_movie_art / player refresh while session is open.
+            _ = (
+                movie.id,
+                getattr(movie, "title", None),
+                getattr(movie, "year", None),
+                getattr(movie, "tmdbid", None),
+                getattr(movie, "remote_poster", None),
+                getattr(movie, "localized_poster", None),
+                getattr(movie, "localized_poster_lang", None),
+                getattr(movie, "display_status", None),
+                getattr(movie, "plex_id", None),
+                getattr(movie, "plex_dummy_id", None),
+            )
+            items.append({"kind": "movie", "movie": movie, "path": path})
+            continue
+
+        series = None
+        season = None
+        path = str(getattr(placeholder, "path", "") or "").strip()
+        if episode and bool(getattr(episode, "has_placeholder", False)):
+            season = session.query(Season).get(episode.season_id) if episode.season_id else None
+            series = session.query(Series).get(season.series_id) if season and season.series_id else None
+            if not path:
+                path = str(getattr(episode, "placeholder_filepath", "") or "").strip()
+            _ = (
+                episode.id,
+                getattr(episode, "title", None),
+                getattr(episode, "still_url", None),
+                getattr(episode, "remote_still", None),
+                getattr(episode, "display_status", None),
+            )
+        elif getattr(placeholder, "series_id", None):
+            series = session.query(Series).get(placeholder.series_id)
+            if getattr(placeholder, "season_id", None):
+                season = session.query(Season).get(placeholder.season_id)
+
+        if not series:
+            continue
+
+        if season is not None:
+            _ = (
+                season.id,
+                getattr(season, "season_number", None),
+                getattr(season, "remote_poster", None),
+                getattr(season, "localized_poster", None),
+                getattr(season, "localized_poster_lang", None),
+            )
+        _ = (
+            series.id,
+            getattr(series, "title", None),
+            getattr(series, "tvdbid", None),
+            getattr(series, "remote_poster", None),
+            getattr(series, "localized_poster", None),
+            getattr(series, "localized_poster_lang", None),
+            getattr(series, "placeholder_folder", None),
+            getattr(series, "plex_id", None),
+            getattr(series, "plex_dummy_id", None),
+            getattr(series, "display_status", None),
+        )
+        series_folder = getattr(series, "placeholder_folder", None) or (
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(path)))) if path else None
+        )
+        items.append(
+            {
+                "kind": "tv",
+                "series": series,
+                "season": season,
+                "episode": episode if episode and bool(getattr(episode, "has_placeholder", False)) else None,
+                "path": path,
+                "series_folder": series_folder,
+                "write_episode_still": bool(
+                    episode
+                    and season
+                    and path
+                    and art_scope_writes_episode_stills(
+                        art_scope, getattr(placeholder, "display_status", None)
+                    )
+                ),
+            }
+        )
+    return items
+
+
+def _art_refresh_release_handler_session(session) -> None:
+    """Return the worker pool connection before long HTTP/FS work."""
     try:
-        refresh_stats = refresh_all_sections(
-            has_movies=True,
-            has_episodes=True,
-            plex_force_metadata_refresh=True,
-        )
-        logger.info(
-            f"{log_prefix} run complete; triggered library section refresh "
-            f"run_id={run_id} refreshed={int(refresh_stats.get('refreshed', 0) or 0)} "
-            f"failed={int(refresh_stats.get('failed', 0) or 0)}",
-            extra={"emoji_type": "success"},
-        )
-    except Exception as exc:
-        logger.warning(
-            f"{log_prefix} completion refresh failed run_id={run_id}: {exc}",
-            extra={"emoji_type": "warning"},
-        )
+        session.commit()
+    except Exception:
+        try:
+            session.rollback()
+        except Exception:
+            pass
+    try:
+        session.close()
+    except Exception:
+        pass
 
 
 def process_placeholder_art_refresh_job(session, job: Job) -> dict:
@@ -1091,15 +1341,17 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
     if not ids:
         return {"ok": False, "reason": "no_placeholder_ids"}
 
+    job_id_val = getattr(job, "id", None)
+    job_id_int = int(job_id_val) if isinstance(job_id_val, int) else None
+
     idem_key: str | None = None
     idem_claim_committed = False
     try:
-        job_id_val = getattr(job, "id", None)
-        if isinstance(job_id_val, int):
-            idem_key = placeholder_art_refresh_idempotency_key(job_id=int(job_id_val))
+        if job_id_int is not None:
+            idem_key = placeholder_art_refresh_idempotency_key(job_id=job_id_int)
             if not try_claim_processed_key(session, idem_key, job_type=PLACEHOLDER_ART_REFRESH_JOB_TYPE):
                 logger.info(
-                    f"placeholder_art_refresh job_id={job_id_val} skipped — already processed",
+                    f"placeholder_art_refresh job_id={job_id_int} skipped — already processed",
                     extra={"emoji_type": "info"},
                 )
                 return {"ok": True, "skipped": "already_processed"}
@@ -1112,11 +1364,25 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
     except Exception as exc:
         logger.debug(f"placeholder_art_refresh idempotency skipped: {exc}", extra={"emoji_type": "debug"})
 
+    from types import SimpleNamespace
+
     from services.task_run_phases import accumulate_art_backfill_counts, empty_art_counts
 
     art_scope = str(payload.get("art_scope") or "all").strip().lower() or "all"
-    placeholders = session.query(Placeholder).filter(Placeholder.id.in_(ids)).all()
-    n_total = len(placeholders)
+    layout_art = payload.get("layout_art") if isinstance(payload.get("layout_art"), dict) else None
+    write_series_posters = layout_art_writes_series_posters(layout_art)
+    write_episode_stills = layout_art_writes_episode_stills(layout_art)
+    work_items = _art_refresh_load_work_items(session, ids, art_scope=art_scope)
+    n_total = len(work_items)
+    # Capture job fields before close: expire_on_commit would break later job.payload access.
+    job_ref = SimpleNamespace(id=job_id_int, payload=payload)
+    # Detach loaded rows, then return the pool connection before HTTP/image I/O.
+    try:
+        session.expunge_all()
+    except Exception:
+        pass
+    _art_refresh_release_handler_session(session)
+
     wrote = 0
     batch_counts = empty_art_counts()
     refresh_paths: set[str] = set()
@@ -1134,7 +1400,7 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
         batch_index = 0
     if batch_index <= 0 and task_run_id_for_live is not None:
         # Fallback when older jobs lack stamps: use job id ordinal as a stable label.
-        batch_index = int(getattr(job, "id", 0) or 0)
+        batch_index = int(job_id_int or 0)
 
     if task_run_id_for_live is not None and batch_index > 0:
         _publish_art_batch_live(
@@ -1148,7 +1414,7 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
     def _heartbeat():
         while not stop_hb.wait(ART_LIVE_HEARTBEAT_S):
             logger.verbose(
-                f"placeholder_art_refresh job_id={job.id}: still running "
+                f"placeholder_art_refresh job_id={job_id_int}: still running "
                 f"progress={loop_pos[0]}/{n_total} wrote={wrote} "
                 f"elapsed_s={time.monotonic() - started:.1f}",
                 extra={"emoji_type": "processing"},
@@ -1166,7 +1432,7 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
     if n_total:
         hb_thread = threading.Thread(
             target=_heartbeat,
-            name=f"art-refresh-hb-{job.id}",
+            name=f"art-refresh-hb-{job_id_int}",
             daemon=True,
         )
         hb_thread.start()
@@ -1176,66 +1442,57 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
 
     cancelled = False
     try:
-        for placeholder in placeholders:
+        for item in work_items:
             loop_pos[0] += 1
             if task_run_id_for_live is not None:
                 ensure_task_run_not_cancelled(task_run_id_for_live)
-            if job.id is not None and is_claim_revoked(int(job.id)):
-                raise TaskRunCancelled(f"job_id={job.id} claim revoked")
-            if not bool(getattr(placeholder, "has_placeholder", False)):
-                continue
+            if job_id_int is not None and is_claim_revoked(job_id_int):
+                raise TaskRunCancelled(f"job_id={job_id_int} claim revoked")
 
-            movie = session.query(Movie).get(placeholder.movie_id) if placeholder.movie_id else None
-            episode = session.query(Episode).get(placeholder.episode_id) if placeholder.episode_id else None
-
-            if movie and bool(getattr(movie, "has_placeholder", False)):
+            if item.get("kind") == "movie":
+                movie = item.get("movie")
+                path = str(item.get("path") or "").strip()
+                if not movie or not path:
+                    continue
                 mid = int(movie.id)
-                path = str(getattr(placeholder, "path", "") or getattr(movie, "placeholder_filepath", "") or "").strip()
-                if path and mid not in processed_movies:
-                    processed_movies.add(mid)
-                    result = ensure_movie_art(movie, path)
-                    if result.wrote_any:
-                        wrote += 1
-                        rewritten_movies.append(movie)
-                        for k, v in result.art_counts.items():
-                            batch_counts[k] = int(batch_counts.get(k, 0)) + int(v)
-                        refresh_paths.add(os.path.dirname(os.path.abspath(path)))
+                if mid in processed_movies:
+                    continue
+                processed_movies.add(mid)
+                result = ensure_movie_art(movie, path)
+                if result.wrote_any:
+                    wrote += 1
+                    rewritten_movies.append(movie)
+                    for k, v in result.art_counts.items():
+                        batch_counts[k] = int(batch_counts.get(k, 0)) + int(v)
+                    refresh_paths.add(os.path.dirname(os.path.abspath(path)))
                 continue
 
-            series = None
-            season = None
-            path = str(getattr(placeholder, "path", "") or "").strip()
-            if episode and bool(getattr(episode, "has_placeholder", False)):
-                season = session.query(Season).get(episode.season_id) if episode.season_id else None
-                series = session.query(Series).get(season.series_id) if season and season.series_id else None
-                if not path:
-                    path = str(getattr(episode, "placeholder_filepath", "") or "").strip()
-            elif getattr(placeholder, "series_id", None):
-                series = session.query(Series).get(placeholder.series_id)
-                if getattr(placeholder, "season_id", None):
-                    season = session.query(Season).get(placeholder.season_id)
-
+            series = item.get("series")
+            season = item.get("season")
+            episode = item.get("episode")
+            path = str(item.get("path") or "").strip()
+            series_folder = item.get("series_folder")
             if not series:
                 continue
 
             sid = int(series.id)
-            series_folder = getattr(series, "placeholder_folder", None) or (
-                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(path)))) if path else None
-            )
             if sid not in processed_series:
                 processed_series.add(sid)
-                series_result = ensure_series_art(series, series_folder=series_folder)
-                if series_result.wrote_any:
-                    wrote += 1
-                    rewritten_series.append(series)
-                    for k, v in series_result.art_counts.items():
-                        batch_counts[k] = int(batch_counts.get(k, 0)) + int(v)
-                    if series_folder:
-                        refresh_paths.add(os.path.abspath(series_folder))
+                if write_series_posters is not False:
+                    series_result = ensure_series_art(series, series_folder=series_folder)
+                    if series_result.wrote_any:
+                        wrote += 1
+                        rewritten_series.append(series)
+                        for k, v in series_result.art_counts.items():
+                            batch_counts[k] = int(batch_counts.get(k, 0)) + int(v)
+                        if series_folder:
+                            refresh_paths.add(os.path.abspath(str(series_folder)))
 
             if not episode or not season or not path:
                 continue
-            if not art_scope_writes_episode_stills(art_scope, getattr(placeholder, "display_status", None)):
+            if write_episode_stills is False:
+                continue
+            if write_episode_stills is None and not item.get("write_episode_still"):
                 continue
 
             still_result = ensure_episode_still_art(episode, season, series, path)
@@ -1250,13 +1507,39 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
     except TaskRunCancelled:
         cancelled = True
         logger.info(
-            f"placeholder_art_refresh job_id={job.id} stopped early "
+            f"placeholder_art_refresh job_id={job_id_int} stopped early "
             f"progress={loop_pos[0]}/{n_total} wrote={wrote}",
             extra={"emoji_type": "info"},
         )
+        # Watchdog / claim revoke: freeze the batch bar as failed (not stuck working).
+        if (
+            task_run_id_for_live is not None
+            and batch_index > 0
+            and job_id_int is not None
+            and is_claim_revoked(int(job_id_int))
+        ):
+            _publish_art_batch_live(
+                task_run_id_for_live,
+                batch_index=batch_index,
+                done=int(loop_pos[0]),
+                total=max(1, n_total),
+                status="failed",
+                reason="timed_out",
+            )
     except Exception:
         if idem_claim_committed and idem_key:
-            release_idempotency_after_failed_claim(session, idem_key)
+            release_sess = get_session()
+            try:
+                release_idempotency_after_failed_claim(release_sess, idem_key)
+                try:
+                    release_sess.commit()
+                except Exception:
+                    release_sess.rollback()
+            finally:
+                try:
+                    release_sess.close()
+                except Exception:
+                    pass
             idem_claim_committed = False
         raise
     finally:
@@ -1276,7 +1559,7 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
                 int(task_run_id_raw),
                 run_id,
                 batch_counts,
-                exclude_job_id=int(job.id),
+                exclude_job_id=int(job_id_int or 0),
                 items_processed=items_in_batch,
                 completed_batch=(
                     {
@@ -1292,11 +1575,6 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
         except Exception as exc:
             logger.debug(f"art backfill phase stats update skipped: {exc}", extra={"emoji_type": "debug"})
 
-    try:
-        session.commit()
-    except Exception:
-        pass
-
     if cancelled:
         return {
             "ok": True,
@@ -1306,7 +1584,9 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
             "series_count": len(processed_series),
         }
 
-    if refresh_paths and not bulk_completion:
+    # Always path/item refresh rewritten art (#181). Bulk runs used to defer to a
+    # force full-section metadata refresh on the last batch.
+    if refresh_paths:
         try:
             refresh_all_paths(
                 refresh_paths,
@@ -1319,7 +1599,7 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
             logger.warning(f"placeholder_art_refresh path refresh failed: {exc}", extra={"emoji_type": "warning"})
 
     # Path scans do not update Plex posters; refresh rewritten titles at item level.
-    if (rewritten_movies or rewritten_series) and not bulk_completion:
+    if rewritten_movies or rewritten_series:
         try:
             refresh_players_after_local_art_rewrite(
                 movies=rewritten_movies,
@@ -1331,10 +1611,18 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
                 extra={"emoji_type": "warning"},
             )
 
-    if bulk_completion and run_id:
-        _art_refresh_completion_scan_if_last_batch(session, job, run_id=run_id)
-    elif run_id and not bulk_completion:
-        # Narrow banner toggles: path refresh above; bust UI cache on the last batch.
-        _art_refresh_ui_bust_if_last_batch(session, job, run_id=run_id)
+    if run_id:
+        finish_session = get_session()
+        try:
+            if bulk_completion:
+                _art_refresh_completion_scan_if_last_batch(finish_session, job_ref, run_id=run_id)
+            else:
+                # Narrow banner toggles: path refresh above; bust UI cache on the last batch.
+                _art_refresh_ui_bust_if_last_batch(finish_session, job_ref, run_id=run_id)
+        finally:
+            try:
+                finish_session.close()
+            except Exception:
+                pass
 
-    return {"ok": True, "wrote": wrote, "scanned": len(placeholders), "series_count": len(processed_series)}
+    return {"ok": True, "wrote": wrote, "scanned": n_total, "series_count": len(processed_series)}

@@ -38,21 +38,21 @@ from services.source_of_truth.determiner import (
     DETERMINATION_OBSOLETE,
     run_determination_for_entities_in_session,
 )
-from services.source_of_truth.arr_share_guard import filter_movie_disk_cleanup_paths
+from services.source_of_truth.arr_share_guard import (
+    filter_episode_disk_cleanup_paths,
+    filter_movie_disk_cleanup_paths,
+)
 from services.source_of_truth.placeholder_cleanup import (
     cleanup_deleted_series_placeholder_files,
     cleanup_episode_placeholder_files,
     cleanup_movie_placeholder_files,
     finalize_deferred_movie_folder_deletes,
+    prepare_episode_placeholder_cleanup,
 )
 from services.source_of_truth.media_refresh_handler import (
     KIND_BULK_INITIAL,
     KIND_DELAYED_FINAL,
     KIND_OVERLAP_PATH_BATCH,
-    KIND_PHASE_FINAL_EPISODE,
-    KIND_PHASE_FINAL_MOVIE,
-    KIND_PHASE_INITIAL_EPISODE,
-    KIND_PHASE_INITIAL_MOVIE,
     enqueue_media_refresh_job,
     use_job_driven_refresh,
 )
@@ -107,32 +107,64 @@ def _enqueue_media_refresh_via_new_session(
     state — the Job needs to be committed promptly so the worker NOTIFY
     listener can see it (Postgres only delivers NOTIFY after commit).
     """
-    s = get_session()
-    try:
-        enqueue_media_refresh_job(
-            s,
-            kind=kind,
-            payload=payload or {},
-            delay_seconds=delay_seconds,
-            coalesce=coalesce,
-        )
-        s.commit()
-        return True
-    except Exception as exc:
+    from sqlalchemy.exc import IntegrityError
+
+    last_exc: BaseException | None = None
+    # UniqueViolation on coalesce group_id: retry a few times so paths merge into
+    # the winning PENDING job instead of falling back to an off-queue Timer (#181).
+    for attempt in range(3):
+        s = get_session()
         try:
-            s.rollback()
-        except Exception:
-            pass
+            enqueue_media_refresh_job(
+                s,
+                kind=kind,
+                payload=payload or {},
+                delay_seconds=delay_seconds,
+                coalesce=coalesce,
+            )
+            s.commit()
+            return True
+        except IntegrityError as exc:
+            last_exc = exc
+            try:
+                s.rollback()
+            except Exception:
+                pass
+            if attempt < 2:
+                logger.info(
+                    f"media_refresh enqueue race kind={kind}; retrying coalesce "
+                    f"(attempt={attempt + 1})",
+                    extra={"emoji_type": "info"},
+                )
+                time.sleep(0.05 * (attempt + 1))
+                continue
+            logger.error(
+                f"Failed to enqueue media_refresh kind={kind} delay={delay_seconds}s: {exc}",
+                extra={"emoji_type": "error"},
+            )
+            return False
+        except Exception as exc:
+            last_exc = exc
+            try:
+                s.rollback()
+            except Exception:
+                pass
+            logger.error(
+                f"Failed to enqueue media_refresh kind={kind} delay={delay_seconds}s: {exc}",
+                extra={"emoji_type": "error"},
+            )
+            return False
+        finally:
+            try:
+                s.close()
+            except Exception:
+                pass
+    if last_exc is not None:
         logger.error(
-            f"Failed to enqueue media_refresh kind={kind} delay={delay_seconds}s: {exc}",
+            f"Failed to enqueue media_refresh kind={kind} delay={delay_seconds}s: {last_exc}",
             extra={"emoji_type": "error"},
         )
-        return False
-    finally:
-        try:
-            s.close()
-        except Exception:
-            pass
+    return False
 
 
 def _schedule_media_refresh(
@@ -146,9 +178,9 @@ def _schedule_media_refresh(
 ) -> None:
     """Either enqueue a media_refresh Job (Phase 3) or fall back to threading.Timer.
 
-    Behind feature flag `USE_JOB_DRIVEN_REFRESH`. When the flag is on AND the
-    Job enqueue succeeds, the Timer is NOT started. On any failure, falls back
-    to the legacy Timer so refreshes never silently disappear.
+    Behind feature flag `USE_JOB_DRIVEN_REFRESH`. Prefer queue coalesce over Timer
+    so concurrent delayed_final jobs merge (#181). Timer is last resort only when
+    job-driven refresh is off or enqueue keeps failing.
     """
     if use_job_driven_refresh():
         if _enqueue_media_refresh_via_new_session(
@@ -160,10 +192,10 @@ def _schedule_media_refresh(
             if log_message:
                 logger.info(log_message, extra={"emoji_type": "info"})
             return
-        # If enqueue failed, fall back to the Timer below so we don't lose the
-        # refresh entirely.
+        # Last resort: keep the refresh, but log that coalesce may be skipped.
         logger.warning(
-            f"media_refresh job enqueue failed for kind={kind}; falling back to threading.Timer",
+            f"media_refresh job enqueue failed for kind={kind} after retry; "
+            "falling back to threading.Timer (paths may not coalesce)",
             extra={"emoji_type": "warning"},
         )
     threading.Timer(delay_seconds, timer_fn).start()
@@ -404,12 +436,16 @@ def _apply_initial_status_for_placeholder(
     placeholder_id: int,
     event_type: str = "creation",
     activity_reason: str | None = None,
+    enqueue_art: bool = True,
 ) -> None:
     """
     After materializer creates or deletes a placeholder, compute and apply initial status.
     
     This decouples status changes from file operations: the orchestrator handles all
     status computation, not just file state changes.
+
+    ``enqueue_art``: event-scoped mats pass False and batch art refresh after the
+    needs-placeholder loop so FS determination does not run inside the chunk txn.
     """
     try:
         from services.source_of_truth.status_intent import StatusSource
@@ -430,10 +466,62 @@ def _apply_initial_status_for_placeholder(
             }
 
         if intent:
-            orchestrator.apply_and_project_statuses([intent])
+            orchestrator.apply_and_project_statuses([intent], enqueue_art=enqueue_art)
             logger.debug(f"Applied initial status for Placeholder[{placeholder_id}]: {intent.new_status}")
     except Exception as e:
         logger.error(f"Failed to apply initial status for Placeholder[{placeholder_id}]: {e}", exc_info=True)
+
+
+def _mid_commit_needs_pass(session, *, enabled: bool, idx: int, total: int, every: int = 10) -> None:
+    """Release row locks during long event-scoped needs-placeholder FS loops."""
+    if not enabled or every < 1 or total <= 0:
+        return
+    if idx % every != 0 or idx >= total:
+        return
+    session.commit()
+    _apply_materialization_lock_timeout(session)
+
+
+def _enqueue_art_for_created_placeholders(
+    session,
+    *,
+    movie_ids: list[int] | None,
+    episode_ids: list[int] | None,
+) -> int:
+    """Batch-enqueue art refresh after event needs passes (skip per-row FS determination)."""
+    from services.source_of_truth.placeholder_art_reconciler import (
+        enqueue_placeholder_art_refresh,
+        note_active_full_sync_art_enqueue,
+        payload_extras_for_active_full_sync_art,
+    )
+
+    pids: list[int] = []
+    if movie_ids:
+        pids.extend(
+            int(r[0])
+            for r in session.query(Placeholder.id)
+            .filter(Placeholder.movie_id.in_(list(movie_ids)), Placeholder.has_placeholder == True)  # noqa: E712
+            .all()
+        )
+    if episode_ids:
+        pids.extend(
+            int(r[0])
+            for r in session.query(Placeholder.id)
+            .filter(Placeholder.episode_id.in_(list(episode_ids)), Placeholder.has_placeholder == True)  # noqa: E712
+            .all()
+        )
+    pids = list(dict.fromkeys(pids))
+    if not pids:
+        return 0
+    extras = payload_extras_for_active_full_sync_art(source="full_sync_materialization")
+    out = enqueue_placeholder_art_refresh(
+        pids,
+        session=session,
+        skip_determination=True,
+        payload_extras=extras,
+    )
+    note_active_full_sync_art_enqueue(out if isinstance(out, dict) else None, extras=extras)
+    return len(pids)
 
 
 def _sync_content_placeholder_status(session, *, movie_id: int | None, episode_id: int | None) -> None:
@@ -718,6 +806,70 @@ def _record_series_bulk_delete_history(
     )
 
 
+def _obsolete_teardown_still_warranted(
+    session,
+    *,
+    movie: Movie | None = None,
+    episode: Episode | None = None,
+    series: Series | None = None,
+) -> bool:
+    """Whether obsolete materialization should remove placeholders.
+
+    Tear down when a real file exists, the catalog row is soft-deleted, or
+    current determination rules still say obsolete (Never, calendar window, …).
+    Skip only when delete/file justification evaporated and live rules no longer
+    want removal (Arr delete-then-quick-readd).
+    """
+    from services.app_timezone import local_today
+    from services.source_of_truth.determiner import (
+        _resolve_episode_determination,
+        _resolve_movie_determination,
+    )
+    from services.source_of_truth.placeholder_policy import policy_from_entity
+
+    placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
+    lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+    now_date = local_today()
+
+    if movie is not None:
+        if bool(getattr(movie, "has_file", False)) or bool(getattr(movie, "is_deleted", False)):
+            return True
+        if not bool(getattr(movie, "has_placeholder", False)):
+            return False
+        det, _ = _resolve_movie_determination(
+            session,
+            movie,
+            placeholders_enabled=placeholders_enabled,
+            lookahead_days=lookahead_days,
+            now_date=now_date,
+        )
+        return det == DETERMINATION_OBSOLETE
+
+    if episode is not None:
+        series_deleted = bool(getattr(series, "is_deleted", False)) if series is not None else False
+        if (
+            bool(getattr(episode, "has_file", False))
+            or bool(getattr(episode, "is_deleted", False))
+            or series_deleted
+        ):
+            return True
+        if not bool(getattr(episode, "has_placeholder", False)):
+            return False
+        series_pol = policy_from_entity(series) if series is not None else None
+        det, _ = _resolve_episode_determination(
+            session,
+            episode,
+            placeholders_enabled=placeholders_enabled,
+            lookahead_days=lookahead_days,
+            now_date=now_date,
+            series_policy=series_pol if series_pol in ("auto", "pinned", "never") else None,
+            series_row=series,
+        )
+        return det == DETERMINATION_OBSOLETE
+
+    return False
+
+
 def apply_movie_materialization(
     movie_id: int,
     session=None,
@@ -737,8 +889,6 @@ def apply_movie_materialization(
         if determination == DETERMINATION_NEEDS:
             target_path = getattr(movie, "placeholder_filepath", None) or movie_placeholder_path(movie)
             _initial_variant = _compute_initial_dummy_variant_for_movie(movie)
-            created = ensure_placeholder_file(target_path, dummy_file_path=_dummy_file_path_for_variant(_initial_variant))
-            nfo_written = ensure_movie_nfo(target_path, movie)
             movie.has_placeholder = True
             movie.placeholder_filepath = target_path
             movie.updated_at = func.now()
@@ -751,7 +901,7 @@ def apply_movie_materialization(
                 activity_reason=activity_reason,
             )
             _sync_content_placeholder_status(session, movie_id=movie.id, episode_id=None)
-            
+
             # Apply initial status before art so Coming Soon banners use final display_status.
             placeholder_row = session.query(Placeholder).filter(
                 Placeholder.movie_id == movie.id
@@ -762,12 +912,9 @@ def apply_movie_materialization(
                     placeholder_id=placeholder_row.id,
                     event_type="creation",
                     activity_reason=activity_reason,
+                    # Art is batch-enqueued after the needs loop (no poster I/O in this txn).
+                    enqueue_art=ensure_art,
                 )
-            if ensure_art:
-                try:
-                    ensure_movie_art(movie, target_path)
-                except Exception:
-                    pass
             placeholder_id = int(placeholder_row.id) if placeholder_row and getattr(placeholder_row, "id", None) else None
 
             # Persist canonical determination so the next materialization pass does not
@@ -779,8 +926,18 @@ def apply_movie_materialization(
             movie.determination_updated_at = func.now()
 
             session.add(movie)
-            if owns_session:
-                session.commit()
+            # Commit before FS so a later shared-session rollback cannot leave orphan files.
+            session.commit()
+            created = ensure_placeholder_file(
+                target_path, dummy_file_path=_dummy_file_path_for_variant(_initial_variant)
+            )
+            nfo_written = ensure_movie_nfo(target_path, movie)
+            # Inline ensure_*_art only when callers opt in; core mats pass ensure_art=False.
+            if ensure_art:
+                try:
+                    ensure_movie_art(movie, target_path)
+                except Exception:
+                    pass
             return {
                 "ok": True,
                 "action": "created_or_exists",
@@ -804,14 +961,17 @@ def apply_movie_materialization(
             if not locked:
                 return {"ok": False, "reason": "movie_not_found", "movie_id": movie_id}
             movie = locked
-            if not bool(getattr(movie, "has_file", False)) and not bool(
-                getattr(movie, "is_deleted", False)
-            ):
+            # Stale guard is for Arr delete-then-quick-readd only. Never / calendar
+            # and other live-title obsolete reasons still warrant teardown.
+            if not _obsolete_teardown_still_warranted(session, movie=movie):
                 return {
                     "ok": True,
                     "action": "noop_stale_obsolete",
                     "movie_id": movie.id,
                 }
+            # Do not re-check warrant after tombstoning: determination reads
+            # Placeholder.has_placeholder and would false-trigger stale-noop,
+            # leaving dirty deletes for a later shared-session commit.
             candidate_paths = _mark_placeholder_rows_deleted(
                 session,
                 movie_id=movie.id,
@@ -822,20 +982,9 @@ def apply_movie_materialization(
                 candidate_paths.append(movie.placeholder_filepath)
             first_path = next((p for p in candidate_paths if p), None)
             disk_paths = filter_movie_disk_cleanup_paths(session, movie, candidate_paths)
-            # Re-check under the same lock before touching disk.
-            if not bool(getattr(movie, "has_file", False)) and not bool(
-                getattr(movie, "is_deleted", False)
-            ):
-                return {
-                    "ok": True,
-                    "action": "noop_stale_obsolete",
-                    "movie_id": movie.id,
-                }
-            cleanup_result = cleanup_movie_placeholder_files(
-                candidate_paths=disk_paths,
-                defer_empty_folder_delete=bool(defer_empty_folder_delete),
-            )
-
+            movie_pk = int(movie.id)
+            # Catalog clears in the same pre-FS commit as Placeholder tombstones so a
+            # later shared-session rollback cannot leave tombstones without Movie flags.
             movie.has_placeholder = False
             movie.placeholder_filepath = None
             movie.determination = DETERMINATION_NOT_NEEDED
@@ -843,8 +992,11 @@ def apply_movie_materialization(
             movie.updated_at = func.now()
             _sync_content_placeholder_status(session, movie_id=movie.id, episode_id=None)
             session.add(movie)
-            if owns_session:
-                session.commit()
+            session.commit()
+            cleanup_result = cleanup_movie_placeholder_files(
+                candidate_paths=disk_paths,
+                defer_empty_folder_delete=bool(defer_empty_folder_delete),
+            )
             return {
                 "ok": True,
                 "action": "deleted_or_absent",
@@ -856,13 +1008,15 @@ def apply_movie_materialization(
                 "refresh_paths": cleanup_result.get("refresh_paths", []),
                 "deferred_folder_deletes": cleanup_result.get("deferred_folder_deletes", []),
                 "path": first_path,
-                "movie_id": movie.id,
+                "movie_id": movie_pk,
             }
 
         return {"ok": True, "action": "noop", "movie_id": movie.id}
     except Exception as e:
-        if owns_session:
+        try:
             session.rollback()
+        except Exception:
+            pass
         return {"ok": False, "reason": str(e), "movie_id": movie_id}
     finally:
         if owns_session:
@@ -895,14 +1049,7 @@ def apply_episode_materialization(
         if determination == DETERMINATION_NEEDS:
             target_path = getattr(episode, "placeholder_filepath", None) or episode_placeholder_path(episode, season, series)
             _initial_variant = _compute_initial_dummy_variant_for_episode(episode, session=session)
-            created = ensure_placeholder_file(target_path, dummy_file_path=_dummy_file_path_for_variant(_initial_variant))
-            nfo_written = ensure_episode_nfo(target_path, episode, season, series)
-            # ensure series-level tvshow.nfo is present as well
             series_folder = getattr(series, "placeholder_folder", None)
-            try:
-                series_nfo_written = ensure_series_nfo(series, folder=series_folder)
-            except Exception:
-                series_nfo_written = False
             episode.has_placeholder = True
             episode.placeholder_filepath = target_path
             episode.updated_at = func.now()
@@ -917,7 +1064,7 @@ def apply_episode_materialization(
                 activity_reason=activity_reason,
             )
             _sync_content_placeholder_status(session, movie_id=None, episode_id=episode.id)
-            
+
             # Apply initial status before art so Coming Soon / New Ep. banners use final status.
             placeholder_row = session.query(Placeholder).filter(
                 Placeholder.episode_id == episode.id
@@ -928,13 +1075,9 @@ def apply_episode_materialization(
                     placeholder_id=placeholder_row.id,
                     event_type="creation",
                     activity_reason=activity_reason,
+                    # Event mats batch art after the needs loop; full/lite keep inline enqueue.
+                    enqueue_art=ensure_art,
                 )
-            if ensure_art:
-                try:
-                    ensure_series_art(series, series_folder=series_folder)
-                    ensure_episode_still_art(episode, season, series, target_path)
-                except Exception:
-                    pass
             placeholder_id = int(placeholder_row.id) if placeholder_row and getattr(placeholder_row, "id", None) else None
 
             if bool(getattr(episode, "has_file", False)) or bool(getattr(episode, "is_deleted", False)):
@@ -944,8 +1087,22 @@ def apply_episode_materialization(
             episode.determination_updated_at = func.now()
 
             session.add(episode)
-            if owns_session:
-                session.commit()
+            # Commit before FS so a later shared-session rollback cannot leave orphan files.
+            session.commit()
+            created = ensure_placeholder_file(
+                target_path, dummy_file_path=_dummy_file_path_for_variant(_initial_variant)
+            )
+            nfo_written = ensure_episode_nfo(target_path, episode, season, series)
+            try:
+                series_nfo_written = ensure_series_nfo(series, folder=series_folder)
+            except Exception:
+                series_nfo_written = False
+            if ensure_art:
+                try:
+                    ensure_series_art(series, series_folder=series_folder)
+                    ensure_episode_still_art(episode, season, series, target_path)
+                except Exception:
+                    pass
             return {
                 "ok": True,
                 "action": "created_or_exists",
@@ -977,17 +1134,15 @@ def apply_episode_materialization(
                 )
                 if locked_series is not None:
                     series = locked_series
-            series_deleted = bool(getattr(series, "is_deleted", False)) if series is not None else False
-            if (
-                not bool(getattr(episode, "has_file", False))
-                and not bool(getattr(episode, "is_deleted", False))
-                and not series_deleted
-            ):
+            # Stale guard is for Arr delete-then-quick-readd only. Never / calendar
+            # and other live-title obsolete reasons still warrant teardown.
+            if not _obsolete_teardown_still_warranted(session, episode=episode, series=series):
                 return {
                     "ok": True,
                     "action": "noop_stale_obsolete",
                     "episode_id": episode.id,
                 }
+            # Same as movie obsolete: warrant must not run after Placeholder tombstones.
             candidate_paths = _mark_placeholder_rows_deleted(
                 session,
                 movie_id=None,
@@ -997,20 +1152,10 @@ def apply_episode_materialization(
             if getattr(episode, "placeholder_filepath", None):
                 candidate_paths.append(episode.placeholder_filepath)
             first_path = next((p for p in candidate_paths if p), None)
-            series_deleted = bool(getattr(series, "is_deleted", False)) if series is not None else False
-            if (
-                not bool(getattr(episode, "has_file", False))
-                and not bool(getattr(episode, "is_deleted", False))
-                and not series_deleted
-            ):
-                return {
-                    "ok": True,
-                    "action": "noop_stale_obsolete",
-                    "episode_id": episode.id,
-                }
-            cleanup_result = cleanup_episode_placeholder_files(
+            episode_pk = int(episode.id)
+            # Resolve path guards + sibling state before commit; FS runs with no session.
+            disk_paths, series_has_placeholders = prepare_episode_placeholder_cleanup(
                 session,
-                season=season,
                 series=series,
                 candidate_paths=candidate_paths,
             )
@@ -1022,8 +1167,15 @@ def apply_episode_materialization(
             episode.updated_at = func.now()
             _sync_content_placeholder_status(session, movie_id=None, episode_id=episode.id)
             session.add(episode)
-            if owns_session:
-                session.commit()
+            session.commit()
+            cleanup_result = cleanup_episode_placeholder_files(
+                None,
+                season=season,
+                series=series,
+                candidate_paths=[],
+                paths_prefiltered=disk_paths,
+                series_has_placeholders=bool(series_has_placeholders),
+            )
             return {
                 "ok": True,
                 "action": "deleted_or_absent",
@@ -1034,13 +1186,15 @@ def apply_episode_materialization(
                 "series_nfo_deleted": cleanup_result.get("series_nfo_deleted", False),
                 "refresh_paths": cleanup_result.get("refresh_paths", []),
                 "path": first_path,
-                "episode_id": episode.id,
+                "episode_id": episode_pk,
             }
 
         return {"ok": True, "action": "noop", "episode_id": episode.id}
     except Exception as e:
-        if owns_session:
+        try:
             session.rollback()
+        except Exception:
+            pass
         return {"ok": False, "reason": str(e), "episode_id": episode_id}
     finally:
         if owns_session:
@@ -1130,9 +1284,11 @@ def _run_materialization_for_ids(
     }
     is_full_sync = (observation_source == "full_sync_materialization")
     event_scoped = (not is_full_sync) and str(observation_source or "").startswith("event_")
-    # Import grace / webhook event mats: placeholders and density stubs only.
-    # Poster ensure stays on full/lite mat, calendar Coming Soon art, and art refresh.
-    ensure_art = not event_scoped
+# Never run poster/TMDB ensure inside the materialization chunk transaction.
+    # Status apply enqueues art jobs; event/full/lite batch-enqueue after needs loops.
+    ensure_art = False
+    # Mid-commit during needs FS loops for event mats and long full/lite chunks.
+    mid_commit_needs = True
     movie_phase_start_mono: float | None = None
     last_movie_periodic_refresh_mono: float | None = None
     episode_phase_start_mono: float | None = None
@@ -1173,7 +1329,7 @@ def _run_materialization_for_ids(
     def _trigger_bulk_initial_media_server_refresh() -> None:
         """Trigger a combined library refresh for all media servers after bulk operations."""
         if is_full_sync:
-            # Full Sync uses its own phase-based rhythm.
+            # Full sync uses path overlap + delayed_final (#181), not bulk_initial.
             return
         nonlocal bulk_initial_non_plex_refresh_done
         if bulk_initial_non_plex_refresh_done:
@@ -1228,8 +1384,9 @@ def _run_materialization_for_ids(
         bulk_initial_non_plex_refresh_done = True
 
     def _emit_overlap_checkpoint(trigger_reason: str, *, force: bool = False) -> None:
-        if not overlap_enabled or is_full_sync or event_scoped:
-            # Skip path-based overlap checkpoints during full sync or event-scoped runs.
+        if not overlap_enabled or event_scoped:
+            # Event-scoped runs are usually one title; delayed_final covers them.
+            # Full sync uses path overlap for progressive visibility (#181).
             return
 
         now_mono = time.monotonic()
@@ -1336,7 +1493,6 @@ def _run_materialization_for_ids(
 
     def _process_single_movie_materialization(movie_id: int) -> None:
         nonlocal stats, changed_paths, delete_refresh_paths, deferred_movie_folder_deletes
-        nonlocal movie_phase_start_mono, last_movie_periodic_refresh_mono
         result = apply_movie_materialization(
             movie_id,
             session=session,
@@ -1405,33 +1561,6 @@ def _run_materialization_for_ids(
         else:
             stats["noop"] += 1
 
-        if is_full_sync and result.get("ok") and (result.get("created") or result.get("deleted")):
-            now = time.monotonic()
-            if movie_phase_start_mono is None:
-                movie_phase_start_mono = now
-                last_movie_periodic_refresh_mono = now
-
-                def _initial_movie_refresh():
-                    refresh_selected_sections(has_movies=True, has_episodes=False, bypass_suppression=True)
-
-                _schedule_media_refresh(
-                    _initial_movie_refresh,
-                    delay_seconds=5.0,
-                    kind=KIND_PHASE_INITIAL_MOVIE,
-                    payload={
-                        "has_movies": True,
-                        "has_episodes": False,
-                        "bypass_suppression": True,
-                    },
-                    log_message="Full sync movie phase started; scheduled initial library refresh in 5 seconds.",
-                )
-                stats["movie_refresh_triggered"] = True
-
-            if now - last_movie_periodic_refresh_mono >= 300:
-                refresh_selected_sections(has_movies=True, has_episodes=False, bypass_suppression=True)
-                last_movie_periodic_refresh_mono = now
-                logger.info("Full sync movie phase recurring refresh triggered (5-minute interval).", extra={"emoji_type": "info"})
-
         if overlap_enabled:
             overlap_state["movie_processed"] += 1
             now_mono = time.monotonic()
@@ -1466,27 +1595,21 @@ def _run_materialization_for_ids(
         ]
     else:
         pending_movie_needs = []
+    movie_needs_total = len(pending_movie_needs)
     for idx, movie_id in enumerate(pending_movie_needs, start=1):
         maybe_check_active_cancel(idx)
+        if isinstance(stall_state, dict) and movie_needs_total:
+            stall_state["phase"] = f"needs-placeholder movie {idx}/{movie_needs_total}"
         _process_single_movie_materialization(movie_id)
         _note_item_progress()
+        _mid_commit_needs_pass(
+            session,
+            enabled=mid_commit_needs,
+            idx=idx,
+            total=movie_needs_total,
+        )
     _scoped_phase("needs-placeholder movie pass done")
     _note_item_progress(0, force=True)
-
-    if is_full_sync and movie_phase_start_mono is not None:
-        def _final_movie_refresh():
-            refresh_selected_sections(has_movies=True, has_episodes=False, bypass_suppression=True)
-        _schedule_media_refresh(
-            _final_movie_refresh,
-            delay_seconds=5.0,
-            kind=KIND_PHASE_FINAL_MOVIE,
-            payload={
-                "has_movies": True,
-                "has_episodes": False,
-                "bypass_suppression": True,
-            },
-            log_message="Full sync movie phase complete; scheduled final library refresh in 5 seconds.",
-        )
 
     def _split_episode_ids_by_determination(session, ids: list[int]) -> tuple[list[int], list[int]]:
         if not ids:
@@ -1502,7 +1625,7 @@ def _run_materialization_for_ids(
         return obsolete_ids, needs_ids
 
     def _process_single_episode_materialization(episode_id: int) -> None:
-        nonlocal stats, changed_paths, delete_refresh_paths, episode_phase_start_mono, last_episode_periodic_refresh_mono
+        nonlocal stats, changed_paths, delete_refresh_paths
         result = apply_episode_materialization(
             episode_id,
             session=session,
@@ -1569,33 +1692,6 @@ def _run_materialization_for_ids(
         else:
             stats["noop"] += 1
 
-        if is_full_sync and result.get("ok") and (result.get("created") or result.get("deleted")):
-            now = time.monotonic()
-            if episode_phase_start_mono is None:
-                episode_phase_start_mono = now
-                last_episode_periodic_refresh_mono = now
-
-                def _initial_episode_refresh():
-                    refresh_selected_sections(has_movies=False, has_episodes=True, bypass_suppression=True)
-
-                _schedule_media_refresh(
-                    _initial_episode_refresh,
-                    delay_seconds=5.0,
-                    kind=KIND_PHASE_INITIAL_EPISODE,
-                    payload={
-                        "has_movies": False,
-                        "has_episodes": True,
-                        "bypass_suppression": True,
-                    },
-                    log_message="Full sync episode phase started; scheduled initial library refresh in 5 seconds.",
-                )
-                stats["tv_refresh_triggered"] = True
-
-            if now - last_episode_periodic_refresh_mono >= 300:
-                refresh_selected_sections(has_movies=False, has_episodes=True, bypass_suppression=True)
-                last_episode_periodic_refresh_mono = now
-                logger.info("Full sync episode phase recurring refresh triggered (5-minute interval).", extra={"emoji_type": "info"})
-
         if overlap_enabled:
             overlap_state["episode_processed"] += 1
             now_mono = time.monotonic()
@@ -1651,10 +1747,8 @@ def _run_materialization_for_ids(
             .all()
         ]
         candidate_paths.extend([p for p in db_paths if p])
-        cleanup_result = cleanup_deleted_series_placeholder_files(
-            session,
-            series=series,
-            candidate_paths=candidate_paths,
+        disk_paths = filter_episode_disk_cleanup_paths(
+            session, series=series, paths=candidate_paths
         )
         session.query(Episode).filter(Episode.id.in_(ids)).update(
             {
@@ -1667,6 +1761,14 @@ def _run_materialization_for_ids(
         from services.series_episode_stats_hooks import refresh_series_stats_after_bulk
 
         refresh_series_stats_after_bulk(session, series_ids={int(series_id)})
+        # Commit DB before FS so a later chunk rollback cannot leave disk ahead of catalog.
+        session.commit()
+        cleanup_result = cleanup_deleted_series_placeholder_files(
+            None,
+            series=series,
+            candidate_paths=[],
+            paths_prefiltered=disk_paths,
+        )
         stats["deleted"] += len(ids)
         files_deleted_count = int(cleanup_result.get("files_deleted", 0) or 0)
         stats["files_deleted"] += files_deleted_count
@@ -1681,6 +1783,7 @@ def _run_materialization_for_ids(
             files_deleted=files_deleted_count,
             activity_reason=activity_reason,
         )
+        session.commit()
         for refresh_path in cleanup_result.get("refresh_paths", []) or []:
             delete_refresh_paths.add(refresh_path)
             overlap_state["pending_delete_paths"].add(refresh_path)
@@ -1727,13 +1830,35 @@ def _run_materialization_for_ids(
         ]
     else:
         pending_episode_needs = []
+    episode_needs_total = len(pending_episode_needs)
     for idx, episode_id in enumerate(pending_episode_needs, start=1):
         maybe_check_active_cancel(idx)
+        if isinstance(stall_state, dict) and episode_needs_total:
+            stall_state["phase"] = f"needs-placeholder episode {idx}/{episode_needs_total}"
         _process_single_episode_materialization(episode_id)
         _note_item_progress()
+        _mid_commit_needs_pass(
+            session,
+            enabled=mid_commit_needs,
+            idx=idx,
+            total=episode_needs_total,
+        )
     _scoped_phase("episode obsolete + needs passes done")
+    if pending_movie_needs or pending_episode_needs:
+        try:
+            art_n = _enqueue_art_for_created_placeholders(
+                session,
+                movie_ids=pending_movie_needs or None,
+                episode_ids=pending_episode_needs or None,
+            )
+            if art_n:
+                _scoped_phase(f"batched art refresh enqueue for {art_n} placeholders")
+        except Exception as art_exc:
+            logger.warning(
+                f"Materialization art enqueue skipped [{observation_source}]: {art_exc}",
+                extra={"emoji_type": "warning"},
+            )
     _note_item_progress(0, force=True)
-
     # TV density stubs: series and/or season (also clears leftovers after switching away).
     if skip_density:
         _scoped_phase("tv density skipped (caller batches density separately)")
@@ -1768,9 +1893,10 @@ def _run_materialization_for_ids(
                 if leftover:
                     density_series_ids = sorted(set(density_series_ids) | leftover)
 
-            if density_series_ids and event_scoped:
+            if density_series_ids:
                 # Commit episode/movie placeholder work first, then density in
-                # per-series short sessions so FS/art cannot hold catalog locks.
+                # per-series short sessions so FS/art cannot hold catalog locks
+                # (lite/reconcile/tag/event all use this path; full sync batches separately).
                 try:
                     session.commit()
                     _scoped_phase("committed core before tv density short sessions")
@@ -1815,75 +1941,9 @@ def _run_materialization_for_ids(
                     if path:
                         delete_refresh_paths.add(str(path))
                 _scoped_phase("tv density passes done")
-            elif density_series_ids:
-                series_stats = run_series_density_for_series_ids(
-                    session,
-                    density_series_ids,
-                    activity_reason=activity_reason or "series_density",
-                )
-                stats["series_density"] = series_stats
-                logger.info(
-                    f"Series density pass: considered={series_stats.get('series_considered', 0)} "
-                    f"created={series_stats.get('created', 0)} "
-                    f"retired={series_stats.get('retired', 0)} "
-                    f"errors={series_stats.get('errors', 0)}",
-                    extra={"emoji_type": "info"},
-                )
-                season_stats = run_season_density_for_series_ids(
-                    session,
-                    density_series_ids,
-                    activity_reason=activity_reason or "season_density",
-                )
-                stats["season_density"] = season_stats
-                logger.info(
-                    f"Season density pass: series={season_stats.get('series_considered', 0)} "
-                    f"seasons={season_stats.get('seasons_considered', 0)} "
-                    f"created={season_stats.get('created', 0)} "
-                    f"retired={season_stats.get('retired', 0)} "
-                    f"errors={season_stats.get('errors', 0)}",
-                    extra={"emoji_type": "info"},
-                )
-                for path in list(series_stats.get("created_paths") or []) + list(
-                    season_stats.get("created_paths") or []
-                ):
-                    if path:
-                        changed_paths.add(str(path))
-                for path in list(series_stats.get("deleted_paths") or []) + list(
-                    season_stats.get("deleted_paths") or []
-                ):
-                    if path:
-                        delete_refresh_paths.add(str(path))
-                try:
-                    from services.series_episode_stats_hooks import refresh_series_stats_after_bulk
-
-                    refresh_series_stats_after_bulk(
-                        session,
-                        series_ids={int(sid) for sid in density_series_ids},
-                    )
-                except Exception as stats_exc:
-                    logger.debug(
-                        f"TV density series stats refresh skipped: {stats_exc}",
-                        extra={"emoji_type": "debug"},
-                    )
-                _scoped_phase("tv density passes done")
         except Exception as exc:
             logger.error(f"TV density pass failed: {exc}", extra={"emoji_type": "error"})
             stats["tv_density_error"] = str(exc)
-
-    if is_full_sync and episode_phase_start_mono is not None:
-        def _final_episode_refresh():
-            refresh_selected_sections(has_movies=False, has_episodes=True, bypass_suppression=True)
-        _schedule_media_refresh(
-            _final_episode_refresh,
-            delay_seconds=5.0,
-            kind=KIND_PHASE_FINAL_EPISODE,
-            payload={
-                "has_movies": False,
-                "has_episodes": True,
-                "bypass_suppression": True,
-            },
-            log_message="Full sync episode phase complete; scheduled final library refresh in 5 seconds.",
-        )
 
     # Final overlap flush coalesces path refreshes for large materialization passes. For
     # event_scoped runs (``event_*`` sources, e.g. ARR webhooks) it is usually 1 title and
@@ -1911,11 +1971,11 @@ def _run_materialization_for_ids(
         extra={"emoji_type": "success"},
     )
 
-    # Event-scoped runs used to hold one huge transaction until after delayed-final
-    # scheduling/enqueue, making session.commit() wait on row locks held by other workers.
-    # Commit core placeholder/movie/episode writes here so locks release before job enqueue.
+    # Commit core placeholder/movie/episode writes here so row locks release before
+    # job enqueue / path refresh (#181). The chunk wrapper may commit again afterward;
+    # that second commit is a no-op when this session is already clean.
+    session.commit()
     if not is_full_sync:
-        session.commit()
         logger.info(
             "Scoped materialization: committed core DB state before delayed path refresh scheduling "
             "(releases locks earlier for event-scoped runs)",
@@ -1924,37 +1984,37 @@ def _run_materialization_for_ids(
 
     _scoped_phase("before scheduling delayed final path refresh (async Timer or job)")
 
-    if not is_full_sync:
-        # Density stubs can create/delete TV paths even when actionable episode_ids is empty
-        # (episodes are NOT_NEEDED under season/series density). Still refresh TV libraries.
-        density_touched_tv = bool(changed_paths or delete_refresh_paths)
-        has_episodes_refresh = bool(episode_ids) or density_touched_tv
+    # Path refresh for scoped mats and full sync (#181). Full sync no longer uses
+    # phase/periodic section scans; delayed_final + overlap path batches cover creates.
+    density_touched_tv = bool(changed_paths or delete_refresh_paths)
+    has_episodes_refresh = bool(episode_ids) or density_touched_tv
 
-        empty_trash_on_delete = bool(delete_refresh_paths or deferred_movie_folder_deletes)
-        deferred_folders = sorted(set(deferred_movie_folder_deletes))
+    empty_trash_on_delete = bool(delete_refresh_paths or deferred_movie_folder_deletes)
+    deferred_folders = sorted(set(deferred_movie_folder_deletes))
 
-        def _trigger_delayed_final_refresh():
-            refresh_stats = refresh_all_path_batches_with_section_fallback(
-                [
-                    (changed_paths, "Created"),
-                    (delete_refresh_paths, "Deleted"),
-                ],
-                has_movies=bool(movie_ids),
-                has_episodes=has_episodes_refresh,
-                enable_section_fallback=False,
-                fallback_wait_seconds=0,
-                include_plex=True,
-                empty_trash_on_delete=empty_trash_on_delete,
-            )
-            folders_removed = finalize_deferred_movie_folder_deletes(deferred_folders)
-            logger.info(
-                f"Completed delayed final media server refresh: refreshed={refresh_stats.get('refreshed', 0)} "
-                f"failed={refresh_stats.get('failed', 0)} "
-                f"trash_emptied={refresh_stats.get('trash_emptied', 0)} "
-                f"deferred_folders_removed={folders_removed}",
-                extra={"emoji_type": "success"},
-            )
+    def _trigger_delayed_final_refresh():
+        refresh_stats = refresh_all_path_batches_with_section_fallback(
+            [
+                (changed_paths, "Created"),
+                (delete_refresh_paths, "Deleted"),
+            ],
+            has_movies=bool(movie_ids),
+            has_episodes=has_episodes_refresh,
+            enable_section_fallback=False,
+            fallback_wait_seconds=0,
+            include_plex=True,
+            empty_trash_on_delete=empty_trash_on_delete,
+        )
+        folders_removed = finalize_deferred_movie_folder_deletes(deferred_folders)
+        logger.info(
+            f"Completed delayed final media server refresh: refreshed={refresh_stats.get('refreshed', 0)} "
+            f"failed={refresh_stats.get('failed', 0)} "
+            f"trash_emptied={refresh_stats.get('trash_emptied', 0)} "
+            f"deferred_folders_removed={folders_removed}",
+            extra={"emoji_type": "success"},
+        )
 
+    if changed_paths or delete_refresh_paths or deferred_folders:
         _schedule_media_refresh(
             _trigger_delayed_final_refresh,
             delay_seconds=2.0,
@@ -1985,6 +2045,94 @@ def _apply_materialization_lock_timeout(session) -> None:
         pass
 
 
+def _resolve_scoped_density_series_ids(episode_ids: list[int] | None) -> list[int]:
+    """Series ids for one post-chunk density pass (touched episodes + leftover stubs)."""
+    from services.source_of_truth.season_density_materializer import (
+        series_ids_with_season_density_stubs,
+    )
+    from services.source_of_truth.series_density_materializer import (
+        series_ids_for_episode_ids,
+        series_ids_with_density_stubs,
+    )
+    from services.source_of_truth.tv_density import tv_placeholder_density
+
+    density = tv_placeholder_density()
+    if density not in ("series", "season", "episode"):
+        return []
+    scope = [int(eid) for eid in (episode_ids or []) if eid is not None]
+    sess = get_session()
+    try:
+        density_series_ids = series_ids_for_episode_ids(sess, scope) if scope else []
+        leftover: set[int] = set()
+        if density != "series":
+            leftover |= set(series_ids_with_density_stubs(sess))
+        if density != "season":
+            leftover |= set(series_ids_with_season_density_stubs(sess))
+        if leftover:
+            density_series_ids = sorted(set(density_series_ids) | leftover)
+        return [int(sid) for sid in density_series_ids if sid is not None]
+    finally:
+        try:
+            sess.close()
+        except Exception:
+            pass
+
+
+def _enqueue_art_for_density_stub_series(series_ids: list[int]) -> int:
+    """Enqueue art for active series/season density stubs (no determination HTTP)."""
+    from services.source_of_truth.placeholder_art_reconciler import (
+        enqueue_placeholder_art_refresh,
+        note_active_full_sync_art_enqueue,
+        payload_extras_for_active_full_sync_art,
+    )
+    from services.source_of_truth.tv_density import (
+        PLACEHOLDER_KIND_SEASON_STUB,
+        PLACEHOLDER_KIND_SERIES_STUB,
+    )
+
+    ids = sorted({int(sid) for sid in (series_ids or []) if sid is not None})
+    if not ids:
+        return 0
+    sess = get_session()
+    try:
+        pids = [
+            int(r[0])
+            for r in sess.query(Placeholder.id)
+            .filter(
+                Placeholder.series_id.in_(ids),
+                Placeholder.has_placeholder == True,  # noqa: E712
+                Placeholder.placeholder_kind.in_(
+                    [PLACEHOLDER_KIND_SERIES_STUB, PLACEHOLDER_KIND_SEASON_STUB]
+                ),
+            )
+            .all()
+        ]
+        pids = list(dict.fromkeys(pids))
+        if not pids:
+            return 0
+        extras = payload_extras_for_active_full_sync_art(source="full_sync_density_art")
+        out = enqueue_placeholder_art_refresh(
+            pids,
+            session=sess,
+            skip_determination=True,
+            payload_extras=extras,
+        )
+        note_active_full_sync_art_enqueue(out if isinstance(out, dict) else None, extras=extras)
+        try:
+            sess.commit()
+        except Exception:
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+        return len(pids)
+    finally:
+        try:
+            sess.close()
+        except Exception:
+            pass
+
+
 def _run_event_scoped_tv_density_short_sessions(
     series_ids: list[int],
     *,
@@ -1994,9 +2142,8 @@ def _run_event_scoped_tv_density_short_sessions(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run series+season density per series in its own short commit.
 
-    Import-grace finalize previously kept ``library_catalog_version`` / ``series``
-    bumps open across FS/art in season density, which could freeze ARR sync for hours.
-    Event-scoped runs default ``ensure_art=False`` so poster work stays off the import path.
+    Keeps ``library_catalog_version`` / ``series`` bumps from spanning FS/art.
+    Default ``ensure_art=False`` so poster work is enqueued after density commits.
     """
     from services.series_episode_stats_hooks import refresh_series_stats_after_bulk
     from services.source_of_truth.season_density_materializer import run_season_density_for_series_ids
@@ -2056,8 +2203,13 @@ def _run_event_scoped_tv_density_short_sessions(
                     f"Event-scoped series density stats refresh skipped series_id={sid}: {stats_exc}",
                     extra={"emoji_type": "debug"},
                 )
-            # Release catalog/series locks before season density FS work.
+            # Release checkout before season density FS/art work.
             sess.commit()
+            try:
+                sess.close()
+            except Exception:
+                pass
+            sess = get_session()
 
             if isinstance(stall_state, dict):
                 stall_state["phase"] = f"tv_density_season_{sid}"
@@ -2190,11 +2342,13 @@ def _run_full_sync_density_batches(
                     session,
                     chunk,
                     activity_reason=activity_reason,
+                    ensure_art=False,
                 )
                 season_stats = run_season_density_for_series_ids(
                     session,
                     chunk,
                     activity_reason=activity_reason,
+                    ensure_art=False,
                 )
                 session.commit()
             except Exception:
@@ -2223,6 +2377,26 @@ def _run_full_sync_density_batches(
                 season_stats.get("errors") or 0
             )
             merged["seasons_considered"] += int(season_stats.get("seasons_considered") or 0)
+            chunk_created = [
+                str(p).strip()
+                for p in list(series_stats.get("created_paths") or [])
+                + list(season_stats.get("created_paths") or [])
+                if str(p).strip()
+            ]
+            chunk_deleted = [
+                str(p).strip()
+                for p in list(series_stats.get("deleted_paths") or [])
+                + list(season_stats.get("deleted_paths") or [])
+                if str(p).strip()
+            ]
+            if chunk_created or chunk_deleted:
+                schedule_scoped_placeholder_media_refresh(
+                    created_paths=chunk_created,
+                    delete_paths=chunk_deleted,
+                    has_movies=False,
+                    has_episodes=True,
+                    delay_seconds=2.0,
+                )
             elapsed = max(0.001, time.monotonic() - started)
             logger.info(
                 f"Full sync TV density: {done}/{total} series done · "
@@ -2232,6 +2406,21 @@ def _run_full_sync_density_batches(
                 extra={"emoji_type": "processing"},
             )
             _emit(done)
+
+    try:
+        art_n = _enqueue_art_for_density_stub_series(series_ids)
+        merged["density_art_enqueued"] = art_n
+        if art_n:
+            logger.info(
+                f"Full sync density art enqueued placeholders={art_n}",
+                extra={"emoji_type": "info"},
+            )
+    except Exception as art_exc:
+        logger.warning(
+            f"Full sync density art enqueue failed: {art_exc}",
+            extra={"emoji_type": "warning"},
+        )
+        merged["density_art_enqueued"] = 0
 
     try:
         from services.source_of_truth.poster_language_job import enqueue_poster_language_resolve_stale
@@ -2250,6 +2439,62 @@ def _run_full_sync_density_batches(
         merged["poster_language_resolve"] = {"ok": False, "reason": str(poster_exc)}
 
     return merged
+
+
+def _maybe_schedule_full_sync_section_fallback(
+    *,
+    has_movies: bool,
+    has_episodes: bool,
+    created: int,
+    deleted: int,
+) -> dict[str, Any]:
+    """Optional one end-of-full-sync section scan when path refresh may miss items (#181)."""
+    if not bool(getattr(settings, "MEDIA_REFRESH_SECTION_FALLBACK_ENABLED", False)):
+        return {"scheduled": False, "reason": "fallback_disabled"}
+    if not has_movies and not has_episodes:
+        return {"scheduled": False, "reason": "no_media"}
+    if int(created or 0) <= 0 and int(deleted or 0) <= 0:
+        return {"scheduled": False, "reason": "no_changes"}
+
+    def _end_section_refresh() -> None:
+        refresh_stats = refresh_selected_sections(
+            has_movies=bool(has_movies),
+            has_episodes=bool(has_episodes),
+            include_plex=True,
+            include_jellyfin=True,
+            include_emby=True,
+            bypass_suppression=True,
+        )
+        logger.info(
+            "Full sync optional section fallback refresh completed: "
+            f"refreshed={refresh_stats.get('refreshed', 0)} failed={refresh_stats.get('failed', 0)}",
+            extra={"emoji_type": "success"},
+        )
+
+    # Reuse bulk_initial handler shape (section refresh for selected media types).
+    _schedule_media_refresh(
+        _end_section_refresh,
+        delay_seconds=5.0,
+        kind=KIND_BULK_INITIAL,
+        payload={
+            "has_movies": bool(has_movies),
+            "has_episodes": bool(has_episodes),
+            "include_plex": True,
+            "include_jellyfin": True,
+            "include_emby": True,
+            "bypass_suppression": True,
+        },
+        log_message=(
+            "Full sync scheduled optional end section fallback refresh in 5 seconds "
+            f"(movies={bool(has_movies)} episodes={bool(has_episodes)})."
+        ),
+        coalesce=True,
+    )
+    return {
+        "scheduled": True,
+        "has_movies": bool(has_movies),
+        "has_episodes": bool(has_episodes),
+    }
 
 
 def run_materialization_pass(*, on_progress=None) -> dict[str, Any]:
@@ -2369,6 +2614,20 @@ def run_materialization_pass(*, on_progress=None) -> dict[str, Any]:
             )
             merged["tv_density"] = density_stats
             density_series = int(density_stats.get("series_considered") or 0)
+            created_total = (
+                int(merged.get("created") or 0)
+                + int(density_stats.get("created") or 0)
+            )
+            deleted_total = (
+                int(merged.get("deleted") or 0)
+                + int(density_stats.get("retired") or 0)
+            )
+            merged["section_fallback"] = _maybe_schedule_full_sync_section_fallback(
+                has_movies=bool(movie_ids) or int(merged.get("created") or 0) > 0 or int(merged.get("deleted") or 0) > 0,
+                has_episodes=bool(episode_ids) or int(density_stats.get("created") or 0) > 0 or int(density_stats.get("retired") or 0) > 0,
+                created=created_total,
+                deleted=deleted_total,
+            )
             final_total = max(entity_total + density_series, done_ids, 1)
             _emit(final_total, final_total, merged)
             logger.info(f"Materialization phase complete: {merged}", extra={"emoji_type": "success"})
@@ -2419,13 +2678,16 @@ def _run_materialization_entity_chunk(
                 f"chunk_movies={len(movie_ids)} chunk_episodes={len(episode_ids)}",
                 extra={"emoji_type": "debug"},
             )
-        v_hb = start_verbose_stall_heartbeat(
-            f"scoped_materialization.session.commit source={observation_source}",
-        )
-        try:
-            session.commit()
-        finally:
-            v_hb.set()
+        # Early commit inside materialization already released locks; only commit again
+        # when this session still has pending state.
+        if session.new or session.dirty or session.deleted:
+            v_hb = start_verbose_stall_heartbeat(
+                f"scoped_materialization.session.commit source={observation_source}",
+            )
+            try:
+                session.commit()
+            finally:
+                v_hb.set()
         return stats if isinstance(stats, dict) else {}
     except Exception:
         try:
@@ -2540,11 +2802,11 @@ def run_materialization_for_entities(
         _scoped_t.start()
 
     try:
-        # Build chunks: movies first, then episodes. Density scope keeps the full
-        # episode id list so series stubs still evaluate across the whole request.
+        # Build chunks: movies first, then episodes. Density runs once after all
+        # chunks (not per chunk) in per-series short sessions (#181: avoids
+        # path-refreshing unchanged season stubs on every commit chunk).
         remaining_movies = list(movie_ids)
         remaining_episodes = list(episode_ids)
-        density_scope = list(episode_ids) if episode_ids else None
         merged: dict[str, Any] = {}
         chunk_index = 0
         done_ids = 0
@@ -2580,7 +2842,8 @@ def run_materialization_for_entities(
                     episode_ids=chunk_episodes,
                     observation_source=observation_source,
                     subject_part=subject_part,
-                    density_scope_episode_ids=density_scope,
+                    density_scope_episode_ids=[],
+                    skip_density=True,
                     on_item_progress=_on_scoped_chunk_items,
                     stall_state=stall_state,
                 )
@@ -2595,6 +2858,63 @@ def run_materialization_for_entities(
                         f"rows_per_s={done_ids / elapsed:.2f}",
                         extra={"emoji_type": "processing"},
                     )
+
+            # One density pass for the whole request (touched series + leftover stubs).
+            density_series_ids = _resolve_scoped_density_series_ids(episode_ids)
+            if density_series_ids:
+                stall_state["phase"] = "tv_density_short_sessions"
+                activity_reason = _activity_reason_from_observation_source(observation_source)
+                series_stats, season_stats = _run_event_scoped_tv_density_short_sessions(
+                    density_series_ids,
+                    activity_reason=activity_reason or "series_density",
+                    stall_state=stall_state,
+                    ensure_art=False,
+                )
+                merged["series_density"] = series_stats
+                merged["season_density"] = season_stats
+                logger.info(
+                    f"Scoped TV density{subject_part}: series={len(density_series_ids)} "
+                    f"series_created={series_stats.get('created', 0)} "
+                    f"season_created={season_stats.get('created', 0)} "
+                    f"errors={int(series_stats.get('errors') or 0) + int(season_stats.get('errors') or 0)}",
+                    extra={"emoji_type": "info"},
+                )
+                # Mirror full-sync density: path-refresh only newly created/deleted stubs (#181).
+                density_created = [
+                    str(p).strip()
+                    for p in list(series_stats.get("created_paths") or [])
+                    + list(season_stats.get("created_paths") or [])
+                    if str(p or "").strip()
+                ]
+                density_deleted = [
+                    str(p).strip()
+                    for p in list(series_stats.get("deleted_paths") or [])
+                    + list(season_stats.get("deleted_paths") or [])
+                    if str(p or "").strip()
+                ]
+                if density_created or density_deleted:
+                    try:
+                        schedule_scoped_placeholder_media_refresh(
+                            created_paths=density_created,
+                            delete_paths=density_deleted,
+                            has_movies=False,
+                            has_episodes=True,
+                        )
+                    except Exception as refresh_exc:
+                        logger.warning(
+                            f"Scoped density media refresh skipped{subject_part}: {refresh_exc}",
+                            extra={"emoji_type": "warning"},
+                        )
+                try:
+                    art_n = _enqueue_art_for_density_stub_series(density_series_ids)
+                    if art_n:
+                        merged["density_art_enqueued"] = art_n
+                except Exception as art_exc:
+                    logger.warning(
+                        f"Scoped density art enqueue skipped{subject_part}: {art_exc}",
+                        extra={"emoji_type": "warning"},
+                    )
+            stall_state["phase"] = "complete"
 
         logger.info(
             f"Scoped materialization complete{subject_part}: {merged}",

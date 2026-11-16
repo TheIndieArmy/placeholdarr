@@ -12,7 +12,7 @@ from core.logger import logger
 from sqlalchemy.orm.attributes import flag_modified
 
 from services.messages import render as render_message
-from services.postgres.db import get_session
+from services.postgres.db import bind_worker_pool_role, get_session
 from services.postgres.models import Episode, Movie, Placeholder, Season, Series
 from services.activity_snapshot import clear_queue_download_snapshot, set_queue_download_snapshot
 from services.source_of_truth.arr_api import (
@@ -528,6 +528,8 @@ class QueueMonitorProducer:
 
     def _run_loop(self) -> None:
         """Idle until NOTIFY / safety timeout while no flagged placeholders; tight poll while active."""
+        # Long-lived daemon: keep polling/Arr nudges on the worker pool.
+        bind_worker_pool_role()
         poll_iv = float(self._poll_interval)
         refresh_iv = float(max(0, int(self._arr_refresh_interval)))
         safety = float(self._notify_safety_seconds)
@@ -590,25 +592,29 @@ class QueueMonitorProducer:
 
     def _nudge_arr_monitored_downloads(self) -> None:
         """POST RefreshMonitoredDownloads so Radarr/Sonarr pick up queue changes before our next /queue read."""
+        ctx = None
         session = get_session()
         try:
             ctx = _collect_queue_monitor_poll_context(session)
-            if ctx is None:
-                return
-            ok: list[str] = []
-            for key in sorted(ctx.get("radarr_instance_keys") or ()):
-                if trigger_radarr_refresh_monitored_downloads(instance_key=key):
-                    ok.append(key)
-            for key in sorted(ctx.get("sonarr_instance_keys") or ()):
-                if trigger_sonarr_refresh_monitored_downloads(instance_key=key):
-                    ok.append(key)
-            if ok:
-                logger.debug(
-                    f"Queue monitor triggered RefreshMonitoredDownloads: {','.join(ok)}",
-                    extra={"emoji_type": "refresh"},
-                )
         finally:
-            session.close()
+            try:
+                session.close()
+            except Exception:
+                pass
+        if ctx is None:
+            return
+        ok: list[str] = []
+        for key in sorted(ctx.get("radarr_instance_keys") or ()):
+            if trigger_radarr_refresh_monitored_downloads(instance_key=key):
+                ok.append(key)
+        for key in sorted(ctx.get("sonarr_instance_keys") or ()):
+            if trigger_sonarr_refresh_monitored_downloads(instance_key=key):
+                ok.append(key)
+        if ok:
+            logger.debug(
+                f"Queue monitor triggered RefreshMonitoredDownloads: {','.join(ok)}",
+                extra={"emoji_type": "refresh"},
+            )
 
     def _poll_once(self) -> None:
         """One full poll cycle: scan -> ARR HTTP (no DB held) -> apply intents.

@@ -71,9 +71,10 @@ def _backfill_counters_ready(
             return True
         batch_count = int(meta.get("batch_count") or 0)
         batches_done = int(meta.get("batches_done") or 0)
+        batches_failed = int(meta.get("batches_failed") or 0)
         if batch_count <= 0:
             return True
-        return batches_done >= batch_count
+        return (batches_done + batches_failed) >= batch_count
     except Exception:
         return True
 

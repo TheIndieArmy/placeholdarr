@@ -243,10 +243,24 @@ def clear_arr_policy_tags_for_movie(
         if not url or not api_key:
             return {"ok": False, "message": f"Radarr instance {instance_key!r} is not configured"}
 
-        ok = set_radarr_movie_tags(int(radarr_id), next_ids, url=url, api_key=api_key)
+        row_id = int(movie.id)
+        radarr_id_int = int(radarr_id)
+        # Release the read session before Arr PUT.
+        try:
+            session.commit()
+        except Exception:
+            pass
+        session.close()
+        session = None
+
+        ok = set_radarr_movie_tags(radarr_id_int, next_ids, url=url, api_key=api_key)
         if not ok:
             return {"ok": False, "message": "Radarr rejected the tag update"}
 
+        session = get_session()
+        movie = session.query(Movie).filter(Movie.id == row_id).first()
+        if movie is None:
+            return {"ok": False, "message": "Movie not found after tag clear"}
         payload = getattr(movie, "radarr_payload_raw", None)
         if isinstance(payload, dict):
             payload = dict(payload)
@@ -254,15 +268,16 @@ def clear_arr_policy_tags_for_movie(
             movie.radarr_payload_raw = payload
         session.add(movie)
         session.commit()
-        row_id = int(movie.id)
     except Exception as exc:
-        try:
-            session.rollback()
-        except Exception:
-            pass
+        if session is not None:
+            try:
+                session.rollback()
+            except Exception:
+                pass
         return {"ok": False, "message": str(exc)}
     finally:
-        session.close()
+        if session is not None:
+            session.close()
 
     apply_out = apply_arr_tag_placeholder_policies(movie_row_ids=[row_id], series_row_ids=[])
     return {
@@ -318,10 +333,23 @@ def clear_arr_policy_tags_for_series(
         if not url or not api_key:
             return {"ok": False, "message": f"Sonarr instance {instance_key!r} is not configured"}
 
-        ok = set_sonarr_series_tags(int(sonarr_id), next_ids, url=url, api_key=api_key)
+        row_id = int(series.id)
+        sonarr_id_int = int(sonarr_id)
+        try:
+            session.commit()
+        except Exception:
+            pass
+        session.close()
+        session = None
+
+        ok = set_sonarr_series_tags(sonarr_id_int, next_ids, url=url, api_key=api_key)
         if not ok:
             return {"ok": False, "message": "Sonarr rejected the tag update"}
 
+        session = get_session()
+        series = session.query(Series).filter(Series.id == row_id).first()
+        if series is None:
+            return {"ok": False, "message": "Series not found after tag clear"}
         payload = getattr(series, "sonarr_payload_raw", None)
         if isinstance(payload, dict):
             payload = dict(payload)
@@ -329,15 +357,16 @@ def clear_arr_policy_tags_for_series(
             series.sonarr_payload_raw = payload
         session.add(series)
         session.commit()
-        row_id = int(series.id)
     except Exception as exc:
-        try:
-            session.rollback()
-        except Exception:
-            pass
+        if session is not None:
+            try:
+                session.rollback()
+            except Exception:
+                pass
         return {"ok": False, "message": str(exc)}
     finally:
-        session.close()
+        if session is not None:
+            session.close()
 
     apply_out = apply_arr_tag_placeholder_policies(movie_row_ids=[], series_row_ids=[row_id])
     return {
@@ -500,12 +529,18 @@ def apply_arr_tag_placeholder_policies(
     *,
     movie_row_ids: Iterable[int] | None = None,
     series_row_ids: Iterable[int] | None = None,
+    follow_up_materialize: bool = True,
 ) -> dict[str, Any]:
     """Apply tag-driven Never/Pinned to movie/series rows.
 
     Matching Never/Pinned tags always win (including over ``source=manual``).
     When no policy tags match, manual chip settings are left alone; prior
     ``source=tag`` Never/Pinned is unwound to Auto.
+
+    When ``follow_up_materialize`` is True (UI tag clear), create/delete placeholders
+    immediately. Lite/full sync pass False so determination and materialization handle
+    file work in their normal phases; callers should union ``movie_ids_changed`` /
+    ``series_ids_changed`` into those scopes when needed.
     """
     never_labels = never_tag_labels()
     pinned_labels = pinned_tag_labels()
@@ -516,8 +551,11 @@ def apply_arr_tag_placeholder_policies(
             "reason": "no_tag_lists",
             "movies_changed": 0,
             "series_changed": 0,
+            "movie_ids_changed": [],
+            "series_ids_changed": [],
             "created": 0,
             "deleted": 0,
+            "follow_up_materialize": bool(follow_up_materialize),
         }
 
     movie_ids = sorted({int(x) for x in (movie_row_ids or []) if x is not None})
@@ -527,10 +565,13 @@ def apply_arr_tag_placeholder_policies(
             "ok": True,
             "movies_changed": 0,
             "series_changed": 0,
+            "movie_ids_changed": [],
+            "series_ids_changed": [],
             "skipped": True,
             "reason": "no_rows",
             "created": 0,
             "deleted": 0,
+            "follow_up_materialize": bool(follow_up_materialize),
         }
 
     label_maps: dict[tuple[str, str], dict[str, set[int]]] = {}
@@ -538,6 +579,8 @@ def apply_arr_tag_placeholder_policies(
     series_changed = 0
     movies_materialize: list[tuple[int, PlaceholderPolicy]] = []
     series_materialize: list[tuple[int, PlaceholderPolicy]] = []
+    movie_ids_changed: list[int] = []
+    series_ids_changed: list[int] = []
 
     session = get_session()
     try:
@@ -565,6 +608,7 @@ def apply_arr_tag_placeholder_policies(
                 apply_placeholder_policy(movie, policy=desired, source="tag")
                 session.add(movie)
                 movies_changed += 1
+                movie_ids_changed.append(int(movie.id))
                 movies_materialize.append((int(movie.id), desired))
 
         if series_ids:
@@ -591,12 +635,10 @@ def apply_arr_tag_placeholder_policies(
                 apply_placeholder_policy(series, policy=desired, source="tag")
                 session.add(series)
                 series_changed += 1
+                series_ids_changed.append(int(series.id))
                 series_materialize.append((int(series.id), desired))
 
-        if movies_changed or series_changed:
-            session.commit()
-        else:
-            session.commit()
+        session.commit()
     except Exception as exc:
         try:
             session.rollback()
@@ -612,6 +654,9 @@ def apply_arr_tag_placeholder_policies(
             "error": str(exc),
             "movies_changed": movies_changed,
             "series_changed": series_changed,
+            "movie_ids_changed": sorted(set(movie_ids_changed)),
+            "series_ids_changed": sorted(set(series_ids_changed)),
+            "follow_up_materialize": bool(follow_up_materialize),
         }
     finally:
         session.close()
@@ -624,94 +669,131 @@ def apply_arr_tag_placeholder_policies(
         "errors": 0,
         "noop": 0,
     }
+    movies_followups = 0
+    series_followups = 0
 
-    for movie_id, policy in movies_materialize:
-        try:
-            if policy == "auto":
-                from services.source_of_truth.determiner import run_determination_for_entities
-                from services.source_of_truth.materializer import run_materialization_for_entities
+    if follow_up_materialize:
+        movies_followups = len(movies_materialize)
+        series_followups = len(series_materialize)
+        for movie_id, policy in movies_materialize:
+            try:
+                if policy == "auto":
+                    from services.source_of_truth.determiner import run_determination_for_entities
+                    from services.source_of_truth.materializer import run_materialization_for_entities
 
-                # Sync determine + materialize so clearing Never/Pinned does not wait on workers.
-                run_determination_for_entities(movie_ids=[int(movie_id)], episode_ids=[])
-                mat_out = run_materialization_for_entities(
-                    movie_ids=[int(movie_id)],
-                    episode_ids=[],
-                    observation_source=f"tag_policy_movie:{movie_id}",
+                    # Sync determine + materialize so clearing Never/Pinned does not wait on workers.
+                    run_determination_for_entities(movie_ids=[int(movie_id)], episode_ids=[])
+                    mat_out = run_materialization_for_entities(
+                        movie_ids=[int(movie_id)],
+                        episode_ids=[],
+                        observation_source=f"tag_policy_movie:{movie_id}",
+                    )
+                    _add_materialization_counts(followup_counts, mat_out)
+                else:
+                    fast_out = apply_movie_placeholder_policy_fast(int(movie_id))
+                    created_n, deleted_n = _counts_from_materialize_action(fast_out.get("action"))
+                    followup_counts["created"] += created_n
+                    followup_counts["deleted"] += deleted_n
+                    if not fast_out.get("ok", True):
+                        followup_counts["errors"] += 1
+            except Exception as exc:
+                followup_counts["errors"] += 1
+                logger.warning(
+                    f"Tag policy movie follow-up failed id={movie_id}: {exc}",
+                    extra={"emoji_type": "warning"},
                 )
-                _add_materialization_counts(followup_counts, mat_out)
-            else:
-                fast_out = apply_movie_placeholder_policy_fast(int(movie_id))
-                created_n, deleted_n = _counts_from_materialize_action(fast_out.get("action"))
-                followup_counts["created"] += created_n
-                followup_counts["deleted"] += deleted_n
-                if not fast_out.get("ok", True):
-                    followup_counts["errors"] += 1
-        except Exception as exc:
-            followup_counts["errors"] += 1
-            logger.warning(
-                f"Tag policy movie follow-up failed id={movie_id}: {exc}",
-                extra={"emoji_type": "warning"},
-            )
 
-    for series_id, policy in series_materialize:
-        try:
-            if policy == "auto":
-                from services.postgres.models import Episode, Season
-                from services.source_of_truth.determiner import run_determination_for_entities
-                from services.source_of_truth.materializer import run_materialization_for_entities
+        for series_id, policy in series_materialize:
+            try:
+                if policy == "auto":
+                    from services.postgres.models import Episode, Season
+                    from services.source_of_truth.determiner import run_determination_for_entities
+                    from services.source_of_truth.materializer import run_materialization_for_entities
 
-                ep_session = get_session()
-                try:
-                    episode_ids = [
-                        int(r[0])
-                        for r in ep_session.query(Episode.id)
-                        .join(Season, Episode.season_id == Season.id)
-                        .filter(Season.series_id == int(series_id), Episode.is_deleted == False)  # noqa: E712
-                        .all()
-                        if r[0] is not None
-                    ]
-                finally:
-                    ep_session.close()
-                run_determination_for_entities(movie_ids=[], episode_ids=episode_ids)
-                mat_out = run_materialization_for_entities(
-                    movie_ids=[],
-                    episode_ids=episode_ids,
-                    observation_source=f"tag_policy_series:{series_id}",
+                    ep_session = get_session()
+                    try:
+                        episode_ids = [
+                            int(r[0])
+                            for r in ep_session.query(Episode.id)
+                            .join(Season, Episode.season_id == Season.id)
+                            .filter(Season.series_id == int(series_id), Episode.is_deleted == False)  # noqa: E712
+                            .all()
+                            if r[0] is not None
+                        ]
+                    finally:
+                        ep_session.close()
+                    run_determination_for_entities(movie_ids=[], episode_ids=episode_ids)
+                    mat_out = run_materialization_for_entities(
+                        movie_ids=[],
+                        episode_ids=episode_ids,
+                        observation_source=f"tag_policy_series:{series_id}",
+                    )
+                    _add_materialization_counts(followup_counts, mat_out)
+                else:
+                    gate_out = apply_series_gate_fast(int(series_id), policy=policy)
+                    _add_materialization_counts(followup_counts, gate_out)
+                    if not gate_out.get("ok", True):
+                        followup_counts["errors"] += 1
+            except Exception as exc:
+                followup_counts["errors"] += 1
+                logger.warning(
+                    f"Tag policy series follow-up failed id={series_id}: {exc}",
+                    extra={"emoji_type": "warning"},
                 )
-                _add_materialization_counts(followup_counts, mat_out)
-            else:
-                gate_out = apply_series_gate_fast(int(series_id), policy=policy)
-                _add_materialization_counts(followup_counts, gate_out)
-                if not gate_out.get("ok", True):
-                    followup_counts["errors"] += 1
-        except Exception as exc:
-            followup_counts["errors"] += 1
-            logger.warning(
-                f"Tag policy series follow-up failed id={series_id}: {exc}",
-                extra={"emoji_type": "warning"},
-            )
 
     if movies_changed or series_changed:
-        logger.info(
-            "Arr tag placeholder policies applied movies_changed=%s series_changed=%s "
-            "placeholders_created=%s placeholders_deleted=%s",
-            movies_changed,
-            series_changed,
-            followup_counts["created"],
-            followup_counts["deleted"],
-            extra={"emoji_type": "info"},
-        )
+        if follow_up_materialize:
+            logger.info(
+                "Arr tag placeholder policies applied movies_changed=%s series_changed=%s "
+                "placeholders_created=%s placeholders_deleted=%s",
+                movies_changed,
+                series_changed,
+                followup_counts["created"],
+                followup_counts["deleted"],
+                extra={"emoji_type": "info"},
+            )
+        else:
+            logger.info(
+                "Arr tag placeholder policies stamped movies_changed=%s series_changed=%s "
+                "(file work deferred to determination/materialization)",
+                movies_changed,
+                series_changed,
+                extra={"emoji_type": "info"},
+            )
 
     return {
         "ok": True,
         "movies_changed": movies_changed,
         "series_changed": series_changed,
-        "movies_followups": len(movies_materialize),
-        "series_followups": len(series_materialize),
+        "movie_ids_changed": sorted(set(movie_ids_changed)),
+        "series_ids_changed": sorted(set(series_ids_changed)),
+        "movies_followups": movies_followups,
+        "series_followups": series_followups,
         "created": followup_counts["created"],
         "deleted": followup_counts["deleted"],
         "files_created": followup_counts["files_created"],
         "files_deleted": followup_counts["files_deleted"],
         "errors": followup_counts["errors"],
         "noop": followup_counts["noop"],
+        "follow_up_materialize": bool(follow_up_materialize),
     }
+
+
+def episode_row_ids_for_series_ids(series_row_ids: Iterable[int]) -> list[int]:
+    """Non-deleted episode row ids for the given series row ids (lite scope expansion)."""
+    series_ids = sorted({int(x) for x in (series_row_ids or []) if x is not None})
+    if not series_ids:
+        return []
+    from services.postgres.models import Episode, Season
+
+    session = get_session()
+    try:
+        rows = (
+            session.query(Episode.id)
+            .join(Season, Episode.season_id == Season.id)
+            .filter(Season.series_id.in_(series_ids), Episode.is_deleted == False)  # noqa: E712
+            .all()
+        )
+        return sorted({int(r[0]) for r in rows if r[0] is not None})
+    finally:
+        session.close()

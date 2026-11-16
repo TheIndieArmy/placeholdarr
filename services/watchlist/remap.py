@@ -257,7 +257,7 @@ def ensure_arr_remap_cached(
             }
         row.extra = set_cached_arr_remap(getattr(row, "extra", None), meta)
         updated += 1
-    if updated:
+    if updated and session is not None:
         try:
             session.flush()
         except Exception:

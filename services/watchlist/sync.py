@@ -19,7 +19,7 @@ WATCHLIST_RSS_POLL_SECONDS = 10
 # Without Plex Pass / RSS, fall back to a full API pull on this cadence.
 WATCHLIST_API_FALLBACK_SECONDS = 300
 _SEEN_GUID_CAP = 500
-from services.postgres.db import get_session
+from services.postgres.db import get_session, session_scope
 from services.postgres.models import (
     PlexWatchlistItem,
     PlexWatchlistMembership,
@@ -843,6 +843,9 @@ def add_watchlist_items_to_arr(
     When Arr resolves a title to a different primary name (alias remap), auto callers must
     leave ``confirm_remap=False`` so those rows stay in Queue. Manual Accept passes
     ``confirm_remap=True`` after the UI confirms the Arr series/movie.
+
+    Execution contract: snapshot + catalog enrich in a short DB session, close, then Arr
+    HTTP with no pooled connection held; open a new short session only to write results.
     """
     from types import SimpleNamespace
 
@@ -870,223 +873,289 @@ def add_watchlist_items_to_arr(
     sonarr_monitor = tv_scope_to_sonarr_monitor(scope)
     added = skipped = failed = 0
     needs_remap_confirm: list[dict[str, Any]] = []
-    session = get_session()
-    try:
+
+    override_targets = parse_watchlist_targets_json(targets) if targets is not None else None
+    # Cheap shim: single instance_key from older clients → one-target list.
+    if override_targets is None and (instance_key or "").strip():
+        shim = normalize_watchlist_target(
+            {
+                "instance_key": instance_key,
+                "quality_profile_id": quality_profile_id,
+                "root_folder_path": root_folder_path,
+            }
+        )
+        override_targets = [shim] if shim else []
+
+    # Phase 1: load + catalog enrich (DB only), then close before Arr HTTP.
+    snapshots: list[SimpleNamespace] = []
+    enrichments: dict[int, dict[str, Any]] = {}
+    with session_scope() as session:
         rows = session.query(PlexWatchlistItem).filter(PlexWatchlistItem.id.in_(ids)).all()
-        ensure_arr_remap_cached(session, rows)
-
-        by_media: dict[str, list[PlexWatchlistItem]] = {"movie": [], "show": []}
-        for row in rows:
-            if row.excluded:
-                continue
-            remap = get_cached_arr_remap(row.extra)
-            if isinstance(remap, dict) and remap.get("remapped") and not confirm_remap:
-                needs_remap_confirm.append(
-                    {
-                        "id": int(row.id),
-                        "watchlist_title": row.title,
-                        "arr_title": remap.get("arr_title"),
-                        "arr_year": remap.get("arr_year"),
-                        "media_type": row.media_type,
-                    }
-                )
-                skipped += 1
-                continue
-            by_media.setdefault(str(row.media_type), []).append(row)
-
-        override_targets = parse_watchlist_targets_json(targets) if targets is not None else None
-        # Cheap shim: single instance_key from older clients → one-target list.
-        if override_targets is None and (instance_key or "").strip():
-            shim = normalize_watchlist_target(
-                {
-                    "instance_key": instance_key,
-                    "quality_profile_id": quality_profile_id,
-                    "root_folder_path": root_folder_path,
-                }
-            )
-            override_targets = [shim] if shim else []
-
         from services.watchlist.catalog import enrich_watchlist_items
 
-        enrichable = [r for media_rows in by_media.values() for r in media_rows]
-        enrichments = enrich_watchlist_items(session, enrichable) if override_targets is None else {}
+        candidate_rows = [r for r in rows if not r.excluded]
+        if override_targets is None and candidate_rows:
+            enrichments = enrich_watchlist_items(session, candidate_rows)
+        for row in rows:
+            snapshots.append(
+                SimpleNamespace(
+                    id=int(row.id),
+                    title=row.title,
+                    year=row.year,
+                    media_type=row.media_type,
+                    excluded=bool(row.excluded),
+                    extra=row.extra,
+                    tmdb_id=row.tmdb_id,
+                    tvdb_id=row.tvdb_id,
+                    imdb_id=row.imdb_id,
+                    status=row.status,
+                )
+            )
 
-        for media_type, media_rows in by_media.items():
-            if not media_rows:
-                continue
-            arr_type = "radarr" if media_type == "movie" else "sonarr"
-            if override_targets is not None:
+    # Remap lookups are Arr HTTP: run with no pooled connection held.
+    ensure_arr_remap_cached(None, snapshots)
+    remap_extras: dict[int, Any] = {int(r.id): r.extra for r in snapshots}
+
+    by_media: dict[str, list[SimpleNamespace]] = {"movie": [], "show": []}
+    for row in snapshots:
+        if row.excluded:
+            continue
+        remap = get_cached_arr_remap(row.extra)
+        if isinstance(remap, dict) and remap.get("remapped") and not confirm_remap:
+            needs_remap_confirm.append(
+                {
+                    "id": int(row.id),
+                    "watchlist_title": row.title,
+                    "arr_title": remap.get("arr_title"),
+                    "arr_year": remap.get("arr_year"),
+                    "media_type": row.media_type,
+                }
+            )
+            skipped += 1
+            continue
+        by_media.setdefault(str(row.media_type), []).append(row)
+
+    # Pending DB writes applied after Arr HTTP (no session held during HTTP).
+    pending_writes: list[dict[str, Any]] = []
+
+    for media_type, media_rows in by_media.items():
+        if not media_rows:
+            continue
+        arr_type = "radarr" if media_type == "movie" else "sonarr"
+        if override_targets is not None:
+            media_targets = [
+                t
+                for t in override_targets
+                if settings.resolve_arr_instance(arr_type, instance_key=str(t.get("instance_key") or ""))
+            ]
+        else:
+            will_keys: set[str] = set()
+            for row in media_rows:
+                enr = enrichments.get(int(row.id)) or {}
+                for k in enr.get("will_add_keys") or []:
+                    if str(k).strip():
+                        will_keys.add(str(k).strip())
+            all_targets = arr_targets_for_media(media_type)
+            if will_keys:
                 media_targets = [
                     t
-                    for t in override_targets
-                    if settings.resolve_arr_instance(arr_type, instance_key=str(t.get("instance_key") or ""))
+                    for t in all_targets
+                    if str(t.get("instance_key") or "").strip() in will_keys
                 ]
             else:
-                # Prefer will_add_keys (missing watchlist targets); fall back to full target list.
-                will_keys: set[str] = set()
-                for row in media_rows:
-                    enr = enrichments.get(int(row.id)) or {}
-                    for k in enr.get("will_add_keys") or []:
-                        if str(k).strip():
-                            will_keys.add(str(k).strip())
-                all_targets = arr_targets_for_media(media_type)
-                if will_keys:
-                    media_targets = [
-                        t
-                        for t in all_targets
-                        if str(t.get("instance_key") or "").strip() in will_keys
-                    ]
-                else:
-                    media_targets = all_targets
+                media_targets = all_targets
 
-            if not media_targets:
+        if not media_targets:
+            for row in media_rows:
+                pending_writes.append(
+                    {
+                        "id": int(row.id),
+                        "status": "failed",
+                        "last_error": (
+                            f"No {arr_type} watchlist targets configured. "
+                            "Enable at least one instance under Settings → Watchlist → Arr targets."
+                        ),
+                        "extra": row.extra,
+                        "arr_instance_key": None,
+                        "added_at": None,
+                    }
+                )
+                failed += 1
+            continue
+
+        row_ok: dict[int, bool] = {int(r.id): False for r in media_rows}
+        row_had_new: dict[int, bool] = {int(r.id): False for r in media_rows}
+        row_keys: dict[int, list[str]] = {int(r.id): [] for r in media_rows}
+        row_errors: dict[int, list[str]] = {int(r.id): [] for r in media_rows}
+        row_remap: dict[int, dict[str, Any] | None] = {
+            int(r.id): get_cached_arr_remap(r.extra) for r in media_rows
+        }
+
+        items = []
+        for r in media_rows:
+            remap = row_remap.get(int(r.id))
+            tmdb_id = r.tmdb_id
+            tvdb_id = r.tvdb_id
+            imdb_id = r.imdb_id
+            if isinstance(remap, dict) and remap.get("remapped"):
+                tmdb_id = remap.get("tmdb_id") or tmdb_id
+                tvdb_id = remap.get("tvdb_id") or tvdb_id
+                imdb_id = remap.get("imdb_id") or imdb_id
+            items.append(
+                SimpleNamespace(
+                    title=r.title,
+                    year=r.year,
+                    tmdb_id=tmdb_id,
+                    tvdb_id=tvdb_id,
+                    imdb_id=imdb_id,
+                )
+            )
+
+        for target in media_targets:
+            key = str(target.get("instance_key") or "").strip()
+            instance = settings.resolve_arr_instance(arr_type, instance_key=key)
+            if not instance:
                 for row in media_rows:
-                    row.status = "failed"
-                    row.last_error = (
-                        f"No {arr_type} watchlist targets configured. "
-                        "Enable at least one instance under Settings → Watchlist → Arr targets."
-                    )
-                    failed += 1
+                    row_errors[int(row.id)].append(f"Unknown Arr instance {key!r}")
+                continue
+            try:
+                qp, root = _ensure_profile_and_root(instance, target)
+            except Exception as exc:
+                for row in media_rows:
+                    row_errors[int(row.id)].append(str(exc))
                 continue
 
-            # Per-row accumulators across fan-out targets.
-            row_ok: dict[int, bool] = {int(r.id): False for r in media_rows}
-            row_had_new: dict[int, bool] = {int(r.id): False for r in media_rows}
-            row_keys: dict[int, list[str]] = {int(r.id): [] for r in media_rows}
-            row_errors: dict[int, list[str]] = {int(r.id): [] for r in media_rows}
-            row_remap: dict[int, dict[str, Any] | None] = {int(r.id): get_cached_arr_remap(r.extra) for r in media_rows}
-
-            items = []
-            for r in media_rows:
-                remap = row_remap.get(int(r.id))
-                tmdb_id = r.tmdb_id
-                tvdb_id = r.tvdb_id
-                imdb_id = r.imdb_id
-                if isinstance(remap, dict) and remap.get("remapped"):
-                    tmdb_id = remap.get("tmdb_id") or tmdb_id
-                    tvdb_id = remap.get("tvdb_id") or tvdb_id
-                    imdb_id = remap.get("imdb_id") or imdb_id
-                items.append(
-                    SimpleNamespace(
-                        title=r.title,
-                        year=r.year,
-                        tmdb_id=tmdb_id,
-                        tvdb_id=tvdb_id,
-                        imdb_id=imdb_id,
-                    )
-                )
-
-            for target in media_targets:
-                key = str(target.get("instance_key") or "").strip()
-                instance = settings.resolve_arr_instance(arr_type, instance_key=key)
-                if not instance:
-                    for row in media_rows:
-                        row_errors[int(row.id)].append(f"Unknown Arr instance {key!r}")
-                    continue
+            tag_ids: list[int] = []
+            url = str(instance.get("url") or "")
+            api_key = str(instance.get("api_key") or "")
+            for label in tag_labels:
                 try:
-                    qp, root = _ensure_profile_and_root(instance, target)
+                    tag_id = arr_api.ensure_arr_tag(url=url, api_key=api_key, label=label)
+                    if tag_id is not None and tag_id not in tag_ids:
+                        tag_ids.append(int(tag_id))
                 except Exception as exc:
-                    for row in media_rows:
-                        row_errors[int(row.id)].append(str(exc))
-                    continue
+                    logger.warning(
+                        f"Watchlist Arr tag {label!r} failed on {key}: {exc}",
+                        extra={"emoji_type": "warning"},
+                    )
 
-                tag_ids: list[int] = []
-                url = str(instance.get("url") or "")
-                api_key = str(instance.get("api_key") or "")
-                for label in tag_labels:
-                    try:
-                        tag_id = arr_api.ensure_arr_tag(url=url, api_key=api_key, label=label)
-                        if tag_id is not None and tag_id not in tag_ids:
-                            tag_ids.append(int(tag_id))
-                    except Exception as exc:
-                        logger.warning(
-                            f"Watchlist Arr tag {label!r} failed on {key}: {exc}",
-                            extra={"emoji_type": "warning"},
-                        )
-
-                # Episode scope: add as pilot without Sonarr missing-search, then
-                # monitor+EpisodeSearch the first EPISODES_LOOKAHEAD episodes.
-                episode_window = media_type == "show" and scope == "episode" and monitored
-                add_search = bool(search) and not episode_window
-                results = arr_api.add_missing_titles(
-                    media_type=media_type,
-                    url=url,
-                    api_key=api_key,
-                    items=items,
-                    quality_profile_id=qp,
-                    root_folder_path=root,
-                    monitored=monitored,
-                    search=add_search,
-                    tag_ids=tag_ids or None,
-                    instance_key=key,
-                    sonarr_monitor=sonarr_monitor if media_type == "show" else None,
-                )
-                # add_missing_titles returns one result per input item in the same order.
-                if len(results) != len(media_rows):
-                    for row in media_rows:
-                        row_errors[int(row.id)].append(
-                            f"{key}: Arr add returned {len(results)} results for {len(media_rows)} titles"
-                        )
-                    continue
-                for row, result in zip(media_rows, results):
-                    rid = int(row.id)
-                    status = str(result.get("status") or "")
-                    result_remap = result.get("arr_remap")
-                    if isinstance(result_remap, dict):
-                        row_remap[rid] = result_remap
-                    if status in {"ok", "skipped"}:
-                        row_ok[rid] = True
-                        if key not in row_keys[rid]:
-                            row_keys[rid].append(key)
-                        if status == "ok":
-                            row_had_new[rid] = True
-                        if episode_window:
-                            try:
-                                arr_id = int(result.get("arr_id") or 0)
-                            except (TypeError, ValueError):
-                                arr_id = 0
-                            if arr_id > 0:
-                                try:
-                                    arr_api.monitor_and_search_first_episodes(
-                                        series_id=arr_id,
-                                        count=_episodes_lookahead_count(),
-                                        search=bool(search),
-                                        url=url,
-                                        api_key=api_key,
-                                    )
-                                except Exception as exc:
-                                    logger.warning(
-                                        f"Watchlist episode window failed for {row.title!r} on {key}: {exc}",
-                                        extra={"emoji_type": "warning"},
-                                    )
-                    else:
-                        row_errors[rid].append(
-                            f"{key}: {result.get('error') or 'Arr add failed'}"
-                        )
-
-            now = _utcnow()
-            for row in media_rows:
+            episode_window = media_type == "show" and scope == "episode" and monitored
+            add_search = bool(search) and not episode_window
+            results = arr_api.add_missing_titles(
+                media_type=media_type,
+                url=url,
+                api_key=api_key,
+                items=items,
+                quality_profile_id=qp,
+                root_folder_path=root,
+                monitored=monitored,
+                search=add_search,
+                tag_ids=tag_ids or None,
+                instance_key=key,
+                sonarr_monitor=sonarr_monitor if media_type == "show" else None,
+            )
+            if len(results) != len(media_rows):
+                for row in media_rows:
+                    row_errors[int(row.id)].append(
+                        f"{key}: Arr add returned {len(results)} results for {len(media_rows)} titles"
+                    )
+                continue
+            for row, result in zip(media_rows, results):
                 rid = int(row.id)
-                meta = row_remap.get(rid)
-                if isinstance(meta, dict):
-                    row.extra = set_cached_arr_remap(row.extra, meta)
-                if row_ok[rid]:
-                    row.status = "added"
-                    row.added_at = now
-                    row.arr_instance_key = ",".join(row_keys[rid]) or None
-                    err_parts = row_errors[rid]
-                    row.last_error = "; ".join(err_parts) if err_parts else None
-                    if row_had_new[rid]:
-                        added += 1
-                    else:
-                        skipped += 1
+                status = str(result.get("status") or "")
+                result_remap = result.get("arr_remap")
+                if isinstance(result_remap, dict):
+                    row_remap[rid] = result_remap
+                if status in {"ok", "skipped"}:
+                    row_ok[rid] = True
+                    if key not in row_keys[rid]:
+                        row_keys[rid].append(key)
+                    if status == "ok":
+                        row_had_new[rid] = True
+                    if episode_window:
+                        try:
+                            arr_id = int(result.get("arr_id") or 0)
+                        except (TypeError, ValueError):
+                            arr_id = 0
+                        if arr_id > 0:
+                            try:
+                                arr_api.monitor_and_search_first_episodes(
+                                    series_id=arr_id,
+                                    count=_episodes_lookahead_count(),
+                                    search=bool(search),
+                                    url=url,
+                                    api_key=api_key,
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    f"Watchlist episode window failed for {row.title!r} on {key}: {exc}",
+                                    extra={"emoji_type": "warning"},
+                                )
                 else:
-                    row.status = "failed"
-                    row.last_error = "; ".join(row_errors[rid]) or "Arr add failed"
-                    failed += 1
-        session.commit()
-    finally:
-        session.close()
+                    row_errors[rid].append(
+                        f"{key}: {result.get('error') or 'Arr add failed'}"
+                    )
+
+        now = _utcnow()
+        for row in media_rows:
+            rid = int(row.id)
+            meta = row_remap.get(rid)
+            extra = row.extra
+            if isinstance(meta, dict):
+                extra = set_cached_arr_remap(extra, meta)
+            if row_ok[rid]:
+                err_parts = row_errors[rid]
+                pending_writes.append(
+                    {
+                        "id": rid,
+                        "status": "added",
+                        "added_at": now,
+                        "arr_instance_key": ",".join(row_keys[rid]) or None,
+                        "last_error": "; ".join(err_parts) if err_parts else None,
+                        "extra": extra,
+                    }
+                )
+                if row_had_new[rid]:
+                    added += 1
+                else:
+                    skipped += 1
+            else:
+                pending_writes.append(
+                    {
+                        "id": rid,
+                        "status": "failed",
+                        "added_at": None,
+                        "arr_instance_key": None,
+                        "last_error": "; ".join(row_errors[rid]) or "Arr add failed",
+                        "extra": extra,
+                    }
+                )
+                failed += 1
+
+    write_ids = {int(w["id"]) for w in pending_writes} | set(remap_extras.keys())
+    if write_ids:
+        with session_scope() as session:
+            by_id = {int(w["id"]): w for w in pending_writes}
+            rows = (
+                session.query(PlexWatchlistItem)
+                .filter(PlexWatchlistItem.id.in_(list(write_ids)))
+                .all()
+            )
+            for row in rows:
+                rid = int(row.id)
+                write = by_id.get(rid)
+                if write:
+                    row.status = write["status"]
+                    row.last_error = write.get("last_error")
+                    row.extra = write.get("extra")
+                    if write.get("arr_instance_key") is not None or write["status"] == "added":
+                        row.arr_instance_key = write.get("arr_instance_key")
+                    if write.get("added_at") is not None:
+                        row.added_at = write["added_at"]
+                elif rid in remap_extras:
+                    row.extra = remap_extras[rid]
+            session.commit()
+
     return {
         "added": added,
         "skipped": skipped,
@@ -1211,10 +1280,14 @@ def list_watchlist_items(
     limit: int = 500,
     plex_user_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
+    from types import SimpleNamespace
+
     from sqlalchemy import exists
 
-    session = get_session()
-    try:
+    from services.watchlist.remap import ensure_arr_remap_cached
+
+    # Phase 1: DB-only load, then close before Arr remap HTTP.
+    with session_scope() as session:
         users_by_id = {u.plex_user_id: u for u in session.query(PlexWatchlistUser).all()}
         q = session.query(PlexWatchlistItem).order_by(PlexWatchlistItem.last_seen_at.desc())
         filter_ids = [str(x).strip() for x in (plex_user_ids or []) if str(x).strip()]
@@ -1233,14 +1306,6 @@ def list_watchlist_items(
             else:
                 q = q.filter(PlexWatchlistItem.status == status, PlexWatchlistItem.excluded.is_(False))
         rows = q.limit(max(1, min(int(limit or 500), 2000))).all()
-        from services.watchlist.remap import ensure_arr_remap_cached
-
-        # Cache Arr remaps for queue/accepted rows so UI can show Will add as / Library link.
-        try:
-            ensure_arr_remap_cached(session, rows)
-            session.commit()
-        except Exception:
-            session.rollback()
         item_ids = [int(r.id) for r in rows]
         mems_by_item: dict[int, list[PlexWatchlistMembership]] = {i: [] for i in item_ids}
         if item_ids:
@@ -1250,9 +1315,62 @@ def list_watchlist_items(
                 .all()
             ):
                 mems_by_item.setdefault(int(mem.watchlist_item_id), []).append(mem)
+        snapshots = [
+            SimpleNamespace(
+                id=int(r.id),
+                title=r.title,
+                year=r.year,
+                media_type=r.media_type,
+                excluded=bool(r.excluded),
+                extra=r.extra,
+                tmdb_id=r.tmdb_id,
+                tvdb_id=r.tvdb_id,
+                imdb_id=r.imdb_id,
+                status=r.status,
+            )
+            for r in rows
+        ]
+
+    # Arr remap HTTP with no pooled connection held.
+    try:
+        ensure_arr_remap_cached(None, snapshots)
+    except Exception:
+        pass
+    remap_extras = {int(s.id): s.extra for s in snapshots}
+    if remap_extras:
+        with session_scope() as session:
+            db_rows = (
+                session.query(PlexWatchlistItem)
+                .filter(PlexWatchlistItem.id.in_(list(remap_extras.keys())))
+                .all()
+            )
+            for row in db_rows:
+                row.extra = remap_extras.get(int(row.id), row.extra)
+            session.commit()
+
+    # Phase 2: enrich + serialize with remapped extras loaded.
+    with session_scope() as session:
         from services.watchlist.catalog import enrich_watchlist_items
 
-        enrichments = enrich_watchlist_items(session, rows)
+        if not item_ids:
+            return []
+        users_by_id = {u.plex_user_id: u for u in session.query(PlexWatchlistUser).all()}
+        rows = (
+            session.query(PlexWatchlistItem)
+            .filter(PlexWatchlistItem.id.in_(item_ids))
+            .all()
+        )
+        # Preserve original order from the first query.
+        by_id = {int(r.id): r for r in rows}
+        ordered = [by_id[i] for i in item_ids if i in by_id]
+        mems_by_item = {i: [] for i in item_ids}
+        for mem in (
+            session.query(PlexWatchlistMembership)
+            .filter(PlexWatchlistMembership.watchlist_item_id.in_(item_ids))
+            .all()
+        ):
+            mems_by_item.setdefault(int(mem.watchlist_item_id), []).append(mem)
+        enrichments = enrich_watchlist_items(session, ordered)
         return [
             _serialize_item(
                 r,
@@ -1260,10 +1378,8 @@ def list_watchlist_items(
                 users_by_id=users_by_id,
                 library=enrichments.get(int(r.id)),
             )
-            for r in rows
+            for r in ordered
         ]
-    finally:
-        session.close()
 
 
 def watchlist_summary() -> dict[str, Any]:

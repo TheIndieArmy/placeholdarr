@@ -13,6 +13,108 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## Released
 
+## [0.13.3] - 2026-11-15
+
+### Summary
+
+- **Execution contract (session holds)**: Long Arr, player, FS, and density work no longer keeps a DB session open the whole time, so lite sync / season density should stop wedging other writers behind lock timeouts.
+- **Tasks live poll after Run**: Starting a sync on an already-open page switches onto the 1s live status poll so phase bars mid-fill without a full page reload.
+- **Density stub player status**: Season/series density placeholders project status into Plex/Jellyfin/Emby like movies (#175).
+- **TV density path refresh**: Existing stubs no longer queue player path refreshes (#181).
+- **Lite density once per request**: Density is not re-run on every materialization chunk (#181).
+- **Event/lite bulk section skip**: Scoped mats rely on path refresh instead of `bulk_initial` section scans (#181).
+- **Full sync path refreshes**: Progressive path batches replace phase and 5-minute section scans (#181).
+- **Section fallback default off**: `MEDIA_REFRESH_SECTION_FALLBACK_ENABLED` defaults to false (#181).
+- **Projection path fallback**: Misses path-refresh known title folders only; no library-root scan (#181).
+- **Art backfill**: No force full-section metadata refresh on completion (#181).
+- **NFO backfill**: No force full-section metadata refresh on completion (#181).
+- **media_refresh coalesce retry**: UniqueViolation retries coalesce instead of Timer bypass (#181).
+- **media_refresh coalesce savepoint**: Coalesce races no longer roll back shared webhook sessions (#181).
+
+### Fixed
+
+- **Tasks live poll after Run**: Starting a sync on an already-open page switches onto the 1s live status poll (via Run click, SSE lifecycle, or a 5s idle status probe). Without that, idle stayed on the 60s history timer so bars only mid-filled after a full page reload.
+- **Live pill while sync phases open**: Overall % no longer forces 100% when ``units_total`` is still unknown (FS walk / Arr begin) but phases are working.
+- **Full sync early task complete**: Mat-linked art/NFO no longer marks the task done while Arr→calendar phases are still open.
+- **Projection fallback without paths**: Status push misses with no title folder no-op (no library-root scan); create-time path refresh and later status passes cover discovery (#181).
+- **media_refresh coalesce savepoint**: UniqueViolation during coalesce uses a savepoint so Arr webhook sessions keep unrelated work (#181).
+- **media_refresh coalesce retries**: Enqueue races retry up to three times with a short backoff before Timer fallback (#181).
+- **Density stub player status**: Season/series density placeholders project status into Plex/Jellyfin/Emby episode title/summary via the on-disk SxxE01 anchor (#175).
+- **Full sync Arr progress cadence**: Restore pre-#152 live emits (every batch or ~1.5s) and drop the extra scheduled_sync 3s throttle so instance bars fill during catalog upserts again.
+- **Full sync art live timing**: Mat-enqueued art no longer takes over Tasks live while Arr→calendar bars are still open, so Never-off recreate no longer snaps those bars to 100% before Updating.
+- **Never obsolete teardown**: Never (and other live-title obsolete reasons) remove placeholders again; the stale-obsolete guard only skips Arr delete-then-quick-readd (#177).
+- **Series stats after Never/Pinned**: Series gate apply refreshes `episode_placeholders` so Seasons & Episodes matches season PH chips (#177).
+- **Rotated chip edge clip**: Corner chips draw on an offscreen tile before rotate/paste so bake keeps leading glyphs and matches desk placement (off-edge parks still clip).
+- **Art refresh DB hold**: `placeholder_art_refresh` loads rows then closes the worker session before HTTP/image I/O so long art batches no longer pin pool connections.
+- **Event mat needs locks**: Event-scoped needs-placeholder commits every 10 items, batches art enqueue after the loop, and reports episode/movie progress in stall phases.
+- **Mat handler idle session**: `entity_materialization` releases the worker handler connection up front; chunk work uses its own short sessions.
+- **Art refresh stuck WORKING**: Watchdog-failed art/NFO batches bump `batches_failed` and close the parent Maintenance run so it does not sit WORKING after the queue drains.
+- **Layout studio art determination**: After layout migrate, legacy PLACEHOLDER banner toggles no longer alone mark sidecars stale when `layout_hash` already matches.
+- **NFO refresh DB hold**: `nfo_refresh` loads entities then closes before NFO FS and player metadata HTTP.
+- **Player metadata batch hold**: Batch projection releases the parent session and uses a short session per placeholder.
+- **Watchlist Arr auto-add hold**: Snapshot and enrich, then Arr HTTP with no pooled connection; short write-back afterward.
+- **Full/lite mat poster hold**: Needs loops mid-commit and batch-enqueue art instead of poster/TMDB inside the chunk transaction.
+- **Watchlist list remap hold**: List load snapshots rows, remaps Arr with no API session, then short-writes `extra`.
+- **Entity reconcile session**: Title Refresh releases before Arr wait/sync and before sidecar FS/art; short sessions for status steps.
+- **Poster language job hold**: Load IDs, close, TMDB, then short persist per entity.
+- **Webhook handler session**: Snapshot EventLog, close, dispatch nested handlers, short finish session.
+- **Playback start hold**: Snapshot context, close, then Plex/JF/Arr HTTP with short write-back.
+- **Import grace Arr hold**: Probe then release before Arr hasFile HTTP and nested mat finalize.
+- **Calendar date refresh hold**: Fetch Arr calendars with no session; short write session for upserts.
+- **Series-add episode fetch**: Pull Sonarr episodes before opening the handler session.
+- **Queue monitor nudge hold**: Close before RefreshMonitoredDownloads HTTP.
+- **Full sync Arr catalog hold**: Catalog and per-series episode GETs run outside the DB txn; writebacks commit per series/batch.
+- **Targeted Arr sync hold**: `sync_*_by_ids` and specials backfill fetch Arr first, then short DB write sessions.
+- **Lite/startup catalog hold**: Release before Arr catalog GETs; nested targeted syncs use their own short sessions.
+- **Orphan cleanup refresh hold**: Close before folder prune FS and player library refresh.
+- **Settings save nested sessions**: Release the request session before Arr transplants/reconcile and post-save refresh work.
+- **Apply-now enqueue hold**: Snapshot placeholder ids, close, then enqueue NFO/art in short sessions.
+- **Density once + short sessions**: Lite/reconcile/tag mats run TV density once after all placeholder chunks, in per-series short sessions with art deferred.
+- **Art-needs pure check**: `*_art_needs_refresh` reads sidecars/fingerprints only; no Arr/TMDB localize on the caller session.
+- **Policy-fast art defer**: Never/Pinned fast paths call materialization with `ensure_art=False`, then enqueue art with `skip_determination=True`.
+- **Lite snapshot session**: Startup lite commits/closes after diff SELECTs before monitored-drift Arr fetches and nested targeted syncs.
+- **Targeted sync commit order**: Per-title Arr GET never runs while a prior title's upsert txn is still open.
+- **FS scan chunking**: Full and incremental placeholder root scans walk with no session, then upsert/touch in short DB chunks.
+- **Calendar dummy swap**: Calendar phase plans variants in a short read, swaps files with no session, then writes status/extra without inline art enqueue.
+- **Import grace mat session**: Finalize releases the handler session before nested entity materialization.
+- **Playback Arr release**: Live flag refresh, monitor PUTs, and search POSTs commit before Arr HTTP.
+- **Episode playback Arr hold**: Episode search matches movie: short plan/write sessions with Sonarr HTTP only while no checkout is held.
+- **Playback fallback Arr hold**: Fallback jobs release the claim session before preferred hasFile checks and Arr search; requeue uses a short write session.
+- **Series-add detail prefetch**: Episode still/file detail and series art-fill HTTP run before the write session opens.
+- **Route to_thread**: Collections meta/preview/explain, Plex OAuth, Arr root/test, and detail Arr tags/TMDB collection leave the event loop.
+- **Tag clear Arr PUT**: Policy tag clear closes the read session before Radarr/Sonarr tag updates.
+- **Obsolete FS mid-commit**: Obsolete teardown commits (releases FOR UPDATE) before placeholder file cleanup.
+- **Orphan prune FS**: Orphan cleanup plans rows, deletes files with no session, then short-writes row deletes before empty-folder prune.
+- **TV-only layout art**: Saving a TV poster profile no longer rebakes episode stills (layout filter used to force `art_scope=all`).
+- **Episode-only layout art**: Saving an Episode profile skips series/season poster bakes for that refresh.
+- **Season poster copy**: When a season uses the series poster and the same overlay, copy `poster.jpg` instead of rebaking every season.
+- **Art refresh batch size**: All art refresh jobs use `ART_REFRESH_BATCH_SIZE` (default 25; `LAYOUT_ART_BATCH_SIZE` still honored) so studio bakes finish under the handler watchdog. NFO/status keep `STATUS_JOB_BATCH_SIZE`.
+- **Art batch numbering**: Worker claim locks one PENDING job at a time so parallel workers no longer jump by 20 (`1` / `21` / `41`) under `SKIP LOCKED`.
+- **Timed-out art batches**: Tasks details mark failed/timed-out art batches amber with a note instead of leaving them as stuck blue working bars.
+- **Layout desk preview tokens**: Real-time desk chips refresh with randomize / TMDB preview art (Title, ratings, runtime, and other tokens). Sprite cache was keyed only on chip style, so the poster swapped while Breaking Bad sample text stayed.
+- **Layout preview demo ratings**: Preview art drops catalog demo scores (for example Metacritic 78) and uses the selected title’s Arr/TMDB values; sources with no score for that title show —.
+- **Layout preview library ratings**: Entering a TMDB id that exists in the library merges Arr ratings onto the desk tokens so rating chips match that title when Arr has them.
+- **TV/Episode rating sources**: Designer only offers IMDb for TV and Episode (Sonarr bake data); Movie keeps the full Radarr provider list.
+- **TV rating source coerce**: Copy/import onto TV or Episode (and load/normalize) remaps non-IMDb Rating chips to IMDb.
+
+### Changed
+- **TV density path refresh**: Existing season/series stubs are not added to `created_paths` unless newly created or relocated (#181).
+- **Lite/scoped density once**: TV density runs once after entity chunks, not on every commit chunk (#181).
+- **Bulk section skip list**: Event, lite, destination remap, and Arr detach mats skip `bulk_initial` section scans and rely on path refresh (#181).
+- **Full sync player refresh**: Progressive path overlap + delayed_final; removed phase initial/final and 5-minute section scans (#181).
+- **Section fallback default**: `MEDIA_REFRESH_SECTION_FALLBACK_ENABLED` defaults to false and gates projection miss + optional full-sync end section (#181).
+- **Projection fallback**: Unresolved titles path-refresh known title folders only; no library-root escalation; section scan only when the fallback flag is on (#181).
+- **Art backfill completion**: Last-batch force full-section metadata refresh removed; batches always path/item refresh rewritten titles (#181).
+- **NFO backfill completion**: Last-batch force full-section metadata refresh removed (#181).
+- **media_refresh coalesce race**: UniqueViolation on coalesce retries with short backoff instead of immediately falling back to `threading.Timer` (#181).
+- **Full-sync art live progress**: Materialization-enqueued art jobs link to the parent full sync (shared Updating bar / completion gate) so create waves no longer sit at 100% with a frozen 0/0 Updating bar until the run snaps done.
+- **Arr tag policy on lite/full sync**: Sync stamps Never/Pinned/Auto from Arr tags only; create/delete runs in the normal determination and materialization phases (no mid-sync tag materialize wave). Library tag-clear still applies placeholders immediately.
+- **Auto pin sidebar progress**: After the pin debounce, Auto marks Saved on the chip and shows title refresh progress in the library sidebar instead of holding Saving… until reconcile finishes.
+- **Never/Pinned sidebar progress**: Fast create/remove also flashes Creating…/Removing… then Done in the library sidebar, even when no reconcile job is queued.
+- **DB dual pools**: Separate API and worker SQLAlchemy pools so UI checkouts are not starved by long worker holds.
+- **Entity mat claim caps**: Cap concurrent `entity_materialization` jobs, with a tighter cap for `event_series_add`.
+- **Background thread pool role**: Maintenance/Settings/watchlist route-spawned daemons bind the worker DB pool so syncs do not starve the API pool.
+
 ## [0.13.2] - 2026-11-11
 
 ### Summary

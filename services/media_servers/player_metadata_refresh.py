@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from core.config import settings
@@ -21,7 +21,7 @@ from services.media_servers.jellyfin import (
     update_jellyfin_item_text,
 )
 from services.media_servers.plex import PlexMetadataRefreshResult, update_plex_item_text
-from services.media_servers.refresh import refresh_selected_sections
+from services.media_servers.refresh import refresh_all_paths, refresh_selected_sections
 from services.media_servers.plex_identity import (
     persist_episode_hierarchy_plex_identity,
     persist_movie_plex_identity,
@@ -429,6 +429,8 @@ class ProjectionFallbackAccumulator:
     jellyfin_episode: bool = False
     emby_movie: bool = False
     emby_episode: bool = False
+    failed_paths: set[str] = field(default_factory=set)
+    _current_path: str = ""
 
     def has_failures(self) -> bool:
         return any(
@@ -472,6 +474,9 @@ def _summary_mark(summary: ProjectionBatchSummary, server: str, ok: bool) -> Non
 
 
 def _mark_fallback(acc: ProjectionFallbackAccumulator, server: str, media_type: str) -> None:
+    path = str(getattr(acc, "_current_path", "") or "").strip()
+    if path:
+        acc.failed_paths.add(path)
     if server == "plex":
         if media_type == "movie":
             acc.plex_movie = True
@@ -898,9 +903,75 @@ def _push_episode(
         summary.plex_disabled += 1
 
 
+def _resolve_projection_folder_path(
+    placeholder: Placeholder,
+    *,
+    movie: Movie | None = None,
+    episode: Episode | None = None,
+) -> str:
+    """Best-effort title folder for path-scoped projection fallback (#181)."""
+    candidates: list[str] = [
+        str(getattr(placeholder, "placeholder_filepath", "") or "").strip(),
+        str(getattr(placeholder, "path", "") or "").strip(),
+    ]
+    if movie is not None:
+        candidates.append(str(getattr(movie, "placeholder_filepath", "") or "").strip())
+        if not any(c for c in candidates if c):
+            try:
+                from services.placeholders import movie_placeholder_path
+
+                candidates.append(str(movie_placeholder_path(movie) or "").strip())
+            except Exception:
+                pass
+    if episode is not None:
+        candidates.append(str(getattr(episode, "placeholder_filepath", "") or "").strip())
+    for raw in candidates:
+        if not raw:
+            continue
+        abs_path = os.path.abspath(raw)
+        return os.path.dirname(abs_path) if os.path.isfile(abs_path) else abs_path
+    return ""
+
+
 def _run_projection_fallback_refreshes(fallback: ProjectionFallbackAccumulator) -> None:
-    """Run one fallback refresh per server/media-type bucket for this batch."""
+    """Path-refresh known title folders; optional section scan only when enabled (#181).
+
+    No library-root escalation: brand-new placeholders rely on create-time path
+    refresh + NFO; later status pushes target items already in the player. A miss
+    with no title folder is a no-op unless section fallback is explicitly on.
+    """
     if not fallback.has_failures():
+        return
+
+    paths = {str(p).strip() for p in (fallback.failed_paths or set()) if str(p).strip()}
+    if paths:
+        path_stats = refresh_all_paths(
+            paths,
+            update_type="Created",
+            include_plex=bool(fallback.plex_movie or fallback.plex_episode),
+            include_jellyfin=bool(fallback.jellyfin_movie or fallback.jellyfin_episode),
+            include_emby=bool(fallback.emby_movie or fallback.emby_episode),
+        )
+        logger.info(
+            "Status projection fallback path refreshes triggered "
+            f"paths={len(paths)} refreshed={path_stats.get('refreshed', 0)} "
+            f"failed={path_stats.get('failed', 0)} "
+            f"plex(movie={fallback.plex_movie},episode={fallback.plex_episode}) "
+            f"jellyfin(movie={fallback.jellyfin_movie},episode={fallback.jellyfin_episode}) "
+            f"emby(movie={fallback.emby_movie},episode={fallback.emby_episode})",
+            extra={"emoji_type": "info"},
+        )
+
+    if not bool(getattr(settings, "MEDIA_REFRESH_SECTION_FALLBACK_ENABLED", False)):
+        if not paths:
+            logger.info(
+                "Status projection fallback no-op "
+                "(no title folder; waiting for create path refresh or a later status pass) "
+                f"plex(movie={fallback.plex_movie},episode={fallback.plex_episode}) "
+                f"jellyfin(movie={fallback.jellyfin_movie},episode={fallback.jellyfin_episode}) "
+                f"emby(movie={fallback.emby_movie},episode={fallback.emby_episode})",
+                extra={"emoji_type": "info"},
+            )
         return
 
     if fallback.plex_movie:
@@ -945,6 +1016,55 @@ def _run_projection_fallback_refreshes(fallback: ProjectionFallbackAccumulator) 
     )
 
 
+def _is_density_stub(placeholder: Placeholder) -> bool:
+    from services.source_of_truth.tv_density import (
+        PLACEHOLDER_KIND_SEASON_STUB,
+        PLACEHOLDER_KIND_SERIES_STUB,
+    )
+
+    kind = str(getattr(placeholder, "placeholder_kind", "") or "").strip()
+    return kind in {PLACEHOLDER_KIND_SEASON_STUB, PLACEHOLDER_KIND_SERIES_STUB}
+
+
+def _resolve_density_stub_anchor_episode(session, placeholder: Placeholder) -> Episode | None:
+    """Resolve the on-disk SxxE01 episode a season/series density stub stands in for.
+
+    Density stubs intentionally leave ``episode_id`` null (keyed by series/season only).
+    Player projection still needs an Episode row so title/summary can be pushed to the
+    Plex/Jellyfin/Emby item that indexes that stub file (always ``…sXXe01…``).
+    """
+    if not _is_density_stub(placeholder):
+        return None
+
+    from services.source_of_truth.tv_density import PLACEHOLDER_KIND_SERIES_STUB
+
+    kind = str(getattr(placeholder, "placeholder_kind", "") or "").strip()
+    season = None
+    season_id = getattr(placeholder, "season_id", None)
+    series_id = getattr(placeholder, "series_id", None)
+
+    if season_id is not None:
+        season = session.query(Season).get(int(season_id))
+    elif kind == PLACEHOLDER_KIND_SERIES_STUB and series_id is not None:
+        # series_density_stub_path always writes s01e01
+        season = (
+            session.query(Season)
+            .filter(Season.series_id == int(series_id), Season.season_number == 1)
+            .order_by(Season.id.asc())
+            .first()
+        )
+
+    if season is None:
+        return None
+
+    return (
+        session.query(Episode)
+        .filter(Episode.season_id == int(season.id), Episode.episode_number == 1)
+        .order_by(Episode.id.asc())
+        .first()
+    )
+
+
 def push_placeholder_player_metadata(
     session,
     placeholder: Placeholder,
@@ -976,6 +1096,10 @@ def push_placeholder_player_metadata(
 
     movie = session.query(Movie).get(placeholder.movie_id) if placeholder.movie_id else None
     episode = session.query(Episode).get(placeholder.episode_id) if placeholder.episode_id else None
+    stub_anchor = False
+    if movie is None and episode is None:
+        episode = _resolve_density_stub_anchor_episode(session, placeholder)
+        stub_anchor = episode is not None
 
     # Release DB connection back to the pool before starting media-server HTTP calls
     try:
@@ -994,10 +1118,34 @@ def push_placeholder_player_metadata(
         )
         return acc
 
-    if movie:
-        _push_movie(session, movie, placeholder, acc, run_summary)
-    elif episode:
-        _push_episode(session, placeholder, episode, acc, run_summary)
+    acc._current_path = _resolve_projection_folder_path(
+        placeholder, movie=movie, episode=episode
+    )
+    try:
+        if movie:
+            _push_movie(session, movie, placeholder, acc, run_summary)
+        elif episode:
+            if stub_anchor:
+                logger.debug(
+                    "Player metadata push via density-stub anchor episode "
+                    f"placeholder_id={getattr(placeholder, 'id', None)} "
+                    f"kind={getattr(placeholder, 'placeholder_kind', None)!r} "
+                    f"episode_id={int(getattr(episode, 'id', 0) or 0)} "
+                    f"episode_number={int(getattr(episode, 'episode_number', 0) or 0)}",
+                    extra={"emoji_type": "debug"},
+                )
+            _push_episode(session, placeholder, episode, acc, run_summary)
+        elif _is_density_stub(placeholder):
+            logger.debug(
+                "Skipping player metadata push (density stub has no resolvable SxxE01 episode) "
+                f"placeholder_id={getattr(placeholder, 'id', None)} "
+                f"kind={getattr(placeholder, 'placeholder_kind', None)!r} "
+                f"series_id={getattr(placeholder, 'series_id', None)} "
+                f"season_id={getattr(placeholder, 'season_id', None)}",
+                extra={"emoji_type": "debug"},
+            )
+    finally:
+        acc._current_path = ""
 
     try:
         session.commit()
@@ -1007,10 +1155,26 @@ def push_placeholder_player_metadata(
 
 
 def push_placeholder_batch_player_metadata(session, placeholders: list[Placeholder]) -> None:
-    """Project status directly for a placeholder batch and fallback-refresh once."""
+    """Project status directly for a placeholder batch and fallback-refresh once.
+
+    Releases the caller session immediately (``session`` may be ``None`` when the
+    caller already closed), then uses a short ``session_scope`` per placeholder so
+    one slow Plex/JF/Emby call does not pin the parent worker connection for the
+    whole batch.
+    """
+    from services.postgres.db import release_handler_session, session_scope
+
+    ids = [
+        int(p.id)
+        for p in (placeholders or [])
+        if getattr(p, "id", None) is not None and bool(getattr(p, "has_placeholder", False))
+    ]
+    if session is not None:
+        release_handler_session(session)
+
     fallback = ProjectionFallbackAccumulator()
     summary = ProjectionBatchSummary()
-    total = len(placeholders)
+    total = len(ids)
     if total:
         logger.info(
             f"Player metadata batch: starting {total} placeholder(s) "
@@ -1037,12 +1201,18 @@ def push_placeholder_batch_player_metadata(session, placeholders: list[Placehold
         )
         _phb.start()
     try:
-        for i, placeholder in enumerate(placeholders, start=1):
-            push_placeholder_player_metadata(session, placeholder, fallback=fallback, summary=summary)
-            try:
-                session.commit()
-            except Exception:
-                pass
+        for i, pid in enumerate(ids, start=1):
+            with session_scope() as item_session:
+                placeholder = item_session.get(Placeholder, int(pid))
+                if placeholder is None:
+                    continue
+                push_placeholder_player_metadata(
+                    item_session, placeholder, fallback=fallback, summary=summary
+                )
+                try:
+                    item_session.commit()
+                except Exception:
+                    pass
             if total and (i % 25 == 0 or i == total):
                 logger.info(
                     f"Player metadata batch: processed {i}/{total} "
@@ -1051,10 +1221,6 @@ def push_placeholder_batch_player_metadata(session, placeholders: list[Placehold
                 )
     finally:
         stop_batch_hb.set()
-        try:
-            session.commit()
-        except Exception:
-            pass
     logger.info(
         "Player libraries synced for this batch — "
         f"Plex: {summary.plex_ok} ok / {summary.plex_failed} failed / {summary.plex_disabled} off; "

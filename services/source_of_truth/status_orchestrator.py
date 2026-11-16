@@ -585,7 +585,12 @@ class StatusOrchestrator:
         
         return applied
     
-    def apply_and_project_statuses(self, intents: List[StatusIntent]) -> int:
+    def apply_and_project_statuses(
+        self,
+        intents: List[StatusIntent],
+        *,
+        enqueue_art: bool = True,
+    ) -> int:
         """
         Apply status intents AND trigger downstream projection to media servers.
         
@@ -593,6 +598,10 @@ class StatusOrchestrator:
           1. DB write (apply_status_intents)
           2. NFO refresh (external trigger)
           3. Media server projection (enqueue projection job)
+
+        ``enqueue_art``: when False, skip per-intent art refresh enqueue (callers that
+        batch art after a materialization chunk should pass False to avoid FS
+        determination inside a long open transaction).
         
         Returns: Number of intents successfully applied.
         """
@@ -632,13 +641,14 @@ class StatusOrchestrator:
 
             # Poster top-banner text follows Coming Soon vs PLACEHOLDER; skip is cheap
             # when overlay_text in .poster-overlay.json already matches.
-            try:
-                from services.source_of_truth.placeholder_art_reconciler import (
-                    enqueue_placeholder_art_refresh,
-                )
+            if enqueue_art:
+                try:
+                    from services.source_of_truth.placeholder_art_reconciler import (
+                        enqueue_placeholder_art_refresh,
+                    )
 
-                enqueue_placeholder_art_refresh(nfo_refresh_ids, session=session)
-            except Exception as e:
-                logger.warning(f"Failed to enqueue placeholder art refresh: {e}", exc_info=True)
+                    enqueue_placeholder_art_refresh(nfo_refresh_ids, session=session)
+                except Exception as e:
+                    logger.warning(f"Failed to enqueue placeholder art refresh: {e}", exc_info=True)
         
         return applied

@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getStats } from "../api/dashboard";
 import { getTasksHistory, getTasksScheduled, getTasksStatus } from "../api/tasks";
-import { TAB_HIDDEN_POLL_MS, TAB_IDLE_POLL_MS, TASKS_ACTIVE_POLL_MS } from "../dashboard/pollIntervals";
+import {
+  TAB_HIDDEN_POLL_MS,
+  TAB_IDLE_POLL_MS,
+  TASKS_ACTIVE_POLL_MS,
+  TASKS_IDLE_STATUS_POLL_MS,
+} from "../dashboard/pollIntervals";
 import type { ScheduledTaskRow, StatsResponse, TaskRunRow, TaskRunStatusResponse } from "../types/api";
 
 /** Start/finish/idle only. Live seq is polled separately and must not full-refetch. */
@@ -51,10 +56,13 @@ export function useActivityTasks(opts: {
   const lifecycleFingerprintRef = useRef("idle");
   const liveFingerprintRef = useRef("idle");
   const workingRef = useRef(false);
+  const lastIdleHistoryAtRef = useRef(0);
   const chromeOnRefreshRef = useRef(Boolean(opts.chromeOnRefresh));
   const onSuccessRef = useRef(opts.onSuccess);
   const onErrorRef = useRef(opts.onError);
   const onRefreshingRef = useRef(opts.onRefreshing);
+  /** Wake the poll loop onto the 1s active cadence (SSE / Run click / status probe). */
+  const pokeActivePollRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     chromeOnRefreshRef.current = Boolean(opts.chromeOnRefresh);
@@ -79,6 +87,10 @@ export function useActivityTasks(opts: {
       setScheduledTasks(sched.tasks || []);
       setTaskHistory(hist || []);
       onSuccessRef.current?.();
+      if ((hist || []).some((row) => String(row.status || "").toUpperCase() === "WORKING")) {
+        workingRef.current = true;
+        pokeActivePollRef.current();
+      }
     } catch (err) {
       onErrorRef.current?.(err instanceof Error ? err.message : "Tasks refresh failed");
       throw err;
@@ -114,6 +126,11 @@ export function useActivityTasks(opts: {
         return;
       }
 
+      // Critical: SSE / Run only hit this once per lifecycle. Without waking the
+      // poll loop, idle stays on the 60s timer and mid-phase live never patches
+      // until a full page reload (which schedules 1s because status is already working).
+      pokeActivePollRef.current();
+
       if (lifecycleChanged) {
         await refreshTasks({ showChrome: chromeOnRefreshRef.current });
         // History can lag the status payload; re-apply live after the full reload.
@@ -142,6 +159,12 @@ export function useActivityTasks(opts: {
       }, delayMs);
     };
 
+    pokeActivePollRef.current = () => {
+      if (stopped) return;
+      window.clearTimeout(timeoutId);
+      schedule(0);
+    };
+
     const tick = async () => {
       if (stopped) return;
       const hidden = typeof document !== "undefined" && document.visibilityState !== "visible";
@@ -150,7 +173,7 @@ export function useActivityTasks(opts: {
         return;
       }
 
-      let nextDelay = TAB_IDLE_POLL_MS;
+      let nextDelay = TASKS_IDLE_STATUS_POLL_MS;
       try {
         const status = await getTasksStatus();
         if (stopped) return;
@@ -174,10 +197,17 @@ export function useActivityTasks(opts: {
           }
           nextDelay = TASKS_ACTIVE_POLL_MS;
         } else {
-          await refreshTasks({
-            showChrome: lifecycleChanged ? chromeOnRefreshRef.current : false,
-          });
-          nextDelay = TAB_IDLE_POLL_MS;
+          // Cheap status every 5s while idle; full history on lifecycle edges or every 60s.
+          const dueHistory =
+            lifecycleChanged ||
+            Date.now() - lastIdleHistoryAtRef.current >= TAB_IDLE_POLL_MS;
+          if (dueHistory) {
+            await refreshTasks({
+              showChrome: chromeOnRefreshRef.current,
+            });
+            lastIdleHistoryAtRef.current = Date.now();
+          }
+          nextDelay = TASKS_IDLE_STATUS_POLL_MS;
         }
       } catch (err) {
         if (!stopped) {
@@ -205,7 +235,7 @@ export function useActivityTasks(opts: {
         if (status.working && status.run) {
           setTaskHistory((prev) => mergeWorkingRun(prev, status.run as TaskRunRow));
         }
-        schedule(status.working ? TASKS_ACTIVE_POLL_MS : TAB_IDLE_POLL_MS);
+        schedule(status.working ? TASKS_ACTIVE_POLL_MS : TASKS_IDLE_STATUS_POLL_MS);
       } catch {
         schedule(TAB_IDLE_POLL_MS);
       }
@@ -225,6 +255,7 @@ export function useActivityTasks(opts: {
 
     return () => {
       stopped = true;
+      pokeActivePollRef.current = () => {};
       document.removeEventListener("visibilitychange", onVisibility);
       window.clearTimeout(timeoutId);
     };

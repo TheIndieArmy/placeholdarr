@@ -761,20 +761,36 @@ def run_placeholder_refresh_task(
         finish_task_run(task_run_id, status="done", summary=summary)
         return {"ok": True, "task_run_id": task_run_id, "enqueued": False, "reason": "nothing_requested"}
 
+    ids: list[int] = []
     session = get_session()
     try:
         ids = _collect_active_placeholder_ids(session)
-        if not ids:
-            phases = summary.get("phases") if isinstance(summary.get("phases"), list) else []
-            for p in phases:
-                if str(p.get("status") or "").lower() == "working":
-                    p["status"] = "skipped"
-                    p["metrics"] = [{"label": "Reason", "value": "no_active_placeholders"}]
-            summary = {**summary, "phases": phases}
-            summary = _persist_placeholder_refresh_progress(task_run_id, summary, overall_status="DONE")
-            finish_task_run(task_run_id, status="done", summary=summary)
-            return {"ok": True, "task_run_id": task_run_id, "enqueued": False, "reason": "no_active_placeholders"}
+        session.commit()
+    except Exception as exc:
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        finish_task_run(task_run_id, status="failed", summary=summary, error_message=str(exc))
+        return {"ok": False, "task_run_id": task_run_id, "reason": str(exc)}
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
 
+    if not ids:
+        phases = summary.get("phases") if isinstance(summary.get("phases"), list) else []
+        for p in phases:
+            if str(p.get("status") or "").lower() == "working":
+                p["status"] = "skipped"
+                p["metrics"] = [{"label": "Reason", "value": "no_active_placeholders"}]
+        summary = {**summary, "phases": phases}
+        summary = _persist_placeholder_refresh_progress(task_run_id, summary, overall_status="DONE")
+        finish_task_run(task_run_id, status="done", summary=summary)
+        return {"ok": True, "task_run_id": task_run_id, "enqueued": False, "reason": "no_active_placeholders"}
+
+    try:
         if art:
             try:
                 from services.task_live_progress import seed_art_refresh_live_phases
@@ -797,9 +813,10 @@ def run_placeholder_refresh_task(
                 "request_backfill_run_id": f"placeholder_refresh:{run_id}",
                 "request_backfill_refresh_on_completion": not art,
             }
+            # Enqueue opens its own short sessions (ids already snapshotted).
             nfo_out = enqueue_nfo_refresh(
                 ids,
-                session=session,
+                session=None,
                 merge_into_pending=False,
                 player_metadata_refresh={int(pid): False for pid in ids},
                 payload_extras=nfo_extras,
@@ -834,7 +851,7 @@ def run_placeholder_refresh_task(
             }
             art_out = enqueue_placeholder_art_refresh(
                 ids,
-                session=session,
+                session=None,
                 merge_into_pending=False,
                 payload_extras=art_extras,
             )
@@ -881,11 +898,8 @@ def run_placeholder_refresh_task(
         _merge_placeholder_refresh_enqueue_flags(task_run_id, out)
         return out
     except Exception as exc:
-        session.rollback()
         finish_task_run(task_run_id, status="failed", summary=summary, error_message=str(exc))
         return {"ok": False, "task_run_id": task_run_id, "reason": str(exc)}
-    finally:
-        session.close()
 
 
 def enqueue_scoped_placeholder_refresh(
@@ -904,14 +918,13 @@ def enqueue_scoped_placeholder_refresh(
     out: dict[str, Any] = {"ok": True, "enqueued": False, "run_id": run_id}
     metadata_committed = False
     art_committed = False
-    session = get_session()
     try:
         if metadata:
             from services.source_of_truth.status_reconciler import enqueue_nfo_refresh
 
             nfo_out = enqueue_nfo_refresh(
                 ids,
-                session=session,
+                session=None,
                 merge_into_pending=False,
                 player_metadata_refresh={int(pid): bool(player_metadata_refresh) for pid in ids},
                 payload_extras={
@@ -933,7 +946,7 @@ def enqueue_scoped_placeholder_refresh(
 
             art_out = enqueue_placeholder_art_refresh(
                 ids,
-                session=session,
+                session=None,
                 merge_into_pending=False,
                 payload_extras={
                     PLACEHOLDER_REFRESH_RUN_ID_KEY: f"scoped:{run_id}",
@@ -949,8 +962,10 @@ def enqueue_scoped_placeholder_refresh(
             out["ok"] = False
             out["reason"] = "enqueue_failed"
         return out
-    finally:
-        session.close()
+    except Exception as exc:
+        out["ok"] = False
+        out["reason"] = str(exc)
+        return out
 
 
 def _mark_phase_done(summary: dict[str, Any], phase_key: str) -> dict[str, Any]:
@@ -1031,6 +1046,9 @@ def _backfill_batches_still_open(meta: Any) -> bool:
     Used by try_complete so Tasks reconcile cannot flip the parent row to DONE
     after ``run_id`` is set but before linked jobs are visible or finished
     (art-only refresh race: empty statuses + enqueue started ⇒ premature DONE).
+
+    ``batches_failed`` counts terminal watchdog/handler failures so a drained
+    queue with short ``batches_done`` can still close the parent task_run.
     """
     if not isinstance(meta, dict):
         return False
@@ -1040,11 +1058,67 @@ def _backfill_batches_still_open(meta: Any) -> bool:
     try:
         batch_count = int(meta.get("batch_count") or 0)
         batches_done = int(meta.get("batches_done") or 0)
+        batches_failed = int(meta.get("batches_failed") or 0)
     except (TypeError, ValueError):
         return False
     if batch_count <= 0:
         return False
-    return batches_done < batch_count
+    return (batches_done + batches_failed) < batch_count
+
+
+def note_placeholder_refresh_batch_terminal_failure(
+    *,
+    task_run_id: int,
+    job_type: str,
+    batch_index: int | None = None,
+    reason: str | None = None,
+) -> None:
+    """Bump ``batches_failed`` on art/nfo backfill meta after a terminal job failure."""
+    from services.task_run_history import mutate_task_run_summary
+
+    tid = int(task_run_id)
+    jt = str(job_type or "").strip()
+    meta_key = "art_backfill" if jt == "placeholder_art_refresh" else "nfo_backfill"
+    if meta_key == "nfo_backfill" and jt != "nfo_refresh":
+        return
+
+    def _mutator(summary: dict[str, Any]) -> dict[str, Any] | None:
+        meta = summary.get(meta_key) if isinstance(summary.get(meta_key), dict) else {}
+        if not meta:
+            return None
+        meta = dict(meta)
+        meta["batches_failed"] = int(meta.get("batches_failed") or 0) + 1
+        if reason:
+            meta["last_batch_error"] = str(reason)[:240]
+        if batch_index is not None and int(batch_index) > 0:
+            failed_idx = list(meta.get("failed_batch_indexes") or [])
+            bi = int(batch_index)
+            if bi not in failed_idx:
+                failed_idx.append(bi)
+            meta["failed_batch_indexes"] = failed_idx
+        summary[meta_key] = meta
+        return summary
+
+    try:
+        mutate_task_run_summary(tid, _mutator)
+    except Exception as exc:
+        logger.debug(
+            f"note_placeholder_refresh_batch_terminal_failure task_run_id={tid} skipped: {exc}",
+            extra={"emoji_type": "debug"},
+        )
+    if batch_index is not None and int(batch_index) > 0 and jt == "placeholder_art_refresh":
+        try:
+            from services.source_of_truth.placeholder_art_reconciler import _publish_art_batch_live
+
+            _publish_art_batch_live(
+                tid,
+                batch_index=int(batch_index),
+                done=0,
+                total=1,
+                status="failed",
+            )
+        except Exception:
+            pass
 
 
 def try_complete_placeholder_refresh_task_run(
@@ -1082,11 +1156,14 @@ def try_complete_placeholder_refresh_task_run(
         # Tasks reconcile must not treat "no linked jobs yet" as finished, or the row
         # flips to done before batches exist and the refresh looks like a no-op.
         # Also: once run_id is set with batch_count > 0, empty statuses must wait until
-        # batches_done catches up (jobs may not be visible to this query yet).
+        # batches_done (+ batches_failed) catches up (jobs may not be visible yet).
+        # Exception: queue already drained to DONE/FAILED only (e.g. watchdog never
+        # bumped counters) — fall through so has_failed_job can close the parent.
+        all_jobs_terminal = bool(statuses) and not any(s in ("PENDING", "CLAIMED") for s in statuses)
         if not failed:
-            if art_requested and _backfill_batches_still_open(art_meta):
+            if art_requested and _backfill_batches_still_open(art_meta) and not all_jobs_terminal:
                 return False
-            if metadata_requested and _backfill_batches_still_open(nfo_meta):
+            if metadata_requested and _backfill_batches_still_open(nfo_meta) and not all_jobs_terminal:
                 return False
             if not statuses:
                 art_enqueue_started = bool(str(art_meta.get("run_id") or "").strip())
@@ -1096,6 +1173,7 @@ def try_complete_placeholder_refresh_task_run(
                 ):
                     return False
         has_failed_job = any(s == "FAILED" for s in statuses)
+
         if failed or has_failed_job:
             linked_reason, failed_types = _linked_refresh_fail_details(
                 session,
@@ -1141,7 +1219,23 @@ def reconcile_stuck_placeholder_refresh_tasks() -> int:
             .all()
         )
         for row in rows:
-            if try_complete_placeholder_refresh_task_run(int(row.id)):
+            tid = int(row.id)
+            # Happy path (counters caught up / all DONE). If that no-ops but the
+            # queue is drained with FAILED children (watchdog), close as failed.
+            if try_complete_placeholder_refresh_task_run(tid):
+                fixed += 1
+                continue
+            summary = row.summary if isinstance(row.summary, dict) else {}
+            art_meta = summary.get("art_backfill") if isinstance(summary.get("art_backfill"), dict) else {}
+            nfo_meta = summary.get("nfo_backfill") if isinstance(summary.get("nfo_backfill"), dict) else {}
+            looks_drained_short = (
+                _backfill_batches_still_open(art_meta) or _backfill_batches_still_open(nfo_meta)
+            )
+            if looks_drained_short and try_complete_placeholder_refresh_task_run(
+                tid,
+                failed=True,
+                error_message="linked_refresh_batch_failed",
+            ):
                 fixed += 1
     finally:
         session.close()

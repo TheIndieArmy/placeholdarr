@@ -22,7 +22,7 @@ def _is_lock_timeout_error(exc: Exception) -> bool:
     pgcode = getattr(getattr(exc, "orig", None), "pgcode", None)
     return str(pgcode or "") == _PG_LOCK_NOT_AVAILABLE_SQLSTATE
 from services.event_normalization import legacy_dispatch_event_type
-from services.postgres.db import get_session
+from services.postgres.db import get_session, set_db_pool_role
 from services.postgres.models import EventLog, Job
 
 
@@ -165,7 +165,13 @@ _CLAIM_CONCURRENCY_CAPS: dict[str, int] = {
     "nfo_refresh": 2,
     "placeholder_art_refresh": 2,
     "poster_language_resolve": 2,
+    # Large series-add mats amplify episode FS; keep concurrency low and rely on coalesce.
+    "entity_materialization": 2,
 }
+
+# Tighter global cap when observation_source is a large series-add storm.
+_ENTITY_MAT_SERIES_ADD_CLAIM_CAP = 1
+_LARGE_EVENT_MAT_SOURCES = frozenset({"event_series_add"})
 _INTERACTIVE_JOB_TYPES = frozenset(
     {
         "webhook_event",
@@ -283,6 +289,7 @@ def _stale_claimed_reaper_loop() -> None:
     """
     interval = _stale_claimed_reap_interval_seconds()
     stale_seconds = _stale_claimed_reset_seconds()
+    set_db_pool_role("worker")
     while not _reaper_stop.wait(interval):
         try:
             session = get_session()
@@ -482,29 +489,29 @@ def _claim_next_job() -> Optional[ClaimedJobDescriptor]:
         try:
             # Priority-aware claim with per-type concurrency caps. Interactive
             # types are never capped here (UX-first).
-            candidates = (
-                session.query(Job)
-                .filter(
-                    and_(
-                        Job.status == "PENDING",
-                        (Job.run_after.is_(None) | (Job.run_after <= now)),
-                        Job.attempts < func.greatest(func.coalesce(Job.max_attempts, 1), 1),
-                    )
-                )
-                .order_by(
-                    func.coalesce(Job.priority, 0).desc(),
-                    Job.run_after.asc().nullsfirst(),
-                    Job.id.asc(),
-                )
-                .with_for_update(skip_locked=True)
-                .limit(20)
-                .all()
+            #
+            # Lock ONE candidate at a time. A prior ``LIMIT 20 … FOR UPDATE
+            # SKIP LOCKED`` held locks on a whole window, so parallel workers
+            # jumped to jobs 21 / 41 / … and art batch bars looked scrambled.
+            pending_filter = and_(
+                Job.status == "PENDING",
+                (Job.run_after.is_(None) | (Job.run_after <= now)),
+                Job.attempts < func.greatest(func.coalesce(Job.max_attempts, 1), 1),
+            )
+            claim_order = (
+                func.coalesce(Job.priority, 0).desc(),
+                Job.run_after.asc().nullsfirst(),
+                Job.id.asc(),
             )
             # Reserve at least one worker for short interactive types when any
             # interactive PENDING exists and non-interactive CLAIMED already fill
             # worker_count - 1.
-            interactive_pending = any(
-                str(c.job_type or "") in _INTERACTIVE_JOB_TYPES for c in candidates
+            interactive_pending = (
+                session.query(Job.id)
+                .filter(pending_filter, Job.job_type.in_(tuple(_INTERACTIVE_JOB_TYPES)))
+                .limit(1)
+                .first()
+                is not None
             )
             non_interactive_claimed = 0
             if interactive_pending:
@@ -521,21 +528,65 @@ def _claim_next_job() -> Optional[ClaimedJobDescriptor]:
                 1, _worker_count() - 1
             )
 
-            for cand in candidates:
-                jtype = str(cand.job_type or "")
-                if reserve_interactive and jtype not in _INTERACTIVE_JOB_TYPES:
-                    continue
-                cap = _CLAIM_CONCURRENCY_CAPS.get(jtype)
-                if cap is not None and jtype not in _INTERACTIVE_JOB_TYPES:
-                    active = (
-                        session.query(func.count(Job.id))
-                        .filter(Job.job_type == jtype, Job.status == "CLAIMED")
-                        .scalar()
-                    )
-                    if int(active or 0) >= int(cap):
+            excluded_ids: list[int] = []
+            for _ in range(40):
+                nested = session.begin_nested()
+                try:
+                    q = session.query(Job).filter(pending_filter).order_by(*claim_order)
+                    if excluded_ids:
+                        q = q.filter(~Job.id.in_(excluded_ids))
+                    cand = q.with_for_update(skip_locked=True).limit(1).first()
+                    if not cand:
+                        nested.rollback()
+                        break
+                    jtype = str(cand.job_type or "")
+                    skip = False
+                    if reserve_interactive and jtype not in _INTERACTIVE_JOB_TYPES:
+                        skip = True
+                    else:
+                        cap = _CLAIM_CONCURRENCY_CAPS.get(jtype)
+                        if cap is not None and jtype not in _INTERACTIVE_JOB_TYPES:
+                            active = (
+                                session.query(func.count(Job.id))
+                                .filter(Job.job_type == jtype, Job.status == "CLAIMED")
+                                .scalar()
+                            )
+                            if int(active or 0) >= int(cap):
+                                skip = True
+                    if skip:
+                        excluded_ids.append(int(cand.id))
+                        nested.rollback()
                         continue
-                job = cand
-                break
+                    if jtype == "entity_materialization":
+                        cand_payload = cand.payload if isinstance(cand.payload, dict) else {}
+                        cand_obs = str(cand_payload.get("observation_source") or "").strip()
+                        if cand_obs in _LARGE_EVENT_MAT_SOURCES:
+                            series_add_claimed = 0
+                            for row in (
+                                session.query(Job.payload)
+                                .filter(
+                                    Job.job_type == "entity_materialization",
+                                    Job.status == "CLAIMED",
+                                )
+                                .all()
+                            ):
+                                pl = row[0] if row else None
+                                if isinstance(pl, dict) and str(pl.get("observation_source") or "").strip() in _LARGE_EVENT_MAT_SOURCES:
+                                    series_add_claimed += 1
+                            if series_add_claimed >= int(_ENTITY_MAT_SERIES_ADD_CLAIM_CAP):
+                                excluded_ids.append(int(cand.id))
+                                nested.rollback()
+                                continue
+                    # RELEASE SAVEPOINT keeps the row lock for the claim UPDATE.
+                    nested.commit()
+                    job = cand
+                    break
+                except Exception:
+                    try:
+                        nested.rollback()
+                    except Exception:
+                        pass
+                    raise
         except OperationalError as exc:
             if _is_lock_timeout_error(exc):
                 session.rollback()
@@ -624,6 +675,8 @@ def _reload_job_for_handler(session, descriptor: ClaimedJobDescriptor) -> Option
 
 
 def _process_webhook_event(session, job: Job):
+    from services.postgres.db import release_handler_session, session_scope
+
     payload = job.payload or {}
     event_log_id = payload.get('event_log_id')
     if not event_log_id:
@@ -632,11 +685,14 @@ def _process_webhook_event(session, job: Job):
     event = session.query(EventLog).filter(EventLog.id == int(event_log_id)).first()
     if not event:
         # Event row missing: mark job done to avoid poison-looping.
+        release_handler_session(session)
         return
 
+    job_id = int(job.id) if getattr(job, "id", None) is not None else None
+    event_id = int(event.id)
     # Correlates with JOB_HANDLER_TIMEOUT_SECONDS watchdog ERROR if a handler blocks (Plex/Radarr/DB).
     logger.info(
-        f"Webhook handler start job_id={job.id} event_log_id={event_log_id} "
+        f"Webhook handler start job_id={job_id} event_log_id={event_log_id} "
         f"event_type={str(getattr(event, 'event_type', '') or '').strip().lower() or '?'}",
         extra={'emoji_type': 'processing'},
     )
@@ -656,7 +712,11 @@ def _process_webhook_event(session, job: Job):
     if source_str.startswith('webhook:'):
         instance = source_str.split(':', 1)[1].strip() or None
 
+    # Nested event handlers open their own sessions; do not pin this claim session across Arr/Plex.
+    release_handler_session(session)
+
     handled = False
+    unhandled_error: str | None = None
     stop_wh_hb = threading.Event()
 
     _wh_iv = max(3.0, float(getattr(settings, "STALL_HEARTBEAT_INTERVAL_SEC", 10.0) or 10.0))
@@ -665,41 +725,41 @@ def _process_webhook_event(session, job: Job):
         """VERBOSE liveness while a handler runs (not INFO)."""
         while not stop_wh_hb.wait(_wh_iv):
             logger.verbose(
-                f"Webhook handler still running job_id={int(job.id)} event_log_id={event_log_id} "
+                f"Webhook handler still running job_id={job_id} event_log_id={event_log_id} "
                 f"event_type={event_type} dispatch_type={dispatch_type} instance={instance or 'unknown'}",
                 extra={"emoji_type": "processing"},
             )
 
     _whb = threading.Thread(
         target=_webhook_stall_heartbeat,
-        name=f"webhook-stall-hb-{int(job.id)}",
+        name=f"webhook-stall-hb-{job_id}",
         daemon=True,
     )
     _whb.start()
     try:
         if event_type == "webhook_test" or dispatch_type == "test":
             logger.info(
-                f"Processed webhook connectivity test event_log_id={event.id} instance={instance or 'unknown'}",
+                f"Processed webhook connectivity test event_log_id={event_id} instance={instance or 'unknown'}",
                 extra={"emoji_type": "success"},
             )
             handled = True
         elif event_type in ("movie_grab", "episode_grab", "webhook_ignored"):
             logger.info(
-                f"Ignored informational webhook event_log_id={event.id} type={event_type} instance={instance or 'unknown'}",
+                f"Ignored informational webhook event_log_id={event_id} type={event_type} instance={instance or 'unknown'}",
                 extra={"emoji_type": "info"},
             )
             handled = True
         elif dispatch_type == 'seriesadd':
             result = process_series_add_event(payload, instance=instance)
             logger.info(
-                f"Processed seriesadd event_log_id={event.id} result={result.get('upsert_stats', {})}",
+                f"Processed seriesadd event_log_id={event_id} result={result.get('upsert_stats', {})}",
                 extra={'emoji_type': 'success'},
             )
             handled = True
         elif dispatch_type in ('movieadd', 'movieadded'):
             result = process_movie_add_event(payload, instance=instance)
             logger.info(
-                f"Processed {dispatch_type} event_log_id={event.id} movie_id={result.get('movie_id')}",
+                f"Processed {dispatch_type} event_log_id={event_id} movie_id={result.get('movie_id')}",
                 extra={'emoji_type': 'success'},
             )
             handled = True
@@ -712,7 +772,7 @@ def _process_webhook_event(session, job: Job):
                     raise JobDeferredError(str(exc), delay_seconds=30) from exc
                 raise
             logger.info(
-                f"Processed movie_imported event_log_id={event.id} movie_id={result.get('movie_id')}",
+                f"Processed movie_imported event_log_id={event_id} movie_id={result.get('movie_id')}",
                 extra={'emoji_type': 'success'},
             )
             handled = True
@@ -724,42 +784,42 @@ def _process_webhook_event(session, job: Job):
                     raise JobDeferredError(str(exc), delay_seconds=30) from exc
                 raise
             logger.info(
-                f"Processed episode_imported event_log_id={event.id} episodes={len(result.get('episode_ids') or [])}",
+                f"Processed episode_imported event_log_id={event_id} episodes={len(result.get('episode_ids') or [])}",
                 extra={'emoji_type': 'success'},
             )
             handled = True
         elif event_type == 'movie_file_deleted' or dispatch_type == 'moviefiledelete':
             result = process_movie_file_deleted_event(payload, instance=instance)
             logger.info(
-                f"Processed movie_file_deleted event_log_id={event.id} movie_id={result.get('movie_id')}",
+                f"Processed movie_file_deleted event_log_id={event_id} movie_id={result.get('movie_id')}",
                 extra={'emoji_type': 'success'},
             )
             handled = True
         elif event_type == 'episode_file_deleted' or dispatch_type == 'episodefiledelete':
             result = process_episode_file_deleted_event(payload, instance=instance)
             logger.info(
-                f"Processed episode_file_deleted event_log_id={event.id} episodes={len(result.get('episode_ids') or [])}",
+                f"Processed episode_file_deleted event_log_id={event_id} episodes={len(result.get('episode_ids') or [])}",
                 extra={'emoji_type': 'success'},
             )
             handled = True
         elif event_type == 'movie_deleted' or dispatch_type == 'moviedelete':
             result = process_movie_deleted_event(payload, instance=instance)
             logger.info(
-                f"Processed movie_deleted event_log_id={event.id} movie_id={result.get('movie_id')}",
+                f"Processed movie_deleted event_log_id={event_id} movie_id={result.get('movie_id')}",
                 extra={'emoji_type': 'success'},
             )
             handled = True
         elif event_type == 'series_deleted' or dispatch_type == 'seriesdelete':
             result = process_series_deleted_event(payload, instance=instance)
             logger.info(
-                f"Processed series_deleted event_log_id={event.id} episodes={len(result.get('episode_ids') or [])}",
+                f"Processed series_deleted event_log_id={event_id} episodes={len(result.get('episode_ids') or [])}",
                 extra={'emoji_type': 'success'},
             )
             handled = True
         elif event_type == 'playback_start' or dispatch_type in ('playback.start', 'playbackstart'):
             result = process_playback_start_event(payload, instance=instance)
             logger.info(
-                f"Processed playback_start event_log_id={event.id} result={result}",
+                f"Processed playback_start event_log_id={event_id} result={result}",
                 extra={'emoji_type': 'success'},
             )
             handled = True
@@ -768,16 +828,23 @@ def _process_webhook_event(session, job: Job):
         stop_wh_hb.set()
 
     if not handled:
-        event.error_message = f'unhandled_event_type:{event_type}'
+        unhandled_error = f'unhandled_event_type:{event_type}'
         logger.warning(
-            f"Webhook event not yet handled event_log_id={event.id} canonical={event_type} raw={raw_event_type or 'unknown'}",
+            f"Webhook event not yet handled event_log_id={event_id} canonical={event_type} raw={raw_event_type or 'unknown'}",
             extra={'emoji_type': 'warning'},
         )
 
-    event.status = 'DONE'
-    event.processed_at = datetime.now(timezone.utc)
-    event.updated_at = datetime.now(timezone.utc)
-    session.add(event)
+    with session_scope(role="worker") as finish_session:
+        row = finish_session.get(EventLog, int(event_id))
+        if row is None:
+            return
+        if unhandled_error:
+            row.error_message = unhandled_error
+        row.status = 'DONE'
+        row.processed_at = datetime.now(timezone.utc)
+        row.updated_at = datetime.now(timezone.utc)
+        finish_session.add(row)
+        finish_session.commit()
 
 
 def _is_non_retriable_webhook_error(error: Exception) -> bool:
@@ -811,6 +878,19 @@ def _try_complete_task_runs_after_job_commit(
     if descriptor.job_type not in (PLACEHOLDER_ART_REFRESH_JOB_TYPE, NFO_REFRESH_JOB_TYPE):
         return
     payload = descriptor.payload if isinstance(descriptor.payload, dict) else {}
+    if failed and descriptor.job_type == PLACEHOLDER_ART_REFRESH_JOB_TYPE:
+        try:
+            from services.job_fail_active import publish_art_batch_failed_for_job
+
+            publish_art_batch_failed_for_job(
+                int(descriptor.id),
+                reason=str(error_message or "failed"),
+            )
+        except Exception as exc:
+            logger.debug(
+                f"art batch live fail publish after job_id={descriptor.id} skipped: {exc}",
+                extra={"emoji_type": "debug"},
+            )
     raw_tid = payload.get("full_sync_task_run_id") or payload.get("art_backfill_task_run_id")
     if raw_tid is not None:
         try:
@@ -1281,6 +1361,7 @@ def _process_one_descriptor(descriptor: ClaimedJobDescriptor) -> None:
 
     def _claim_heartbeat() -> None:
         """Keep updated_at fresh so the stale-CLAIMED reaper does not requeue live work."""
+        set_db_pool_role("worker")
         while not heartbeat_stop.wait(60.0):
             hb_session = None
             try:
@@ -1480,6 +1561,8 @@ def _executor_loop():
     drain event. This is the documented one-line rollback path if NOTIFY
     ever wedges in production.
     """
+    # Worker threads always check out from the worker pool so UI stays responsive.
+    set_db_pool_role("worker")
     from services.startup_gate import startup_sync_complete
 
     if not startup_sync_complete.is_set():

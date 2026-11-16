@@ -3,13 +3,13 @@ import type { ThemeMode } from "../../brandTypes";
 import {
   clearMovieArrPolicyTags,
   clearSeriesArrPolicyTags,
-  getEntityReconcileStatus,
   setEpisodePlaceholderPolicy,
   setMoviePlaceholderPolicy,
   setSeasonPlaceholderPolicy,
   setSeriesPlaceholderPolicy,
 } from "../../api/dashboard";
 import type { PolicyTagControl } from "../../types/api";
+import { useLibraryReconcile } from "../LibraryReconcileContext";
 import { PinGlyph, type PlaceholderPolicy } from "./PinGlyph";
 import { PolicyTagControlModal } from "./PolicyTagControlModal";
 import {
@@ -24,18 +24,6 @@ const APPLY_DEBOUNCE_MS = 1100;
 
 export type PolicySyncPhase = "idle" | "creating" | "removing" | "working" | "saved";
 export type PolicyMediaType = "movie" | "episode" | "series" | "season";
-
-async function waitForReconcileJob(jobId: number): Promise<void> {
-  for (let i = 0; i < 80; i += 1) {
-    const status = await getEntityReconcileStatus(jobId);
-    if (status.status === "done") return;
-    if (status.status === "failed") {
-      throw new Error(status.error_message || "Sync failed");
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, 1000));
-  }
-  throw new Error("Timed out waiting for placeholder sync");
-}
 
 function phaseForPolicy(
   policy: PlaceholderPolicy,
@@ -64,6 +52,8 @@ function setterForMediaType(mediaType: PolicyMediaType) {
 export function PlaceholderPolicyCycle(props: {
   mediaType: PolicyMediaType;
   entityId: number;
+  /** Library title for sidebar progress (same label Auto reconcile uses). */
+  displayTitle?: string | null;
   placeholderPolicy?: PlaceholderPolicy | null;
   forcePlaceholder?: boolean;
   blockPlaceholder?: boolean;
@@ -98,6 +88,7 @@ export function PlaceholderPolicyCycle(props: {
   const locked = Boolean(props.locked);
   const progressSide = props.inlineProgressSide ?? "end";
   const hasPlaceholder = Boolean(props.hasPlaceholder);
+  const { trackReconcileJob, flashSidebarStatus } = useLibraryReconcile();
   const hasFile = Boolean(props.hasFile);
   const tagControl = props.policyTagControl || null;
   const tagConflict = Boolean(tagControl?.conflict);
@@ -159,8 +150,24 @@ export function PlaceholderPolicyCycle(props: {
       desiredPolicyRef.current = policy;
       const gen = ++generationRef.current;
       inFlightRef.current = true;
-      updatePhase(phaseForPolicy(policy, hasPlaceholder, hasFile));
+      const syncPhase = phaseForPolicy(policy, hasPlaceholder, hasFile);
+      updatePhase(syncPhase);
       setError(null);
+      const busyMsg =
+        syncPhase === "removing"
+          ? "Removing placeholders…"
+          : syncPhase === "creating"
+            ? "Creating placeholders…"
+            : "Updating placeholders…";
+      const contentTitle = String(props.displayTitle || "").trim() || null;
+      // Never/Pinned (and the brief Auto API hop) show in the sidebar immediately.
+      flashSidebarStatus({
+        message: busyMsg,
+        busy: true,
+        kind: "info",
+        step: syncPhase,
+        title: contentTitle,
+      });
       try {
         const setter = setterForMediaType(props.mediaType);
         const out = await setter(props.entityId, { policy });
@@ -184,39 +191,30 @@ export function PlaceholderPolicyCycle(props: {
         if (!out.ok) {
           throw new Error(out.message || "Failed to update placeholder policy");
         }
-        if (out.job_id != null) {
-          await waitForReconcileJob(out.job_id);
-        }
-        if (gen !== generationRef.current || desiredPolicyRef.current !== policy) {
-          const latest = desiredPolicyRef.current;
-          if (latest !== policy) {
-            await savePolicyRef.current(latest);
-          } else {
-            confirmedPolicyRef.current = policy;
-            inFlightRef.current = false;
-            updatePhase("saved");
-            if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
-            savedTimerRef.current = setTimeout(() => updatePhase("idle"), 1500);
-            props.onApplied?.();
-          }
-          return;
-        }
-        if (out.followup_job_id != null) {
-          await waitForReconcileJob(out.followup_job_id);
-        }
-        if (gen !== generationRef.current || desiredPolicyRef.current !== policy) {
-          const latest = desiredPolicyRef.current;
-          if (latest !== policy) {
-            await savePolicyRef.current(latest);
-          } else {
-            confirmedPolicyRef.current = policy;
-            inFlightRef.current = false;
-            updatePhase("saved");
-            if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
-            savedTimerRef.current = setTimeout(() => updatePhase("idle"), 1500);
-            props.onApplied?.();
-          }
-          return;
+        // Auto (and season Auto) enqueue a title reconcile: accept on the chip and
+        // show Creating…/steps in the library sidebar instead of a stuck Saving….
+        if (out.job_id != null && Number(out.job_id) > 0) {
+          trackReconcileJob({
+            jobId: Number(out.job_id),
+            followupJobId: out.followup_job_id,
+            message: out.step_label || "Refreshing placeholders…",
+            step: "queued",
+            title: contentTitle,
+          });
+        } else {
+          const doneMsg =
+            syncPhase === "removing"
+              ? "Placeholders removed"
+              : syncPhase === "creating"
+                ? "Placeholders created"
+                : "Placeholders updated";
+          flashSidebarStatus({
+            message: doneMsg,
+            busy: false,
+            kind: "success",
+            step: "done",
+            title: contentTitle,
+          });
         }
 
         confirmedPolicyRef.current = policy;
@@ -238,16 +236,27 @@ export function PlaceholderPolicyCycle(props: {
         setDisplayPolicy(confirmedPolicyRef.current);
         displayPolicyRef.current = confirmedPolicyRef.current;
         desiredPolicyRef.current = confirmedPolicyRef.current;
-        setError(err instanceof Error ? err.message : "Failed to update placeholder policy");
+        const msg = err instanceof Error ? err.message : "Failed to update placeholder policy";
+        flashSidebarStatus({
+          message: msg,
+          busy: false,
+          kind: "error",
+          step: null,
+          title: contentTitle,
+        });
+        setError(msg);
       }
     },
     [
       props.mediaType,
       props.entityId,
+      props.displayTitle,
       props.onApplied,
       hasPlaceholder,
       hasFile,
       updatePhase,
+      trackReconcileJob,
+      flashSidebarStatus,
     ],
   );
 

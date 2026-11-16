@@ -26,9 +26,29 @@ type LibraryReconcileSidebarStatus = {
   live: TaskRunLiveProgress | null;
 };
 
+type TrackReconcileJobOpts = {
+  jobId: number;
+  followupJobId?: number | null;
+  message?: string | null;
+  step?: string | null;
+  title?: string | null;
+};
+
+type FlashSidebarStatusOpts = {
+  message: string;
+  kind?: LibraryReconcileSidebarStatus["kind"];
+  busy?: boolean;
+  step?: string | null;
+  title?: string | null;
+};
+
 type LibraryReconcileContextValue = {
   status: LibraryReconcileSidebarStatus;
   runReconcile: (startReconcile: () => Promise<EntityReconcileStartResponse>) => Promise<void>;
+  /** Poll an already-queued entity reconcile in the sidebar (e.g. Auto pin). */
+  trackReconcileJob: (opts: TrackReconcileJobOpts) => void;
+  /** Local Creating…/Removing…/Done for Never/Pinned fast path (no job id). */
+  flashSidebarStatus: (opts: FlashSidebarStatusOpts) => void;
 };
 
 const LibraryReconcileContext = createContext<LibraryReconcileContextValue | null>(null);
@@ -260,6 +280,48 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
     };
   }, [pollingJobId, followupJobId, clearPollingJob, beginPollingJob, resumeChecked]);
 
+  const trackReconcileJob = useCallback(
+    (opts: TrackReconcileJobOpts) => {
+      const jobId = Math.trunc(Number(opts.jobId));
+      if (!Number.isFinite(jobId) || jobId <= 0) return;
+      const followupRaw =
+        opts.followupJobId != null && Number(opts.followupJobId) > 0
+          ? Math.trunc(Number(opts.followupJobId))
+          : null;
+      const followup = followupRaw != null && followupRaw !== jobId ? followupRaw : null;
+      setStatus({
+        busy: true,
+        kind: "info",
+        message: String(opts.message || "").trim() || "Refresh queued…",
+        step: String(opts.step || "").trim() || "queued",
+        title: String(opts.title || "").trim() || null,
+        live: null,
+      });
+      beginPollingJob(jobId, followup);
+    },
+    [beginPollingJob],
+  );
+
+  const flashSidebarStatus = useCallback(
+    (opts: FlashSidebarStatusOpts) => {
+      const message = String(opts.message || "").trim();
+      if (!message) return;
+      // Local pin apply supersedes any in-flight Auto poll (Never cancels that job).
+      clearPollingJob();
+      const kind = opts.kind ?? "info";
+      const busy = opts.busy ?? kind === "info";
+      setStatus({
+        busy,
+        kind,
+        message,
+        step: opts.step != null ? String(opts.step).trim() || null : busy ? "working" : "done",
+        title: String(opts.title || "").trim() || null,
+        live: null,
+      });
+    },
+    [clearPollingJob],
+  );
+
   const runReconcile = useCallback(async (startReconcile: () => Promise<EntityReconcileStartResponse>) => {
     clearPollingJob();
     setStatus({
@@ -279,15 +341,13 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
         out.followup_job_id != null && Number(out.followup_job_id) > 0
           ? Math.trunc(Number(out.followup_job_id))
           : null;
-      setStatus({
-        busy: true,
-        kind: "info",
+      trackReconcileJob({
+        jobId: out.job_id,
+        followupJobId: followup,
         message: out.step_label || "Refresh queued…",
         step: out.step || "queued",
         title: String(out.display_title || "").trim() || null,
-        live: out.live ?? null,
       });
-      beginPollingJob(out.job_id, followup);
     } catch (e) {
       clearPollingJob();
       setStatus({
@@ -299,9 +359,12 @@ export function LibraryReconcileProvider(props: { children: ReactNode }) {
         live: null,
       });
     }
-  }, [beginPollingJob, clearPollingJob]);
+  }, [clearPollingJob, trackReconcileJob]);
 
-  const value = useMemo(() => ({ status, runReconcile }), [status, runReconcile]);
+  const value = useMemo(
+    () => ({ status, runReconcile, trackReconcileJob, flashSidebarStatus }),
+    [status, runReconcile, trackReconcileJob, flashSidebarStatus],
+  );
 
   return (
     <LibraryReconcileContext.Provider value={value}>

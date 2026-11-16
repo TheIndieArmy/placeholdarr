@@ -2031,6 +2031,7 @@ export function App() {
               setTaskRunError(null);
               try {
                 await postTaskRun("collections_sync");
+                void refreshWorkingLive();
               } catch (e) {
                 setTaskRunError(e instanceof Error ? e.message : "Failed to start collections sync");
               }
@@ -2039,7 +2040,7 @@ export function App() {
               setTaskRunError(null);
               try {
                 await postTaskRun("watchlist_sync");
-                void refreshTasks();
+                void refreshWorkingLive();
               } catch (e) {
                 setTaskRunError(e instanceof Error ? e.message : "Failed to start watchlist sync");
               }
@@ -2056,7 +2057,7 @@ export function App() {
                   await postTaskRun("placeholder_refresh", { metadata: true, art: true });
                 }
                 invalidateLibraryAfterCatalogChange();
-                void refreshTasks();
+                void refreshWorkingLive();
               } catch (e) {
                 setTaskRunError(e instanceof Error ? e.message : "Failed to start placeholder refresh");
               } finally {
@@ -2067,7 +2068,7 @@ export function App() {
               setTaskRunError(null);
               try {
                 await postTaskAbandon({ runId, reason: "stopped_by_user" });
-                void refreshTasks();
+                void refreshWorkingLive();
               } catch (e) {
                 setTaskRunError(e instanceof Error ? e.message : "Failed to stop task");
                 throw e;
@@ -3086,7 +3087,7 @@ export function App() {
                   setTaskRunError(null);
                   try {
                     await postTaskAbandon({ runId, reason: "stopped_by_user" });
-                    void refreshTasks();
+                    void refreshWorkingLive();
                   } catch (e) {
                     setTaskRunError(e instanceof Error ? e.message : "Failed to stop task");
                     throw e;
@@ -3466,7 +3467,7 @@ export function App() {
               await postTaskRun("full_sync");
               setTaskRunModal(null);
               invalidateLibraryAfterCatalogChange();
-              void refreshTasks();
+              void refreshWorkingLive();
             } catch (e) {
               setTaskRunError(e instanceof Error ? e.message : "Failed to start task");
             } finally {
@@ -3480,7 +3481,7 @@ export function App() {
               await postTaskRun("lite_sync");
               setTaskRunModal(null);
               invalidateLibraryAfterCatalogChange();
-              void refreshTasks();
+              void refreshWorkingLive();
             } catch (e) {
               setTaskRunError(e instanceof Error ? e.message : "Failed to start task");
             } finally {
@@ -3494,7 +3495,7 @@ export function App() {
               await postTaskRun("calendar_sync");
               setTaskRunModal(null);
               invalidateLibraryAfterCatalogChange();
-              void refreshTasks();
+              void refreshWorkingLive();
             } catch (e) {
               setTaskRunError(e instanceof Error ? e.message : "Failed to start task");
             } finally {
@@ -9958,9 +9959,15 @@ function PosterOverlayFocusPreview(props: {
       return [] as Record<string, unknown>[];
     }
   })();
+  // Fold sampleTokensJson into styleKey so randomize/TMDB preview art invalidates
+  // cached chips (Title, ratings, runtime, …). Style-only keys reused Breaking Bad text.
   const chipSpriteNeeds = labels
     .filter((l) => !isDeskBannerLabel(l) && String(l.id || ""))
-    .map((l) => ({ id: String(l.id), styleKey: layoutLabelSpriteStyleKey(l), label: l }));
+    .map((l) => ({
+      id: String(l.id),
+      styleKey: `${layoutLabelSpriteStyleKey(l)}::${sampleTokensJson}`,
+      label: l,
+    }));
   const chipNeedsKey = chipSpriteNeeds.map((c) => `${c.id}:${c.styleKey}`).join("|");
 
   useEffect(() => {

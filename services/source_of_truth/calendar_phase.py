@@ -494,19 +494,49 @@ def refresh_placeholder_calendar_status(session, placeholder: Placeholder) -> bo
             "force_pinned": force_pinned,
         },
     )
-    orchestrator.apply_and_project_statuses([intent])
+    # Art follows calendar Coming Soon enqueue; do not determine on this session.
+    orchestrator.apply_and_project_statuses([intent], enqueue_art=False)
 
     desired_variant = _dummy_variant_for_status(decision.status)
-    try:
-        _switch_placeholder_dummy_variant(
+    fingerprint = _calendar_variant_settings_fingerprint()
+    plan = _plan_placeholder_dummy_variant_swap(placeholder, desired_variant, fingerprint)
+    if plan and plan.get("stamp_extra"):
+        _stamp_placeholder_dummy_variant_extra(
             placeholder,
-            desired_variant,
-            _calendar_variant_settings_fingerprint(),
+            variant=desired_variant,
+            settings_fingerprint=fingerprint,
         )
-    except Exception as exc:
-        logger.warning(
-            f"Calendar variant switch failed placeholder_id={placeholder.id}: {exc}",
-            extra={"emoji_type": "warning"},
+    # Release row locks before FS swap; stamp already staged above.
+    placeholder_id = int(placeholder.id)
+    try:
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    # Prefer not touching the shared session during FS (connection released after commit
+    # until the next use). Enqueue art after FS without requiring an open checkout.
+    if plan:
+        try:
+            _apply_dummy_variant_fs(plan)
+        except Exception as exc:
+            logger.warning(
+                f"Calendar variant switch failed placeholder_id={placeholder_id}: {exc}",
+                extra={"emoji_type": "warning"},
+            )
+    try:
+        from services.source_of_truth.placeholder_art_reconciler import (
+            enqueue_placeholder_art_refresh,
+        )
+
+        enqueue_placeholder_art_refresh(
+            [placeholder_id],
+            session=session,
+            skip_determination=True,
+        )
+    except Exception as art_exc:
+        logger.debug(
+            f"Calendar status art enqueue skipped placeholder_id={placeholder.id}: {art_exc}",
+            extra={"emoji_type": "debug"},
         )
     return True
 
@@ -550,14 +580,15 @@ def _variant_dummy_path(variant: str) -> str:
     return resolve_calendar_variant_dummy_path(variant)
 
 
-def _switch_placeholder_dummy_variant(
+def _plan_placeholder_dummy_variant_swap(
     placeholder: Placeholder,
     variant: str,
     settings_fingerprint: str,
-) -> bool:
+) -> dict[str, Any] | None:
+    """Pure plan for a dummy swap (no FS, no ORM mutation)."""
     path = str(getattr(placeholder, "path", "") or "").strip()
     if not path:
-        return False
+        return None
 
     extra = dict(getattr(placeholder, "extra", {}) or {})
     current_variant = str(extra.get("calendar_dummy_variant") or "").strip()
@@ -565,20 +596,69 @@ def _switch_placeholder_dummy_variant(
     target_dummy = _variant_dummy_path(variant)
     settings_changed = bool(prior_fingerprint and prior_fingerprint != settings_fingerprint)
     variant_changed = current_variant != variant
+    if not variant_changed and not settings_changed and prior_fingerprint == settings_fingerprint:
+        # Nothing to do unless fingerprint was never stamped (first pass).
+        if prior_fingerprint:
+            return None
 
+    return {
+        "placeholder_id": int(placeholder.id),
+        "path": path,
+        "variant": variant,
+        "settings_fingerprint": settings_fingerprint,
+        "target_dummy": target_dummy,
+        "replace_existing": bool(variant_changed or settings_changed),
+        "variant_changed": bool(variant_changed),
+        "stamp_extra": bool(variant_changed or prior_fingerprint != settings_fingerprint),
+    }
+
+
+def _apply_dummy_variant_fs(plan: dict[str, Any]) -> bool:
+    """Run ensure_placeholder_file with no DB session held."""
+    path = str(plan.get("path") or "").strip()
+    if not path:
+        return False
     replaced = ensure_placeholder_file(
         path,
-        dummy_file_path=target_dummy,
-        replace_existing=(variant_changed or settings_changed),
+        dummy_file_path=str(plan.get("target_dummy") or ""),
+        replace_existing=bool(plan.get("replace_existing")),
     )
+    return bool(replaced or plan.get("variant_changed") or plan.get("stamp_extra"))
 
-    if variant_changed:
+
+def _stamp_placeholder_dummy_variant_extra(
+    placeholder: Placeholder,
+    *,
+    variant: str,
+    settings_fingerprint: str,
+) -> None:
+    extra = dict(getattr(placeholder, "extra", {}) or {})
+    current_variant = str(extra.get("calendar_dummy_variant") or "").strip()
+    prior_fingerprint = str(extra.get("calendar_variant_settings_fingerprint") or "").strip()
+    if current_variant != variant:
         extra["calendar_dummy_variant"] = variant
-    # Always stamp current decision fingerprint so future runs can detect setting flips.
     extra["calendar_variant_settings_fingerprint"] = settings_fingerprint
-    if variant_changed or prior_fingerprint != settings_fingerprint:
+    if current_variant != variant or prior_fingerprint != settings_fingerprint:
         placeholder.extra = extra
-    return bool(replaced or variant_changed or settings_changed)
+
+
+def _switch_placeholder_dummy_variant(
+    placeholder: Placeholder,
+    variant: str,
+    settings_fingerprint: str,
+) -> bool:
+    """Plan + FS + stamp. Prefer calendar phase split for batch work (FS off session)."""
+    plan = _plan_placeholder_dummy_variant_swap(placeholder, variant, settings_fingerprint)
+    if not plan:
+        return False
+    applied = _apply_dummy_variant_fs(plan)
+    if plan.get("stamp_extra"):
+        _stamp_placeholder_dummy_variant_extra(
+            placeholder,
+            variant=variant,
+            settings_fingerprint=settings_fingerprint,
+        )
+    return bool(applied)
 
 
 def _query_placeholders_for_calendar_phase(session, win_start: date, win_end: date):
@@ -767,15 +847,14 @@ def _run_calendar_phase_inner(stats: dict[str, Any], *, on_progress=None) -> dic
     last_heartbeat = scan_started
     heartbeat_s = 10.0
 
-    # Phase B: process in chunks. Each chunk gets its own session/transaction,
-    # commits at the end, and never holds DB locks across chunks.
+    # Phase B: short read plan → FS swaps with no session → short write (status + extra).
     for chunk_offset in range(0, total_ph, batch_size):
         chunk_ids = candidate_ids[chunk_offset:chunk_offset + batch_size]
         chunk_idx = chunk_offset // batch_size + 1
         chunk_total = (total_ph + batch_size - 1) // batch_size
         chunk_started = time.monotonic()
         chunk_intents: list[StatusIntent] = []
-        chunk_variant_switched = 0
+        planned_swaps: list[dict[str, Any]] = []
         chunk_status_skipped = 0
 
         session = get_session()
@@ -822,15 +901,11 @@ def _run_calendar_phase_inner(stats: dict[str, Any], *, on_progress=None) -> dic
                 )
 
                 desired_variant = _dummy_variant_for_status(decision.status)
-                try:
-                    if _switch_placeholder_dummy_variant(placeholder, desired_variant, settings_fingerprint):
-                        chunk_variant_switched += 1
-                except Exception as exc:
-                    stats["errors"] += 1
-                    logger.warning(
-                        f"Calendar variant switch failed placeholder_id={placeholder.id}: {exc}",
-                        extra={"emoji_type": "warning"},
-                    )
+                plan = _plan_placeholder_dummy_variant_swap(
+                    placeholder, desired_variant, settings_fingerprint
+                )
+                if plan:
+                    planned_swaps.append(plan)
 
                 current_status = str(getattr(placeholder, "display_status", "") or "")
                 current_reason = _normalize_reason(getattr(placeholder, "display_reason", None))
@@ -862,58 +937,152 @@ def _run_calendar_phase_inner(stats: dict[str, Any], *, on_progress=None) -> dic
                     stats["status_changed_placeholder_ids"].append(int(placeholder.id))
                 except Exception:
                     pass
-
-            chunk_applied = 0
-            if chunk_intents:
-                from services.source_of_truth.status_orchestrator import StatusOrchestrator
-
-                orchestrator = StatusOrchestrator(session=session)
-                chunk_applied = int(orchestrator.apply_and_project_statuses(chunk_intents) or 0)
-
-            # Commit any pending variant-switch mutations for placeholders that
-            # did not produce an intent. ``apply_and_project_statuses`` already
-            # commits per-intent rows internally, so this only flushes the
-            # remaining "matched but variant changed" rows for this chunk.
-            session.commit()
-
-            stats["status_intents"] += len(chunk_intents)
-            stats["status_applied"] += chunk_applied
-            stats["status_skipped"] += chunk_status_skipped
-            stats["variant_switched"] += chunk_variant_switched
-            stats["chunks_committed"] += 1
-
-            done_ph = min(total_ph, chunk_offset + len(chunk_ids))
-            if callable(on_progress):
-                try:
-                    on_progress(done_ph, max(total_ph, 1), stats)
-                except TypeError:
-                    try:
-                        on_progress(done_ph, max(total_ph, 1))
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-
-            logger.info(
-                f"Calendar phase: chunk {chunk_idx}/{chunk_total} committed "
-                f"({chunk_offset + len(chunk_ids)}/{total_ph} placeholders, "
-                f"{len(chunk_intents)} intent(s) applied, "
-                f"{chunk_variant_switched} variant switch(es), "
-                f"{chunk_status_skipped} already matched) "
-                f"chunk_s={time.monotonic() - chunk_started:.1f} "
-                f"elapsed_s={time.monotonic() - scan_started:.1f}",
-                extra={"emoji_type": "info"},
-            )
         except Exception as exc:
             session.rollback()
             stats["errors"] += 1
             logger.error(
-                f"Calendar phase chunk {chunk_idx}/{chunk_total} failed "
+                f"Calendar phase chunk {chunk_idx}/{chunk_total} plan failed "
+                f"(offset={chunk_offset}, size={len(chunk_ids)}): {exc}",
+                extra={"emoji_type": "error"},
+            )
+            session.close()
+            continue
+        else:
+            # Read plan only; discard session before write/FS.
+            try:
+                session.rollback()
+            except Exception:
+                pass
+            session.close()
+
+        chunk_applied = 0
+        chunk_variant_switched = 0
+        write_ok = False
+        write_session = get_session()
+        try:
+            if chunk_intents:
+                from services.source_of_truth.status_orchestrator import StatusOrchestrator
+
+                orchestrator = StatusOrchestrator(session=write_session)
+                chunk_applied = int(
+                    orchestrator.apply_and_project_statuses(chunk_intents, enqueue_art=False) or 0
+                )
+
+            stamp_ids = [
+                int(p["placeholder_id"])
+                for p in planned_swaps
+                if p.get("stamp_extra") and p.get("placeholder_id") is not None
+            ]
+            if stamp_ids:
+                stamp_rows = (
+                    write_session.query(Placeholder)
+                    .filter(Placeholder.id.in_(stamp_ids))
+                    .all()
+                )
+                by_id = {int(row.id): row for row in stamp_rows}
+                for plan in planned_swaps:
+                    if not plan.get("stamp_extra"):
+                        continue
+                    row = by_id.get(int(plan["placeholder_id"]))
+                    if row is None:
+                        continue
+                    _stamp_placeholder_dummy_variant_extra(
+                        row,
+                        variant=str(plan.get("variant") or ""),
+                        settings_fingerprint=str(plan.get("settings_fingerprint") or ""),
+                    )
+                    write_session.add(row)
+
+            write_session.commit()
+            write_ok = True
+            stats["chunks_committed"] += 1
+        except Exception as exc:
+            write_session.rollback()
+            stats["errors"] += 1
+            logger.error(
+                f"Calendar phase chunk {chunk_idx}/{chunk_total} write failed "
                 f"(offset={chunk_offset}, size={len(chunk_ids)}): {exc}",
                 extra={"emoji_type": "error"},
             )
         finally:
-            session.close()
+            write_session.close()
+
+        # FS only after DB commit so a failed write cannot leave disk ahead of status/extra.
+        if write_ok:
+            failed_stamp_ids: list[int] = []
+            for plan in planned_swaps:
+                try:
+                    if _apply_dummy_variant_fs(plan):
+                        chunk_variant_switched += 1
+                    elif plan.get("stamp_extra") and plan.get("placeholder_id") is not None:
+                        failed_stamp_ids.append(int(plan["placeholder_id"]))
+                except Exception as exc:
+                    stats["errors"] += 1
+                    if plan.get("stamp_extra") and plan.get("placeholder_id") is not None:
+                        failed_stamp_ids.append(int(plan["placeholder_id"]))
+                    logger.warning(
+                        f"Calendar variant switch failed placeholder_id={plan.get('placeholder_id')}: {exc}",
+                        extra={"emoji_type": "warning"},
+                    )
+            # Clear fingerprint so the next calendar pass retries FS for these rows.
+            if failed_stamp_ids:
+                fix_session = get_session()
+                try:
+                    rows = (
+                        fix_session.query(Placeholder)
+                        .filter(Placeholder.id.in_(failed_stamp_ids))
+                        .all()
+                    )
+                    for row in rows:
+                        extra = dict(getattr(row, "extra", {}) or {})
+                        if "calendar_variant_settings_fingerprint" in extra:
+                            extra.pop("calendar_variant_settings_fingerprint", None)
+                            row.extra = extra
+                            fix_session.add(row)
+                    fix_session.commit()
+                except Exception as fix_exc:
+                    try:
+                        fix_session.rollback()
+                    except Exception:
+                        pass
+                    stats["errors"] += 1
+                    logger.warning(
+                        f"Calendar FS compensate failed for {len(failed_stamp_ids)} placeholder(s): {fix_exc}",
+                        extra={"emoji_type": "warning"},
+                    )
+                finally:
+                    try:
+                        fix_session.close()
+                    except Exception:
+                        pass
+
+        stats["status_intents"] += len(chunk_intents)
+        stats["status_applied"] += chunk_applied
+        stats["status_skipped"] += chunk_status_skipped
+        stats["variant_switched"] += chunk_variant_switched
+
+        done_ph = min(total_ph, chunk_offset + len(chunk_ids))
+        if callable(on_progress):
+            try:
+                on_progress(done_ph, max(total_ph, 1), stats)
+            except TypeError:
+                try:
+                    on_progress(done_ph, max(total_ph, 1))
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        logger.info(
+            f"Calendar phase: chunk {chunk_idx}/{chunk_total} committed "
+            f"({chunk_offset + len(chunk_ids)}/{total_ph} placeholders, "
+            f"{len(chunk_intents)} intent(s) applied, "
+            f"{chunk_variant_switched} variant switch(es), "
+            f"{chunk_status_skipped} already matched) "
+            f"chunk_s={time.monotonic() - chunk_started:.1f} "
+            f"elapsed_s={time.monotonic() - scan_started:.1f}",
+            extra={"emoji_type": "info"},
+        )
 
     changed_ids = stats.get("status_changed_placeholder_ids") or []
     if isinstance(changed_ids, list) and changed_ids:

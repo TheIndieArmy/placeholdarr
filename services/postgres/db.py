@@ -1,17 +1,31 @@
 from contextlib import contextmanager
+import contextvars
+import os
 
 from core.logger import logger
 from sqlalchemy import create_engine, inspect, event, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from core.config import settings
-import os
 
 Base = declarative_base()
 
 # Module-level engine and session factory singletons to avoid creating
 # a new connection pool on every call (which exhausted DB connections).
+# Dual pools (api vs worker) keep UI sessions from starving when workers
+# still hold connections longer than the execution contract allows.
 _engine = None
 _SessionFactory = None
+_api_engine = None
+_worker_engine = None
+_ApiSessionFactory = None
+_WorkerSessionFactory = None
+_orm_hooks_registered = False
+
+# Default to API so request handlers stay on the UI pool unless a worker
+# thread explicitly switches. Scripts/init use get_engine() (API engine).
+_db_pool_role: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "ph_db_pool_role", default="api"
+)
 
 
 def _coerce_int(name: str, default: int, *, minimum: int = 0) -> int:
@@ -23,28 +37,87 @@ def _coerce_int(name: str, default: int, *, minimum: int = 0) -> int:
     return max(minimum, v)
 
 
-def get_engine():
-    global _engine, _SessionFactory
-    if _engine is not None:
-        return _engine
+def set_db_pool_role(role: str):
+    """Bind subsequent ``get_session()`` / ``session_scope()`` to ``api`` or ``worker``."""
+    token = str(role or "api").strip().lower()
+    if token not in {"api", "worker"}:
+        token = "api"
+    return _db_pool_role.set(token)
 
-    url = (
+
+def bind_worker_pool_role() -> None:
+    """Call at the start of route-spawned daemon threads (Maintenance, Settings defer, sync).
+
+    Those threads inherit the default API pool role; switching to worker keeps
+    long sync/mat work off the UI checkout budget.
+    """
+    set_db_pool_role("worker")
+
+
+def reset_db_pool_role(token) -> None:
+    """Restore the previous pool role after ``set_db_pool_role``."""
+    try:
+        _db_pool_role.reset(token)
+    except Exception:
+        pass
+
+
+def get_db_pool_role() -> str:
+    try:
+        role = str(_db_pool_role.get() or "api").strip().lower()
+    except Exception:
+        role = "api"
+    return role if role in {"api", "worker"} else "api"
+
+
+def _db_url() -> str:
+    return (
         f"postgresql+psycopg2://{settings.DB_USER}:{settings.DB_PASS}"
         f"@{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}"
     )
-    # Phase 2 of the holistic NOTIFY audit: connection pool sizing is now
-    # externally tunable via env / settings. Defaults are higher than the
-    # legacy hardcoded values (10/20) to give NOTIFY-era spiky concurrency
-    # more headroom, while still well under typical Postgres
-    # ``max_connections`` (100). Operators sizing for many workers should
-    # confirm: pool_size + max_overflow + (notifier LISTEN) + (other apps)
-    # < server max_connections.
-    pool_size = _coerce_int("DB_POOL_SIZE", 20, minimum=1)
-    max_overflow = _coerce_int("DB_POOL_MAX_OVERFLOW", 20, minimum=0)
+
+
+def _pool_sizes_for_role(role: str) -> tuple[int, int]:
+    """Return (pool_size, max_overflow) for api or worker.
+
+    Defaults split the legacy ``DB_POOL_SIZE`` / ``DB_POOL_MAX_OVERFLOW`` budget
+    so total checked-out capacity stays near the previous single-pool total.
+    Explicit ``DB_API_POOL_*`` / ``DB_WORKER_POOL_*`` of 0 mean "use the split".
+    """
+    total_size = _coerce_int("DB_POOL_SIZE", 20, minimum=2)
+    total_overflow = _coerce_int("DB_POOL_MAX_OVERFLOW", 20, minimum=0)
+
+    def _opt_size(name: str, fallback: int) -> int:
+        try:
+            raw = int(getattr(settings, name, 0) or 0)
+        except Exception:
+            raw = 0
+        return max(1, raw) if raw > 0 else max(1, fallback)
+
+    def _opt_overflow(name: str, fallback: int) -> int:
+        try:
+            raw = int(getattr(settings, name, 0) or 0)
+        except Exception:
+            raw = 0
+        return max(0, raw) if raw > 0 else max(0, fallback)
+
+    api_size = _opt_size("DB_API_POOL_SIZE", max(4, total_size // 2))
+    worker_size = _opt_size("DB_WORKER_POOL_SIZE", max(4, total_size - api_size))
+    api_overflow = _opt_overflow("DB_API_POOL_MAX_OVERFLOW", max(0, total_overflow // 2))
+    worker_overflow = _opt_overflow(
+        "DB_WORKER_POOL_MAX_OVERFLOW", max(0, total_overflow - api_overflow)
+    )
+    if role == "worker":
+        return worker_size, worker_overflow
+    return api_size, api_overflow
+
+
+def _create_role_engine(role: str):
+    pool_size, max_overflow = _pool_sizes_for_role(role)
     pool_timeout = _coerce_int("DB_POOL_TIMEOUT_SECONDS", 10, minimum=1)
     pool_recycle = _coerce_int("DB_POOL_RECYCLE_SECONDS", 1800, minimum=60)
-    _engine = create_engine(
-        url,
+    engine = create_engine(
+        _db_url(),
         echo=False,
         future=True,
         pool_pre_ping=True,
@@ -54,32 +127,26 @@ def get_engine():
         pool_recycle=pool_recycle,
     )
     logger.info(
-        f"DB engine created pool_size={pool_size} max_overflow={max_overflow} "
+        f"DB {role} engine created pool_size={pool_size} max_overflow={max_overflow} "
         f"pool_timeout={pool_timeout}s pool_recycle={pool_recycle}s",
         extra={"emoji_type": "gear"},
     )
-    # Ensure the DB session / display timezone is set to UTC on every new connection.
-    # This makes TIMESTAMPTZ values display consistently as UTC and avoids
-    # surprises when the Postgres server default_timezone differs from the app.
+
     def _set_utc_timezone(dbapi_connection, connection_record):
         try:
-            # dbapi_connection is a raw DB-API connection (psycopg2 or psycopg)
             cur = dbapi_connection.cursor()
             cur.execute("SET TIME ZONE 'UTC'")
             cur.close()
         except Exception:
-            # Non-fatal; if this fails, connections will use server timezone.
             pass
 
-    event.listen(_engine, "connect", _set_utc_timezone)
-    # also prepare a Session factory so get_session can use it
-    _SessionFactory = sessionmaker(bind=_engine, future=True)
+    event.listen(engine, "connect", _set_utc_timezone)
     if bool(getattr(settings, "DB_POOL_TELEMETRY_ENABLED", True)):
         try:
             from services.postgres.pool_telemetry import register_pool_telemetry
 
             register_pool_telemetry(
-                _engine,
+                engine,
                 pool_size=pool_size,
                 max_overflow=max_overflow,
                 slow_checkin_seconds=float(
@@ -92,13 +159,21 @@ def get_engine():
                     max(0, getattr(settings, "DB_POOL_NEAR_FULL_FREE_SLOTS", 3) or 3)
                 ),
             )
-            logger.info(
-                "DB pool telemetry enabled (slow check-in logs + near-full snapshots; "
-                "Postgres application_name prefixed with ph_ on checkout)",
-                extra={"emoji_type": "gear"},
-            )
         except Exception as ex:
-            logger.warning("Could not register DB pool telemetry: %s", ex, extra={"emoji_type": "warning"})
+            logger.warning(
+                "Could not register DB %s pool telemetry: %s",
+                role,
+                ex,
+                extra={"emoji_type": "warning"},
+            )
+    return engine, sessionmaker(bind=engine, future=True)
+
+
+def _register_orm_hooks_once() -> None:
+    global _orm_hooks_registered
+    if _orm_hooks_registered:
+        return
+    _orm_hooks_registered = True
     try:
         from services.placeholder_activity_history_hooks import register_placeholder_activity_history_hooks
 
@@ -123,24 +198,60 @@ def get_engine():
         register_series_episode_stats_hooks()
     except Exception as ex:
         logger.warning("Could not register series_episode_stats hooks: %s", ex, extra={"emoji_type": "warning"})
+
+
+def _ensure_dual_engines():
+    global _engine, _SessionFactory
+    global _api_engine, _worker_engine, _ApiSessionFactory, _WorkerSessionFactory
+    if _api_engine is not None and _worker_engine is not None:
+        return
+    _api_engine, _ApiSessionFactory = _create_role_engine("api")
+    _worker_engine, _WorkerSessionFactory = _create_role_engine("worker")
+    # get_engine() / init_db keep using the API engine as the schema owner.
+    _engine = _api_engine
+    _SessionFactory = _ApiSessionFactory
+    _register_orm_hooks_once()
+    logger.info(
+        "DB dual pools ready (api vs worker); UI and workers no longer share one checkout budget",
+        extra={"emoji_type": "gear"},
+    )
+
+
+def get_engine():
+    """Return the API engine (schema init / shared diagnostics)."""
+    _ensure_dual_engines()
     return _engine
 
 
-def get_session(engine=None):
-    """Return a SQLAlchemy Session from a module-level session factory.
+def get_api_session():
+    """Return a Session from the API pool (FastAPI / UI)."""
+    _ensure_dual_engines()
+    return _ApiSessionFactory()
 
-    Avoid creating new engines/sessionmakers on each call. Callers should
-    close() the returned session when finished. New code should prefer
-    ``session_scope()`` so close-on-finally is impossible to forget.
+
+def get_worker_session():
+    """Return a Session from the worker pool (job handlers / background)."""
+    _ensure_dual_engines()
+    return _WorkerSessionFactory()
+
+
+def get_session(engine=None):
+    """Return a SQLAlchemy Session for the current pool role.
+
+    Prefer ``session_scope()`` so close-on-finally is impossible to forget.
+    FastAPI middleware sets role ``api``; worker threads set ``worker``.
+    When ``engine`` is passed, bind a one-off sessionmaker to that engine.
     """
-    global _engine, _SessionFactory
-    if _SessionFactory is None:
-        _engine = get_engine()
-    return _SessionFactory()
+    if engine is not None:
+        return sessionmaker(bind=engine, future=True)()
+    _ensure_dual_engines()
+    if get_db_pool_role() == "worker":
+        return _WorkerSessionFactory()
+    return _ApiSessionFactory()
 
 
 @contextmanager
-def session_scope():
+def session_scope(*, role: str | None = None):
     """Yield a Session and guarantee close-on-finally.
 
     Phase 2 of the holistic NOTIFY audit: this is the preferred shape for
@@ -149,11 +260,18 @@ def session_scope():
     inside the ``with`` block always leaves the connection returned to the
     pool. Use ``session.commit()`` explicitly for writes.
 
+    Execution contract: never hold this session across FS, HTTP, image compose,
+    or other slow I/O. Read or write, commit, exit the ``with``, then do I/O;
+    open a new short session only if you must persist results.
+
     Example:
         with session_scope() as session:
             session.execute(...)
             session.commit()
     """
+    token = None
+    if role is not None:
+        token = set_db_pool_role(role)
     session = get_session()
     try:
         yield session
@@ -162,35 +280,94 @@ def session_scope():
             session.close()
         except Exception:
             pass
+        if token is not None:
+            reset_db_pool_role(token)
+
+
+def db_read(fn):
+    """Run ``fn(session)`` in a short read session and always close.
+
+    Prefer for one-shot lookups. Do not perform FS/HTTP inside ``fn``.
+    """
+    with session_scope() as session:
+        return fn(session)
+
+
+def db_write(fn):
+    """Run ``fn(session)``, commit on success, rollback on error, always close.
+
+    Prefer for short writes. Do not perform FS/HTTP inside ``fn``.
+    """
+    with session_scope() as session:
+        try:
+            result = fn(session)
+            session.commit()
+            return result
+        except Exception:
+            try:
+                session.rollback()
+            except Exception:
+                pass
+            raise
+
+
+def release_handler_session(session) -> None:
+    """Commit-or-rollback then close a worker handler session before slow I/O."""
+    if session is None:
+        return
+    try:
+        session.commit()
+    except Exception:
+        try:
+            session.rollback()
+        except Exception:
+            pass
+    try:
+        session.close()
+    except Exception:
+        pass
+
+
+def _pool_counters(engine) -> dict[str, int]:
+    out: dict[str, int] = {}
+    try:
+        pool = engine.pool
+    except Exception:
+        return out
+    for attr, label in (
+        ("size", "size"),
+        ("checkedin", "checked_in"),
+        ("checkedout", "checked_out"),
+        ("overflow", "overflow"),
+    ):
+        fn = getattr(pool, attr, None)
+        if callable(fn):
+            try:
+                out[label] = int(fn())
+            except Exception:
+                pass
+    try:
+        out["total"] = int(out.get("checked_in", 0)) + int(out.get("checked_out", 0))
+    except Exception:
+        pass
+    return out
 
 
 def pool_stats() -> dict:
     """Return a dict snapshot of SQLAlchemy pool counters for diagnostics.
 
-    Returned keys (all ints, missing if the pool does not expose them):
-    ``size``, ``checked_in``, ``checked_out``, ``overflow``, ``total``.
+    Top-level keys remain the API pool counters for backward compatibility.
+    Also includes ``api`` and ``worker`` nested snapshots when dual pools are up.
     Safe to call from request handlers; does not block.
     """
     try:
-        engine = get_engine()
-        pool = engine.pool
-        out: dict[str, int] = {}
-        for attr, label in (
-            ("size", "size"),
-            ("checkedin", "checked_in"),
-            ("checkedout", "checked_out"),
-            ("overflow", "overflow"),
-        ):
-            fn = getattr(pool, attr, None)
-            if callable(fn):
-                try:
-                    out[label] = int(fn())
-                except Exception:
-                    pass
-        try:
-            out["total"] = int(out.get("checked_in", 0)) + int(out.get("checked_out", 0))
-        except Exception:
-            pass
+        _ensure_dual_engines()
+        api = _pool_counters(_api_engine)
+        worker = _pool_counters(_worker_engine)
+        out = dict(api)
+        out["api"] = api
+        out["worker"] = worker
+        out["role"] = get_db_pool_role()
         return out
     except Exception:
         return {}

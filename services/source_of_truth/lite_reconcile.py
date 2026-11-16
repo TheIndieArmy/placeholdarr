@@ -204,6 +204,14 @@ def run_specials_backfill_if_pending(*, instances: list[dict]) -> dict:
 
         touched: set[int] = set()
         sonarr_instance_keys: set[str] = set()
+        # Snapshot pending flags, then release before Arr catalog + nested sync HTTP.
+        try:
+            session.commit()
+        except Exception:
+            pass
+        session.close()
+        session = None
+
         for inst in instances:
             if str(inst.get("arr_type") or "").strip().lower() != "sonarr":
                 continue
@@ -246,6 +254,9 @@ def run_specials_backfill_if_pending(*, instances: list[dict]) -> dict:
                     extra={"emoji_type": "warning"},
                 )
 
+        session = get_session()
+        pending_row = session.query(AppConfig).filter(AppConfig.key == _SPECIALS_BACKFILL_PENDING_KEY).first()
+        done_row = session.query(AppConfig).filter(AppConfig.key == _SPECIALS_CATALOG_BACKFILL_DONE_KEY).first()
         stats["touched_episode_row_ids"] = sorted(touched)
         if sonarr_instance_keys and bool(getattr(settings, "INCLUDE_SPECIALS", False)):
             special_episode_rows = (
@@ -303,4 +314,5 @@ def run_specials_backfill_if_pending(*, instances: list[dict]) -> dict:
         )
         return stats
     finally:
-        session.close()
+        if session is not None:
+            session.close()

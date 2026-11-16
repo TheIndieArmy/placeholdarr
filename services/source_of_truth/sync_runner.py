@@ -814,7 +814,7 @@ def run_full_sync(
         'episode_file_detail_fetched': 0,
     }
 
-    session = get_session()
+    session = None
     touched_movie_row_ids: list[int] = []
     touched_series_row_ids: list[int] = []
     allow_episode_detail = _episode_detail_fetches_enabled()
@@ -822,14 +822,48 @@ def run_full_sync(
     progress_total = 0
     last_live_mono = [0.0]
 
+    def _ensure_session():
+        nonlocal session
+        if session is None:
+            session = get_session()
+        return session
+
+    def _release_session() -> None:
+        """Commit + close so Arr HTTP does not hold a pooled checkout."""
+        nonlocal session
+        if session is None:
+            return
+        try:
+            session.commit()
+        except Exception:
+            try:
+                session.rollback()
+            except Exception:
+                pass
+            try:
+                session.close()
+            except Exception:
+                pass
+            session = None
+            raise
+        try:
+            session.close()
+        except Exception:
+            pass
+        session = None
+
     def _emit_arr_progress(*, force: bool = False) -> None:
         if not callable(on_progress):
             return
         now = time.monotonic()
-        # Time-throttle only (do not also fire on every batch commit). Progress
-        # callbacks often take a DB lock on scheduled_task_run; coupling them to
-        # every batch made ARR catalog sync stall under concurrent workers.
-        if not force and (now - last_live_mono[0]) < 3.0:
+        # Pre-#152 cadence: every batch commit, or at least ~1.5s. The later hard 3s
+        # throttle (plus a second throttle in scheduled_sync) made quiet syncs look
+        # stuck at 0% until the instance finished.
+        if (
+            not force
+            and (now - last_live_mono[0]) < 1.5
+            and progress_done % max(1, int(batch_size or 50)) != 0
+        ):
             return
         last_live_mono[0] = now
         try:
@@ -852,6 +886,7 @@ def run_full_sync(
         ):
             _check_cancel()
             if content_type == 'movie':
+                # Catalog GET with no DB session held.
                 movies = fetch_radarr_movies(base_url, api_key, bypass_cache=True)
                 if movies is None:
                     logger.warning(
@@ -863,8 +898,11 @@ def run_full_sync(
                 progress_total += len(movies)
                 _emit_arr_progress(force=True)
                 seen_tmdbids = set()
+                sess = _ensure_session()
                 for movie in movies:
                     _check_cancel()
+                    # End txn + return checkout before optional art-detail Arr HTTP.
+                    _release_session()
                     fields = _movie_fields(movie, sync_instance_key)
                     fields = _fill_missing_movie_art(fields, movie, base_url, api_key)
                     if not fields['tmdbid']:
@@ -873,7 +911,8 @@ def run_full_sync(
                         continue
                     seen_tmdbids.add(fields['tmdbid'])
                     stats['movies_seen'] += 1
-                    movie_row, created, _ = _upsert_movie(session, fields)
+                    sess = _ensure_session()
+                    movie_row, created, _ = _upsert_movie(sess, fields)
                     if movie_row is not None and getattr(movie_row, "id", None) is not None:
                         touched_movie_row_ids.append(int(movie_row.id))
                     if created:
@@ -881,21 +920,22 @@ def run_full_sync(
                     else:
                         stats['movies_updated'] += 1
                     if not dry_run and batch_size > 0 and stats['movies_seen'] % batch_size == 0:
-                        session.commit()
+                        sess.commit()
                         _check_cancel()
                     progress_done += 1
                     _emit_arr_progress()
 
                 if not dry_run and seen_tmdbids:
                     marked_movies = (
-                        session.query(Movie)
+                        sess.query(Movie)
                         .filter(and_(Movie.instance_key == sync_instance_key, ~Movie.tmdbid.in_(seen_tmdbids)))
                         .update({'is_deleted': True}, synchronize_session=False)
                     )
                     stats['movies_marked_deleted'] += int(marked_movies or 0)
-                session.commit()
+                sess.commit()
 
             if content_type == 'series':
+                # Catalog GET with no DB session held.
                 series_items = fetch_sonarr_series(base_url, api_key, bypass_cache=True)
                 if series_items is None:
                     logger.warning(
@@ -915,6 +955,8 @@ def run_full_sync(
 
                 for series_idx, series_entry in enumerate(series_items, start=1):
                     _check_cancel()
+                    # Commit/close txn before per-series Arr episode + art HTTP.
+                    _release_session()
                     s_fields = _series_fields(series_entry, sync_instance_key)
                     s_fields = _fill_missing_series_art(s_fields, series_entry, base_url, api_key)
                     if not s_fields['tvdbid']:
@@ -949,9 +991,11 @@ def run_full_sync(
                         )
                         prepared_episodes.append((ep, ep_effective, episode_file))
 
+                    # Short DB write session work for this series after Arr HTTP.
+                    sess = _ensure_session()
                     seen_tvdbids.add(s_fields['tvdbid'])
                     stats['series_seen'] += 1
-                    series_row, created, _ = _upsert_series(session, s_fields)
+                    series_row, created, _ = _upsert_series(sess, s_fields)
                     if series_row is not None and getattr(series_row, "id", None) is not None:
                         touched_series_row_ids.append(int(series_row.id))
                     if created:
@@ -971,7 +1015,7 @@ def run_full_sync(
                     season_overview_by_number: Dict[int, str] = {}
                     for ep, ep_effective, episode_file in prepared_episodes:
                         season_number = int(ep.get('seasonNumber') or 0)
-                        season_row, season_created = _upsert_season(session, series_row, season_number)
+                        season_row, season_created = _upsert_season(sess, series_row, season_number)
                         season_rows_by_number[season_number] = season_row
                         if season_created:
                             stats['seasons_created'] += 1
@@ -994,9 +1038,9 @@ def run_full_sync(
                             rollup['status'] = ep_fields.get('sonarr_status')
 
                         stats['episodes_seen'] += 1
-                        ep_row, ep_created, _ = _upsert_episode(session, ep_fields)
+                        ep_row, ep_created, _ = _upsert_episode(sess, ep_fields)
                         _inherit_season_policy_if_created(
-                            session,
+                            sess,
                             series=series_row,
                             season=season_row,
                             episode=ep_row,
@@ -1019,18 +1063,19 @@ def run_full_sync(
                         if season_overview_by_number.get(season_number):
                             season_row.sonarr_season_overview = season_overview_by_number[season_number]
                         season_row.is_deleted = False
-                        session.add(season_row)
+                        sess.add(season_row)
 
                     if not dry_run:
-                        session.commit()
+                        sess.commit()
                         _check_cancel()
                     progress_done += 1
                     _emit_arr_progress()
 
                 if not dry_run and seen_tvdbids:
                     _check_cancel()
+                    sess = _ensure_session()
                     deleted_series_rows = (
-                        session.query(Series.id)
+                        sess.query(Series.id)
                         .filter(and_(Series.instance_key == sync_instance_key, ~Series.tvdbid.in_(seen_tvdbids)))
                         .all()
                     )
@@ -1038,34 +1083,35 @@ def run_full_sync(
 
                     if deleted_series_ids:
                         marked_series = (
-                            session.query(Series)
+                            sess.query(Series)
                             .filter(Series.id.in_(deleted_series_ids))
                             .update({'is_deleted': True}, synchronize_session=False)
                         )
                         stats['series_marked_deleted'] += int(marked_series or 0)
 
                         marked_seasons = (
-                            session.query(Season)
+                            sess.query(Season)
                             .filter(Season.series_id.in_(deleted_series_ids))
                             .update({'is_deleted': True}, synchronize_session=False)
                         )
                         stats['seasons_marked_deleted'] += int(marked_seasons or 0)
 
                         deleted_season_rows = (
-                            session.query(Season.id)
+                            sess.query(Season.id)
                             .filter(Season.series_id.in_(deleted_series_ids))
                             .all()
                         )
                         deleted_season_ids = [row[0] for row in deleted_season_rows]
                         if deleted_season_ids:
                             marked_episodes = (
-                                session.query(Episode)
+                                sess.query(Episode)
                                 .filter(Episode.season_id.in_(deleted_season_ids))
                                 .update({'is_deleted': True}, synchronize_session=False)
                             )
                             stats['episodes_marked_deleted'] += int(marked_episodes or 0)
 
-                session.commit()
+                if session is not None:
+                    session.commit()
 
         elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
         stats['duration_seconds'] = round(elapsed, 2)
@@ -1111,6 +1157,7 @@ def run_full_sync(
                 stats["tag_policies"] = apply_arr_tag_placeholder_policies(
                     movie_row_ids=movie_ids,
                     series_row_ids=series_ids,
+                    follow_up_materialize=False,
                 )
             except Exception as tag_exc:
                 logger.warning(
@@ -1136,6 +1183,7 @@ def run_full_sync(
                     stats["tag_policies"] = apply_arr_tag_placeholder_policies(
                         movie_row_ids=drift_movies,
                         series_row_ids=drift_series,
+                        follow_up_materialize=False,
                     )
             except Exception as tag_exc:
                 logger.warning(
@@ -1161,7 +1209,11 @@ def run_full_sync(
         _emit_arr_progress(force=True)
         return stats
     except Exception as e:
-        session.rollback()
+        if session is not None:
+            try:
+                session.rollback()
+            except Exception:
+                pass
         from services.task_run_cancel import TaskRunCancelled
 
         if isinstance(e, TaskRunCancelled):
@@ -1173,7 +1225,8 @@ def run_full_sync(
         logger.error(f"Source-of-truth fullsync failed: {e}", extra={'emoji_type': 'error'})
         raise
     finally:
-        session.close()
+        if session is not None:
+            session.close()
 
 
 def sync_radarr_movies_by_ids(
@@ -1214,12 +1267,39 @@ def sync_radarr_movies_by_ids(
         except Exception:
             pass
 
-    session = get_session()
+    session = None
     touched_movie_row_ids: list[int] = []
+
+    def _release_movie_session() -> None:
+        nonlocal session
+        if session is None:
+            return
+        try:
+            session.commit()
+        except Exception:
+            try:
+                session.rollback()
+            except Exception:
+                pass
+            try:
+                session.close()
+            except Exception:
+                pass
+            session = None
+            raise
+        try:
+            session.close()
+        except Exception:
+            pass
+        session = None
+
     try:
         _emit_progress(0, force=True)
         for idx, movie_id in enumerate(ids, start=1):
+            # Arr GET with no DB session held (commit+close previous title before this fetch).
+            _release_movie_session()
             movie = fetch_radarr_movie(movie_id, base_url, api_key, bypass_cache=True)
+            session = get_session()
             if not isinstance(movie, dict):
                 tomb_mids = [
                     int(r[0])
@@ -1235,11 +1315,13 @@ def sync_radarr_movies_by_ids(
                     .update({'is_deleted': True}, synchronize_session=False)
                 )
                 stats['movies_marked_deleted'] += int(marked or 0)
+                session.commit()
                 _emit_progress(idx)
                 continue
 
             fields = _movie_fields(movie, effective_instance_key)
             if not fields['tmdbid']:
+                session.commit()
                 _emit_progress(idx)
                 continue
             stats['movies_seen'] += 1
@@ -1251,17 +1333,19 @@ def sync_radarr_movies_by_ids(
             if created or changed:
                 session.flush()
                 touched_movie_row_ids.append(int(row.id))
+            session.commit()
             _emit_progress(idx)
 
-        session.commit()
         stats['touched_movie_row_ids'] = touched_movie_row_ids
         _emit_progress(total, force=True)
         return stats
     except Exception:
-        session.rollback()
+        if session is not None:
+            session.rollback()
         raise
     finally:
-        session.close()
+        if session is not None:
+            session.close()
 
 
 def _sonarr_series_display_name(series_entry: dict | None, series_id: int) -> str:
@@ -1360,6 +1444,26 @@ def sync_sonarr_series_specials_season0_backfill(
 
         for series_idx, series_entry in enumerate(items, start=1):
             t_series = time.monotonic()
+            # End txn + return checkout before Arr art / episode catalog HTTP.
+            if session is not None:
+                try:
+                    session.commit()
+                except Exception:
+                    try:
+                        session.rollback()
+                    except Exception:
+                        pass
+                    try:
+                        session.close()
+                    except Exception:
+                        pass
+                    session = None
+                    raise
+                try:
+                    session.close()
+                except Exception:
+                    pass
+                session = None
             sonarr_series_id = series_entry.get("id")
             label = _sonarr_series_display_name(series_entry, int(sonarr_series_id))
             s_fields = _series_fields(series_entry, effective_instance_key)
@@ -1370,15 +1474,9 @@ def sync_sonarr_series_specials_season0_backfill(
                     f"{time.monotonic() - t_series:.1f}s",
                     extra={"emoji_type": "debug"},
                 )
+                session = get_session()
                 _maybe_specials_backfill_overall(series_idx)
                 continue
-
-            stats["series_seen"] += 1
-            series_row, series_created, series_changed = _upsert_series(session, s_fields)
-            if series_created:
-                stats["series_created"] += 1
-            else:
-                stats["series_updated"] += 1
 
             logger.debug(
                 f"Specials backfill S0 {series_idx}/{total_series} — {label} — fetching episode catalog…",
@@ -1394,22 +1492,8 @@ def sync_sonarr_series_specials_season0_backfill(
                 extra={"emoji_type": "debug"},
             )
 
-            season_rows_by_number: Dict[int, Season] = {}
-            season_rollups: Dict[int, Dict[str, int | bool | str | None]] = {}
-            season_overview_by_number: Dict[int, str] = {}
-
-            n_s0 = len(episodes_list)
-            _s0_log_every = 50
-            _s0_log_min_interval_s = 20.0
-            last_s0_log_mono = time.monotonic()
-            for i, ep in enumerate(episodes_list, start=1):
-                season_number = int(ep.get("seasonNumber") or 0)
-                season_row, season_created = _upsert_season(session, series_row, season_number)
-                season_rows_by_number[season_number] = season_row
-                if season_created:
-                    stats["seasons_created"] += 1
-
-                sonarr_ep_id = ep.get("id")
+            prepared_episodes: List[Tuple[Dict[str, Any], Dict[str, Any], Any]] = []
+            for ep in episodes_list:
                 ep_effective = _resolve_episode_sync_payload(
                     ep,
                     base_url,
@@ -1417,7 +1501,6 @@ def sync_sonarr_series_specials_season0_backfill(
                     allow_still_detail=allow_episode_detail,
                     stats=stats,
                 )
-
                 episode_file = _resolve_episode_file_payload(
                     ep_effective,
                     base_url,
@@ -1425,6 +1508,31 @@ def sync_sonarr_series_specials_season0_backfill(
                     allow_file_detail=allow_episode_detail,
                     stats=stats,
                 )
+                prepared_episodes.append((ep, ep_effective, episode_file))
+
+            session = get_session()
+            stats["series_seen"] += 1
+            series_row, series_created, series_changed = _upsert_series(session, s_fields)
+            if series_created:
+                stats["series_created"] += 1
+            else:
+                stats["series_updated"] += 1
+
+            season_rows_by_number: Dict[int, Season] = {}
+            season_rollups: Dict[int, Dict[str, int | bool | str | None]] = {}
+            season_overview_by_number: Dict[int, str] = {}
+
+            n_s0 = len(prepared_episodes)
+            _s0_log_every = 50
+            _s0_log_min_interval_s = 20.0
+            last_s0_log_mono = time.monotonic()
+            for i, (ep, ep_effective, episode_file) in enumerate(prepared_episodes, start=1):
+                season_number = int(ep.get("seasonNumber") or 0)
+                season_row, season_created = _upsert_season(session, series_row, season_number)
+                season_rows_by_number[season_number] = season_row
+                if season_created:
+                    stats["seasons_created"] += 1
+
                 ep_fields = _episode_fields(series_row, season_row, ep_effective, episode_file)
 
                 overview = str(ep.get("overview") or "").strip()
@@ -1559,15 +1667,47 @@ def sync_sonarr_series_by_ids(
         except Exception:
             pass
 
-    session = get_session()
+    session = None
     touched_episode_ids: set[int] = set()
     allow_episode_detail = _episode_detail_fetches_enabled()
+
+    def _ensure_session():
+        nonlocal session
+        if session is None:
+            session = get_session()
+        return session
+
+    def _release_session() -> None:
+        nonlocal session
+        if session is None:
+            return
+        try:
+            session.commit()
+        except Exception:
+            try:
+                session.rollback()
+            except Exception:
+                pass
+            try:
+                session.close()
+            except Exception:
+                pass
+            session = None
+            raise
+        try:
+            session.close()
+        except Exception:
+            pass
+        session = None
+
     try:
         _ep_log_every = 100
         _ep_log_min_interval_s = 25.0
         _emit_progress(0, force=True)
         for series_idx, series_id in enumerate(ids, start=1):
             t_series = time.monotonic()
+            # Arr GETs first with no prior title locks held (commit+close at end of each series).
+            _release_session()
             series_entry = fetch_sonarr_series_item(series_id, base_url, api_key, bypass_cache=True)
             label = _sonarr_series_display_name(series_entry if isinstance(series_entry, dict) else None, series_id)
             if not isinstance(series_entry, dict):
@@ -1575,15 +1715,16 @@ def sync_sonarr_series_by_ids(
                     f'Series {series_idx}/{total_series} — {label} — gone from Sonarr · {time.monotonic() - t_series:.1f}s',
                     extra={'emoji_type': 'info'},
                 )
+                sess = _ensure_session()
                 deleted_series_rows = (
-                    session.query(Series.id)
+                    sess.query(Series.id)
                     .filter(and_(Series.sonarrid == series_id, Series.instance_key == effective_instance_key))
                     .all()
                 )
                 deleted_series_ids = [int(r[0]) for r in deleted_series_rows if r[0] is not None]
                 if deleted_series_ids:
                     for (eid,) in (
-                        session.query(Episode.id)
+                        sess.query(Episode.id)
                         .join(Season, Episode.season_id == Season.id)
                         .filter(Season.series_id.in_(deleted_series_ids))
                         .all()
@@ -1591,28 +1732,29 @@ def sync_sonarr_series_by_ids(
                         if eid is not None:
                             touched_episode_ids.add(int(eid))
                     marked_series = (
-                        session.query(Series)
+                        sess.query(Series)
                         .filter(Series.id.in_(deleted_series_ids))
                         .update({'is_deleted': True}, synchronize_session=False)
                     )
                     stats['series_marked_deleted'] += int(marked_series or 0)
                     marked_seasons = (
-                        session.query(Season)
+                        sess.query(Season)
                         .filter(Season.series_id.in_(deleted_series_ids))
                         .update({'is_deleted': True}, synchronize_session=False)
                     )
                     stats['seasons_marked_deleted'] += int(marked_seasons or 0)
                     deleted_season_rows = (
-                        session.query(Season.id).filter(Season.series_id.in_(deleted_series_ids)).all()
+                        sess.query(Season.id).filter(Season.series_id.in_(deleted_series_ids)).all()
                     )
                     deleted_season_ids = [int(r[0]) for r in deleted_season_rows if r[0] is not None]
                     if deleted_season_ids:
                         marked_episodes = (
-                            session.query(Episode)
+                            sess.query(Episode)
                             .filter(Episode.season_id.in_(deleted_season_ids))
                             .update({'is_deleted': True}, synchronize_session=False)
                         )
                         stats['episodes_marked_deleted'] += int(marked_episodes or 0)
+                sess.commit()
                 _emit_progress(series_idx)
                 continue
 
@@ -1626,27 +1768,10 @@ def sync_sonarr_series_by_ids(
                 _emit_progress(series_idx)
                 continue
 
-            stats['series_seen'] += 1
-            series_row, series_created, series_changed = _upsert_series(session, s_fields)
-            if series_created:
-                stats['series_created'] += 1
-            else:
-                stats['series_updated'] += 1
-
             episodes = fetch_sonarr_episodes(series_id, base_url, api_key)
             episodes_list = list(episodes or [])
             episodes_to_process = sum(1 for row in episodes_list if isinstance(row, dict))
-            logger.info(
-                f'Series {series_idx}/{total_series} — {label} — episodes 0/{episodes_to_process} checked · '
-                f'{time.monotonic() - t_series:.1f}s',
-                extra={'emoji_type': 'info'},
-            )
-            season_rows_by_number: Dict[int, Season] = {}
-            season_rollups: Dict[int, Dict[str, int | bool | str | None]] = {}
-            season_overview_by_number: Dict[int, str] = {}
-
-            last_ep_log_mono = time.monotonic()
-            series_episodes_done = 0
+            prepared_episodes: List[Tuple[Dict[str, Any], Dict[str, Any], Any]] = []
             seen_episode_sonarr_ids: set[int] = set()
             for ep in episodes_list:
                 if not isinstance(ep, dict):
@@ -1658,30 +1783,51 @@ def sync_sonarr_series_by_ids(
                     ep_sonarr_id = None
                 if ep_sonarr_id is not None:
                     seen_episode_sonarr_ids.add(ep_sonarr_id)
-                season_number = int(ep.get('seasonNumber') or 0)
-                season_row, season_created = _upsert_season(session, series_row, season_number)
-                season_rows_by_number[season_number] = season_row
-                if season_created:
-                    stats['seasons_created'] += 1
-
-                # Use bulk row when sufficient; detail GET only for missing episodeFile embed.
-                sonarr_ep_id = ep.get('id')
-                ep = _resolve_episode_sync_payload(
+                ep_effective = _resolve_episode_sync_payload(
                     ep,
                     base_url,
                     api_key,
                     allow_still_detail=allow_episode_detail,
                     stats=stats,
                 )
-
                 episode_file = _resolve_episode_file_payload(
-                    ep,
+                    ep_effective,
                     base_url,
                     api_key,
                     allow_file_detail=allow_episode_detail,
                     stats=stats,
                 )
-                ep_fields = _episode_fields(series_row, season_row, ep, episode_file)
+                prepared_episodes.append((ep, ep_effective, episode_file))
+
+            logger.info(
+                f'Series {series_idx}/{total_series} — {label} — episodes 0/{episodes_to_process} checked · '
+                f'{time.monotonic() - t_series:.1f}s',
+                extra={'emoji_type': 'info'},
+            )
+
+            # Short DB write session after Arr HTTP for this series.
+            sess = _ensure_session()
+            stats['series_seen'] += 1
+            series_row, series_created, series_changed = _upsert_series(sess, s_fields)
+            if series_created:
+                stats['series_created'] += 1
+            else:
+                stats['series_updated'] += 1
+
+            season_rows_by_number: Dict[int, Season] = {}
+            season_rollups: Dict[int, Dict[str, int | bool | str | None]] = {}
+            season_overview_by_number: Dict[int, str] = {}
+
+            last_ep_log_mono = time.monotonic()
+            series_episodes_done = 0
+            for ep, ep_effective, episode_file in prepared_episodes:
+                season_number = int(ep.get('seasonNumber') or 0)
+                season_row, season_created = _upsert_season(sess, series_row, season_number)
+                season_rows_by_number[season_number] = season_row
+                if season_created:
+                    stats['seasons_created'] += 1
+
+                ep_fields = _episode_fields(series_row, season_row, ep_effective, episode_file)
 
                 overview = str(ep.get('overview') or '').strip()
                 if overview and season_number not in season_overview_by_number:
@@ -1699,9 +1845,9 @@ def sync_sonarr_series_by_ids(
                     rollup['status'] = ep_fields.get('sonarr_status')
 
                 stats['episodes_seen'] += 1
-                ep_row, ep_created, ep_changed = _upsert_episode(session, ep_fields)
+                ep_row, ep_created, ep_changed = _upsert_episode(sess, ep_fields)
                 _inherit_season_policy_if_created(
-                    session,
+                    sess,
                     series=series_row,
                     season=season_row,
                     episode=ep_row,
@@ -1712,7 +1858,7 @@ def sync_sonarr_series_by_ids(
                 else:
                     stats['episodes_updated'] += 1
                 if ep_created or ep_changed:
-                    session.flush()
+                    sess.flush()
                     touched_episode_ids.add(int(ep_row.id))
 
                 series_episodes_done += 1
@@ -1741,12 +1887,12 @@ def sync_sonarr_series_by_ids(
                 if season_overview_by_number.get(season_number):
                     season_row.sonarr_season_overview = season_overview_by_number[season_number]
                 season_row.is_deleted = False
-                session.add(season_row)
+                sess.add(season_row)
 
             # Reconcile episodes that no longer exist in Sonarr for this series.
             # Keep behavior aligned with Sonarr as source-of-truth, even for catalog churn.
             stale_episode_rows = (
-                session.query(Episode.id)
+                sess.query(Episode.id)
                 .join(Season, Episode.season_id == Season.id)
                 .filter(
                     Season.series_id == int(series_row.id),
@@ -1759,7 +1905,7 @@ def sync_sonarr_series_by_ids(
             stale_episode_ids = [int(r[0]) for r in stale_episode_rows if r and r[0] is not None]
             if stale_episode_ids:
                 marked_missing = (
-                    session.query(Episode)
+                    sess.query(Episode)
                     .filter(Episode.id.in_(stale_episode_ids))
                     .update({'is_deleted': True}, synchronize_session=False)
                 )
@@ -1769,7 +1915,7 @@ def sync_sonarr_series_by_ids(
 
             if series_created or series_changed:
                 for (eid,) in (
-                    session.query(Episode.id)
+                    sess.query(Episode.id)
                     .join(Season, Episode.season_id == Season.id)
                     .filter(
                         Season.series_id == int(series_row.id),
@@ -1785,14 +1931,16 @@ def sync_sonarr_series_by_ids(
                 f'{int(series_episodes_done or 0)}/{episodes_to_process} checked · {time.monotonic() - t_series:.1f}s',
                 extra={'emoji_type': 'info'},
             )
+            sess.commit()
             _emit_progress(series_idx)
 
-        session.commit()
         stats['touched_episode_row_ids'] = sorted(touched_episode_ids)
         _emit_progress(total_series, force=True)
         return stats
     except Exception:
-        session.rollback()
+        if session is not None:
+            session.rollback()
         raise
     finally:
-        session.close()
+        if session is not None:
+            session.close()

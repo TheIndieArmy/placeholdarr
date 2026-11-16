@@ -393,16 +393,28 @@ def process_entity_materialization_job(session, job: Job) -> dict[str, Any]:
     observation_source = str(payload.get("observation_source") or "event_materialization")
     run_determination_first = bool(payload.get("run_determination_first"))
     finalize = bool(payload.get("finalize_movie_deleted_activity"))
+    job_id = getattr(job, "id", None)
+
+    # Mat opens its own determination/chunk sessions. Release the worker handler
+    # connection so it is not idle-in-transaction for the whole job.
+    try:
+        session.rollback()
+    except Exception:
+        pass
+    try:
+        session.close()
+    except Exception:
+        pass
 
     stop_v = start_verbose_stall_heartbeat(
-        f"entity_materialization job_id={job.id} obs={observation_source}",
+        f"entity_materialization job_id={job_id} obs={observation_source}",
     )
     try:
         if finalize and movie_ids:
             movie_row_id = int(payload.get("movie_row_id") or movie_ids[0])
             if not movie_still_soft_deleted(movie_row_id):
                 logger.info(
-                    f"entity_materialization job_id={job.id} movie_row_id={movie_row_id} "
+                    f"entity_materialization job_id={job_id} movie_row_id={movie_row_id} "
                     f"no longer soft-deleted (re-added or already purged); skipping delete follow-up",
                     extra={"emoji_type": "info"},
                 )
@@ -420,7 +432,7 @@ def process_entity_materialization_job(session, job: Job) -> dict[str, Any]:
                 episode_ids=episode_ids or None,
             )
             logger.info(
-                f"entity_materialization job_id={job.id} determination finished "
+                f"entity_materialization job_id={job_id} determination finished "
                 f"movies={len(movie_ids)} episodes={len(episode_ids)}",
                 extra={"emoji_type": "processing"},
             )
@@ -440,7 +452,7 @@ def process_entity_materialization_job(session, job: Job) -> dict[str, Any]:
             # Re-check after mat: a concurrent re-add may have revived the row.
             if not movie_still_soft_deleted(movie_row_id):
                 logger.info(
-                    f"entity_materialization job_id={job.id} movie_row_id={movie_row_id} "
+                    f"entity_materialization job_id={job_id} movie_row_id={movie_row_id} "
                     f"revived during materialization; skipping delete activity + purge",
                     extra={"emoji_type": "info"},
                 )
@@ -463,14 +475,14 @@ def process_entity_materialization_job(session, job: Job) -> dict[str, Any]:
                     stats_mat["catalog_tombstone_purge"] = purge_stats
             except Exception as purge_exc:
                 logger.debug(
-                    f"entity_materialization job_id={job.id} deferred catalog purge skipped: {purge_exc}",
+                    f"entity_materialization job_id={job_id} deferred catalog purge skipped: {purge_exc}",
                     extra={"emoji_type": "debug"},
                 )
     finally:
         stop_v.set()
 
     logger.info(
-        f"entity_materialization job_id={job.id} observation_source={observation_source} "
+        f"entity_materialization job_id={job_id} observation_source={observation_source} "
         f"movies={len(movie_ids)} episodes={len(episode_ids)} ok",
         extra={"emoji_type": "success"},
     )
