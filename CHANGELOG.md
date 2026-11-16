@@ -22,12 +22,11 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Art backfill**: No force full-section metadata refresh on completion (#181).
 - **NFO backfill**: No force full-section metadata refresh on completion (#181).
 - **media_refresh coalesce retry**: UniqueViolation retries coalesce instead of Timer bypass (#181).
-- **Projection fallback library roots**: Misses with no title folder still path-refresh movie/TV roots (#181).
 - **media_refresh coalesce savepoint**: Coalesce races no longer roll back shared webhook sessions (#181).
 
 ### Fixed
 
-- **Projection fallback without paths**: When status push fails and no title folder is known, path-refresh configured movie/TV library roots instead of no-op (#181).
+- **Projection fallback without paths**: Status push misses with no title folder no-op (no library-root scan); create-time path refresh and later status passes cover discovery (#181).
 - **media_refresh coalesce savepoint**: UniqueViolation during coalesce uses a savepoint so Arr webhook sessions keep unrelated work (#181).
 - **media_refresh coalesce retries**: Enqueue races retry up to three times with a short backoff before Timer fallback (#181).
 - **Density stub player status**: Season/series density placeholders project status into Plex/Jellyfin/Emby episode title/summary via the on-disk SxxE01 anchor (#175).
@@ -94,7 +93,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Bulk section skip list**: Event, lite, destination remap, and Arr detach mats skip `bulk_initial` section scans and rely on path refresh (#181).
 - **Full sync player refresh**: Progressive path overlap + delayed_final; removed phase initial/final and 5-minute section scans (#181).
 - **Section fallback default**: `MEDIA_REFRESH_SECTION_FALLBACK_ENABLED` defaults to false and gates projection miss + optional full-sync end section (#181).
-- **Projection fallback**: Unresolved titles path-refresh their folders first; section scan only when the fallback flag is on (#181).
+- **Projection fallback**: Unresolved titles path-refresh known title folders only; no library-root escalation; section scan only when the fallback flag is on (#181).
 - **Art backfill completion**: Last-batch force full-section metadata refresh removed; batches always path/item refresh rewritten titles (#181).
 - **NFO backfill completion**: Last-batch force full-section metadata refresh removed (#181).
 - **media_refresh coalesce race**: UniqueViolation on coalesce retries with short backoff instead of immediately falling back to `threading.Timer` (#181).
