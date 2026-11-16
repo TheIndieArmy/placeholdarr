@@ -903,12 +903,78 @@ def _push_episode(
         summary.plex_disabled += 1
 
 
+def _library_root_paths_for_fallback(fallback: ProjectionFallbackAccumulator) -> set[str]:
+    """Movie/TV dest roots when per-title folders are unknown (#181)."""
+    roots: set[str] = set()
+    need_movies = bool(fallback.plex_movie or fallback.jellyfin_movie or fallback.emby_movie)
+    need_episodes = bool(fallback.plex_episode or fallback.jellyfin_episode or fallback.emby_episode)
+    try:
+        from services.library_destinations import all_movie_dest_roots, all_tv_dest_roots
+
+        if need_movies:
+            for root in all_movie_dest_roots() or []:
+                cleaned = str(root or "").strip()
+                if cleaned:
+                    roots.add(os.path.abspath(cleaned))
+        if need_episodes:
+            for root in all_tv_dest_roots() or []:
+                cleaned = str(root or "").strip()
+                if cleaned:
+                    roots.add(os.path.abspath(cleaned))
+    except Exception:
+        if need_movies:
+            raw = str(getattr(settings, "MOVIE_LIBRARY_FOLDER", "") or "").strip()
+            if raw:
+                roots.add(os.path.abspath(raw))
+        if need_episodes:
+            raw = str(getattr(settings, "TV_LIBRARY_FOLDER", "") or "").strip()
+            if raw:
+                roots.add(os.path.abspath(raw))
+    return roots
+
+
+def _resolve_projection_folder_path(
+    placeholder: Placeholder,
+    *,
+    movie: Movie | None = None,
+    episode: Episode | None = None,
+) -> str:
+    """Best-effort folder for path-scoped projection fallback (#181)."""
+    candidates: list[str] = [
+        str(getattr(placeholder, "placeholder_filepath", "") or "").strip(),
+        str(getattr(placeholder, "path", "") or "").strip(),
+    ]
+    if movie is not None:
+        candidates.append(str(getattr(movie, "placeholder_filepath", "") or "").strip())
+        if not any(c for c in candidates if c):
+            try:
+                from services.placeholders import movie_placeholder_path
+
+                candidates.append(str(movie_placeholder_path(movie) or "").strip())
+            except Exception:
+                pass
+    if episode is not None:
+        candidates.append(str(getattr(episode, "placeholder_filepath", "") or "").strip())
+    for raw in candidates:
+        if not raw:
+            continue
+        abs_path = os.path.abspath(raw)
+        return os.path.dirname(abs_path) if os.path.isfile(abs_path) else abs_path
+    return ""
+
+
 def _run_projection_fallback_refreshes(fallback: ProjectionFallbackAccumulator) -> None:
     """Path-refresh unresolved titles; optional section scan only when enabled (#181)."""
     if not fallback.has_failures():
         return
 
     paths = {str(p).strip() for p in (fallback.failed_paths or set()) if str(p).strip()}
+    used_library_roots = False
+    if not paths:
+        # Still recover without a full section scan: path-refresh library roots.
+        paths = _library_root_paths_for_fallback(fallback)
+        used_library_roots = bool(paths)
+
     if paths:
         path_stats = refresh_all_paths(
             paths,
@@ -921,6 +987,7 @@ def _run_projection_fallback_refreshes(fallback: ProjectionFallbackAccumulator) 
             "Status projection fallback path refreshes triggered "
             f"paths={len(paths)} refreshed={path_stats.get('refreshed', 0)} "
             f"failed={path_stats.get('failed', 0)} "
+            f"library_roots={used_library_roots} "
             f"plex(movie={fallback.plex_movie},episode={fallback.plex_episode}) "
             f"jellyfin(movie={fallback.jellyfin_movie},episode={fallback.jellyfin_episode}) "
             f"emby(movie={fallback.emby_movie},episode={fallback.emby_episode})",
@@ -1083,12 +1150,9 @@ def push_placeholder_player_metadata(
         )
         return acc
 
-    raw_path = str(getattr(placeholder, "placeholder_filepath", "") or "").strip()
-    if raw_path:
-        abs_path = os.path.abspath(raw_path)
-        acc._current_path = os.path.dirname(abs_path) if os.path.isfile(abs_path) else abs_path
-    else:
-        acc._current_path = ""
+    acc._current_path = _resolve_projection_folder_path(
+        placeholder, movie=movie, episode=episode
+    )
     try:
         if movie:
             _push_movie(session, movie, placeholder, acc, run_summary)

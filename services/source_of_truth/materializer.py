@@ -110,9 +110,9 @@ def _enqueue_media_refresh_via_new_session(
     from sqlalchemy.exc import IntegrityError
 
     last_exc: BaseException | None = None
-    # UniqueViolation on coalesce group_id: retry once so paths merge into the
-    # winning PENDING job instead of falling back to an off-queue Timer (#181).
-    for attempt in range(2):
+    # UniqueViolation on coalesce group_id: retry a few times so paths merge into
+    # the winning PENDING job instead of falling back to an off-queue Timer (#181).
+    for attempt in range(3):
         s = get_session()
         try:
             enqueue_media_refresh_job(
@@ -130,12 +130,13 @@ def _enqueue_media_refresh_via_new_session(
                 s.rollback()
             except Exception:
                 pass
-            if attempt == 0:
+            if attempt < 2:
                 logger.info(
                     f"media_refresh enqueue race kind={kind}; retrying coalesce "
                     f"(attempt={attempt + 1})",
                     extra={"emoji_type": "info"},
                 )
+                time.sleep(0.05 * (attempt + 1))
                 continue
             logger.error(
                 f"Failed to enqueue media_refresh kind={kind} delay={delay_seconds}s: {exc}",
@@ -1970,10 +1971,9 @@ def _run_materialization_for_ids(
         extra={"emoji_type": "success"},
     )
 
-    # Event-scoped runs used to hold one huge transaction until after delayed-final
-    # scheduling/enqueue, making session.commit() wait on row locks held by other workers.
-    # Commit core placeholder/movie/episode writes here so locks release before job enqueue.
-    # Full sync chunks also benefit: release locks before path-refresh enqueue (#181).
+    # Commit core placeholder/movie/episode writes here so row locks release before
+    # job enqueue / path refresh (#181). The chunk wrapper may commit again afterward;
+    # that second commit is a no-op when this session is already clean.
     session.commit()
     if not is_full_sync:
         logger.info(
@@ -2678,13 +2678,16 @@ def _run_materialization_entity_chunk(
                 f"chunk_movies={len(movie_ids)} chunk_episodes={len(episode_ids)}",
                 extra={"emoji_type": "debug"},
             )
-        v_hb = start_verbose_stall_heartbeat(
-            f"scoped_materialization.session.commit source={observation_source}",
-        )
-        try:
-            session.commit()
-        finally:
-            v_hb.set()
+        # Early commit inside materialization already released locks; only commit again
+        # when this session still has pending state.
+        if session.new or session.dirty or session.deleted:
+            v_hb = start_verbose_stall_heartbeat(
+                f"scoped_materialization.session.commit source={observation_source}",
+            )
+            try:
+                session.commit()
+            finally:
+                v_hb.set()
         return stats if isinstance(stats, dict) else {}
     except Exception:
         try:

@@ -22,9 +22,14 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Art backfill**: No force full-section metadata refresh on completion (#181).
 - **NFO backfill**: No force full-section metadata refresh on completion (#181).
 - **media_refresh coalesce retry**: UniqueViolation retries coalesce instead of Timer bypass (#181).
+- **Projection fallback library roots**: Misses with no title folder still path-refresh movie/TV roots (#181).
+- **media_refresh coalesce savepoint**: Coalesce races no longer roll back shared webhook sessions (#181).
 
 ### Fixed
 
+- **Projection fallback without paths**: When status push fails and no title folder is known, path-refresh configured movie/TV library roots instead of no-op (#181).
+- **media_refresh coalesce savepoint**: UniqueViolation during coalesce uses a savepoint so Arr webhook sessions keep unrelated work (#181).
+- **media_refresh coalesce retries**: Enqueue races retry up to three times with a short backoff before Timer fallback (#181).
 - **Density stub player status**: Season/series density placeholders project status into Plex/Jellyfin/Emby episode title/summary via the on-disk SxxE01 anchor (#175).
 - **Full sync Arr progress cadence**: Restore pre-#152 live emits (every batch or ~1.5s) and drop the extra scheduled_sync 3s throttle so instance bars fill during catalog upserts again.
 - **Full sync art live timing**: Mat-enqueued art no longer takes over Tasks live while Arr→calendar bars are still open, so Never-off recreate no longer snaps those bars to 100% before Updating.
@@ -92,7 +97,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Projection fallback**: Unresolved titles path-refresh their folders first; section scan only when the fallback flag is on (#181).
 - **Art backfill completion**: Last-batch force full-section metadata refresh removed; batches always path/item refresh rewritten titles (#181).
 - **NFO backfill completion**: Last-batch force full-section metadata refresh removed (#181).
-- **media_refresh coalesce race**: UniqueViolation on coalesce retries once instead of immediately falling back to `threading.Timer` (#181).
+- **media_refresh coalesce race**: UniqueViolation on coalesce retries with short backoff instead of immediately falling back to `threading.Timer` (#181).
 - **Full-sync art live progress**: Materialization-enqueued art jobs link to the parent full sync (shared Updating bar / completion gate) so create waves no longer sit at 100% with a frozen 0/0 Updating bar until the run snaps done.
 - **Arr tag policy on lite/full sync**: Sync stamps Never/Pinned/Auto from Arr tags only; create/delete runs in the normal determination and materialization phases (no mid-sync tag materialize wave). Library tag-clear still applies placeholders immediately.
 - **Auto pin sidebar progress**: After the pin debounce, Auto marks Saved on the chip and shows title refresh progress in the library sidebar instead of holding Saving… until reconcile finishes.

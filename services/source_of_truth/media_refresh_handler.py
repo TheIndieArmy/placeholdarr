@@ -241,10 +241,16 @@ def enqueue_media_refresh_job(
     )
     session.add(job)
     if should_coalesce and resolved_group_id:
+        # Savepoint only: a full session.rollback() would wipe unrelated work on
+        # shared caller sessions (Arr webhook / event handlers) (#181).
         try:
-            session.flush()
+            with session.begin_nested():
+                session.flush()
         except IntegrityError:
-            session.rollback()
+            try:
+                session.expunge(job)
+            except Exception:
+                pass
             existing = (
                 session.query(Job)
                 .filter(
