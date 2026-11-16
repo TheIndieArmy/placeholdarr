@@ -16,7 +16,6 @@ from sqlalchemy import func
 from services.postgres.db import get_session, release_handler_session, session_scope
 from services.postgres.models import AppConfig, Episode, Movie, Placeholder, Job, Season, Series
 from services.media_servers.player_metadata_refresh import push_placeholder_batch_player_metadata
-from services.media_servers.refresh import refresh_all_sections
 from services.source_of_truth.placeholder_job_enqueue import (
     enqueue_batched_placeholder_job,
     job_placeholder_ids as _job_placeholder_ids,
@@ -266,10 +265,13 @@ def _nfo_refresh_completion_scan_if_last_batch(
     only_if: Any = None,
     after_refresh: Any = None,
 ) -> None:
-    """After batched NFO jobs sharing ``run_id``, refresh library sections once (Plex force=1).
+    """After batched NFO jobs sharing ``run_id``, finalize once without a force section scan.
 
-    ``only_if`` / ``after_refresh`` are optional hooks used by template backfill so superseded runs
-    never trigger a library refresh, and the active run clears its marker after the final batch.
+    Per-batch player metadata projection (and path fallback on miss) already covers
+    player updates. Whole-library ``force=1`` section refreshes were dropped (#181).
+
+    ``only_if`` / ``after_refresh`` are optional hooks used by template backfill so
+    superseded runs never clear markers, and the active run clears after the final batch.
     """
     if only_if is not None and not only_if():
         return
@@ -299,38 +301,18 @@ def _nfo_refresh_completion_scan_if_last_batch(
     ):
         return
 
-    # Phase 1 connection-lifecycle: ``refresh_all_sections`` is a multi-second Plex
-    # HTTP burst. Commit + close the worker's session so the pool slot returns
-    # BEFORE the HTTP runs.
     try:
         session.commit()
     except Exception:
         session.rollback()
-    try:
-        session.close()
-    except Exception:
-        pass
 
-    try:
-        refresh_stats = refresh_all_sections(
-            has_movies=True,
-            has_episodes=True,
-            plex_force_metadata_refresh=True,
-        )
-        logger.info(
-            f"{log_prefix} run complete; triggered one library section refresh "
-            f"run_id={run_id} refreshed={int(refresh_stats.get('refreshed', 0) or 0)} "
-            f"failed={int(refresh_stats.get('failed', 0) or 0)}",
-            extra={"emoji_type": "success"},
-        )
-    except Exception as ex:
-        logger.warning(
-            f"{log_prefix} completion refresh failed run_id={run_id}: {ex}",
-            extra={"emoji_type": "warning"},
-        )
-    finally:
-        if after_refresh is not None:
-            after_refresh()
+    logger.info(
+        f"{log_prefix} run complete; skipped force library section refresh "
+        f"run_id={run_id} (path/item projection covers NFO updates; #181)",
+        extra={"emoji_type": "success"},
+    )
+    if after_refresh is not None:
+        after_refresh()
 
 
 def process_nfo_refresh_job(session, job: Job) -> dict:

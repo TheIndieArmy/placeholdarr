@@ -14,11 +14,27 @@ _bulk_intent_merged: dict[str, bool] = {"has_movies": False, "has_episodes": Fal
 
 
 def observation_source_skips_bulk_section_refresh(observation_source: str) -> bool:
-    """Single-title work must use path refresh only, not a full library scan."""
+    """Path-refresh-first sources must not also schedule a full library section scan.
+
+    Full sync uses its own phase rhythm (not bulk_initial). Event/lite/reconcile/tag
+    mats already schedule delayed_final path refreshes (#181).
+    """
     token = str(observation_source or "").strip().lower()
     if token == "entity_reconcile":
         return True
     if token.startswith("tag_policy_movie:") or token.startswith("tag_policy_series:"):
+        return True
+    if token.startswith("event_"):
+        return True
+    if token in {
+        "scheduled_lite_materialization",
+        "startup_lite_materialization",
+        "event_materialization",
+    }:
+        return True
+    if token.startswith("destination_rematerialize:"):
+        return True
+    if token == "arr_instance_detach":
         return True
     return False
 
