@@ -9,12 +9,6 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
-### Fixed
-
-- **Tasks live poll after Run**: Starting a sync on an already-open page switches onto the 1s live status poll (via Run click, SSE lifecycle, or a 5s idle status probe). Without that, idle stayed on the 60s history timer so bars only mid-filled after a full page reload.
-- **Live pill while sync phases open**: Overall % no longer forces 100% when ``units_total`` is still unknown (FS walk / Arr begin) but phases are working.
-- **Full sync early task complete**: Mat-linked art/NFO no longer marks the task done while Arr→calendar phases are still open.
-
 ## Pre-release
 
 ## Released
@@ -24,6 +18,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 ### Summary
 
 - **Execution contract (session holds)**: Long Arr, player, FS, and density work no longer keeps a DB session open the whole time, so lite sync / season density should stop wedging other writers behind lock timeouts.
+- **Tasks live poll after Run**: Starting a sync on an already-open page switches onto the 1s live status poll so phase bars mid-fill without a full page reload.
 - **Density stub player status**: Season/series density placeholders project status into Plex/Jellyfin/Emby like movies (#175).
 - **TV density path refresh**: Existing stubs no longer queue player path refreshes (#181).
 - **Lite density once per request**: Density is not re-run on every materialization chunk (#181).
@@ -38,6 +33,9 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ### Fixed
 
+- **Tasks live poll after Run**: Starting a sync on an already-open page switches onto the 1s live status poll (via Run click, SSE lifecycle, or a 5s idle status probe). Without that, idle stayed on the 60s history timer so bars only mid-filled after a full page reload.
+- **Live pill while sync phases open**: Overall % no longer forces 100% when ``units_total`` is still unknown (FS walk / Arr begin) but phases are working.
+- **Full sync early task complete**: Mat-linked art/NFO no longer marks the task done while Arr→calendar phases are still open.
 - **Projection fallback without paths**: Status push misses with no title folder no-op (no library-root scan); create-time path refresh and later status passes cover discovery (#181).
 - **media_refresh coalesce savepoint**: UniqueViolation during coalesce uses a savepoint so Arr webhook sessions keep unrelated work (#181).
 - **media_refresh coalesce retries**: Enqueue races retry up to three times with a short backoff before Timer fallback (#181).
