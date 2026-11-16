@@ -18,7 +18,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Event/lite bulk section skip**: Scoped mats rely on path refresh instead of `bulk_initial` section scans (#181).
 - **Full sync path refreshes**: Progressive path batches replace phase and 5-minute section scans (#181).
 - **Section fallback default off**: `MEDIA_REFRESH_SECTION_FALLBACK_ENABLED` defaults to false (#181).
-- **Projection path fallback**: Misses path-refresh folders before any section scan (#181).
+- **Projection path fallback**: Misses path-refresh known title folders only; no library-root scan (#181).
 - **Art backfill**: No force full-section metadata refresh on completion (#181).
 - **NFO backfill**: No force full-section metadata refresh on completion (#181).
 - **media_refresh coalesce retry**: UniqueViolation retries coalesce instead of Timer bypass (#181).
