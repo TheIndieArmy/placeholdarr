@@ -351,6 +351,22 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         requires_ack=True,
     ),
     WhatsNewNotice(
+        id="sync-overhaul-0-13-3",
+        since_version="0.13.3",
+        title="A calmer, more reliable sync",
+        body=(
+            "Syncs should feel more reliable and finish faster. The sync system was entirely overhauled "
+            "for this release. Placeholdarr used to keep the database busy across long Arr and art work, "
+            "which could stall other jobs and make syncs drag or get stuck. Those paths now release locks "
+            "sooner, commit in smaller bites, and batch art more cleanly so the run can keep moving.\n\n"
+            "Your media players stay quieter too: only changed folders refresh instead of scanning whole "
+            "libraries while placeholders are created or updated.\n\n"
+            "This is a major sync change and hard to test every setup thoroughly. Please do not hesitate "
+            "to report issues on GitHub."
+        ),
+        requires_ack=True,
+    ),
+    WhatsNewNotice(
         id="layout-designer-board-tools-0-13-2",
         since_version="0.13.2",
         title="Layout designer board tools",

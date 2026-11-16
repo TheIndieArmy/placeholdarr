@@ -9,6 +9,12 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+## Pre-release
+
+## Released
+
+## [0.13.3] - 2026-11-15
+
 ### Summary
 
 - **Execution contract (session holds)**: Long Arr, player, FS, and density work no longer keeps a DB session open the whole time, so lite sync / season density should stop wedging other writers behind lock timeouts.
@@ -104,10 +110,6 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **DB dual pools**: Separate API and worker SQLAlchemy pools so UI checkouts are not starved by long worker holds.
 - **Entity mat claim caps**: Cap concurrent `entity_materialization` jobs, with a tighter cap for `event_series_add`.
 - **Background thread pool role**: Maintenance/Settings/watchlist route-spawned daemons bind the worker DB pool so syncs do not starve the API pool.
-
-## Pre-release
-
-## Released
 
 ## [0.13.2] - 2026-11-11
 
