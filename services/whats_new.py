@@ -353,7 +353,7 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
     WhatsNewNotice(
         id="integration-boot-readiness-0-13-4",
         since_version="0.13.4",
-        title="Smarter startup when Arr is still waking up",
+        title="Ongoing connection checks",
         body=(
             "If Placeholdarr starts before Radarr or Sonarr are reachable, boot sync now waits for those "
             "instances (up to about 10 minutes) instead of running an empty pass. If they never come up "
