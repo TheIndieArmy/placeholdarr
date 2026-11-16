@@ -570,21 +570,22 @@ def _build_live_payload(
 
     total = max(0, int(units_total or 0))
     done = max(0, int(units_done or 0))
+    phases_open = any(
+        str(p.get("status") or "").lower() in ("working", "pending") for p in merged_phases
+    )
+    units_open = any(str(u.get("status") or "").lower() == "working" for u in merged_units)
     if total > 0:
         done = min(done, total)
         # Match phase honesty: do not report 100% while a batch bar is still working.
-        if any(str(u.get("status") or "").lower() == "working" for u in merged_units) and done >= total:
+        if units_open and done >= total:
             done = total - 1
         overall_pct = int(round((100.0 * done) / total))
-        if done < total:
+        if done < total or phases_open or units_open:
             overall_pct = min(overall_pct, 99)
-    elif stage_key in ("updating", "queued", "refreshing", "determining"):
-        # Art refresh: empty/unknown totals while still in a progress stage must not
-        # snap the pill to 100% (create-wave follow-up / draining Updating).
-        if any(str(p.get("status") or "").lower() in ("working", "pending") for p in merged_phases):
-            overall_pct = 99
-        else:
-            overall_pct = 100
+    elif phases_open or units_open or stage_key in ("updating", "queued", "refreshing", "determining"):
+        # Unknown totals while any phase is still open (FS walk, Arr begin, art Updating)
+        # must not snap the pill to 100%.
+        overall_pct = 99
         done = 0
     else:
         # Nothing queued (e.g. determination found no art mismatches): treat as complete.

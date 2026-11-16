@@ -9,6 +9,12 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Fixed
+
+- **Tasks live poll after Run**: Starting a sync on an already-open page switches onto the 1s live status poll (via Run click, SSE lifecycle, or a 5s idle status probe). Without that, idle stayed on the 60s history timer so bars only mid-filled after a full page reload.
+- **Live pill while sync phases open**: Overall % no longer forces 100% when ``units_total`` is still unknown (FS walk / Arr begin) but phases are working.
+- **Full sync early task complete**: Mat-linked art/NFO no longer marks the task done while Arr→calendar phases are still open.
+
 ## Pre-release
 
 ## Released

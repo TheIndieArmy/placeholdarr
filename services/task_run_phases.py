@@ -728,7 +728,7 @@ def try_complete_full_sync_task_run(
     error_message: str | None = None,
     exclude_job_id: int | None = None,
 ) -> bool:
-    """Finish the task run once all full-sync follow-up jobs (art, NFO) have drained."""
+    """Finish the task run once core Arr→calendar phases and follow-up jobs have drained."""
     if _pending_jobs_for_full_sync_task(task_run_id, exclude_job_id=exclude_job_id):
         logger.debug(
             f"full_sync task_run_id={task_run_id} still waiting on follow-up jobs",
@@ -736,7 +736,29 @@ def try_complete_full_sync_task_run(
         )
         return False
     summary = _load_summary(task_run_id)
+    # Mat-linked art can drain before the main pipeline ends; do not mark the task
+    # done (UI goes idle) while Arr→calendar bars are still open.
+    from services.task_live_progress import FULL_SYNC_CORE_PHASES, full_sync_core_live_still_open
+
+    live = summary.get("live") if isinstance(summary.get("live"), dict) else None
+    if full_sync_core_live_still_open(live):
+        logger.debug(
+            f"full_sync task_run_id={task_run_id} still waiting on Arr→calendar live phases",
+            extra={"emoji_type": "debug"},
+        )
+        return False
+    core_keys = {key for key, _label in FULL_SYNC_CORE_PHASES}
     phases = phases_from_summary(summary) or list(summary.get("phases") or [])
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        key = str(phase.get("key") or "").strip().lower()
+        if key in core_keys and str(phase.get("status") or "").strip().lower() in ("working", "pending"):
+            logger.debug(
+                f"full_sync task_run_id={task_run_id} still waiting on phase={key}",
+                extra={"emoji_type": "debug"},
+            )
+            return False
     complete_full_sync_task_run(task_run_id, phases=phases, failed=failed, error_message=error_message)
     return True
 

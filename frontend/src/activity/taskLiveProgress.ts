@@ -363,15 +363,22 @@ export function taskLiveFromApi(live: TaskRunLiveProgress | null | undefined): T
   // Keep Updating/queued/determining below 100% while those stages are still active.
   let overallPct = Math.max(0, Math.min(100, Number(live.overall_pct ?? 0)));
   const stageKey = String(stage || "").toLowerCase();
+  const phasesOpen = (Array.isArray(live.phases) ? live.phases : []).some((phase) => {
+    const status = String(phase?.status || "").toLowerCase();
+    return status === "working" || status === "pending";
+  });
+  // Art stages + any still-open sync phase: never force the pill to 100% from an
+  // empty units_total (FS walk / Arr begin used to snap the sidebar to done).
   const progressStage =
     stageKey === "determining" ||
     stageKey === "updating" ||
     stageKey === "queued" ||
-    stageKey === "refreshing";
+    stageKey === "refreshing" ||
+    phasesOpen;
   if (unitsTotal <= 0 && !progressStage) {
     overallPct = 100;
-  } else if (unitsTotal <= 0 && progressStage && overallPct >= 100) {
-    overallPct = 99;
+  } else if (progressStage && (unitsTotal <= 0 || overallPct >= 100)) {
+    overallPct = Math.min(Math.max(overallPct, 1), 99);
   }
   const detailSections = Array.isArray(live.detail_sections)
     ? live.detail_sections.map((section) => {
