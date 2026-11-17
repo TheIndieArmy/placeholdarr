@@ -397,6 +397,8 @@ class StatusOrchestrator:
             if ph.display_status in {
                 DisplayStatus.SEARCHING.value,
                 DisplayStatus.DOWNLOADING.value,
+                DisplayStatus.IMPORT_IN_PROGRESS.value,
+                DisplayStatus.IMPORT_BLOCKED.value,
                 DisplayStatus.NOT_FOUND.value,
                 DisplayStatus.DOWNLOAD_UNAVAILABLE.value,
             }:
@@ -517,6 +519,7 @@ class StatusOrchestrator:
                     DisplayStatus.AVAILABLE.value,
                     DisplayStatus.NOT_FOUND.value,
                     DisplayStatus.DOWNLOAD_UNAVAILABLE.value,
+                    DisplayStatus.IMPORT_BLOCKED.value,
                     DisplayStatus.DELETED.value,
                     DisplayStatus.ARCHIVED.value,
                 }

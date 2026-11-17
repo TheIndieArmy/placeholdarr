@@ -801,10 +801,10 @@ def _build_registry() -> tuple[MessageKey, ...]:
         MessageKey(
             key="queue.import.blocked",
             label="Import: blocked",
-            default="Import blocked",
+            default="Download finished, import blocked",
             group="Queue Monitor",
             subgroup="Import",
-            tooltip="Shown when the ARR has blocked the import (e.g. permissions, missing files, mismatched media).",
+            tooltip="Shown when the download finished but Arr will not auto-import (missing folder, ID match, permissions, etc.).",
             allowed_tokens=queue_tokens,
             sample_context={},
         )
