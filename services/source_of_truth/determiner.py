@@ -127,6 +127,7 @@ _ACQUIRING_DISPLAY_STATUSES = frozenset(
         DisplayStatus.SEARCH_QUEUED.value,
         DisplayStatus.DOWNLOADING.value,
         DisplayStatus.IMPORT_IN_PROGRESS.value,
+        DisplayStatus.IMPORT_BLOCKED.value,
     }
 )
 

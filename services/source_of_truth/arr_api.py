@@ -2,7 +2,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
@@ -562,17 +562,22 @@ def trigger_radarr_movie_search(
     *,
     url: Optional[str] = None,
     api_key: Optional[str] = None,
-) -> bool:
-    """Trigger a targeted Radarr movie search command."""
+) -> Optional[int]:
+    """Trigger a targeted Radarr movie search. Returns Arr command id, or None on failure."""
     url = url or _default_radarr_endpoint()[0]
     api_key = api_key or _default_radarr_endpoint()[1]
     if not url or not api_key or not movie_id:
-        return False
+        return None
 
     endpoint = _build_endpoint(url, 'command')
     payload = {'name': 'MoviesSearch', 'movieIds': [int(movie_id)]}
     result = _request_json('POST', endpoint, payload=payload, api_key=api_key)
-    return result is not None
+    if not isinstance(result, dict):
+        return None
+    try:
+        return int(result.get("id"))
+    except (TypeError, ValueError):
+        return None
 
 
 def trigger_radarr_refresh_monitored_downloads(
@@ -843,8 +848,10 @@ def trigger_sonarr_search(
     season_number: Optional[int] = None,
     url: Optional[str] = None,
     api_key: Optional[str] = None,
-) -> bool:
+) -> Optional[int]:
     """Trigger Sonarr search at episode, season, or series scope.
+
+    Returns Arr command id, or None on failure.
 
     SeasonSearch rejects releases when the series master switch is Off even if
     individual episodes are monitored. Ensure series monitored before that command.
@@ -852,7 +859,7 @@ def trigger_sonarr_search(
     url = url or _default_sonarr_endpoint()[0]
     api_key = api_key or _default_sonarr_endpoint()[1]
     if not url or not api_key or not series_id:
-        return False
+        return None
 
     endpoint = _build_endpoint(url, 'command')
     if episode_ids:
@@ -870,7 +877,72 @@ def trigger_sonarr_search(
         payload = {'name': 'seriesSearch', 'seriesId': int(series_id)}
 
     result = _request_json('POST', endpoint, payload=payload, api_key=api_key)
-    return result is not None
+    if not isinstance(result, dict):
+        return None
+    try:
+        return int(result.get("id"))
+    except (TypeError, ValueError):
+        return None
+
+
+def arr_has_grab_since(
+    *,
+    arr_type: str,
+    base_url: str,
+    api_key: str,
+    since: datetime | None = None,
+    movie_id: int | None = None,
+    series_id: int | None = None,
+    episode_id: int | None = None,
+) -> bool:
+    """True when Arr history has a Grabbed event for this title at/after ``since`` (UTC)."""
+    kind = str(arr_type or "").strip().lower()
+    if not base_url or not api_key or kind not in {"radarr", "sonarr"}:
+        return False
+    endpoint = _build_endpoint(base_url, "history")
+    # Event type 1 = Grabbed in both Radarr and Sonarr history APIs.
+    params: dict[str, Any] = {
+        "page": 1,
+        "pageSize": 20,
+        "sortKey": "date",
+        "sortDirection": "descending",
+        "eventType": 1,
+    }
+    if kind == "radarr" and movie_id is not None:
+        params["movieIds"] = int(movie_id)
+    elif kind == "sonarr":
+        if episode_id is not None:
+            params["episodeId"] = int(episode_id)
+        elif series_id is not None:
+            params["seriesIds"] = int(series_id)
+        else:
+            return False
+    else:
+        return False
+
+    result = _request_json("GET", endpoint, params=params, api_key=api_key, timeout=ARR_HTTP_TIMEOUT_SECONDS)
+    records = result.get("records") if isinstance(result, dict) else None
+    if not isinstance(records, list) or not records:
+        return False
+    since_utc = None
+    if isinstance(since, datetime):
+        since_utc = since if since.tzinfo is not None else since.replace(tzinfo=timezone.utc)
+        since_utc = since_utc.astimezone(timezone.utc)
+    for row in records:
+        if not isinstance(row, dict):
+            continue
+        raw_date = row.get("date")
+        if since_utc is None:
+            return True
+        if not raw_date:
+            continue
+        try:
+            grabbed_at = datetime.fromisoformat(str(raw_date).replace("Z", "+00:00")).astimezone(timezone.utc)
+        except Exception:
+            continue
+        if grabbed_at >= since_utc:
+            return True
+    return False
 
 
 def _unmonitor_all_sonarr_seasons(
@@ -969,13 +1041,14 @@ def monitor_and_search_first_episodes(
     mon = set_sonarr_episode_monitored(episode_ids, True, url=url, api_key=api_key)
     searched = False
     if search and episode_ids:
-        searched = bool(
+        searched = (
             trigger_sonarr_search(
                 series_id=int(series_id),
                 episode_ids=episode_ids,
                 url=url,
                 api_key=api_key,
             )
+            is not None
         )
     return {
         "selected": len(episode_ids),

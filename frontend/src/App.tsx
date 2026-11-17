@@ -33,7 +33,7 @@ import {
 import { getCollectionPlexSections } from "./api/collections";
 import { DestinationMapEditor } from "./settings/DestinationMapEditor";
 import { PathMappingsEditor } from "./settings/PathMappingsEditor";
-import type { IntegrationsStatusResponse, PlexSectionOption } from "./types/api";
+import type { IntegrationsStatusResponse, LastPlaybackSummary, PlexSectionOption } from "./types/api";
 import { postTaskAbandon, postTaskRun } from "./api/tasks";
 import { fetchJson, postJson, setUnauthorizedHandler, getCsrfToken } from "./api/client";
 import { changePassword, getAuthStatus, getWebhookApiKey, logoutAuth, regenerateWebhookApiKey, type AuthStatus } from "./api/auth";
@@ -226,6 +226,168 @@ function formatDashboardDataAge(msAgo: number): string {
   if (m < 60) return `${m}m ago`;
   const h = Math.floor(m / 60);
   return `${h}h ago`;
+}
+
+/** Relative age for sidebar last-playback (supports multi-day silence). */
+function formatLastPlaybackAge(msAgo: number): string {
+  const s = Math.floor(Math.max(0, msAgo) / 1000);
+  if (s < 12) return "just now";
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  if (d < 14) return `${d}d ago`;
+  const w = Math.floor(d / 7);
+  return `${w}w ago`;
+}
+
+function formatLastPlaybackExact(iso: string): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return iso;
+  try {
+    return new Date(t).toLocaleString(undefined, {
+      dateStyle: "medium",
+      timeStyle: "medium",
+    });
+  } catch {
+    return new Date(t).toLocaleString();
+  }
+}
+
+function LastPlaybackSidebarFooter(props: {
+  isStudioGlass: boolean;
+  summary: LastPlaybackSummary | null | undefined;
+  statusLoaded: boolean;
+  ageTick: number;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const glass = props.isStudioGlass;
+  const summary = props.summary ?? null;
+  const iso = summary?.at ?? null;
+  const parsed = iso ? Date.parse(iso) : NaN;
+  const hasPlay = Number.isFinite(parsed);
+  void props.ageTick;
+  const relative = hasPlay
+    ? formatLastPlaybackAge(Date.now() - parsed)
+    : props.statusLoaded
+      ? "never"
+      : "…";
+  const exact = hasPlay && iso ? formatLastPlaybackExact(iso) : null;
+
+  useEffect(() => {
+    if (!hasPlay) setExpanded(false);
+  }, [hasPlay]);
+
+  useEffect(() => {
+    if (!expanded) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setExpanded(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [expanded]);
+
+  const muted = glass ? "text-slate-500" : "text-slate-500";
+  const panelClass = glass
+    ? "border-[#424753]/50 bg-[#141a24] text-slate-100"
+    : "border-[#c5d0de] bg-[#eef3f8] text-slate-900";
+  const rowLabel = glass ? "text-slate-500" : "text-slate-500";
+  const rowValue = glass ? "text-slate-200" : "text-slate-800";
+
+  const detailRows: Array<{ label: string; value: string }> = [];
+  if (exact) detailRows.push({ label: "When", value: exact });
+  if (summary?.source_label) detailRows.push({ label: "Source", value: summary.source_label });
+  if (summary?.title) {
+    const withYear =
+      summary.year != null && !String(summary.title).includes(String(summary.year))
+        ? `${summary.title} (${summary.year})`
+        : summary.title;
+    detailRows.push({ label: "Title", value: withYear });
+  }
+  if (summary?.subtitle) detailRows.push({ label: "Episode", value: summary.subtitle });
+  if (summary?.media_type) {
+    detailRows.push({
+      label: "Type",
+      value: summary.media_type.replace(/_/g, " "),
+    });
+  }
+  if (summary?.player) detailRows.push({ label: "Player", value: summary.player });
+
+  return (
+    <div className="relative mx-4 mb-1.5 min-w-0">
+      <button
+        type="button"
+        disabled={!hasPlay}
+        aria-expanded={hasPlay ? expanded : undefined}
+        onClick={() => {
+          if (!hasPlay) return;
+          setExpanded((v) => !v);
+        }}
+        title={
+          hasPlay
+            ? expanded
+              ? "Hide last playback details"
+              : exact
+                ? `Last playback webhook: ${exact}`
+                : "Show last playback details"
+            : props.statusLoaded
+              ? "No playback webhook received yet"
+              : "Loading last playback…"
+        }
+        className={`flex w-full min-w-0 items-center gap-1 text-left text-[11px] font-headline uppercase tracking-wider transition-colors ${muted} ${
+          hasPlay ? (glass ? "hover:text-slate-300" : "hover:text-slate-700") : "cursor-default opacity-80"
+        }`}
+      >
+        <span className="min-w-0 flex-1 truncate">Last play · {relative}</span>
+        {hasPlay ? (
+          <span className="material-symbols-outlined shrink-0 opacity-70" style={{ fontSize: 14 }}>
+            {expanded ? "expand_less" : "expand_more"}
+          </span>
+        ) : null}
+      </button>
+      {expanded && hasPlay ? (
+        <div className={`mt-1.5 overflow-hidden rounded-xl border p-2.5 ${panelClass}`}>
+          <div className="mb-2 flex items-start justify-between gap-2">
+            <p className={`text-[10px] font-headline uppercase tracking-widest ${rowLabel}`}>
+              Last playback
+            </p>
+            <button
+              type="button"
+              onClick={() => setExpanded(false)}
+              className={`rounded-md p-0.5 ${
+                glass
+                  ? "text-slate-400 hover:bg-white/10 hover:text-white"
+                  : "text-slate-500 hover:bg-black/5 hover:text-slate-800"
+              }`}
+              aria-label="Collapse last playback details"
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
+                close
+              </span>
+            </button>
+          </div>
+          {detailRows.length ? (
+            <dl className="space-y-1.5">
+              {detailRows.map((row) => (
+                <div key={row.label} className="min-w-0">
+                  <dt className={`text-[9px] font-headline uppercase tracking-widest ${rowLabel}`}>{row.label}</dt>
+                  <dd className={`mt-0.5 break-words text-[12px] leading-snug normal-case tracking-normal ${rowValue}`}>
+                    {row.value}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          ) : (
+            <p className={`text-[12px] normal-case tracking-normal ${rowValue}`}>
+              Playback webhook received{exact ? ` at ${exact}` : ""}.
+            </p>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 const LOG_TAIL_LINES = 2000;
 const STUDIO_THEME_MODE_STORAGE_KEY = "placeholdarr:studio-theme-mode";
@@ -1321,10 +1483,10 @@ export function App() {
   }, [libraryShelfSort]);
 
   useEffect(() => {
-    if (lastDashboardSuccessAt == null) return;
+    if (lastDashboardSuccessAt == null && !integrationsStatus?.last_playback_at) return;
     const id = window.setInterval(() => setDashboardAgeTick((n) => n + 1), 5000);
     return () => window.clearInterval(id);
-  }, [lastDashboardSuccessAt]);
+  }, [lastDashboardSuccessAt, integrationsStatus?.last_playback_at]);
 
   useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -3143,53 +3305,61 @@ export function App() {
                 )}
               />
               {sidebarExpanded ? (
-                <div className="mx-4 mb-3 flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSidebarPinned((prev) => {
-                        const next = !prev;
-                        if (next) {
-                          setSidebarHover(false);
-                        } else {
-                          // Stay expanded under the cursor; collapse when the pointer leaves.
-                          if (sidebarHoverLeaveTimer.current != null) {
-                            window.clearTimeout(sidebarHoverLeaveTimer.current);
-                            sidebarHoverLeaveTimer.current = null;
+                <>
+                  <LastPlaybackSidebarFooter
+                    isStudioGlass={isStudioGlass}
+                    summary={integrationsStatus?.last_playback}
+                    statusLoaded={integrationsStatus != null}
+                    ageTick={dashboardAgeTick}
+                  />
+                  <div className="mx-4 mb-3 flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSidebarPinned((prev) => {
+                          const next = !prev;
+                          if (next) {
+                            setSidebarHover(false);
+                          } else {
+                            // Stay expanded under the cursor; collapse when the pointer leaves.
+                            if (sidebarHoverLeaveTimer.current != null) {
+                              window.clearTimeout(sidebarHoverLeaveTimer.current);
+                              sidebarHoverLeaveTimer.current = null;
+                            }
+                            setSidebarHover(true);
                           }
-                          setSidebarHover(true);
-                        }
-                        return next;
-                      });
-                    }}
-                    title={sidebarPinned ? "Collapse sidebar" : "Pin sidebar open"}
-                    aria-pressed={sidebarPinned}
-                    className={`hidden h-8 w-8 shrink-0 items-center justify-center rounded-full border transition-colors md:flex ${
-                      isStudioGlass
-                        ? "border-[#424753]/55 bg-[#1e2430]/80 text-slate-300 hover:border-[#424753]/80 hover:text-white"
-                        : "border-[#c5d0de] bg-white/80 text-slate-600 hover:text-slate-900"
-                    }`}
-                  >
-                    <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
-                      {sidebarPinned ? "keyboard_double_arrow_left" : "keep"}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setMobileNavOpen(false);
-                      void openWhatsNewCatalog();
-                    }}
-                    title="What's new"
-                    className={`flex min-w-0 flex-1 items-center justify-center rounded-full border px-3 py-1.5 font-headline text-[12px] uppercase tracking-widest transition-colors ${
-                      isStudioGlass
-                        ? "border-[#424753]/55 bg-[#1e2430]/80 text-slate-300 hover:border-[#424753]/80 hover:text-white"
-                        : "border-[#c5d0de] bg-white/80 text-slate-600 hover:text-slate-900"
-                    }`}
-                  >
-                    v{appVersionLabel || "…"}
-                  </button>
-                </div>
+                          return next;
+                        });
+                      }}
+                      title={sidebarPinned ? "Collapse sidebar" : "Pin sidebar open"}
+                      aria-pressed={sidebarPinned}
+                      className={`hidden h-8 w-8 shrink-0 items-center justify-center rounded-full border transition-colors md:flex ${
+                        isStudioGlass
+                          ? "border-[#424753]/55 bg-[#1e2430]/80 text-slate-300 hover:border-[#424753]/80 hover:text-white"
+                          : "border-[#c5d0de] bg-white/80 text-slate-600 hover:text-slate-900"
+                      }`}
+                    >
+                      <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
+                        {sidebarPinned ? "keyboard_double_arrow_left" : "keep"}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMobileNavOpen(false);
+                        void openWhatsNewCatalog();
+                      }}
+                      title="What's new"
+                      className={`flex min-w-0 flex-1 items-center justify-center rounded-full border px-3 py-1.5 font-headline text-[12px] uppercase tracking-widest transition-colors ${
+                        isStudioGlass
+                          ? "border-[#424753]/55 bg-[#1e2430]/80 text-slate-300 hover:border-[#424753]/80 hover:text-white"
+                          : "border-[#c5d0de] bg-white/80 text-slate-600 hover:text-slate-900"
+                      }`}
+                    >
+                      v{appVersionLabel || "…"}
+                    </button>
+                  </div>
+                </>
               ) : null}
             </div>
           </aside>

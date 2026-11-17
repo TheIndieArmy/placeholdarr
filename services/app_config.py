@@ -1794,15 +1794,14 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "QUEUE_MONITOR_SEARCH_TIMEOUT_SECONDS",
             {
                 "section": "Advanced",
-                "label": "Queue monitor search timeout (seconds)",
+                "label": "Queue monitor post-search grace (seconds)",
                 "description": (
-                    "The amount of time to wait for content to be added to the Radarr/Sonarr queue after it is "
-                    "requested. If content does not reach the queue before this timeout, Placeholdarr assumes no "
-                    "qualifying releases were found. Adjust this setting based on how long typical indexer searches "
-                    "take in your environment. Default 120 seconds (2 minutes)."
+                    "After Radarr/Sonarr finishes the playback search command, how long to wait for a matching "
+                    "queue item or grab in history before assuming no qualifying release was found. Searching "
+                    "itself is no longer covered by this timer. Default 5 seconds."
                 ),
                 "type": "int",
-                "min": 60,
+                "min": 1,
                 "restart_required": True,
             },
         ),

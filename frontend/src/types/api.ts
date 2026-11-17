@@ -709,6 +709,19 @@ export interface IntegrationStatusEntry {
   label?: string;
 }
 
+/** Newest playback_start webhook summary for sidebar last-play chrome. */
+export interface LastPlaybackSummary {
+  id?: number | null;
+  at: string;
+  source?: string | null;
+  source_label?: string | null;
+  title?: string | null;
+  subtitle?: string | null;
+  media_type?: string | null;
+  player?: string | null;
+  year?: number | null;
+}
+
 export interface IntegrationsStatusResponse {
   checked_at: string | null;
   media: Record<string, IntegrationStatusEntry>;
@@ -716,6 +729,10 @@ export interface IntegrationsStatusResponse {
   media_has_failure: boolean;
   arr_has_failure: boolean;
   settings_has_failure: boolean;
+  /** Newest playback_start webhook time (UTC ISO), when any exist. */
+  last_playback_at?: string | null;
+  /** Detail for expandable sidebar last-play row. */
+  last_playback?: LastPlaybackSummary | null;
 }
 
 // ---------------------------------------------------------------------------
