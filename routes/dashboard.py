@@ -5263,7 +5263,7 @@ async def calendar_view(month: str = Query("")):
         return JSONResponse(content={"ok": False, "message": str(exc)}, status_code=400)
 
     today = local_today()
-    lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+    lookahead_days = int(settings.calendar_lookahead_days)
     countdown_enabled = bool(getattr(settings, "ENABLE_COMING_SOON_COUNTDOWN", True))
     placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
 
@@ -5735,7 +5735,7 @@ async def settings_save(request: Request):
     )
     before_arr_fingerprint = _arr_endpoint_fingerprint()
     was_setup_complete = bool(get_onboarding_status().get("setup_complete"))
-    lookahead_before = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+    lookahead_before = int(settings.calendar_lookahead_days)
     include_specials_before = bool(getattr(settings, "INCLUDE_SPECIALS", False))
     apply_scope_raw = payload.get("apply_scope") if isinstance(payload, dict) else None
     apply_scope = (
@@ -5758,7 +5758,7 @@ async def settings_save(request: Request):
     elif result.get("ok") and not partial and arr_endpoints_changed:
         _launch_arr_change_full_sync(reason="arr_endpoint_changed")
     if result.get("ok"):
-        lookahead_after = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+        lookahead_after = int(settings.calendar_lookahead_days)
         include_specials_after = bool(getattr(settings, "INCLUDE_SPECIALS", False))
         if lookahead_before != lookahead_after or include_specials_before != include_specials_after:
             try:
@@ -5849,11 +5849,134 @@ async def integrations_test(request: Request):
     return JSONResponse(content=result, status_code=status_code)
 
 
+def _dt_to_iso_z(dt: Any) -> str | None:
+    if not isinstance(dt, datetime):
+        return str(dt) if dt is not None else None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _playback_source_label(source: str | None) -> str:
+    raw = str(source or "").strip()
+    key = raw.split(":", 1)[-1].strip().lower() if raw else ""
+    known = {
+        "tautulli": "Tautulli",
+        "tracearr": "Tracearr",
+        "jellyfin": "Jellyfin",
+        "emby": "Emby",
+        "plex": "Plex",
+    }
+    if key in known:
+        return known[key]
+    if key and key != "unknown":
+        return key.replace("_", " ").title()
+    return "Webhook"
+
+
+def _extract_last_playback_fields(payload: Any) -> dict[str, Any]:
+    """Pull display fields from a stored playback_start webhook payload."""
+    root = payload if isinstance(payload, dict) else {}
+    media = root.get("media") if isinstance(root.get("media"), dict) else {}
+    data = root.get("data") if isinstance(root.get("data"), dict) else {}
+    data_media = data.get("media") if isinstance(data.get("media"), dict) else {}
+    playback = data.get("playback") if isinstance(data.get("playback"), dict) else {}
+
+    title = str(
+        media.get("title")
+        or data_media.get("title")
+        or media.get("show_name")
+        or data_media.get("grandparentTitle")
+        or ""
+    ).strip()
+    subtitle = str(media.get("subtitle") or data_media.get("subtitle") or "").strip()
+    if not subtitle:
+        episode_name = str(media.get("episode_name") or data_media.get("episode_name") or "").strip()
+        season = media.get("season_number")
+        if season is None:
+            season = media.get("season_num")
+        if season is None:
+            season = data_media.get("season_number") or data_media.get("season_num")
+        episode = media.get("episode_number")
+        if episode is None:
+            episode = media.get("episode_num")
+        if episode is None:
+            episode = data_media.get("episode_number") or data_media.get("episode_num")
+        parts: list[str] = []
+        try:
+            if season is not None and str(season).strip() != "" and episode is not None and str(episode).strip() != "":
+                parts.append(f"S{int(season):02d} E{int(episode):02d}")
+        except (TypeError, ValueError):
+            pass
+        if episode_name:
+            parts.append(episode_name)
+        subtitle = " · ".join(parts)
+
+    media_type = str(media.get("type") or data_media.get("type") or "").strip().lower() or None
+    player = str(
+        playback.get("player")
+        or media.get("player")
+        or root.get("player")
+        or ""
+    ).strip() or None
+    year = media.get("year") if media.get("year") is not None else data_media.get("year")
+    try:
+        year_i = int(year) if year is not None and str(year).strip() != "" else None
+    except (TypeError, ValueError):
+        year_i = None
+
+    return {
+        "title": title or None,
+        "subtitle": subtitle or None,
+        "media_type": media_type,
+        "player": player,
+        "year": year_i,
+    }
+
+
+def _last_playback_summary() -> dict[str, Any] | None:
+    """Newest playback_start webhook summary for sidebar display, or None."""
+    session = get_session()
+    try:
+        row = session.execute(
+            text(
+                """
+                SELECT id, source, created_at, payload
+                FROM event_log
+                WHERE event_type = 'playback_start'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+        ).mappings().first()
+        if not row:
+            return None
+        at = _dt_to_iso_z(row.get("created_at"))
+        if not at:
+            return None
+        fields = _extract_last_playback_fields(row.get("payload"))
+        return {
+            "id": int(row["id"]) if row.get("id") is not None else None,
+            "at": at,
+            "source": str(row.get("source") or "").strip() or None,
+            "source_label": _playback_source_label(row.get("source")),
+            **fields,
+        }
+    except Exception:
+        return None
+    finally:
+        session.close()
+
+
 @router.get("/api/integrations/status")
 async def integrations_status():
     from services.integration_status import get_integration_status
 
-    return JSONResponse(content=get_integration_status())
+    payload = get_integration_status()
+    last = await asyncio.to_thread(_last_playback_summary)
+    payload["last_playback"] = last
+    payload["last_playback_at"] = (last or {}).get("at")
+    return JSONResponse(content=payload)
 
 
 @router.get("/api/logs")

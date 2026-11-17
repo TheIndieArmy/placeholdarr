@@ -17,9 +17,11 @@ from services.postgres.models import Episode, Movie, Placeholder, Season, Series
 from services.activity_snapshot import clear_queue_download_snapshot, set_queue_download_snapshot
 from services.source_of_truth.arr_api import (
     ARR_HTTP_TIMEOUT_SECONDS,
+    arr_has_grab_since,
     trigger_radarr_refresh_monitored_downloads,
     trigger_sonarr_refresh_monitored_downloads,
 )
+from services.source_of_truth.arr_commands import get_arr_command
 from services.source_of_truth.status_intent import DisplayStatus, StatusIntent, StatusSource
 from services.source_of_truth.status_orchestrator import StatusOrchestrator
 
@@ -29,8 +31,8 @@ ACTIVE_QUEUE_STATUSES = {
     DisplayStatus.DOWNLOADING.value,
     DisplayStatus.IMPORT_IN_PROGRESS.value,
     "RETRYING",
-    # NOT_FOUND and DOWNLOAD_UNAVAILABLE are terminal for queue-monitor purposes;
-    # do not keep polling/nudging ARR.
+    # NOT_FOUND, DOWNLOAD_UNAVAILABLE, and IMPORT_BLOCKED are terminal for
+    # queue-monitor purposes; do not keep polling/nudging ARR.
 }
 
 # Arr /queue statuses that mean the download path is blocked; monitor stops immediately.
@@ -42,6 +44,15 @@ _STALLED_QUEUE_STATUSES = frozenset(
         "failed",
     }
 )
+
+# Search command lifecycle done (Sonarr/Radarr CommandStatus).
+_SEARCH_COMMAND_TERMINAL = frozenset(
+    {"completed", "failed", "aborted", "cancelled", "orphaned"}
+)
+
+# Consecutive poll failures (unknown status or missing Arr endpoint) before we
+# treat stored search command ids as finished so SEARCHING cannot hang forever.
+_SEARCH_COMMAND_POLL_FAILURE_LIMIT = 3
 
 
 def _utc_now() -> datetime:
@@ -459,8 +470,8 @@ class QueueMonitorProducer:
         )
         self._retry_grace_seconds = max(30, int(getattr(settings, "QUEUE_MONITOR_RETRY_GRACE_SECONDS", 300) or 300))
         self._search_timeout_seconds = max(
-            60,
-            int(getattr(settings, "QUEUE_MONITOR_SEARCH_TIMEOUT_SECONDS", 120) or 120),
+            1,
+            int(getattr(settings, "QUEUE_MONITOR_SEARCH_TIMEOUT_SECONDS", 5) or 5),
         )
         self._arr_refresh_interval = max(
             0,
@@ -680,17 +691,36 @@ class QueueMonitorProducer:
             orchestrator = StatusOrchestrator(session=apply_session)
             intents: list[StatusIntent] = []
 
+            command_status_cache: dict[tuple[str, str, int], str] = {}
+
             for ph, movie, instance_key in movie_targets:
                 queue_map = radarr_maps.get(instance_key) or {}
                 queue_item = queue_map.get(str(getattr(movie, "radarrid", "")))
-                intent = self._build_intent_for_placeholder(ph, queue_item)
+                intent = self._build_intent_for_placeholder(
+                    ph,
+                    queue_item,
+                    arr_type="radarr",
+                    instance_key=instance_key,
+                    movie=movie,
+                    command_status_cache=command_status_cache,
+                )
                 if intent:
                     intents.append(intent)
 
             for ph, episode, instance_key in episode_targets:
                 queue_map = sonarr_maps.get(instance_key) or {}
                 queue_item = queue_map.get(str(getattr(episode, "sonarrid", "")))
-                intent = self._build_intent_for_placeholder(ph, queue_item)
+                season = getattr(episode, "season", None)
+                series = getattr(season, "series", None) if season else None
+                intent = self._build_intent_for_placeholder(
+                    ph,
+                    queue_item,
+                    arr_type="sonarr",
+                    instance_key=instance_key,
+                    episode=episode,
+                    series=series,
+                    command_status_cache=command_status_cache,
+                )
                 if intent:
                     intents.append(intent)
 
@@ -702,7 +732,14 @@ class QueueMonitorProducer:
                     queue_map,
                     season_id=stub_season_id,
                 )
-                intent = self._build_intent_for_placeholder(ph, queue_item)
+                intent = self._build_intent_for_placeholder(
+                    ph,
+                    queue_item,
+                    arr_type="sonarr",
+                    instance_key=instance_key,
+                    series=series,
+                    command_status_cache=command_status_cache,
+                )
                 if intent:
                     intents.append(intent)
 
@@ -781,10 +818,192 @@ class QueueMonitorProducer:
             logger.error(f"Queue monitor failed polling endpoint={endpoint}: {e}", extra={"emoji_type": "error"})
             return {}
 
-    def _build_intent_for_placeholder(self, placeholder: Placeholder, queue_item: dict[str, Any] | None) -> StatusIntent | None:
+    def _command_ids_from_qm(self, qm: dict[str, Any]) -> list[int]:
+        raw = qm.get("arr_command_ids")
+        if not isinstance(raw, list):
+            single = qm.get("arr_command_id")
+            raw = [single] if single is not None else []
+        out: list[int] = []
+        for item in raw:
+            try:
+                cid = int(item)
+            except (TypeError, ValueError):
+                continue
+            if cid > 0 and cid not in out:
+                out.append(cid)
+        return out
+
+    def _search_commands_finished(
+        self,
+        *,
+        qm: dict[str, Any],
+        arr_type: str,
+        instance_key: str,
+        command_status_cache: dict[tuple[str, str, int], str],
+    ) -> bool:
+        """True when stored Arr search command ids are all terminal (or none stored).
+
+        Missing Arr endpoint or repeated command-status poll failures do not count as
+        "still searching" forever: after ``_SEARCH_COMMAND_POLL_FAILURE_LIMIT`` consecutive
+        bad polls we treat the command set as finished so post-search grace can run.
+        """
+        ids = self._command_ids_from_qm(qm)
+        if not ids:
+            return True
+        key = str(instance_key or "").strip().lower()
+        kind = str(arr_type or "").strip().lower()
+        if not key or kind not in {"radarr", "sonarr"}:
+            return True
+
+        failures_raw = qm.get("arr_command_poll_failures")
+        failures: dict[str, int] = {}
+        if isinstance(failures_raw, dict):
+            for fail_key, fail_val in failures_raw.items():
+                try:
+                    failures[str(fail_key)] = int(fail_val)
+                except (TypeError, ValueError):
+                    continue
+
+        def _bump_failure(token: str) -> int:
+            nxt = int(failures.get(token, 0) or 0) + 1
+            failures[token] = nxt
+            qm["arr_command_poll_failures"] = failures
+            return nxt
+
+        def _clear_failure(token: str) -> None:
+            if token in failures:
+                failures.pop(token, None)
+                qm["arr_command_poll_failures"] = failures
+
+        base_url, api_key = settings.resolve_arr_endpoint(kind, instance_key=key)
+        if not base_url or not api_key:
+            # Do not pretend commands finished; retry until the failure cap.
+            fail_n = _bump_failure("_endpoint")
+            if fail_n >= _SEARCH_COMMAND_POLL_FAILURE_LIMIT:
+                logger.info(
+                    "Queue monitor treating Arr search command(s) finished after repeated "
+                    f"endpoint resolve failures instance_key={key} failures={fail_n} "
+                    f"command_ids={ids}",
+                    extra={"emoji_type": "warning"},
+                )
+                return True
+            return False
+        _clear_failure("_endpoint")
+
+        for cid in ids:
+            cache_key = (kind, key, int(cid))
+            status = command_status_cache.get(cache_key)
+            if status is None:
+                try:
+                    cmd = get_arr_command(base_url=base_url, api_key=api_key, command_id=int(cid))
+                    status = str((cmd or {}).get("status") or "").strip().lower() or "unknown"
+                except Exception:
+                    status = "unknown"
+                command_status_cache[cache_key] = status
+
+            fail_token = str(int(cid))
+            if status in _SEARCH_COMMAND_TERMINAL:
+                _clear_failure(fail_token)
+                continue
+
+            if status == "unknown":
+                fail_n = _bump_failure(fail_token)
+                if fail_n >= _SEARCH_COMMAND_POLL_FAILURE_LIMIT:
+                    logger.info(
+                        "Queue monitor treating Arr search command finished after repeated "
+                        f"status poll failures command_id={cid} failures={fail_n} "
+                        f"instance_key={key}",
+                        extra={"emoji_type": "warning"},
+                    )
+                    continue
+                return False
+
+            # queued / started / other non-terminal: still running.
+            _clear_failure(fail_token)
+            return False
+        return True
+
+    def _history_has_grab(
+        self,
+        *,
+        qm: dict[str, Any],
+        arr_type: str,
+        instance_key: str,
+        movie: Movie | None,
+        episode: Episode | None,
+        series: Series | None,
+    ) -> bool:
+        key = str(instance_key or "").strip().lower()
+        kind = str(arr_type or "").strip().lower()
+        if not key or kind not in {"radarr", "sonarr"}:
+            return False
+        base_url, api_key = settings.resolve_arr_endpoint(kind, instance_key=key)
+        if not base_url or not api_key:
+            return False
+        since = (
+            _from_iso(qm.get("search_commands_finished_at"))
+            or _from_iso(qm.get("search_restarted_at"))
+            or _from_iso(qm.get("empty_queue_search_started_at"))
+        )
+        # Require a lower bound so legacy monitors without timestamps cannot treat any
+        # historical grab as "grabbed for this search" and block NOT_FOUND forever.
+        if since is None:
+            return False
+        try:
+            if kind == "radarr" and movie is not None and getattr(movie, "radarrid", None):
+                return bool(
+                    arr_has_grab_since(
+                        arr_type="radarr",
+                        base_url=base_url,
+                        api_key=api_key,
+                        since=since,
+                        movie_id=int(movie.radarrid),
+                    )
+                )
+            if kind == "sonarr":
+                if episode is not None and getattr(episode, "sonarrid", None):
+                    return bool(
+                        arr_has_grab_since(
+                            arr_type="sonarr",
+                            base_url=base_url,
+                            api_key=api_key,
+                            since=since,
+                            episode_id=int(episode.sonarrid),
+                        )
+                    )
+                if series is not None and getattr(series, "sonarrid", None):
+                    return bool(
+                        arr_has_grab_since(
+                            arr_type="sonarr",
+                            base_url=base_url,
+                            api_key=api_key,
+                            since=since,
+                            series_id=int(series.sonarrid),
+                        )
+                    )
+        except Exception as exc:
+            logger.debug(
+                f"Queue monitor history grab check failed: {exc}",
+                extra={"emoji_type": "debug"},
+            )
+        return False
+
+    def _build_intent_for_placeholder(
+        self,
+        placeholder: Placeholder,
+        queue_item: dict[str, Any] | None,
+        *,
+        arr_type: str,
+        instance_key: str,
+        movie: Movie | None = None,
+        episode: Episode | None = None,
+        series: Series | None = None,
+        command_status_cache: dict[tuple[str, str, int], str] | None = None,
+    ) -> StatusIntent | None:
         now = _utc_now()
         extra = _safe_extra_dict(placeholder)
         qm = dict(extra.get("queue_monitor") or {})
+        cache = command_status_cache if command_status_cache is not None else {}
 
         seen_queue_once = bool(qm.get("seen_queue_once", False))
         left_queue_at = _from_iso(qm.get("left_queue_at"))
@@ -802,13 +1021,25 @@ class QueueMonitorProducer:
             qm["seen_queue_once"] = True
             qm["left_queue_at"] = None
             qm["empty_queue_search_started_at"] = None
+            qm["grab_history_wait_started_at"] = None
             qm["search_wait_last_log_at"] = None
             qm["left_queue_wait_last_log_at"] = None
             qm["last_seen_in_queue_at"] = _to_iso(now)
             qm["last_queue_status"] = queue_status
             qm["last_tracked_state"] = tracked_state
 
-            if queue_status == "downloading":
+            if tracked_state == "importblocked":
+                # Terminal: download finished but Arr will not auto-import.
+                target_status = DisplayStatus.IMPORT_BLOCKED.value
+                target_reason = render_message("queue.import.blocked", {})
+                target_progress = None
+                logger.info(
+                    "Queue monitor terminal IMPORT_BLOCKED: "
+                    f"placeholder_id={int(getattr(placeholder, 'id', 0) or 0)} "
+                    f"arr_status={queue_status} tracked={tracked_state}",
+                    extra={"emoji_type": "warning"},
+                )
+            elif queue_status == "downloading":
                 progress = self._extract_progress(queue_item)
                 if progress > 0:
                     target_status = DisplayStatus.DOWNLOADING.value
@@ -829,8 +1060,6 @@ class QueueMonitorProducer:
                     target_reason = render_message("queue.import.pending", {})
                 elif tracked_state == "importing":
                     target_reason = render_message("queue.import.importing", {})
-                elif tracked_state == "importblocked":
-                    target_reason = render_message("queue.import.blocked", {})
                 elif tracked_state == "failedpending":
                     target_reason = render_message("queue.import.failed_pending", {})
                 else:
@@ -888,35 +1117,112 @@ class QueueMonitorProducer:
                         extra={"emoji_type": "warning"},
                     )
             else:
-                search_start = _from_iso(qm.get("empty_queue_search_started_at"))
-                if not search_start:
-                    search_start = now
-                    qm["empty_queue_search_started_at"] = _to_iso(search_start)
-                elapsed_search = (now - search_start).total_seconds() if search_start else 0.0
-                if elapsed_search >= float(self._search_timeout_seconds):
-                    target_status = DisplayStatus.NOT_FOUND.value
-                    target_reason = render_message("queue.not_found", {})
+                commands_done = self._search_commands_finished(
+                    qm=qm,
+                    arr_type=arr_type,
+                    instance_key=instance_key,
+                    command_status_cache=cache,
+                )
+                if not commands_done:
                     qm["empty_queue_search_started_at"] = None
-                    qm["search_wait_last_log_at"] = None
-                    logger.info(
-                        "Queue monitor search timeout reached before queue entry: "
-                        f"placeholder_id={int(getattr(placeholder, 'id', 0) or 0)} "
-                        f"elapsed={int(elapsed_search)}s timeout={self._search_timeout_seconds}s "
-                        f"status={target_status} reason={target_reason}",
-                        extra={"emoji_type": "warning"},
-                    )
-                else:
+                    qm["grab_history_wait_started_at"] = None
+                    qm["search_commands_finished_at"] = None
                     target_status = DisplayStatus.SEARCHING.value
                     target_reason = render_message("queue.searching", {})
                     target_progress = None
                     if _should_emit_wait_log(qm, "search_wait_last_log_at", now, period_seconds=60):
-                        remaining = max(0, int(float(self._search_timeout_seconds) - elapsed_search))
                         logger.info(
-                            "Queue monitor searching with no queue entry yet: "
+                            "Queue monitor waiting for Arr search command(s): "
                             f"placeholder_id={int(getattr(placeholder, 'id', 0) or 0)} "
-                            f"elapsed={int(elapsed_search)}s remaining={remaining}s status={target_status}",
+                            f"command_ids={self._command_ids_from_qm(qm)} status={target_status}",
                             extra={"emoji_type": "info"},
                         )
+                else:
+                    if self._command_ids_from_qm(qm) and not qm.get("search_commands_finished_at"):
+                        qm["search_commands_finished_at"] = _to_iso(now)
+                    if qm.get("arr_command_poll_failures"):
+                        qm["arr_command_poll_failures"] = {}
+                    if self._history_has_grab(
+                        qm=qm,
+                        arr_type=arr_type,
+                        instance_key=instance_key,
+                        movie=movie,
+                        episode=episode,
+                        series=series,
+                    ):
+                        # Grab recorded but queue row not visible yet. Cap with the same
+                        # post-search grace so SEARCHING cannot hang if the queue never appears.
+                        qm["seen_grab_history"] = True
+                        qm["empty_queue_search_started_at"] = None
+                        grab_wait_start = _from_iso(qm.get("grab_history_wait_started_at"))
+                        if not grab_wait_start:
+                            grab_wait_start = now
+                            qm["grab_history_wait_started_at"] = _to_iso(grab_wait_start)
+                        elapsed_grab_wait = (
+                            (now - grab_wait_start).total_seconds() if grab_wait_start else 0.0
+                        )
+                        if elapsed_grab_wait >= float(self._search_timeout_seconds):
+                            target_status = DisplayStatus.NOT_FOUND.value
+                            target_reason = render_message("queue.not_found", {})
+                            target_progress = None
+                            qm["grab_history_wait_started_at"] = None
+                            qm["search_wait_last_log_at"] = None
+                            logger.info(
+                                "Queue monitor post-search grace reached with grab history but no queue: "
+                                f"placeholder_id={int(getattr(placeholder, 'id', 0) or 0)} "
+                                f"elapsed={int(elapsed_grab_wait)}s timeout={self._search_timeout_seconds}s "
+                                f"status={target_status} reason={target_reason}",
+                                extra={"emoji_type": "warning"},
+                            )
+                        else:
+                            target_status = DisplayStatus.SEARCHING.value
+                            target_reason = render_message("queue.searching", {})
+                            target_progress = None
+                            if _should_emit_wait_log(qm, "search_wait_last_log_at", now, period_seconds=60):
+                                remaining = max(
+                                    0, int(float(self._search_timeout_seconds) - elapsed_grab_wait)
+                                )
+                                logger.info(
+                                    "Queue monitor waiting for queue after grab history: "
+                                    f"placeholder_id={int(getattr(placeholder, 'id', 0) or 0)} "
+                                    f"elapsed={int(elapsed_grab_wait)}s remaining={remaining}s "
+                                    f"status={target_status}",
+                                    extra={"emoji_type": "info"},
+                                )
+                    else:
+                        qm["grab_history_wait_started_at"] = None
+                        search_start = _from_iso(qm.get("empty_queue_search_started_at"))
+                        if not search_start:
+                            search_start = now
+                            qm["empty_queue_search_started_at"] = _to_iso(search_start)
+                        elapsed_search = (now - search_start).total_seconds() if search_start else 0.0
+                        if elapsed_search >= float(self._search_timeout_seconds):
+                            target_status = DisplayStatus.NOT_FOUND.value
+                            target_reason = render_message("queue.not_found", {})
+                            qm["empty_queue_search_started_at"] = None
+                            qm["search_wait_last_log_at"] = None
+                            logger.info(
+                                "Queue monitor post-search grace reached with empty queue/history: "
+                                f"placeholder_id={int(getattr(placeholder, 'id', 0) or 0)} "
+                                f"elapsed={int(elapsed_search)}s timeout={self._search_timeout_seconds}s "
+                                f"status={target_status} reason={target_reason}",
+                                extra={"emoji_type": "warning"},
+                            )
+                        else:
+                            target_status = DisplayStatus.SEARCHING.value
+                            target_reason = render_message("queue.searching", {})
+                            target_progress = None
+                            if _should_emit_wait_log(qm, "search_wait_last_log_at", now, period_seconds=60):
+                                remaining = max(
+                                    0, int(float(self._search_timeout_seconds) - elapsed_search)
+                                )
+                                logger.info(
+                                    "Queue monitor post-search grace with no queue/history yet: "
+                                    f"placeholder_id={int(getattr(placeholder, 'id', 0) or 0)} "
+                                    f"elapsed={int(elapsed_search)}s remaining={remaining}s "
+                                    f"status={target_status}",
+                                    extra={"emoji_type": "info"},
+                                )
 
         extra["queue_monitor"] = qm
         placeholder.extra = extra

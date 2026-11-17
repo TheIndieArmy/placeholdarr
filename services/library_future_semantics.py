@@ -33,7 +33,7 @@ def _local_today_sql() -> ColumnElement:
 
 def _lookahead_int() -> int:
     try:
-        return int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+        return int(settings.calendar_lookahead_days)
     except (TypeError, ValueError):
         return 30
 
@@ -59,9 +59,6 @@ def _preferred_movie_release_date_column(Movie: Any) -> Any:
 
 def sql_episode_future_outside_lookahead(Episode: Any, Season: Any) -> ColumnElement:
     """SQL predicate: episode counts as Future on the library grid (outside lookahead)."""
-    if not _placeholders_enabled():
-        return literal(False)
-
     eff = _local_today_sql()
     lk = _lookahead_int()
     include_specials = _include_specials()
@@ -90,9 +87,6 @@ def sql_episode_future_outside_lookahead(Episode: Any, Season: Any) -> ColumnEle
 
 def sql_movie_future_outside_lookahead(Movie: Any) -> ColumnElement:
     """SQL predicate: movie counts as Future on the library grid (outside lookahead)."""
-    if not _placeholders_enabled():
-        return literal(False)
-
     eff = _local_today_sql()
     lk = _lookahead_int()
     lk_lit = literal(lk)
@@ -120,8 +114,6 @@ def sql_movie_future_outside_lookahead(Movie: Any) -> ColumnElement:
 def movie_row_is_future_outside_lookahead(movie: Movie, *, now_date: date | None = None) -> bool:
     """Python mirror of :func:`sql_movie_future_outside_lookahead` for API row building."""
     eff = now_date or local_today()
-    if not _placeholders_enabled():
-        return False
     if str(getattr(movie, "determination", None) or "") != DETERMINATION_NOT_NEEDED:
         return False
     if bool(getattr(movie, "has_file", False)) or bool(getattr(movie, "has_placeholder", False)):
@@ -154,8 +146,6 @@ def movie_row_is_future_outside_lookahead(movie: Movie, *, now_date: date | None
 def episode_row_is_future_outside_lookahead(episode: Episode, season_number: int, *, now_date: date | None = None) -> bool:
     """Python mirror for per-episode checks (detail views) if needed."""
     eff = now_date or local_today()
-    if not _placeholders_enabled():
-        return False
     if season_number == 0 and not _include_specials():
         return False
     if str(getattr(episode, "determination", None) or "") != DETERMINATION_NOT_NEEDED:

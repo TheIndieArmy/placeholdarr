@@ -102,6 +102,15 @@ TV_DENSITY_REMATERIALIZE_SETTING_KEYS = frozenset(
     }
 )
 
+# Settings that re-run determination/materialization for Coming Soon window membership
+# (create/retire + Library Future). Countdown text alone is not in this set.
+CALENDAR_LIFECYCLE_REMATERIALIZE_SETTING_KEYS = frozenset(
+    {
+        "CALENDAR_LOOKAHEAD_DAYS",
+        "PREFERRED_MOVIE_DATE_TYPE",
+    }
+)
+
 _POSTER_LANGUAGE_OPTIONS = [
     {"value": "en", "label": "English (en)"},
     {"value": "de", "label": "German (de)"},
@@ -694,7 +703,9 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "label": "Calendar lookahead days (Coming Soon window)",
                 "description": (
                     "How far ahead Placeholdarr creates and keeps Coming Soon placeholders for releases that are not yet available in your library. "
-                    "Set to 0 to disable Coming Soon placeholders entirely. Use a positive number for a day cap (e.g. 30). Use -1 for unlimited lookahead within your release-date rules."
+                    "Set to 0 to disable Coming Soon for future releases (no future placeholders; past-due missing titles can still get normal placeholders). "
+                    "Use a positive number for a day cap (e.g. 30). Use -1 for unlimited lookahead within your release-date rules. "
+                    "Changing this re-evaluates existing titles (Apply now or next full sync)."
                 ),
                 "type": "int",
                 "min": -1,
@@ -707,7 +718,9 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "section": "Calendar",
                 "label": "Movie release date type",
                 "description": (
-                    "Choose which Radarr release date type will be used to determine when placeholders are created."
+                    "Choose which Radarr release date type will be used to determine when placeholders are created. "
+                    "Changing this re-evaluates existing movie titles against the Coming Soon window "
+                    "(Apply now or next full sync)."
                 ),
                 "type": "choice",
                 "restart_required": False,
@@ -1781,15 +1794,16 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "QUEUE_MONITOR_SEARCH_TIMEOUT_SECONDS",
             {
                 "section": "Advanced",
-                "label": "Queue monitor search timeout (seconds)",
+                "label": "Queue monitor post-search grace (seconds)",
                 "description": (
-                    "The amount of time to wait for content to be added to the Radarr/Sonarr queue after it is "
-                    "requested. If content does not reach the queue before this timeout, Placeholdarr assumes no "
-                    "qualifying releases were found. Adjust this setting based on how long typical indexer searches "
-                    "take in your environment. Default 120 seconds (2 minutes)."
+                    "Grace period after Arr reports the playback search command done. Placeholdarr looks for a "
+                    "queue item or grab in history; if neither appears, status becomes no qualifying release. "
+                    "Default 5 seconds. This does not limit how long the search itself may run. Raise it when "
+                    "your stack often needs more than a few seconds between \"search completed\" and "
+                    "\"item in queue\"."
                 ),
                 "type": "int",
-                "min": 60,
+                "min": 1,
                 "restart_required": True,
             },
         ),
@@ -3539,6 +3553,13 @@ def save_settings(
             if _setting_value_changed(key):
                 tv_density_rematerialize_keys_changed.append(key)
 
+        calendar_lifecycle_rematerialize_keys_changed: list[str] = []
+        for key in CALENDAR_LIFECYCLE_REMATERIALIZE_SETTING_KEYS:
+            if key not in validated:
+                continue
+            if _setting_value_changed(key):
+                calendar_lifecycle_rematerialize_keys_changed.append(key)
+
         if "LIBRARY_DESTINATION_MAP_JSON" in validated:
             raw_map = str(validated.get("LIBRARY_DESTINATION_MAP_JSON") or "").strip()
             if raw_map:
@@ -4229,6 +4250,57 @@ def save_settings(
                     )
                     tv_density_rematerialize_summary = {"ok": False, "error": str(dens_exc)}
 
+        calendar_lifecycle_rematerialize_summary: dict[str, Any] | None = None
+        if calendar_lifecycle_rematerialize_keys_changed and apply_scope:
+            effective_cal_scope = str(apply_scope)
+            if effective_cal_scope == "future":
+                effective_cal_scope = "next_full_sync"
+            if effective_cal_scope == "now":
+                def _apply_now_calendar_lifecycle() -> None:
+                    from services.source_of_truth.calendar_lifecycle_rematerialize import (
+                        execute_calendar_lifecycle_rematerialize_apply_scope,
+                    )
+
+                    out = execute_calendar_lifecycle_rematerialize_apply_scope(
+                        "now",
+                        source="settings_save:calendar_lifecycle",
+                    )
+                    logger.info(
+                        f"Calendar lifecycle rematerialize after settings save (deferred) scope=now "
+                        f"keys={calendar_lifecycle_rematerialize_keys_changed} out={out}",
+                        extra={"emoji_type": "processing"},
+                    )
+
+                _defer_settings_post_save_work("calendar-lifecycle-rematerialize", _apply_now_calendar_lifecycle)
+                calendar_lifecycle_rematerialize_summary = {
+                    "ok": True,
+                    "scope": "now",
+                    "enqueued": True,
+                    "deferred": True,
+                    "pending": True,
+                }
+            else:
+                try:
+                    from services.source_of_truth.calendar_lifecycle_rematerialize import (
+                        execute_calendar_lifecycle_rematerialize_apply_scope,
+                    )
+
+                    calendar_lifecycle_rematerialize_summary = execute_calendar_lifecycle_rematerialize_apply_scope(
+                        effective_cal_scope,
+                        source="settings_save:calendar_lifecycle",
+                    )
+                    logger.info(
+                        f"Calendar lifecycle rematerialize after settings save scope={effective_cal_scope} "
+                        f"keys={calendar_lifecycle_rematerialize_keys_changed}",
+                        extra={"emoji_type": "processing"},
+                    )
+                except Exception as cal_exc:
+                    logger.warning(
+                        f"Calendar lifecycle rematerialize after settings save failed: {cal_exc}",
+                        extra={"emoji_type": "warning"},
+                    )
+                    calendar_lifecycle_rematerialize_summary = {"ok": False, "error": str(cal_exc)}
+
         logger.info(
             "Settings saved"
             f" partial={partial}"
@@ -4254,6 +4326,8 @@ def save_settings(
             "destination_rematerialize": destination_rematerialize_summary,
             "tv_density_rematerialize_keys_changed": tv_density_rematerialize_keys_changed,
             "tv_density_rematerialize": tv_density_rematerialize_summary,
+            "calendar_lifecycle_rematerialize_keys_changed": calendar_lifecycle_rematerialize_keys_changed,
+            "calendar_lifecycle_rematerialize": calendar_lifecycle_rematerialize_summary,
         }
     except Exception as exc:
         if session is not None:

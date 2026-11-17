@@ -127,6 +127,7 @@ _ACQUIRING_DISPLAY_STATUSES = frozenset(
         DisplayStatus.SEARCH_QUEUED.value,
         DisplayStatus.DOWNLOADING.value,
         DisplayStatus.IMPORT_IN_PROGRESS.value,
+        DisplayStatus.IMPORT_BLOCKED.value,
     }
 )
 
@@ -996,9 +997,14 @@ def _compute_determination(
     # - lookahead < 0  => infinite
     # - lookahead == 0 => disabled/off for future placeholders
     # - lookahead > 0  => strict horizon in days
-    if placeholders_enabled is True and lookahead_days is not None and not has_file and not is_deleted:
+    # Coming Soon disabled (placeholders_enabled False, normally CALENDAR_LOOKAHEAD_DAYS=0)
+    # must still suppress futures. Do not skip this guard when disabled; that used to
+    # create placeholders for every missing future title (#189).
+    if lookahead_days is not None and not has_file and not is_deleted:
         effective_now = now_date or local_today()
         lookahead = int(lookahead_days)
+        if placeholders_enabled is False:
+            lookahead = 0
 
         if lookahead < 0:
             # Infinite mode keeps normal lifecycle behavior, including unknown dates.
@@ -1098,7 +1104,7 @@ def run_determination_pass(*, on_progress=None) -> dict:
             last_log_episodes: list[float] = [started_mono]
             last_live: list[float] = [0.0]
             placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
-            lookahead_days = int(getattr(settings, 'CALENDAR_LOOKAHEAD_DAYS', 30) or 30)
+            lookahead_days = int(settings.calendar_lookahead_days)
             now_date = local_today()
 
             movies_all = int(session.query(func.count(Movie.id)).scalar() or 0)
@@ -1474,7 +1480,7 @@ def run_determination_for_entities_in_session(
     last_log_episodes: list[float] = [started_mono]
 
     placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
-    lookahead_days = int(getattr(settings, 'CALENDAR_LOOKAHEAD_DAYS', 30) or 30)
+    lookahead_days = int(settings.calendar_lookahead_days)
     now_date = local_today()
 
     movies_q = session.query(Movie)

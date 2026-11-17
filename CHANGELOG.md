@@ -13,6 +13,38 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## Released
 
+## [0.13.5] - 2026-11-17
+
+### Summary
+
+- **Single-Arr placeholder play**: One Radarr/Sonarr no longer skips search when the path is unclear and Play Actions is hidden (#186).
+- **Playback path mappings**: Media-server path mappings apply when matching a played path to an Arr (#186).
+- **Post-search queue grace**: Empty-queue NOT_FOUND waits until Arr search commands finish, then a short grace (default 5s) for queue or grab history (#142).
+- **Import blocked status**: Queue `importBlocked` becomes a terminal placeholder status with clear copy (#142).
+- **Last play in sidebar**: Expanded sidebar shows time since the newest playback webhook; expand for source, title, episode, player, and exact time (#142).
+
+### Added
+
+- **IMPORT_BLOCKED status**: When Arr reports `trackedDownloadState=importBlocked`, show “Download finished, import blocked” and stop queue monitoring (#142).
+- **Last play in sidebar**: Expanded sidebar shows time since the newest playback webhook; expand for source, title, episode, player, and exact time. Silence is informational, not a health check (#142).
+
+### Fixed
+
+- **Calendar lookahead days = 0**: Suppresses future movie/episode placeholders instead of creating them all; stored `0` is no longer coerced to 30 (#189).
+- **Library Future with window off**: Titles outside a disabled Coming Soon window still classify as Future, not Missing (#189).
+- **Single-Arr placeholder play**: When path match is unclear and Always/Fallback are Off (Play Actions N/A with one Arr), use the only qualifying instance instead of skipping (#186).
+- **Playback path mappings**: Instance path match applies media-server remote→local mappings before destination/library folder checks (#186).
+- **False not-found while Arr still searching**: Queue monitor no longer starts the empty-queue timeout until playback search command(s) are terminal; also checks grab history (#142).
+- **Post-search command poll hang**: Repeated Arr command-status or endpoint resolve failures no longer leave placeholders stuck on Searching (#142).
+- **Grab history without a time bound**: History checks require a search timestamp so old grabs cannot block NOT_FOUND (#142).
+- **Grab history without a queue row**: After search commands finish, a grab in history without a matching queue item is capped by the same post-search grace instead of Searching forever (#142).
+
+### Changed
+
+- **Queue monitor post-search grace**: `QUEUE_MONITOR_SEARCH_TIMEOUT_SECONDS` defaults to 5 (was 120) and applies after search commands finish, not during the search itself (#142).
+- **Post-search grace Settings copy**: Clarifies the timer starts after the Arr search command finishes and can be raised for slow grab-to-queue stacks (#142).
+- **Coming Soon window save**: Changing Calendar lookahead days or Movie release date type offers Apply now / Next full sync so existing titles are re-checked for create/retire (#189).
+
 ## [0.13.4] - 2026-11-16
 
 ### Summary

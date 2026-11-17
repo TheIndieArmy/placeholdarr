@@ -351,6 +351,19 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         requires_ack=True,
     ),
     WhatsNewNotice(
+        id="playback-search-calendar-0-13-5",
+        since_version="0.13.5",
+        title="Clearer playback search and calendar fixes",
+        body=(
+            "Single-Arr placeholder play no longer skips search when the path is unclear. Not-found waits "
+            "until Arr's search command is done and checks queue or grab history, so the post-search grace "
+            "can stay short (default 5 seconds) and still be raised in Advanced if needed. Import blocked "
+            "is a clear terminal status. Fixed calendar lookahead 0 creating all future placeholders; "
+            "Apply now or Next full sync on save re-checks existing titles. Expanded sidebar Last play "
+            "shows the newest playback webhook age and detail."
+        ),
+    ),
+    WhatsNewNotice(
         id="integration-boot-readiness-0-13-4",
         since_version="0.13.4",
         title="Ongoing connection checks",

@@ -229,12 +229,22 @@ def _match_instance_key_from_path(path: str | None, *, arr_type: str) -> str | N
     Returns a single key, ``all`` when ambiguous / shared, or ``None`` when unmatched.
     Longest matching dest folder wins when multiple map rows apply.
     Unmapped paths under the default library folder map to ranking index 0.
+    Media-server path mappings are applied first so Tautulli/Plex remote paths
+    can match Placeholdarr-local destination folders.
     """
     if not path:
         return None
     arr = str(arr_type or '').strip().lower()
     if arr not in {'radarr', 'sonarr'}:
         return None
+
+    try:
+        from services.media_path_mappings import apply_media_server_path_mappings
+
+        mapped = apply_media_server_path_mappings(path)
+        path = _normalize_path(mapped) or path
+    except Exception:
+        path = _normalize_path(path) or path
 
     try:
         from services.library_destinations import parse_library_destination_map
@@ -1636,7 +1646,20 @@ def _select_play_actions_placeholder_rows(
             else 'placeholder_ambiguous_always_only'
         )
     else:
-        # Always/Fallback all Off (or no active rows): do not invent a first-ranked target.
+        # Always/Fallback all Off (or no active rows): do not invent a first-ranked
+        # target when multiple Arrs qualify. With exactly one qualifying instance,
+        # use it: Play Actions UI is N/A for single-instance and Off must not skip.
+        if len(ranked) == 1 and ranked[0] in rows_by_instance:
+            only = ranked[0]
+            return _selection_result(
+                rows_by_instance,
+                chosen_keys=[only],
+                preferred_instance=only,
+                fallback_instances=[],
+                selection_reason='placeholder_single_instance',
+                root_match=root_match,
+                qualifying_instances=ranked,
+            )
         return _selection_result(
             rows_by_instance,
             chosen_keys=[],
@@ -1939,7 +1962,7 @@ def _catalog_anchor_season_episode(
 
     include_specials = bool(getattr(settings, "INCLUDE_SPECIALS", False))
     placeholders_enabled = bool(getattr(settings, "coming_soon_placeholders_enabled", True))
-    lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+    lookahead_days = int(settings.calendar_lookahead_days)
     today = date_cls.today()
 
     if bool(getattr(series_row, "block_placeholder", False)):
@@ -2157,6 +2180,7 @@ def _activate_queue_monitor_after_playback_search(
     intents: list[StatusIntent],
     *,
     search_triggered: bool,
+    arr_command_ids: list[int] | None = None,
 ) -> None:
     """Mark placeholders for NOTIFY-driven queue monitoring after a playback ARR search.
 
@@ -2167,20 +2191,35 @@ def _activate_queue_monitor_after_playback_search(
     empty-search timer must not survive a new playback-triggered search, or the
     next poll can immediately apply NOT_FOUND (seen when playing an earlier
     episode re-searches a later title that was still mid-download).
+
+    ``arr_command_ids`` are Arr ``/api/v3/command`` ids for the search(es) just
+    triggered; the queue monitor waits until those finish before the short
+    empty-queue / history grace.
     """
     if not search_triggered or not intents:
         return
     now = datetime.now(timezone.utc)
+    cmd_ids: list[int] = []
+    for raw in arr_command_ids or []:
+        try:
+            cid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if cid > 0 and cid not in cmd_ids:
+            cmd_ids.append(cid)
     for intent in intents:
         ph = session.query(Placeholder).filter(Placeholder.id == int(intent.placeholder_id)).first()
         if ph:
             ph.queue_monitor_active = True
             ph.queue_monitor_active_set_at = now
             extra = dict(ph.extra) if isinstance(getattr(ph, "extra", None), dict) else {}
-            extra["queue_monitor"] = {
+            qm_state: dict[str, Any] = {
                 "seen_queue_once": False,
                 "search_restarted_at": now.isoformat(),
             }
+            if cmd_ids:
+                qm_state["arr_command_ids"] = list(cmd_ids)
+            extra["queue_monitor"] = qm_state
             ph.extra = extra
             try:
                 flag_modified(ph, "extra")
@@ -2537,7 +2576,7 @@ def _run_movie_search_for_movie_id(movie_pk: int) -> dict[str, Any]:
     if not was_monitored and radarr_id is not None:
         monitored_updated = set_radarr_movie_monitored(radarr_id, True, url=base_url, api_key=api_key)
 
-    search_triggered = False
+    search_command_id: int | None = None
     skipped_search_reason: str | None = None
     if _playback_monitor_only_no_search(dest_folder):
         skipped_search_reason = "monitor_only_no_search"
@@ -2546,8 +2585,9 @@ def _run_movie_search_for_movie_id(movie_pk: int) -> dict[str, Any]:
     elif is_future and _suppress_search_for_future_titles(dest_folder):
         skipped_search_reason = "future_only"
     elif radarr_id is not None:
-        search_triggered = trigger_radarr_movie_search(radarr_id, url=base_url, api_key=api_key)
+        search_command_id = trigger_radarr_movie_search(radarr_id, url=base_url, api_key=api_key)
 
+    search_triggered = search_command_id is not None
     intents: list = []
     write = get_session()
     try:
@@ -2565,7 +2605,10 @@ def _run_movie_search_for_movie_id(movie_pk: int) -> dict[str, Any]:
         if intents:
             StatusOrchestrator(session=write).apply_and_project_statuses(intents)
         _activate_queue_monitor_after_playback_search(
-            write, intents, search_triggered=bool(search_triggered)
+            write,
+            intents,
+            search_triggered=bool(search_triggered),
+            arr_command_ids=[int(search_command_id)] if search_command_id is not None else None,
         )
         write.commit()
     finally:
@@ -2580,6 +2623,7 @@ def _run_movie_search_for_movie_id(movie_pk: int) -> dict[str, Any]:
         "dest_folder": dest_folder or "",
         "monitored_updated": monitored_updated,
         "search_triggered": bool(search_triggered),
+        "arr_command_ids": [int(search_command_id)] if search_command_id is not None else [],
         "skipped_search_reason": skipped_search_reason,
         "was_monitored": was_monitored,
         "is_future": is_future,
@@ -2881,6 +2925,7 @@ def _execute_playback_sonarr_search(
     """Arr HTTP only: run the search plan from ``_plan_playback_sonarr_search``."""
     empty: dict[str, Any] = {
         "search_triggered": False,
+        "arr_command_ids": [],
         "season_searches": {},
         "season_searches_failed": [],
         "episode_search": None,
@@ -2893,10 +2938,23 @@ def _execute_playback_sonarr_search(
         return empty
 
     series_id = int(sonarr_series_id)
+    command_ids: list[int] = []
+
+    def _note_command(cid: int | None) -> bool:
+        if cid is None:
+            return False
+        try:
+            value = int(cid)
+        except (TypeError, ValueError):
+            return False
+        if value > 0 and value not in command_ids:
+            command_ids.append(value)
+        return True
+
     if kind == "season":
         season_searches: dict[str, bool] = {}
         for sn in plan.get("season_full_searches") or []:
-            ok = bool(
+            ok = _note_command(
                 trigger_sonarr_search(
                     series_id=series_id,
                     season_number=int(sn),
@@ -2917,7 +2975,7 @@ def _execute_playback_sonarr_search(
                     continue
                 seen_ids.add(eid)
                 unique_ids.append(eid)
-            episode_search_ok = bool(
+            episode_search_ok = _note_command(
                 trigger_sonarr_search(
                     series_id=series_id,
                     episode_ids=unique_ids,
@@ -2942,6 +3000,7 @@ def _execute_playback_sonarr_search(
         any_ok = any(season_searches.values()) or bool(episode_search_ok)
         return {
             "search_triggered": bool(any_ok),
+            "arr_command_ids": list(command_ids),
             "season_searches": season_searches,
             "season_searches_failed": failed,
             "episode_search": episode_search_ok,
@@ -2949,9 +3008,10 @@ def _execute_playback_sonarr_search(
         }
 
     if kind == "series":
-        ok = bool(trigger_sonarr_search(series_id=series_id, url=base_url, api_key=api_key))
+        ok = _note_command(trigger_sonarr_search(series_id=series_id, url=base_url, api_key=api_key))
         return {
             "search_triggered": ok,
+            "arr_command_ids": list(command_ids),
             "season_searches": {},
             "season_searches_failed": [],
             "episode_search": None,
@@ -2959,7 +3019,7 @@ def _execute_playback_sonarr_search(
         }
 
     eligible_ids = [int(x) for x in (plan.get("eligible_ids") or plan.get("episode_ids") or [])]
-    ok = bool(
+    ok = _note_command(
         trigger_sonarr_search(
             series_id=series_id,
             episode_ids=eligible_ids,
@@ -2969,6 +3029,7 @@ def _execute_playback_sonarr_search(
     )
     return {
         "search_triggered": ok,
+        "arr_command_ids": list(command_ids),
         "season_searches": {},
         "season_searches_failed": [],
         "episode_search": ok,
@@ -3273,6 +3334,7 @@ def _run_episode_search_for_series_id(series_pk: int, payload: dict[str, Any]) -
 
     search_result: dict[str, Any] = {
         "search_triggered": False,
+        "arr_command_ids": [],
         "season_searches": {},
         "season_searches_failed": [],
         "episode_search": None,
@@ -3289,6 +3351,14 @@ def _run_episode_search_for_series_id(series_pk: int, payload: dict[str, Any]) -
     elif search_eligible_pks and series_ensure_ok is False:
         skipped_search_reason = skipped_search_reason or "series_monitor_failed"
     search_triggered = bool(search_result.get("search_triggered"))
+    arr_command_ids: list[int] = []
+    for raw_cid in search_result.get("arr_command_ids") or []:
+        try:
+            cid = int(raw_cid)
+        except (TypeError, ValueError):
+            continue
+        if cid > 0 and cid not in arr_command_ids:
+            arr_command_ids.append(cid)
 
     reached_end_marked = False
     if bool((target_meta or {}).get("reached_end")) and sonarr_series_id:
@@ -3332,7 +3402,10 @@ def _run_episode_search_for_series_id(series_pk: int, payload: dict[str, Any]) -
         if intents:
             StatusOrchestrator(session=write).apply_and_project_statuses(intents)
         _activate_queue_monitor_after_playback_search(
-            write, intents, search_triggered=bool(search_triggered)
+            write,
+            intents,
+            search_triggered=bool(search_triggered),
+            arr_command_ids=arr_command_ids,
         )
         write.commit()
     except Exception:
@@ -3365,6 +3438,7 @@ def _run_episode_search_for_series_id(series_pk: int, payload: dict[str, Any]) -
         "monitor_failed_ids": list(monitor_result.get("failed_ids") or []),
         "series_ensure_ok": series_ensure_ok,
         "search_triggered": bool(search_triggered),
+        "arr_command_ids": list(arr_command_ids),
         "season_searches": search_result.get("season_searches") or {},
         "season_searches_failed": list(search_result.get("season_searches_failed") or []),
         "episode_search": search_result.get("episode_search"),
