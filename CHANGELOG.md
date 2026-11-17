@@ -31,6 +31,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **False not-found while Arr still searching**: Queue monitor no longer starts the empty-queue timeout until playback search command(s) are terminal; also checks grab history (#142).
 - **Post-search command poll hang**: Repeated Arr command-status or endpoint resolve failures no longer leave placeholders stuck on Searching (#142).
 - **Grab history without a time bound**: History checks require a search timestamp so old grabs cannot block NOT_FOUND (#142).
+- **Grab history without a queue row**: After search commands finish, a grab in history without a matching queue item is capped by the same post-search grace instead of Searching forever (#142).
 
 ### Changed
 
