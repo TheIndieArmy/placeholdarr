@@ -21,6 +21,10 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Single-Arr placeholder play**: When path match is unclear and Always/Fallback are Off (Play Actions N/A with one Arr), use the only qualifying instance instead of skipping (#186).
 - **Playback path mappings**: Instance path match applies media-server remote→local mappings before destination/library folder checks (#186).
 
+### Changed
+
+- **Coming Soon window save**: Changing Calendar lookahead days or Movie release date type offers Apply now / Next full sync so existing titles are re-checked for create/retire (#189).
+
 ## Pre-release
 
 ## Released

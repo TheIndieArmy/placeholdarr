@@ -2272,18 +2272,34 @@ export function App() {
               hasUnsavedChanges && destinationRematerializeSettingsChanged(baselineValues, fieldValues);
             const densityChanged =
               hasUnsavedChanges && tvDensityRematerializeSettingsChanged(baselineValues, fieldValues);
+            const calendarLifecycleChanged =
+              hasUnsavedChanges && calendarLifecycleRematerializeSettingsChanged(baselineValues, fieldValues);
             const densityConsolidating =
               densityChanged && tvDensityChangeIsConsolidating(baselineValues, fieldValues);
             const messagesDirty = statusMessagesMeta.dirty;
             const needsBackfillPrompt =
-              statusKeysChanged || messagesDirty || destinationChanged || densityChanged;
+              statusKeysChanged ||
+              messagesDirty ||
+              destinationChanged ||
+              densityChanged ||
+              calendarLifecycleChanged;
             let applyScope: NfoBackfillApplyScope | undefined;
             try {
               if (needsBackfillPrompt) {
                 const densityOnly =
-              densityChanged && !statusKeysChanged && !messagesDirty && !destinationChanged;
+                  densityChanged &&
+                  !statusKeysChanged &&
+                  !messagesDirty &&
+                  !destinationChanged &&
+                  !calendarLifecycleChanged;
+                const calendarOnly =
+                  calendarLifecycleChanged &&
+                  !statusKeysChanged &&
+                  !messagesDirty &&
+                  !destinationChanged &&
+                  !densityChanged;
                 const modalCopy =
-              densityOnly
+                  densityOnly
                     ? {
                         title: "Apply TV placeholder density to existing files",
                         description: densityConsolidating
@@ -2291,13 +2307,27 @@ export function App() {
                           : "Changing TV placeholder density or retire-when rematerializes existing TV placeholders on disk. Choose Apply now or wait for the next full sync.",
                         countMedia: "tv" as const,
                       }
-                  : destinationChanged && !statusKeysChanged && !messagesDirty && !densityChanged
+                    : calendarOnly
+                      ? {
+                          title: "Apply Coming Soon window to existing titles",
+                          description:
+                            "Changing the Coming Soon window or movie release date type re-checks which titles should have placeholders. Choose Apply now or wait for the next full sync.",
+                        }
+                  : destinationChanged &&
+                      !statusKeysChanged &&
+                      !messagesDirty &&
+                      !densityChanged &&
+                      !calendarLifecycleChanged
                     ? {
                         title: "Apply library destinations to existing placeholders",
                         description:
                           "Library Root or destination map changes move placeholders on disk. Choose Apply now or wait for the next full sync.",
                       }
-                    : posterLanguageChanged && !messagesDirty && !destinationChanged && !densityChanged
+                    : posterLanguageChanged &&
+                        !messagesDirty &&
+                        !destinationChanged &&
+                        !densityChanged &&
+                        !calendarLifecycleChanged
                     ? {
                         title: "Apply poster language to existing placeholders",
                         description:
@@ -2308,13 +2338,16 @@ export function App() {
                         title: "Apply changes to existing placeholders",
                         description: posterLanguageChanged
                           ? "Choose when status display, poster language, overlays, and message template updates should affect placeholders already on disk."
-                          : "Choose when status display, poster overlays, and message template updates should affect placeholders already on disk.",
+                          : calendarLifecycleChanged
+                            ? "Choose when status, Coming Soon window, poster overlays, and message template updates should affect placeholders already on disk."
+                            : "Choose when status display, poster overlays, and message template updates should affect placeholders already on disk.",
                       }
                     : statusKeysChanged
                       ? {
                           title: "Apply status & poster changes",
-                          description:
-                            "Choose when updates to placeholder status visibility, projection targets, poster overlays, or NFO premiere date should affect existing placeholders.",
+                          description: calendarLifecycleChanged
+                            ? "Choose when updates to status visibility, Coming Soon window, poster overlays, or NFO premiere date should affect existing placeholders."
+                            : "Choose when updates to placeholder status visibility, projection targets, poster overlays, or NFO premiere date should affect existing placeholders.",
                         }
                       : destinationChanged
                         ? {
@@ -2330,6 +2363,12 @@ export function App() {
                                 : "Changing TV placeholder density or retire-when rematerializes existing TV placeholders on disk. Choose Apply now or wait for the next full sync.",
                               countMedia: "tv" as const,
                         }
+                      : calendarLifecycleChanged
+                        ? {
+                            title: "Apply Coming Soon window to existing titles",
+                            description:
+                              "Changing the Coming Soon window or movie release date type re-checks which titles should have placeholders. Choose Apply now or wait for the next full sync.",
+                          }
                       : {
                           title: "Apply template changes",
                           description:
@@ -2347,7 +2386,9 @@ export function App() {
               /* Persist field-backed settings before saving templates + enqueueing nfo_refresh jobs. */
               if (hasUnsavedChanges) {
                 const settingsBackfillScope =
-                  statusKeysChanged || destinationChanged || densityChanged ? applyScope : undefined;
+                  statusKeysChanged || destinationChanged || densityChanged || calendarLifecycleChanged
+                    ? applyScope
+                    : undefined;
                 const result = await saveSettings(
                   buildPersistableSettingsValues(fieldValues, settingsPayload),
                   false,
@@ -10348,6 +10389,10 @@ function ComingSoonCountdownDescription(props: { spacing: "settings" | "wizard" 
         <span className="font-medium text-slate-200">Disabled</span>
         {": "}Future placeholders always show &quot;Coming soon&quot;.
       </li>
+      <li>
+        Does not create or remove placeholders. Run Calendar sync (or wait for the next one) to refresh
+        countdown text on titles that already have placeholders.
+      </li>
     </ul>
   );
 }
@@ -12015,10 +12060,24 @@ function destinationRematerializeSettingsChanged(baseline: FieldValueMap, curren
 
 const TV_DENSITY_REMATERIALIZE_SETTING_KEYS = ["TV_PLACEHOLDER_DENSITY", "TV_DENSITY_RETIRE_WHEN"] as const;
 
+const CALENDAR_LIFECYCLE_REMATERIALIZE_SETTING_KEYS = [
+  "CALENDAR_LOOKAHEAD_DAYS",
+  "PREFERRED_MOVIE_DATE_TYPE",
+] as const;
+
 const TV_DENSITY_RANK: Record<string, number> = { episode: 0, season: 1, series: 2 };
 
 function tvDensityRematerializeSettingsChanged(baseline: FieldValueMap, current: FieldValueMap): boolean {
   return TV_DENSITY_REMATERIALIZE_SETTING_KEYS.some(
+    (key) => String(baseline[key] ?? "") !== String(current[key] ?? ""),
+  );
+}
+
+function calendarLifecycleRematerializeSettingsChanged(
+  baseline: FieldValueMap,
+  current: FieldValueMap,
+): boolean {
+  return CALENDAR_LIFECYCLE_REMATERIALIZE_SETTING_KEYS.some(
     (key) => String(baseline[key] ?? "") !== String(current[key] ?? ""),
   );
 }
