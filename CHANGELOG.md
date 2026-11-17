@@ -9,6 +9,12 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+## Pre-release
+
+## Released
+
+## [0.13.5] - 2026-11-17
+
 ### Summary
 
 - **Single-Arr placeholder play**: One Radarr/Sonarr no longer skips search when the path is unclear and Play Actions is hidden (#186).
@@ -38,10 +44,6 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Queue monitor post-search grace**: `QUEUE_MONITOR_SEARCH_TIMEOUT_SECONDS` defaults to 5 (was 120) and applies after search commands finish, not during the search itself (#142).
 - **Post-search grace Settings copy**: Clarifies the timer starts after the Arr search command finishes and can be raised for slow grab-to-queue stacks (#142).
 - **Coming Soon window save**: Changing Calendar lookahead days or Movie release date type offers Apply now / Next full sync so existing titles are re-checked for create/retire (#189).
-
-## Pre-release
-
-## Released
 
 ## [0.13.4] - 2026-11-16
 
