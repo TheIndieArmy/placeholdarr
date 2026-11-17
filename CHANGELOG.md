@@ -9,6 +9,16 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Summary
+
+- **Single-Arr placeholder play**: One Radarr/Sonarr no longer skips search when the path is unclear and Play Actions is hidden (#186).
+- **Playback path mappings**: Media-server path mappings apply when matching a played path to an Arr (#186).
+
+### Fixed
+
+- **Single-Arr placeholder play**: When path match is unclear and Always/Fallback are Off (Play Actions N/A with one Arr), use the only qualifying instance instead of skipping (#186).
+- **Playback path mappings**: Instance path match applies media-server remote→local mappings before destination/library folder checks (#186).
+
 ## Pre-release
 
 ## Released

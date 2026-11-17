@@ -229,12 +229,22 @@ def _match_instance_key_from_path(path: str | None, *, arr_type: str) -> str | N
     Returns a single key, ``all`` when ambiguous / shared, or ``None`` when unmatched.
     Longest matching dest folder wins when multiple map rows apply.
     Unmapped paths under the default library folder map to ranking index 0.
+    Media-server path mappings are applied first so Tautulli/Plex remote paths
+    can match Placeholdarr-local destination folders.
     """
     if not path:
         return None
     arr = str(arr_type or '').strip().lower()
     if arr not in {'radarr', 'sonarr'}:
         return None
+
+    try:
+        from services.media_path_mappings import apply_media_server_path_mappings
+
+        mapped = apply_media_server_path_mappings(path)
+        path = _normalize_path(mapped) or path
+    except Exception:
+        path = _normalize_path(path) or path
 
     try:
         from services.library_destinations import parse_library_destination_map
@@ -1636,7 +1646,20 @@ def _select_play_actions_placeholder_rows(
             else 'placeholder_ambiguous_always_only'
         )
     else:
-        # Always/Fallback all Off (or no active rows): do not invent a first-ranked target.
+        # Always/Fallback all Off (or no active rows): do not invent a first-ranked
+        # target when multiple Arrs qualify. With exactly one qualifying instance,
+        # use it: Play Actions UI is N/A for single-instance and Off must not skip.
+        if len(ranked) == 1 and ranked[0] in rows_by_instance:
+            only = ranked[0]
+            return _selection_result(
+                rows_by_instance,
+                chosen_keys=[only],
+                preferred_instance=only,
+                fallback_instances=[],
+                selection_reason='placeholder_single_instance',
+                root_match=root_match,
+                qualifying_instances=ranked,
+            )
         return _selection_result(
             rows_by_instance,
             chosen_keys=[],
