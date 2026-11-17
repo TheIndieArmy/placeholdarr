@@ -1962,7 +1962,7 @@ def _catalog_anchor_season_episode(
 
     include_specials = bool(getattr(settings, "INCLUDE_SPECIALS", False))
     placeholders_enabled = bool(getattr(settings, "coming_soon_placeholders_enabled", True))
-    lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+    lookahead_days = int(settings.calendar_lookahead_days)
     today = date_cls.today()
 
     if bool(getattr(series_row, "block_placeholder", False)):

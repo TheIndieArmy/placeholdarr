@@ -5263,7 +5263,7 @@ async def calendar_view(month: str = Query("")):
         return JSONResponse(content={"ok": False, "message": str(exc)}, status_code=400)
 
     today = local_today()
-    lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+    lookahead_days = int(settings.calendar_lookahead_days)
     countdown_enabled = bool(getattr(settings, "ENABLE_COMING_SOON_COUNTDOWN", True))
     placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
 
@@ -5735,7 +5735,7 @@ async def settings_save(request: Request):
     )
     before_arr_fingerprint = _arr_endpoint_fingerprint()
     was_setup_complete = bool(get_onboarding_status().get("setup_complete"))
-    lookahead_before = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+    lookahead_before = int(settings.calendar_lookahead_days)
     include_specials_before = bool(getattr(settings, "INCLUDE_SPECIALS", False))
     apply_scope_raw = payload.get("apply_scope") if isinstance(payload, dict) else None
     apply_scope = (
@@ -5758,7 +5758,7 @@ async def settings_save(request: Request):
     elif result.get("ok") and not partial and arr_endpoints_changed:
         _launch_arr_change_full_sync(reason="arr_endpoint_changed")
     if result.get("ok"):
-        lookahead_after = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+        lookahead_after = int(settings.calendar_lookahead_days)
         include_specials_after = bool(getattr(settings, "INCLUDE_SPECIALS", False))
         if lookahead_before != lookahead_after or include_specials_before != include_specials_after:
             try:

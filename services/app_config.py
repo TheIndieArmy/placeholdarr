@@ -694,7 +694,8 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "label": "Calendar lookahead days (Coming Soon window)",
                 "description": (
                     "How far ahead Placeholdarr creates and keeps Coming Soon placeholders for releases that are not yet available in your library. "
-                    "Set to 0 to disable Coming Soon placeholders entirely. Use a positive number for a day cap (e.g. 30). Use -1 for unlimited lookahead within your release-date rules."
+                    "Set to 0 to disable Coming Soon for future releases (no future placeholders; past-due missing titles can still get normal placeholders). "
+                    "Use a positive number for a day cap (e.g. 30). Use -1 for unlimited lookahead within your release-date rules."
                 ),
                 "type": "int",
                 "min": -1,

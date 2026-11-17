@@ -832,10 +832,21 @@ class Settings(BaseSettings):
         return self.PLACEHOLDARR_HOST
 
     @property
+    def calendar_lookahead_days(self) -> int:
+        """Coming Soon window in days. Preserves 0 (off) and -1 (unlimited); never coerce via ``or``."""
+        try:
+            raw = self.CALENDAR_LOOKAHEAD_DAYS
+            if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+                return 30
+            return int(raw)
+        except (TypeError, ValueError):
+            return 30
+
+    @property
     def coming_soon_placeholders_enabled(self) -> bool:
         """True when the calendar lookahead window is active (Coming Soon placeholders). Set CALENDAR_LOOKAHEAD_DAYS to 0 to disable."""
         try:
-            return int(self.CALENDAR_LOOKAHEAD_DAYS) != 0
+            return int(self.calendar_lookahead_days) != 0
         except (TypeError, ValueError):
             return False
 
