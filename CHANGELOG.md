@@ -16,8 +16,14 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ### Fixed
 
+- **Calendar lookahead days = 0**: Suppresses future movie/episode placeholders instead of creating them all; stored `0` is no longer coerced to 30 (#189).
+- **Library Future with window off**: Titles outside a disabled Coming Soon window still classify as Future, not Missing (#189).
 - **Single-Arr placeholder play**: When path match is unclear and Always/Fallback are Off (Play Actions N/A with one Arr), use the only qualifying instance instead of skipping (#186).
 - **Playback path mappings**: Instance path match applies media-server remote→local mappings before destination/library folder checks (#186).
+
+### Changed
+
+- **Coming Soon window save**: Changing Calendar lookahead days or Movie release date type offers Apply now / Next full sync so existing titles are re-checked for create/retire (#189).
 
 ## Pre-release
 

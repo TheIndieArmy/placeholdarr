@@ -828,7 +828,7 @@ def _obsolete_teardown_still_warranted(
     from services.source_of_truth.placeholder_policy import policy_from_entity
 
     placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
-    lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+    lookahead_days = int(settings.calendar_lookahead_days)
     now_date = local_today()
 
     if movie is not None:

@@ -547,6 +547,25 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
                     extra={"emoji_type": "warning"},
                 )
 
+            try:
+                from services.source_of_truth.calendar_lifecycle_rematerialize import (
+                    clear_calendar_lifecycle_rematerialize_pending,
+                    is_calendar_lifecycle_rematerialize_pending,
+                )
+
+                if is_calendar_lifecycle_rematerialize_pending():
+                    clear_calendar_lifecycle_rematerialize_pending()
+                    pipeline_stats["calendar_lifecycle_rematerialize_pending_cleared"] = True
+                    logger.info(
+                        "Cleared calendar lifecycle rematerialize pending after full sync materialization",
+                        extra={"emoji_type": "info"},
+                    )
+            except Exception as cal_exc:
+                logger.warning(
+                    f"Could not clear calendar lifecycle rematerialize pending after full sync: {cal_exc}",
+                    extra={"emoji_type": "warning"},
+                )
+
             ensure_task_run_not_cancelled(task_run_id)
             phases.begin("catalog_gc", "Catalog cleanup")
             # Seed count cards immediately so the phase is expandable while working.

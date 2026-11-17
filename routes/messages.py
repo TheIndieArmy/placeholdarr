@@ -396,6 +396,22 @@ def get_apply_estimate(media: str | None = None) -> JSONResponse:
         else:
             count = placeholder_count_for_apply_now()
         pending = has_pending_intent()
+        try:
+            from services.source_of_truth.tv_density_rematerialize import (
+                is_tv_density_rematerialize_pending,
+            )
+
+            pending = bool(pending) or bool(is_tv_density_rematerialize_pending())
+        except Exception:
+            pass
+        try:
+            from services.source_of_truth.calendar_lifecycle_rematerialize import (
+                is_calendar_lifecycle_rematerialize_pending,
+            )
+
+            pending = bool(pending) or bool(is_calendar_lifecycle_rematerialize_pending())
+        except Exception:
+            pass
     except Exception as exc:
         logger.warning(f"Apply estimate unavailable: {exc}", extra={"emoji_type": "warning"})
         return JSONResponse({"placeholder_count": 0, "pending_full_sync_backfill": False})

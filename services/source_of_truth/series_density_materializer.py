@@ -58,7 +58,7 @@ def _placeholders_enabled() -> bool:
 
 def _lookahead_days() -> int:
     try:
-        return int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+        return int(settings.calendar_lookahead_days)
     except (TypeError, ValueError):
         return 30
 

@@ -52,7 +52,7 @@ def run_calendar_date_refresh() -> dict:
     This lightweight path keeps date fields current for calendar/status decisions
     without running a full content sync.
     """
-    lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+    lookahead_days = int(settings.calendar_lookahead_days)
     now_date = local_today()
     start_date, end_date = _window_bounds(now_date, lookahead_days)
 

@@ -1665,6 +1665,25 @@ def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
                 f"Could not clear TV density rematerialize pending after startup: {dens_exc}",
                 extra={"emoji_type": "warning"},
             )
+        try:
+            from services.source_of_truth.calendar_lifecycle_rematerialize import (
+                clear_calendar_lifecycle_rematerialize_pending,
+                is_calendar_lifecycle_rematerialize_pending,
+            )
+
+            if is_calendar_lifecycle_rematerialize_pending():
+                clear_calendar_lifecycle_rematerialize_pending()
+                materialization_stats = dict(materialization_stats or {})
+                materialization_stats["calendar_lifecycle_rematerialize_pending_cleared"] = True
+                logger.info(
+                    "Cleared calendar lifecycle rematerialize pending after startup full materialization",
+                    extra={"emoji_type": "info"},
+                )
+        except Exception as cal_exc:
+            logger.warning(
+                f"Could not clear calendar lifecycle rematerialize pending after startup: {cal_exc}",
+                extra={"emoji_type": "warning"},
+            )
         from services.source_of_truth.tag_placeholder_policy import merge_tag_policy_materialization_into
 
         materialization_stats = merge_tag_policy_materialization_into(

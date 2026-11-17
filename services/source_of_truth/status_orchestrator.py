@@ -124,7 +124,7 @@ class StatusOrchestrator:
         Pinned placeholders bypass the calendar lookahead window and show countdown
         or TBD/TBA labels like in-window calendar sync items.
         """
-        snap_lookahead = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+        snap_lookahead = int(settings.calendar_lookahead_days)
         placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
         countdown_enabled = bool(getattr(settings, "ENABLE_COMING_SOON_COUNTDOWN", True))
         now_date = datetime.now(timezone.utc).date()

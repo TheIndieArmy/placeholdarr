@@ -354,7 +354,7 @@ def _calendar_settings_snapshot(*, now_date: date | None = None) -> dict[str, An
     """Shared calendar settings used by status, calendar phase, and materializer."""
     resolved_now = now_date or local_today()
     return {
-        "lookahead_days": int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30),
+        "lookahead_days": int(settings.calendar_lookahead_days),
         "placeholders_enabled": bool(settings.coming_soon_placeholders_enabled),
         "countdown_enabled": bool(getattr(settings, "ENABLE_COMING_SOON_COUNTDOWN", True)),
         "now_date": resolved_now,
@@ -566,7 +566,7 @@ def _calendar_variant_settings_fingerprint() -> str:
     """Hash settings that influence placeholder variant selection/replacement."""
     parts = [
         str(bool(settings.coming_soon_placeholders_enabled)),
-        str(int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)),
+        str(int(settings.calendar_lookahead_days)),
         str(bool(getattr(settings, "ENABLE_COMING_SOON_COUNTDOWN", True))),
         str(getattr(settings, "PREFERRED_MOVIE_DATE_TYPE", "inCinemas") or "inCinemas"),
         str(getattr(settings, "DUMMY_FILE_PATH", "") or ""),
@@ -792,7 +792,7 @@ def run_calendar_phase(*, on_progress=None) -> dict[str, Any]:
 def _run_calendar_phase_inner(stats: dict[str, Any], *, on_progress=None) -> dict[str, Any]:
     """Inner body of ``run_calendar_phase``; the outer wrapper owns the
     class-singleton gate + heartbeat lifecycle."""
-    lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+    lookahead_days = int(settings.calendar_lookahead_days)
     placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
     countdown_enabled = bool(getattr(settings, "ENABLE_COMING_SOON_COUNTDOWN", True))
     now_date = local_today()

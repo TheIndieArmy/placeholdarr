@@ -173,13 +173,6 @@ def _calendar_guard_result(
     date_label: str,
 ) -> tuple[str | None, dict[str, Any]]:
     """Return (outcome_if_calendar_decided, step) or (None, step) when calendar passes."""
-    if not placeholders_enabled:
-        return None, _step(
-            "calendar_window",
-            "Within calendar window",
-            "pass",
-            detail="Coming-soon placeholders are disabled, so the calendar window does not constrain this title.",
-        )
     if has_file or is_deleted:
         return None, _step(
             "calendar_window",
@@ -189,6 +182,9 @@ def _calendar_guard_result(
         )
 
     lookahead = int(lookahead_days)
+    if not placeholders_enabled:
+        # Match determination: disabled Coming Soon window suppresses futures only.
+        lookahead = 0
     if lookahead < 0:
         return None, _step(
             "calendar_window",
@@ -449,7 +445,7 @@ def _build_series_max_known_order_within_horizon(
 def explain_movie_determination(session, movie: Movie) -> dict[str, Any]:
     now_date = local_today()
     placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
-    lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+    lookahead_days = int(settings.calendar_lookahead_days)
     has_placeholder = bool(getattr(movie, "has_placeholder", False))
     has_file = bool(getattr(movie, "has_file", False))
     is_deleted = bool(getattr(movie, "is_deleted", False))
@@ -656,7 +652,7 @@ def explain_movie_determination(session, movie: Movie) -> dict[str, Any]:
 def explain_episode_determination(session, episode: Episode) -> dict[str, Any]:
     now_date = local_today()
     placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
-    lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+    lookahead_days = int(settings.calendar_lookahead_days)
     has_placeholder = bool(getattr(episode, "has_placeholder", False))
     has_file = bool(getattr(episode, "has_file", False))
     is_deleted = bool(getattr(episode, "is_deleted", False))
