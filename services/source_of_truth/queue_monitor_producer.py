@@ -1021,6 +1021,7 @@ class QueueMonitorProducer:
             qm["seen_queue_once"] = True
             qm["left_queue_at"] = None
             qm["empty_queue_search_started_at"] = None
+            qm["grab_history_wait_started_at"] = None
             qm["search_wait_last_log_at"] = None
             qm["left_queue_wait_last_log_at"] = None
             qm["last_seen_in_queue_at"] = _to_iso(now)
@@ -1124,6 +1125,7 @@ class QueueMonitorProducer:
                 )
                 if not commands_done:
                     qm["empty_queue_search_started_at"] = None
+                    qm["grab_history_wait_started_at"] = None
                     qm["search_commands_finished_at"] = None
                     target_status = DisplayStatus.SEARCHING.value
                     target_reason = render_message("queue.searching", {})
@@ -1148,13 +1150,47 @@ class QueueMonitorProducer:
                         episode=episode,
                         series=series,
                     ):
-                        # Grab recorded but queue row not visible yet; keep searching briefly.
+                        # Grab recorded but queue row not visible yet. Cap with the same
+                        # post-search grace so SEARCHING cannot hang if the queue never appears.
                         qm["seen_grab_history"] = True
                         qm["empty_queue_search_started_at"] = None
-                        target_status = DisplayStatus.SEARCHING.value
-                        target_reason = render_message("queue.searching", {})
-                        target_progress = None
+                        grab_wait_start = _from_iso(qm.get("grab_history_wait_started_at"))
+                        if not grab_wait_start:
+                            grab_wait_start = now
+                            qm["grab_history_wait_started_at"] = _to_iso(grab_wait_start)
+                        elapsed_grab_wait = (
+                            (now - grab_wait_start).total_seconds() if grab_wait_start else 0.0
+                        )
+                        if elapsed_grab_wait >= float(self._search_timeout_seconds):
+                            target_status = DisplayStatus.NOT_FOUND.value
+                            target_reason = render_message("queue.not_found", {})
+                            target_progress = None
+                            qm["grab_history_wait_started_at"] = None
+                            qm["search_wait_last_log_at"] = None
+                            logger.info(
+                                "Queue monitor post-search grace reached with grab history but no queue: "
+                                f"placeholder_id={int(getattr(placeholder, 'id', 0) or 0)} "
+                                f"elapsed={int(elapsed_grab_wait)}s timeout={self._search_timeout_seconds}s "
+                                f"status={target_status} reason={target_reason}",
+                                extra={"emoji_type": "warning"},
+                            )
+                        else:
+                            target_status = DisplayStatus.SEARCHING.value
+                            target_reason = render_message("queue.searching", {})
+                            target_progress = None
+                            if _should_emit_wait_log(qm, "search_wait_last_log_at", now, period_seconds=60):
+                                remaining = max(
+                                    0, int(float(self._search_timeout_seconds) - elapsed_grab_wait)
+                                )
+                                logger.info(
+                                    "Queue monitor waiting for queue after grab history: "
+                                    f"placeholder_id={int(getattr(placeholder, 'id', 0) or 0)} "
+                                    f"elapsed={int(elapsed_grab_wait)}s remaining={remaining}s "
+                                    f"status={target_status}",
+                                    extra={"emoji_type": "info"},
+                                )
                     else:
+                        qm["grab_history_wait_started_at"] = None
                         search_start = _from_iso(qm.get("empty_queue_search_started_at"))
                         if not search_start:
                             search_start = now
