@@ -15,10 +15,12 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Playback path mappings**: Media-server path mappings apply when matching a played path to an Arr (#186).
 - **Post-search queue grace**: Empty-queue NOT_FOUND waits until Arr search commands finish, then a short grace (default 5s) for queue or grab history (#142).
 - **Import blocked status**: Queue `importBlocked` becomes a terminal placeholder status with clear copy (#142).
+- **Last play in sidebar**: Expanded sidebar shows time since the newest playback webhook; expand for source, title, episode, player, and exact time (#142).
 
 ### Added
 
 - **IMPORT_BLOCKED status**: When Arr reports `trackedDownloadState=importBlocked`, show “Download finished, import blocked” and stop queue monitoring (#142).
+- **Last play in sidebar**: Expanded sidebar shows time since the newest playback webhook; expand for source, title, episode, player, and exact time. Silence is informational, not a health check (#142).
 
 ### Fixed
 
@@ -31,9 +33,6 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 ### Changed
 
 - **Queue monitor post-search grace**: `QUEUE_MONITOR_SEARCH_TIMEOUT_SECONDS` defaults to 5 (was 120) and applies after search commands finish, not during the search itself (#142).
-
-### Changed
-
 - **Coming Soon window save**: Changing Calendar lookahead days or Movie release date type offers Apply now / Next full sync so existing titles are re-checked for create/retire (#189).
 
 ## Pre-release
