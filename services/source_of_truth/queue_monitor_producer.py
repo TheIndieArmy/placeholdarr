@@ -50,6 +50,10 @@ _SEARCH_COMMAND_TERMINAL = frozenset(
     {"completed", "failed", "aborted", "cancelled", "orphaned"}
 )
 
+# Consecutive poll failures (unknown status or missing Arr endpoint) before we
+# treat stored search command ids as finished so SEARCHING cannot hang forever.
+_SEARCH_COMMAND_POLL_FAILURE_LIMIT = 3
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -837,7 +841,12 @@ class QueueMonitorProducer:
         instance_key: str,
         command_status_cache: dict[tuple[str, str, int], str],
     ) -> bool:
-        """True when stored Arr search command ids are all terminal (or none stored)."""
+        """True when stored Arr search command ids are all terminal (or none stored).
+
+        Missing Arr endpoint or repeated command-status poll failures do not count as
+        "still searching" forever: after ``_SEARCH_COMMAND_POLL_FAILURE_LIMIT`` consecutive
+        bad polls we treat the command set as finished so post-search grace can run.
+        """
         ids = self._command_ids_from_qm(qm)
         if not ids:
             return True
@@ -845,9 +854,42 @@ class QueueMonitorProducer:
         kind = str(arr_type or "").strip().lower()
         if not key or kind not in {"radarr", "sonarr"}:
             return True
+
+        failures_raw = qm.get("arr_command_poll_failures")
+        failures: dict[str, int] = {}
+        if isinstance(failures_raw, dict):
+            for fail_key, fail_val in failures_raw.items():
+                try:
+                    failures[str(fail_key)] = int(fail_val)
+                except (TypeError, ValueError):
+                    continue
+
+        def _bump_failure(token: str) -> int:
+            nxt = int(failures.get(token, 0) or 0) + 1
+            failures[token] = nxt
+            qm["arr_command_poll_failures"] = failures
+            return nxt
+
+        def _clear_failure(token: str) -> None:
+            if token in failures:
+                failures.pop(token, None)
+                qm["arr_command_poll_failures"] = failures
+
         base_url, api_key = settings.resolve_arr_endpoint(kind, instance_key=key)
         if not base_url or not api_key:
-            return True
+            # Do not pretend commands finished; retry until the failure cap.
+            fail_n = _bump_failure("_endpoint")
+            if fail_n >= _SEARCH_COMMAND_POLL_FAILURE_LIMIT:
+                logger.info(
+                    "Queue monitor treating Arr search command(s) finished after repeated "
+                    f"endpoint resolve failures instance_key={key} failures={fail_n} "
+                    f"command_ids={ids}",
+                    extra={"emoji_type": "warning"},
+                )
+                return True
+            return False
+        _clear_failure("_endpoint")
+
         for cid in ids:
             cache_key = (kind, key, int(cid))
             status = command_status_cache.get(cache_key)
@@ -858,8 +900,27 @@ class QueueMonitorProducer:
                 except Exception:
                     status = "unknown"
                 command_status_cache[cache_key] = status
-            if status not in _SEARCH_COMMAND_TERMINAL:
+
+            fail_token = str(int(cid))
+            if status in _SEARCH_COMMAND_TERMINAL:
+                _clear_failure(fail_token)
+                continue
+
+            if status == "unknown":
+                fail_n = _bump_failure(fail_token)
+                if fail_n >= _SEARCH_COMMAND_POLL_FAILURE_LIMIT:
+                    logger.info(
+                        "Queue monitor treating Arr search command finished after repeated "
+                        f"status poll failures command_id={cid} failures={fail_n} "
+                        f"instance_key={key}",
+                        extra={"emoji_type": "warning"},
+                    )
+                    continue
                 return False
+
+            # queued / started / other non-terminal: still running.
+            _clear_failure(fail_token)
+            return False
         return True
 
     def _history_has_grab(
@@ -884,6 +945,10 @@ class QueueMonitorProducer:
             or _from_iso(qm.get("search_restarted_at"))
             or _from_iso(qm.get("empty_queue_search_started_at"))
         )
+        # Require a lower bound so legacy monitors without timestamps cannot treat any
+        # historical grab as "grabbed for this search" and block NOT_FOUND forever.
+        if since is None:
+            return False
         try:
             if kind == "radarr" and movie is not None and getattr(movie, "radarrid", None):
                 return bool(
@@ -1073,6 +1138,8 @@ class QueueMonitorProducer:
                 else:
                     if self._command_ids_from_qm(qm) and not qm.get("search_commands_finished_at"):
                         qm["search_commands_finished_at"] = _to_iso(now)
+                    if qm.get("arr_command_poll_failures"):
+                        qm["arr_command_poll_failures"] = {}
                     if self._history_has_grab(
                         qm=qm,
                         arr_type=arr_type,

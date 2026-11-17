@@ -928,12 +928,14 @@ def arr_has_grab_since(
     if isinstance(since, datetime):
         since_utc = since if since.tzinfo is not None else since.replace(tzinfo=timezone.utc)
         since_utc = since_utc.astimezone(timezone.utc)
+    # Require an explicit lower bound. Without ``since``, any older grab would look
+    # like a hit for the current search and could block empty-queue NOT_FOUND.
+    if since_utc is None:
+        return False
     for row in records:
         if not isinstance(row, dict):
             continue
         raw_date = row.get("date")
-        if since_utc is None:
-            return True
         if not raw_date:
             continue
         try:

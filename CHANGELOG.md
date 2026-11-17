@@ -29,10 +29,13 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 - **Single-Arr placeholder play**: When path match is unclear and Always/Fallback are Off (Play Actions N/A with one Arr), use the only qualifying instance instead of skipping (#186).
 - **Playback path mappings**: Instance path match applies media-server remote→local mappings before destination/library folder checks (#186).
 - **False not-found while Arr still searching**: Queue monitor no longer starts the empty-queue timeout until playback search command(s) are terminal; also checks grab history (#142).
+- **Post-search command poll hang**: Repeated Arr command-status or endpoint resolve failures no longer leave placeholders stuck on Searching (#142).
+- **Grab history without a time bound**: History checks require a search timestamp so old grabs cannot block NOT_FOUND (#142).
 
 ### Changed
 
 - **Queue monitor post-search grace**: `QUEUE_MONITOR_SEARCH_TIMEOUT_SECONDS` defaults to 5 (was 120) and applies after search commands finish, not during the search itself (#142).
+- **Post-search grace Settings copy**: Clarifies the timer starts after the Arr search command finishes and can be raised for slow grab-to-queue stacks (#142).
 - **Coming Soon window save**: Changing Calendar lookahead days or Movie release date type offers Apply now / Next full sync so existing titles are re-checked for create/retire (#189).
 
 ## Pre-release

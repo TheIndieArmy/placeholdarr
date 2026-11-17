@@ -1796,9 +1796,11 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "section": "Advanced",
                 "label": "Queue monitor post-search grace (seconds)",
                 "description": (
-                    "After Radarr/Sonarr finishes the playback search command, how long to wait for a matching "
-                    "queue item or grab in history before assuming no qualifying release was found. Searching "
-                    "itself is no longer covered by this timer. Default 5 seconds."
+                    "Grace period after Arr reports the playback search command done. Placeholdarr looks for a "
+                    "queue item or grab in history; if neither appears, status becomes no qualifying release. "
+                    "Default 5 seconds. This does not limit how long the search itself may run. Raise it when "
+                    "your stack often needs more than a few seconds between \"search completed\" and "
+                    "\"item in queue\"."
                 ),
                 "type": "int",
                 "min": 1,
