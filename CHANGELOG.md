@@ -9,6 +9,10 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Fixed
+
+- **Never/Pinned density stubs**: Series gate and season stamp rematerialize season/series density stubs so Never removes them and Pinned creates them (#196).
+
 ## Pre-release
 
 ## Released
