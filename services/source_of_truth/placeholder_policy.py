@@ -360,13 +360,30 @@ def apply_episode_placeholder_policy_fast(episode_id: int) -> dict[str, Any]:
                 "job_id": None,
                 **_entity_state_snapshot(episode),
             }
-        sibling_has_file = sibling_episode_has_file(session, episode)
-        target = _policy_target_determination(
-            episode,
-            arr_type="sonarr",
-            sibling_has_file=sibling_has_file,
-            policy=effective,
-        )
+        # Season/series density owns create/retire of stubs. Only tear down leftover
+        # per-episode files here; Never/Pinned stub work runs in apply_series_gate_fast
+        # / apply_season_stamp_fast density rematerialize.
+        from services.source_of_truth.tv_density import density_suppresses_episode_files
+
+        if density_suppresses_episode_files(series):
+            if not bool(getattr(episode, "has_placeholder", False)):
+                session.commit()
+                return {
+                    "ok": True,
+                    "action": "noop",
+                    "job_id": None,
+                    **_entity_state_snapshot(episode),
+                }
+            # Leftover episode file under stub density → obsolete teardown only.
+            target = DETERMINATION_OBSOLETE
+        else:
+            sibling_has_file = sibling_episode_has_file(session, episode)
+            target = _policy_target_determination(
+                episode,
+                arr_type="sonarr",
+                sibling_has_file=sibling_has_file,
+                policy=effective,
+            )
         episode.determination = target
         episode.determination_updated_at = func.now()
         session.add(episode)
@@ -474,6 +491,146 @@ def _refresh_series_episode_stats_after_policy(series_id: int) -> None:
         pass
 
 
+def _density_action_counts(out: dict[str, Any]) -> tuple[int, int, list[str], list[str]]:
+    """Map series/season density materialization output to create/remove + refresh paths."""
+    # apply_season_density_for_series aggregates list path keys (+ numeric created/retired).
+    if "created_paths" in out or "deleted_paths" in out or "seasons_considered" in out:
+        created_paths = [str(p).strip() for p in (out.get("created_paths") or []) if str(p).strip()]
+        delete_refresh = [str(p).strip() for p in (out.get("deleted_paths") or []) if str(p).strip()]
+        return (
+            int(out.get("created") or 0),
+            int(out.get("retired") or 0),
+            created_paths,
+            delete_refresh,
+        )
+
+    action = str(out.get("action") or "").strip().lower()
+    path = str(out.get("path") or "").strip()
+    relocated_from = str(out.get("relocated_from") or "").strip()
+    deleted_paths = [str(p).strip() for p in (out.get("paths") or []) if str(p).strip()]
+
+    created = 0
+    removed = 0
+    create_refresh: list[str] = []
+    delete_refresh: list[str] = []
+
+    if action == "created_or_exists":
+        if out.get("created"):
+            created = 1
+            if path:
+                create_refresh.append(path)
+        elif path and relocated_from:
+            create_refresh.append(path)
+        if relocated_from:
+            delete_refresh.append(relocated_from)
+    elif action == "retired" or (action == "skipped_density" and out.get("deleted")):
+        removed = 1 if deleted_paths or out.get("deleted") else 0
+        delete_refresh.extend(deleted_paths)
+    elif deleted_paths:
+        delete_refresh.extend(deleted_paths)
+
+    return created, removed, create_refresh, delete_refresh
+
+
+def _rematerialize_density_after_series_policy(series_id: int) -> dict[str, Any]:
+    """Create/retire season or series density stubs after series Never/Pinned."""
+    from services.source_of_truth.tv_density import tv_placeholder_density
+
+    density = tv_placeholder_density()
+    if density == "series":
+        from services.source_of_truth.series_density_materializer import (
+            apply_series_density_materialization,
+        )
+
+        out = apply_series_density_materialization(
+            int(series_id),
+            activity_reason=_ACTIVITY_REASON,
+            ensure_art=False,
+        )
+    elif density == "season":
+        from services.source_of_truth.season_density_materializer import (
+            apply_season_density_for_series,
+        )
+
+        out = apply_season_density_for_series(
+            int(series_id),
+            activity_reason=_ACTIVITY_REASON,
+            ensure_art=False,
+        )
+    else:
+        return {"ok": True, "created": 0, "removed": 0, "skipped": True}
+
+    if not out.get("ok", True):
+        return {
+            "ok": False,
+            "message": str(out.get("reason") or out.get("message") or "Density update failed"),
+            "created": 0,
+            "removed": 0,
+        }
+
+    created, removed, create_paths, delete_paths = _density_action_counts(out)
+    if create_paths or delete_paths:
+        from services.source_of_truth.materializer import schedule_scoped_placeholder_media_refresh
+
+        schedule_scoped_placeholder_media_refresh(
+            created_paths=create_paths,
+            delete_paths=delete_paths,
+            has_movies=False,
+            has_episodes=True,
+        )
+    return {"ok": True, "created": created, "removed": removed, "density": density}
+
+
+def _rematerialize_density_after_season_policy(season_id: int, series_id: int) -> dict[str, Any]:
+    """Create/retire density stubs after a season Never/Pinned stamp."""
+    from services.source_of_truth.tv_density import tv_placeholder_density
+
+    density = tv_placeholder_density()
+    if density == "season":
+        from services.source_of_truth.season_density_materializer import (
+            apply_season_density_materialization,
+        )
+
+        out = apply_season_density_materialization(
+            int(season_id),
+            activity_reason=_ACTIVITY_REASON,
+            ensure_art=False,
+        )
+    elif density == "series":
+        from services.source_of_truth.series_density_materializer import (
+            apply_series_density_materialization,
+        )
+
+        # Season stamps change episode contribution to the series stub.
+        out = apply_series_density_materialization(
+            int(series_id),
+            activity_reason=_ACTIVITY_REASON,
+            ensure_art=False,
+        )
+    else:
+        return {"ok": True, "created": 0, "removed": 0, "skipped": True}
+
+    if not out.get("ok", True):
+        return {
+            "ok": False,
+            "message": str(out.get("reason") or out.get("message") or "Density update failed"),
+            "created": 0,
+            "removed": 0,
+        }
+
+    created, removed, create_paths, delete_paths = _density_action_counts(out)
+    if create_paths or delete_paths:
+        from services.source_of_truth.materializer import schedule_scoped_placeholder_media_refresh
+
+        schedule_scoped_placeholder_media_refresh(
+            created_paths=create_paths,
+            delete_paths=delete_paths,
+            has_movies=False,
+            has_episodes=True,
+        )
+    return {"ok": True, "created": created, "removed": removed, "density": density}
+
+
 def apply_series_gate_fast(series_id: int, *, policy: PlaceholderPolicy) -> dict[str, Any]:
     """Apply series Never/Pinned across episodes via effective policy (no flag rewrite on children)."""
     episode_ids: list[int] = []
@@ -498,6 +655,14 @@ def apply_series_gate_fast(series_id: int, *, policy: PlaceholderPolicy) -> dict
         created_n, deleted_n = _policy_fast_action_counts(action)
         created += created_n
         removed += deleted_n
+
+    density_out = _rematerialize_density_after_series_policy(int(series_id))
+    if not density_out.get("ok", False):
+        errors.append(str(density_out.get("message") or "Density update failed"))
+    else:
+        created += int(density_out.get("created") or 0)
+        removed += int(density_out.get("removed") or 0)
+
     # Per-episode commits enqueue async series stats; settle the series counter
     # here so Seasons & Episodes does not lag the Placeholdarr / season PH chips.
     _refresh_series_episode_stats_after_policy(int(series_id))
@@ -573,7 +738,14 @@ def apply_season_stamp_fast(season_id: int, *, policy: PlaceholderPolicy) -> dic
         created_n, deleted_n = _policy_fast_action_counts(action)
         created += created_n
         removed += deleted_n
+
     if series_id is not None:
+        density_out = _rematerialize_density_after_season_policy(int(season_id), int(series_id))
+        if not density_out.get("ok", False):
+            errors.append(str(density_out.get("message") or "Density update failed"))
+        else:
+            created += int(density_out.get("created") or 0)
+            removed += int(density_out.get("removed") or 0)
         _refresh_series_episode_stats_after_policy(int(series_id))
     if errors and created == 0 and removed == 0:
         return {

@@ -13,6 +13,16 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## Released
 
+## [0.13.6] - 2026-11-23
+
+### Summary
+
+- **Never/Pinned density stubs**: The series Never pin (and season Never/Pinned pins) again remove or create season/series density stubs instead of saying Done while they stay (#196).
+
+### Fixed
+
+- **Never/Pinned density stubs**: Series gate and season stamp rematerialize season/series density stubs so Never removes them and Pinned creates them (#196).
+
 ## [0.13.5] - 2026-11-17
 
 ### Summary
