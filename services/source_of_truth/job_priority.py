@@ -32,6 +32,7 @@ _PRIORITY_BY_TYPE: dict[str, int] = {
     "entity_reconcile": PRIORITY_INTERACTIVE,
     # Slightly below live webhooks so grace ticks do not drown imports/playback.
     "import_grace": PRIORITY_SEMI_INTERACTIVE + 10,
+    "density_import_finalize": PRIORITY_SEMI_INTERACTIVE + 10,
     "nfo_refresh": PRIORITY_SEMI_INTERACTIVE,
     "placeholder_art_refresh": PRIORITY_SEMI_INTERACTIVE,
     "queue_monitor": PRIORITY_SEMI_INTERACTIVE,

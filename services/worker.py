@@ -58,7 +58,9 @@ from services.source_of_truth.event_playback import (
     process_playback_start_event,
 )
 from services.source_of_truth.import_grace import (
+    DENSITY_IMPORT_FINALIZE_JOB_TYPE,
     IMPORT_GRACE_JOB_TYPE,
+    process_density_import_finalize_job,
     process_import_grace_job,
 )
 from services.source_of_truth.entity_materialization_job import (
@@ -176,6 +178,7 @@ _INTERACTIVE_JOB_TYPES = frozenset(
     {
         "webhook_event",
         "import_grace",
+        "density_import_finalize",
         "playback_fallback",
     }
 )
@@ -1219,6 +1222,17 @@ def _process_claimed_job(session, job: Job):
             logger.warning(f"import_grace job failed: job_id={getattr(job, 'id', '?')}, reason={reason}", extra={'emoji_type': 'warning'})
             raise ValueError(reason)
         logger.info(f"import_grace job completed: job_id={getattr(job, 'id', '?')}, phase={result.get('phase')}", extra={'emoji_type': 'success'})
+        return
+
+    if job.job_type == DENSITY_IMPORT_FINALIZE_JOB_TYPE:
+        result = process_density_import_finalize_job(session, job)
+        if not result.get("ok", False):
+            raise ValueError(str(result.get("reason") or "density_import_finalize_failed"))
+        logger.info(
+            f"density_import_finalize job completed: job_id={getattr(job, 'id', '?')} "
+            f"series_id={result.get('series_id')} episodes={result.get('episode_count')}",
+            extra={"emoji_type": "success"},
+        )
         return
 
     if job.job_type == PLAYBACK_FALLBACK_JOB_TYPE:

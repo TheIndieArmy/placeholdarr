@@ -2709,6 +2709,7 @@ def run_materialization_for_entities(
     log_subject: str | None = None,
     *,
     purge_catalog_tombstones: bool = True,
+    skip_density: bool = False,
     on_progress=None,
 ) -> dict[str, Any]:
     """Run materialization only for targeted entities.
@@ -2727,6 +2728,9 @@ def run_materialization_for_entities(
     When ``purge_catalog_tombstones`` is False, soft-deleted catalog rows are
     left in place after placeholder teardown so callers can still write
     activity history (or other FK-bound rows) before hard-purge.
+
+    ``skip_density``: omit the trailing season/series density pass (callers that
+    coalesce density separately, e.g. import-grace pack finalize (#199)).
 
     ``on_progress(done, total, stats=None)`` is optional for live Activity updates.
     """
@@ -2860,60 +2864,64 @@ def run_materialization_for_entities(
                     )
 
             # One density pass for the whole request (touched series + leftover stubs).
-            density_series_ids = _resolve_scoped_density_series_ids(episode_ids)
-            if density_series_ids:
-                stall_state["phase"] = "tv_density_short_sessions"
-                activity_reason = _activity_reason_from_observation_source(observation_source)
-                series_stats, season_stats = _run_event_scoped_tv_density_short_sessions(
-                    density_series_ids,
-                    activity_reason=activity_reason or "series_density",
-                    stall_state=stall_state,
-                    ensure_art=False,
-                )
-                merged["series_density"] = series_stats
-                merged["season_density"] = season_stats
-                logger.info(
-                    f"Scoped TV density{subject_part}: series={len(density_series_ids)} "
-                    f"series_created={series_stats.get('created', 0)} "
-                    f"season_created={season_stats.get('created', 0)} "
-                    f"errors={int(series_stats.get('errors') or 0) + int(season_stats.get('errors') or 0)}",
-                    extra={"emoji_type": "info"},
-                )
-                # Mirror full-sync density: path-refresh only newly created/deleted stubs (#181).
-                density_created = [
-                    str(p).strip()
-                    for p in list(series_stats.get("created_paths") or [])
-                    + list(season_stats.get("created_paths") or [])
-                    if str(p or "").strip()
-                ]
-                density_deleted = [
-                    str(p).strip()
-                    for p in list(series_stats.get("deleted_paths") or [])
-                    + list(season_stats.get("deleted_paths") or [])
-                    if str(p or "").strip()
-                ]
-                if density_created or density_deleted:
+            if skip_density:
+                stall_state["phase"] = "tv_density_skipped"
+                merged["density_skipped"] = True
+            else:
+                density_series_ids = _resolve_scoped_density_series_ids(episode_ids)
+                if density_series_ids:
+                    stall_state["phase"] = "tv_density_short_sessions"
+                    activity_reason = _activity_reason_from_observation_source(observation_source)
+                    series_stats, season_stats = _run_event_scoped_tv_density_short_sessions(
+                        density_series_ids,
+                        activity_reason=activity_reason or "series_density",
+                        stall_state=stall_state,
+                        ensure_art=False,
+                    )
+                    merged["series_density"] = series_stats
+                    merged["season_density"] = season_stats
+                    logger.info(
+                        f"Scoped TV density{subject_part}: series={len(density_series_ids)} "
+                        f"series_created={series_stats.get('created', 0)} "
+                        f"season_created={season_stats.get('created', 0)} "
+                        f"errors={int(series_stats.get('errors') or 0) + int(season_stats.get('errors') or 0)}",
+                        extra={"emoji_type": "info"},
+                    )
+                    # Mirror full-sync density: path-refresh only newly created/deleted stubs (#181).
+                    density_created = [
+                        str(p).strip()
+                        for p in list(series_stats.get("created_paths") or [])
+                        + list(season_stats.get("created_paths") or [])
+                        if str(p or "").strip()
+                    ]
+                    density_deleted = [
+                        str(p).strip()
+                        for p in list(series_stats.get("deleted_paths") or [])
+                        + list(season_stats.get("deleted_paths") or [])
+                        if str(p or "").strip()
+                    ]
+                    if density_created or density_deleted:
+                        try:
+                            schedule_scoped_placeholder_media_refresh(
+                                created_paths=density_created,
+                                delete_paths=density_deleted,
+                                has_movies=False,
+                                has_episodes=True,
+                            )
+                        except Exception as refresh_exc:
+                            logger.warning(
+                                f"Scoped density media refresh skipped{subject_part}: {refresh_exc}",
+                                extra={"emoji_type": "warning"},
+                            )
                     try:
-                        schedule_scoped_placeholder_media_refresh(
-                            created_paths=density_created,
-                            delete_paths=density_deleted,
-                            has_movies=False,
-                            has_episodes=True,
-                        )
-                    except Exception as refresh_exc:
+                        art_n = _enqueue_art_for_density_stub_series(density_series_ids)
+                        if art_n:
+                            merged["density_art_enqueued"] = art_n
+                    except Exception as art_exc:
                         logger.warning(
-                            f"Scoped density media refresh skipped{subject_part}: {refresh_exc}",
+                            f"Scoped density art enqueue skipped{subject_part}: {art_exc}",
                             extra={"emoji_type": "warning"},
                         )
-                try:
-                    art_n = _enqueue_art_for_density_stub_series(density_series_ids)
-                    if art_n:
-                        merged["density_art_enqueued"] = art_n
-                except Exception as art_exc:
-                    logger.warning(
-                        f"Scoped density art enqueue skipped{subject_part}: {art_exc}",
-                        extra={"emoji_type": "warning"},
-                    )
             stall_state["phase"] = "complete"
 
         logger.info(

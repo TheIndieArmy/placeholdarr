@@ -849,7 +849,13 @@ def process_episode_imported_event(payload: dict[str, Any], instance: str | None
             gd = g if isinstance(g, dict) else {}
             ph_count = int(gd.get("placeholder_count", 0) or 0)
             active_n = int(gd.get("active_placeholder_count", 0) or 0)
-            if ph_count <= 0:
+            if gd.get("density_coalesced"):
+                result_reason = (
+                    "Episode import detected - no episode placeholder; "
+                    "season/series density finalize coalesced (import grace skipped)."
+                )
+                status_label = "Density Coalesced"
+            elif ph_count <= 0:
                 result_reason = "Episode import detected - no linked placeholders to retire; grace timer not scheduled."
                 status_label = "No Action"
             else:

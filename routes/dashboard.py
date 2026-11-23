@@ -911,6 +911,7 @@ def _humanize_job_type(job_type: str) -> str:
         "nfo_refresh": "Metadata Refresh",
         "placeholder_art_refresh": "Art Refresh",
         "import_grace": "Import Grace Check",
+        "density_import_finalize": "Density Import Finalize",
         "playback_fallback": "Playback Fallback",
     }
     normalized = str(job_type or "").strip().lower()
@@ -1118,6 +1119,7 @@ def _humanize_placeholder_reason(reason: str | None, *, action: str | None = Non
         "media_server_deleted": "Removed from media server",
         "placeholder_requested": "Placeholder requested",
         "import_grace": "Import grace period",
+        "density_import_finalize": "Season/series density after import",
     }
     normalized = str(reason or "").strip().lower()
     if normalized:
@@ -1161,6 +1163,7 @@ def _is_user_relevant_job(job_type: str, status: str | None = None) -> bool:
         "status_reconcile",
         "calendar_date_refresh",
         "import_grace",
+        "density_import_finalize",
         "playback_fallback",
         "observation_trail",
         "placeholder_observation_trail",

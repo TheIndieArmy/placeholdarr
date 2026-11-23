@@ -36,6 +36,10 @@ IMPORT_GRACE_JOB_TYPE = "import_grace"
 IMPORT_GRACE_REASON = "import_grace_countdown"
 IMPORT_GRACE_CANCEL_ERROR = "Cancelled: file deleted during import grace"
 IMPORT_GRACE_INTERRUPT_REASON = "import_grace_interrupted"
+# Coalesced season/series density rematerialize after pack imports (#199).
+DENSITY_IMPORT_FINALIZE_JOB_TYPE = "density_import_finalize"
+_DENSITY_IMPORT_DEBOUNCE_SECONDS = 15.0
+_DENSITY_IMPORT_MAX_DEBOUNCE_SECONDS = 120.0
 # Number of countdown ticks before the final "less than a minute" tick.
 # Historically: 5, 4, 3, 2, 1 minutes remaining, plus a "less than a minute" final.
 COUNTDOWN_MINUTES_DECREASING = (5, 4, 3, 2, 1)
@@ -445,6 +449,229 @@ def schedule_movie_import_grace(session, movie_row_id: int, file_path: str | Non
     )
 
 
+def _density_import_max_debounce_seconds() -> float:
+    try:
+        return max(
+            float(_DENSITY_IMPORT_DEBOUNCE_SECONDS),
+            float(
+                getattr(
+                    settings,
+                    "DENSITY_IMPORT_COALESCE_MAX_DEBOUNCE_SECONDS",
+                    _DENSITY_IMPORT_MAX_DEBOUNCE_SECONDS,
+                )
+                or _DENSITY_IMPORT_MAX_DEBOUNCE_SECONDS
+            ),
+        )
+    except Exception:
+        return float(_DENSITY_IMPORT_MAX_DEBOUNCE_SECONDS)
+
+
+def schedule_coalesced_density_import_finalize(
+    session,
+    *,
+    series_id: int,
+    episode_id: int | None = None,
+    season_id: int | None = None,
+) -> dict[str, Any]:
+    """Debounce season/series density rematerialize across pack episode imports (#199)."""
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from services.source_of_truth.job_priority import default_priority_for
+
+    sid = int(series_id)
+    group_id = f"density_import:{sid}"
+    debounce = float(_DENSITY_IMPORT_DEBOUNCE_SECONDS)
+    run_after = datetime.now(timezone.utc) + timedelta(seconds=debounce)
+    incoming_eps = [int(episode_id)] if episode_id is not None else []
+    incoming_seasons = [int(season_id)] if season_id is not None else []
+
+    existing = (
+        session.query(Job)
+        .filter(
+            Job.job_type == DENSITY_IMPORT_FINALIZE_JOB_TYPE,
+            Job.status == "PENDING",
+            Job.group_id == group_id,
+        )
+        .order_by(Job.id.desc())
+        .with_for_update()
+        .first()
+    )
+    if existing is not None:
+        old = dict(existing.payload or {})
+        ep_ids = sorted(
+            {
+                int(x)
+                for x in list(old.get("episode_ids") or []) + incoming_eps
+                if x is not None
+            }
+        )
+        season_ids = sorted(
+            {
+                int(x)
+                for x in list(old.get("season_ids") or []) + incoming_seasons
+                if x is not None
+            }
+        )
+        existing.payload = {
+            "series_id": sid,
+            "episode_ids": ep_ids,
+            "season_ids": season_ids,
+        }
+        flag_modified(existing, "payload")
+        prev = existing.run_after
+        if prev is None or prev < run_after:
+            existing.run_after = run_after
+        debounce_cap = datetime.now(timezone.utc) + timedelta(
+            seconds=_density_import_max_debounce_seconds()
+        )
+        if existing.run_after is not None and existing.run_after > debounce_cap:
+            existing.run_after = debounce_cap
+        existing.updated_at = datetime.now(timezone.utc)
+        session.add(existing)
+        return {
+            "ok": True,
+            "coalesced": True,
+            "job_id": int(existing.id) if getattr(existing, "id", None) else None,
+            "series_id": sid,
+            "episode_ids": ep_ids,
+            "season_ids": season_ids,
+        }
+
+    job = Job(
+        job_type=DENSITY_IMPORT_FINALIZE_JOB_TYPE,
+        payload={
+            "series_id": sid,
+            "episode_ids": incoming_eps,
+            "season_ids": incoming_seasons,
+        },
+        status="PENDING",
+        run_after=run_after,
+        group_id=group_id,
+        priority=default_priority_for(DENSITY_IMPORT_FINALIZE_JOB_TYPE),
+    )
+    session.add(job)
+    return {
+        "ok": True,
+        "coalesced": False,
+        "job_id": None,
+        "series_id": sid,
+        "episode_ids": incoming_eps,
+        "season_ids": incoming_seasons,
+    }
+
+
+def process_density_import_finalize_job(session, job: Job) -> dict[str, Any]:
+    """Rematerialize season/series density stubs once for a coalesced import pack (#199)."""
+    from core.logger import logger
+    from services.postgres.db import release_handler_session
+    from services.source_of_truth.materializer import schedule_scoped_placeholder_media_refresh
+    from services.source_of_truth.season_density_materializer import (
+        apply_season_density_for_series,
+    )
+    from services.source_of_truth.series_density_materializer import (
+        apply_series_density_materialization,
+    )
+    from services.source_of_truth.tv_density import tv_placeholder_density
+
+    payload = job.payload or {}
+    try:
+        series_id = int(payload.get("series_id"))
+    except Exception:
+        return {"done": True, "ok": False, "reason": "missing_series_id"}
+
+    episode_ids = sorted(
+        {int(x) for x in (payload.get("episode_ids") or []) if x is not None}
+    )
+    if episode_ids:
+        rows = (
+            session.query(Episode)
+            .filter(Episode.id.in_(episode_ids), Episode.is_deleted == False)  # noqa: E712
+            .all()
+        )
+        touched = False
+        for ep in rows:
+            if not bool(getattr(ep, "has_file", False)):
+                ep.has_file = True
+                session.add(ep)
+                touched = True
+        if touched:
+            mark_live_catalog_touch(
+                session,
+                episode_ids=episode_ids,
+                series_ids=[series_id],
+            )
+
+    # Persist has_file, then density mat opens its own short sessions (#199).
+    release_handler_session(session)
+
+    density = tv_placeholder_density()
+    created_paths: list[str] = []
+    deleted_paths: list[str] = []
+    density_out: dict[str, Any] = {"density": density}
+    if density == "series":
+        out = apply_series_density_materialization(
+            int(series_id),
+            activity_reason="density_import_finalize",
+            ensure_art=False,
+        )
+        density_out["series"] = out
+        action = str(out.get("action") or "")
+        path = str(out.get("path") or "").strip()
+        relocated = str(out.get("relocated_from") or "").strip()
+        paths = [str(p).strip() for p in (out.get("paths") or []) if str(p).strip()]
+        if action == "created_or_exists" and path:
+            created_paths.append(path)
+        if relocated:
+            deleted_paths.append(relocated)
+        deleted_paths.extend(paths)
+    elif density == "season":
+        out = apply_season_density_for_series(
+            int(series_id),
+            activity_reason="density_import_finalize",
+            ensure_art=False,
+        )
+        density_out["season"] = out
+        created_paths.extend(
+            [str(p).strip() for p in (out.get("created_paths") or []) if str(p).strip()]
+        )
+        deleted_paths.extend(
+            [str(p).strip() for p in (out.get("deleted_paths") or []) if str(p).strip()]
+        )
+    else:
+        return {
+            "done": True,
+            "ok": True,
+            "phase": "density_import_finalize",
+            "skipped": "not_stub_density",
+            "series_id": series_id,
+        }
+
+    if created_paths or deleted_paths:
+        schedule_scoped_placeholder_media_refresh(
+            created_paths=created_paths,
+            delete_paths=deleted_paths,
+            has_movies=False,
+            has_episodes=True,
+        )
+
+    logger.info(
+        f"Density import finalize series_id={series_id} density={density} "
+        f"episodes={len(episode_ids)} created_paths={len(created_paths)} "
+        f"deleted_paths={len(deleted_paths)}",
+        extra={"emoji_type": "success"},
+    )
+    return {
+        "done": True,
+        "ok": True,
+        "phase": "density_import_finalize",
+        "series_id": series_id,
+        "episode_count": len(episode_ids),
+        "created_paths": created_paths,
+        "deleted_paths": deleted_paths,
+        "density": density_out,
+    }
+
+
 def schedule_episode_import_grace(session, episode_row_id: int, file_path: str | None = None) -> dict[str, Any]:
     raw_ids = (
         session.query(Placeholder.id)
@@ -455,6 +682,48 @@ def schedule_episode_import_grace(session, episode_row_id: int, file_path: str |
         .all()
     )
     placeholder_ids = [int(pid) for (pid,) in raw_ids]
+
+    # Season/series density stubs are not episode-linked. Skip the per-episode
+    # countdown timeline when there is nothing to count down on; mark has_file
+    # and coalesce one density rematerialize for the series (#199).
+    if not placeholder_ids:
+        from services.source_of_truth.tv_density import density_suppresses_episode_files
+
+        episode = session.query(Episode).filter(Episode.id == int(episode_row_id)).first()
+        series = None
+        season = None
+        if episode is not None and getattr(episode, "season_id", None) is not None:
+            season = session.query(Season).filter(Season.id == int(episode.season_id)).first()
+            if season is not None and getattr(season, "series_id", None) is not None:
+                series = session.query(Series).filter(Series.id == int(season.series_id)).first()
+        if series is not None and density_suppresses_episode_files(series):
+            episode.has_file = True
+            if file_path:
+                episode.sonarr_filepath = str(file_path)
+            session.add(episode)
+            mark_live_catalog_touch(
+                session,
+                episode_ids=[int(episode_row_id)],
+                series_ids=[int(series.id)],
+            )
+            coalesce = schedule_coalesced_density_import_finalize(
+                session,
+                series_id=int(series.id),
+                episode_id=int(episode_row_id),
+                season_id=int(season.id) if season is not None else None,
+            )
+            return {
+                "ok": True,
+                "content_type": "episode",
+                "entity_id": int(episode_row_id),
+                "placeholder_count": 0,
+                "active_placeholder_count": 0,
+                "scheduled_jobs": 0,
+                "skipped_grace": True,
+                "density_coalesced": True,
+                "coalesce": coalesce,
+            }
+
     return _schedule_import_grace(
         session,
         content_type="episode",
@@ -733,6 +1002,17 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
                     series_ids=[series_id_for_touch] if series_id_for_touch else None,
                 )
                 session.flush()
+                from services.source_of_truth.tv_density import density_suppresses_episode_files
+
+                series_for_density = None
+                if series_id_for_touch:
+                    series_for_density = (
+                        session.query(Series).filter(Series.id == int(series_id_for_touch)).first()
+                    )
+                coalesce_density = bool(
+                    series_for_density is not None
+                    and density_suppresses_episode_files(series_for_density)
+                )
                 try:
                     session.commit()
                 except Exception:
@@ -755,9 +1035,12 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
                 release_handler_session(session)
                 session = None
                 try:
+                    # Under season/series density, skip per-episode density rematerialize
+                    # and coalesce one pack finalize for the series (#199).
                     materialization = run_materialization_for_entities(
                         episode_ids=mat_episode_ids,
                         observation_source="event_episode_imported_grace_finalize",
+                        skip_density=coalesce_density,
                     )
                 except Exception as mat_exc:
                     if _is_lock_timeout_error(mat_exc):
@@ -777,6 +1060,13 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
                         }
                     raise
                 session = get_session()
+                if coalesce_density and series_id_for_touch:
+                    schedule_coalesced_density_import_finalize(
+                        session,
+                        series_id=int(series_id_for_touch),
+                        episode_id=int(entity_id),
+                        season_id=int(season_id) if season_id else None,
+                    )
                 ctx = (
                     session.query(Episode, Season, Series)
                     .join(Season, Episode.season_id == Season.id)
