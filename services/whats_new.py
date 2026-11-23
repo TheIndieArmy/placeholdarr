@@ -351,6 +351,14 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         requires_ack=True,
     ),
     WhatsNewNotice(
+        id="never-pinned-density-stubs-0-13-6",
+        since_version="0.13.6",
+        title="TV Never/Pinned modes now respect density settings",
+        body=(
+            "Series and season pins now create or remove density stubs to match your TV density mode."
+        ),
+    ),
+    WhatsNewNotice(
         id="playback-search-calendar-0-13-5",
         since_version="0.13.5",
         title="Clearer playback search and calendar fixes",
