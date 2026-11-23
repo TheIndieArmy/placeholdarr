@@ -9,6 +9,10 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Fixed
+
+- **Season/series density pack imports**: Episodes with no linked placeholders skip the import-grace countdown and coalesce one density rematerialize per series instead of per-episode finalize (#199).
+
 ## Pre-release
 
 ## Released
