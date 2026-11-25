@@ -11,6 +11,7 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ### Fixed
 
+- **Large collection create**: First-time Plex collection create (and membership adds) send rating keys in chunks of 150 so oversized `uri` query strings no longer 400 (#202).
 - **Season/series density pack imports**: Episodes with no linked placeholders skip the import-grace countdown and coalesce one density rematerialize per series instead of per-episode finalize (#199).
 
 ## Pre-release
