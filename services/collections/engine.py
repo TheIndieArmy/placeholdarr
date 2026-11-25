@@ -10,6 +10,7 @@ collection so the builder UI can show live staged counts.
 """
 from __future__ import annotations
 
+import random
 import re
 from services.app_timezone import local_today
 from datetime import datetime, timedelta, timezone
@@ -66,7 +67,16 @@ FILTER_FIELDS = (
     "release_window",
     "rating",
 )
-SORT_OPTIONS = ("popularity", "release_date", "latest_aired", "title", "rating")
+SORT_OPTIONS = (
+    "source_order",
+    "popularity",
+    "release_date",
+    "latest_aired",
+    "title",
+    "rating",
+    "random",
+    "recent",
+)
 # release_window basis: TV air-date modes + per-type movie release dates.
 RELEASE_WINDOW_BASES = (
     "premiered",
@@ -191,6 +201,109 @@ def _normalize_visible_on(raw: Any) -> dict[str, bool]:
     }
 
 
+def _normalize_auto_add(raw: Any, *, section_type: str | None = None) -> dict[str, Any] | None:
+    _ = section_type  # per-recipe config only; no global fallback
+    if not isinstance(raw, dict) or not bool(raw.get("enabled")):
+        return None
+    try:
+        missing_limit = int(
+            raw.get("missing_limit") if raw.get("missing_limit") is not None else raw.get("max_per_run") or 10
+        )
+    except (TypeError, ValueError):
+        missing_limit = 10
+    missing_limit = max(1, min(missing_limit, 50))
+    prune_raw = raw.get("prune") if isinstance(raw.get("prune"), dict) else {}
+    from core.config import settings as app_settings
+
+    prune_enabled = bool(prune_raw.get("enabled")) if prune_raw else bool(
+        getattr(app_settings, "COLLECTIONS_DISCOVER_PRUNE_ENABLED", False)
+    )
+    try:
+        grace_days = int(
+            prune_raw.get("grace_days")
+            if prune_raw.get("grace_days") is not None
+            else getattr(app_settings, "COLLECTIONS_DISCOVER_PRUNE_GRACE_DAYS", 14) or 14
+        )
+    except (TypeError, ValueError):
+        grace_days = 14
+    grace_days = max(1, min(grace_days, 365))
+    keys_raw = raw.get("instance_keys") or []
+    instance_keys = [str(k).strip() for k in keys_raw if str(k).strip()] if isinstance(keys_raw, list) else []
+    tags_raw = raw.get("tags") or []
+    tags = [str(t).strip() for t in tags_raw if str(t).strip()] if isinstance(tags_raw, list) else []
+    from services.collections.discover_defaults import DISCOVER_AUTO_ADD_TAG
+
+    if DISCOVER_AUTO_ADD_TAG not in [t.lower() for t in tags]:
+        tags.insert(0, DISCOVER_AUTO_ADD_TAG)
+    try:
+        quality_profile_id = int(raw.get("quality_profile_id") or 0)
+    except (TypeError, ValueError):
+        quality_profile_id = 0
+    root = str(raw.get("root_folder_path") or "").strip()
+
+    instance_options: dict[str, dict[str, Any]] = {}
+    options_raw = raw.get("instance_options")
+    if isinstance(options_raw, dict) and options_raw:
+        for key in instance_keys:
+            opt = options_raw.get(key)
+            if not isinstance(opt, dict):
+                continue
+            try:
+                qp = int(opt.get("quality_profile_id") or 0)
+            except (TypeError, ValueError):
+                qp = 0
+            root_path = str(opt.get("root_folder_path") or "").strip()
+            if qp >= 1 and root_path:
+                instance_options[key] = {
+                    "quality_profile_id": qp,
+                    "root_folder_path": root_path,
+                }
+        instance_keys = [k for k in instance_keys if k in instance_options]
+    elif instance_keys and quality_profile_id >= 1 and root:
+        for key in instance_keys:
+            instance_options[key] = {
+                "quality_profile_id": quality_profile_id,
+                "root_folder_path": root,
+            }
+
+    if not instance_keys or not instance_options:
+        return None
+
+    first = instance_options[instance_keys[0]]
+    return {
+        "enabled": True,
+        "instance_keys": instance_keys,
+        "instance_options": instance_options,
+        "quality_profile_id": int(first["quality_profile_id"]),
+        "root_folder_path": str(first["root_folder_path"]),
+        "monitored": bool(raw.get("monitored", True)),
+        "search": bool(raw.get("search", False)),
+        "tags": tags,
+        "missing_limit": missing_limit,
+        "max_per_run": missing_limit,
+        "prune": {"enabled": prune_enabled, "grace_days": grace_days},
+    }
+
+
+def _stored_auto_add(raw: Any) -> dict[str, Any] | None:
+    """Persistable auto_add block (fully valid or enabled stub for later resolve)."""
+    normalized = _normalize_auto_add(raw)
+    if normalized:
+        return normalized
+    if isinstance(raw, dict) and raw.get("enabled"):
+        return raw
+    return None
+
+
+def _effective_auto_add(definition: dict[str, Any], section_type: str) -> dict[str, Any] | None:
+    """Resolved auto_add for a recipe run (must be configured on the recipe)."""
+    _ = section_type
+    raw = definition.get("auto_add")
+    if not isinstance(raw, dict) or not bool(raw.get("enabled")):
+        return None
+    return _normalize_auto_add(raw)
+
+
 def validate_definition(definition: dict[str, Any]) -> dict[str, Any]:
     """Validate and normalize a recipe definition. Raises RecipeValidationError."""
     if not isinstance(definition, dict):
@@ -208,6 +321,7 @@ def validate_definition(definition: dict[str, Any]) -> dict[str, Any]:
         if limit is not None:
             limit = min(int(limit), MAX_COLLECTION_ITEMS)
             set_cfg["limit"] = limit
+        include_library = bool(set_cfg.get("include_library", True))
         sources = [{"type": "catalog"}]
         return {
             "mode": "collection_set",
@@ -215,11 +329,13 @@ def validate_definition(definition: dict[str, Any]) -> dict[str, Any]:
             "sources": sources,
             "filters": [],
             "limit": limit,
+            "include_library": include_library,
             "sort": sort,
             "sort_provider": None,
             "pins": {"include": [], "exclude": []},
             "adopt_existing": bool(definition.get("adopt_existing")),
             "visible_on": _normalize_visible_on(definition.get("visible_on")),
+            "auto_add": _stored_auto_add(definition.get("auto_add")),
         }
 
     sources = definition.get("sources") or []
@@ -286,25 +402,41 @@ def validate_definition(definition: dict[str, Any]) -> dict[str, Any]:
 
     filters = _normalize_filters(definition.get("filters"))
 
+    include_library = definition.get("include_library")
+    if include_library is None:
+        include_library = True
+    else:
+        include_library = bool(include_library)
+
     limit = definition.get("limit")
     if limit is not None:
         try:
             limit = int(limit)
         except (TypeError, ValueError):
             raise RecipeValidationError("limit must be an integer")
-        if limit < 1:
-            raise RecipeValidationError("limit must be >= 1")
+        if include_library and limit < 1:
+            raise RecipeValidationError("limit must be >= 1 when library titles are enabled")
         limit = min(limit, MAX_COLLECTION_ITEMS)
 
     sort = definition.get("sort")
     if sort is not None and sort not in SORT_OPTIONS:
         raise RecipeValidationError(f"unknown sort option: {sort!r}")
+    if sort is None:
+        sort = _default_recipe_sort(normalized_sources)
     sort_provider = definition.get("sort_provider")
     if sort_provider is not None:
         if sort_provider not in MOVIE_RATING_PROVIDERS:
             raise RecipeValidationError(f"unknown sort_provider: {sort_provider!r}")
         if sort != "rating":
             sort_provider = None
+
+    release_basis = definition.get("release_basis")
+    if release_basis is not None and str(release_basis).strip():
+        release_basis = str(release_basis).strip().lower()
+        if release_basis not in RELEASE_WINDOW_BASES:
+            raise RecipeValidationError(f"unknown release_basis: {release_basis!r}")
+    else:
+        release_basis = None
 
     pins = definition.get("pins") or {}
     if not isinstance(pins, dict):
@@ -325,11 +457,14 @@ def validate_definition(definition: dict[str, Any]) -> dict[str, Any]:
         "sources": normalized_sources,
         "filters": filters,
         "limit": limit,
+        "include_library": include_library,
         "sort": sort,
         "sort_provider": sort_provider,
+        "release_basis": release_basis,
         "pins": normalized_pins,
         "adopt_existing": bool(definition.get("adopt_existing")),
         "visible_on": _normalize_visible_on(definition.get("visible_on")),
+        "auto_add": _stored_auto_add(definition.get("auto_add")),
     }
 
 
@@ -404,8 +539,16 @@ def _fetch_source_items(source: dict[str, Any], media_type: str) -> list[dict[st
         return tmdb_client.fetch_discover(
             media_type,
             genre_ids=[int(g) for g in (source.get("genre_ids") or [])],
+            company_ids=[int(c) for c in (source.get("company_ids") or [])],
+            network_ids=[int(n) for n in (source.get("network_ids") or [])],
             year_from=source.get("year_from"),
             year_to=source.get("year_to"),
+            primary_release_date_gte=source.get("primary_release_date_gte"),
+            primary_release_date_lte=source.get("primary_release_date_lte"),
+            first_air_date_gte=source.get("first_air_date_gte"),
+            first_air_date_lte=source.get("first_air_date_lte"),
+            certification=str(source.get("certification") or "").strip() or None,
+            certification_country=source.get("certification_country"),
             provider_ids=[int(p) for p in (source.get("provider_ids") or [])],
             watch_region=source.get("watch_region"),
             min_vote_average=source.get("min_vote_average"),
@@ -539,6 +682,62 @@ def _candidate_index(candidates: Optional[list[dict[str, Any]]]) -> dict[tuple[s
     return index
 
 
+def _candidate_source_rank(candidates: Optional[list[dict[str, Any]]]) -> dict[tuple[str, Any], int]:
+    """First-seen gather order for each provider id (for source_order arrange)."""
+    ranks: dict[tuple[str, Any], int] = {}
+    for index, candidate in enumerate(candidates or []):
+        if candidate.get("tmdb_id"):
+            ranks.setdefault(("tmdb", int(candidate["tmdb_id"])), index)
+        if candidate.get("imdb_id"):
+            ranks.setdefault(("imdb", str(candidate["imdb_id"])), index)
+        if candidate.get("tvdb_id"):
+            ranks.setdefault(("tvdb", int(candidate["tvdb_id"])), index)
+    return ranks
+
+
+_TMDB_RANKED_SUBTYPES = frozenset({"trending", "popular", "upcoming", "page"})
+
+
+def _source_preserves_fetch_order(source: dict[str, Any]) -> bool:
+    source_type = source.get("type")
+    if source_type == "catalog":
+        return False
+    if source_type in (
+        "tmdb_trending",
+        "tmdb_popular",
+        "tmdb_upcoming",
+        "tmdb_discover",
+        "tmdb_list",
+        "tmdb_url",
+        "tmdb_person",
+        "tmdb_company",
+        "tmdb_keyword",
+        "tmdb_collection",
+        "mdblist",
+        "trakt_list",
+        "trakt_chart",
+        "stevenlu",
+        "anilist",
+        "tautulli",
+        "arr_tag",
+    ):
+        return True
+    if source_type == "tmdb":
+        subtype = str(source.get("subtype") or "trending").strip().lower()
+        return subtype in _TMDB_RANKED_SUBTYPES
+    if source_type == "trakt":
+        return True
+    return False
+
+
+def _default_recipe_sort(sources: list[dict[str, Any]]) -> str:
+    if any(s.get("type") == "catalog" for s in sources):
+        return "popularity"
+    if sources and all(_source_preserves_fetch_order(s) for s in sources):
+        return "source_order"
+    return "popularity"
+
+
 # ---------------------------------------------------------------------------
 # Catalog matching
 # ---------------------------------------------------------------------------
@@ -634,6 +833,7 @@ def _missing_from_arr_items(
     cap: int = MISSING_FROM_ARR_CAP,
     sort: Optional[str] = None,
     sort_provider: Optional[str] = None,
+    preserve_source_order: bool = False,
 ) -> tuple[list[dict[str, Any]], int, int, list[str]]:
     """Source candidates not in the catalog, after recipe filters that can run off-list.
 
@@ -653,7 +853,8 @@ def _missing_from_arr_items(
         raw.append(candidate)
     prefilter = len(raw)
     kept = [c for c in raw if tree is None or _candidate_node_passes(c, tree, section_type, genre_map or {})]
-    kept = _sort_candidates(kept, sort, sort_provider)
+    if not preserve_source_order:
+        kept = _sort_candidates(kept, sort, sort_provider)
     items = [
         {
             "title": candidate.get("title") or "Untitled",
@@ -661,6 +862,7 @@ def _missing_from_arr_items(
             "tmdb_id": candidate.get("tmdb_id"),
             "tvdb_id": candidate.get("tvdb_id"),
             "imdb_id": candidate.get("imdb_id"),
+            "date": candidate.get("date"),
             "poster": _candidate_poster_url(candidate),
         }
         for candidate in kept[:cap]
@@ -1240,15 +1442,27 @@ def _row_release_date(row: Any, section_type: str) -> Optional[datetime]:
 
 
 def _row_movie_basis_date(row: Any, basis: str) -> Optional[datetime]:
-    if basis in MOVIE_RELEASE_BASES:
-        column = {
-            "theater": "theater_release_date",
-            "digital": "digital_release_date",
-            "physical": "physical_release_date",
-        }[basis]
-        return _coerce_utc_datetime(getattr(row, column, None))
-    # premiered / omitted: first available release date (back-compat with flat movie dates).
-    return _row_release_date(row, "movie")
+    """Movie release date for a chosen type, with calendar-style fallback to other types."""
+    if basis not in MOVIE_RELEASE_BASES:
+        return _row_release_date(row, "movie")
+    basis_to_type = {
+        "theater": "inCinemas",
+        "digital": "digitalRelease",
+        "physical": "physicalRelease",
+    }
+    type_to_column = {
+        "inCinemas": "theater_release_date",
+        "digitalRelease": "digital_release_date",
+        "physicalRelease": "physical_release_date",
+    }
+    start_type = basis_to_type.get(basis, "inCinemas")
+    order = [start_type] + [t for t in basis_to_type.values() if t != start_type]
+    for release_type in order:
+        col = type_to_column[release_type]
+        raw = getattr(row, col, None)
+        if raw:
+            return _coerce_utc_datetime(raw)
+    return None
 
 
 def _coerce_utc_datetime(raw: Any) -> Optional[datetime]:
@@ -1563,18 +1777,57 @@ def _sort_rows(
     candidate_index: dict[tuple[str, Any], dict[str, Any]],
     air_dates: Optional[dict[int, dict[str, Optional[datetime]]]] = None,
     sort_provider: Optional[str] = None,
+    release_basis: Optional[str] = None,
+    candidate_rank: Optional[dict[tuple[str, Any], int]] = None,
 ) -> list[Any]:
+    if sort == "source_order" and candidate_rank:
+        tail = len(candidate_rank) + 1
+
+        def source_order_key(row: Any) -> int:
+            tmdb_id = row.tmdbid if section_type == "movie" else row.sonarr_tmdbid
+            if tmdb_id:
+                rank = candidate_rank.get(("tmdb", int(tmdb_id)))
+                if rank is not None:
+                    return rank
+            imdb = getattr(row, "imdbid", None)
+            if imdb:
+                rank = candidate_rank.get(("imdb", str(imdb)))
+                if rank is not None:
+                    return rank
+            if section_type != "movie":
+                tvdb = getattr(row, "tvdbid", None)
+                if tvdb:
+                    rank = candidate_rank.get(("tvdb", int(tvdb)))
+                    if rank is not None:
+                        return rank
+            return tail
+
+        return sorted(rows, key=source_order_key)
     if sort == "title":
         return sorted(rows, key=lambda r: _title_sort_key(getattr(r, "title", None)))
     if sort == "release_date":
         epoch = datetime(1900, 1, 1, tzinfo=timezone.utc)
+        basis = release_basis
+        if section_type == "movie" and basis in MOVIE_RELEASE_BASES:
+
+            def movie_release_key(row: Any) -> datetime:
+                return _row_basis_date(row, section_type, str(basis), air_dates) or epoch
+
+            return sorted(rows, key=movie_release_key, reverse=True)
+        if section_type != "movie" and basis in ("premiered", "latest_episode", "latest_season"):
+
+            def show_release_key(row: Any) -> datetime:
+                return _row_basis_date(row, section_type, str(basis), air_dates) or epoch
+
+            return sorted(rows, key=show_release_key, reverse=True)
         return sorted(rows, key=lambda r: _row_release_date(r, section_type) or epoch, reverse=True)
     if sort == "latest_aired":
         # Shows: latest aired episode; movies (or shows missing episode data): release date.
         epoch = datetime(1900, 1, 1, tzinfo=timezone.utc)
+        aired_basis = release_basis if release_basis in ("latest_episode", "latest_season", "premiered") else "latest_episode"
 
         def aired_key(row: Any) -> datetime:
-            value = _row_basis_date(row, section_type, "latest_episode", air_dates)
+            value = _row_basis_date(row, section_type, aired_basis, air_dates)
             return value or _row_release_date(row, section_type) or epoch
 
         return sorted(rows, key=aired_key, reverse=True)
@@ -1600,6 +1853,26 @@ def _sort_rows(
                 item = candidate_index.get(("tvdb", int(row.tvdbid)))
             return float(item.get("popularity") or 0) if item else 0.0
         return sorted(rows, key=popularity, reverse=True)
+    if sort == "recent":
+        epoch = datetime(1900, 1, 1, tzinfo=timezone.utc)
+
+        def added_key(row: Any) -> datetime:
+            value = getattr(row, "radarr_added_at", None) if section_type == "movie" else getattr(row, "sonarr_added_at", None)
+            if value is None:
+                value = getattr(row, "created_at", None)
+            if isinstance(value, datetime):
+                if value.tzinfo is None:
+                    return value.replace(tzinfo=timezone.utc)
+                return value
+            return epoch
+
+        return sorted(rows, key=added_key, reverse=True)
+    if sort == "random":
+        seed = int(datetime.now(timezone.utc).strftime("%Y%m%d%H"))
+        rng = random.Random(seed)
+        out = list(rows)
+        rng.shuffle(out)
+        return out
     return rows
 
 
@@ -1626,7 +1899,7 @@ def _sort_candidates(
     sort_provider: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """Apply the recipe Arrange sort to missing-from-ARR candidates (stable)."""
-    if not sort:
+    if not sort or sort == "source_order":
         return candidates
     indexed = list(enumerate(candidates))
     epoch = datetime(1900, 1, 1, tzinfo=timezone.utc)
@@ -1641,7 +1914,11 @@ def _sort_candidates(
         if sort == "rating":
             score = _candidate_rating_score(candidate, sort_provider)
             return (-score, index)
-        # popularity / list rank (missing popularity keeps source order)
+        if sort == "random":
+            return (index,)
+        if sort == "recent":
+            return (index,)
+        # popularity score (stable tie-break by gather index)
         try:
             pop = float(candidate.get("popularity") or 0)
         except (TypeError, ValueError):
@@ -1650,6 +1927,100 @@ def _sort_candidates(
 
     indexed.sort(key=keyed)
     return [candidate for _index, candidate in indexed]
+
+
+def _landing_indexes(
+    rows: list[Any],
+    items: list[dict[str, Any]],
+    sort: Optional[str],
+    section_type: str,
+    candidate_index: dict[tuple[str, Any], dict[str, Any]],
+    candidate_rank: dict[tuple[str, Any], int],
+    air_dates: Optional[dict[int, dict[str, Optional[datetime]]]] = None,
+    sort_provider: Optional[str] = None,
+    release_basis: Optional[str] = None,
+) -> list[Optional[int]]:
+    """Slot in the sorted ``rows`` where each missing candidate would land once added.
+
+    Returns ``None`` per item when the arrange has no comparable key (random, recently added).
+    """
+    if not items:
+        return []
+
+    def row_ids(row: Any) -> list[tuple[str, Any]]:
+        ids: list[tuple[str, Any]] = []
+        tmdb_id = row.tmdbid if section_type == "movie" else row.sonarr_tmdbid
+        if tmdb_id:
+            ids.append(("tmdb", int(tmdb_id)))
+        if getattr(row, "imdbid", None):
+            ids.append(("imdb", str(row.imdbid)))
+        if section_type != "movie" and getattr(row, "tvdbid", None):
+            ids.append(("tvdb", int(row.tvdbid)))
+        return ids
+
+    def item_ids(item: dict[str, Any]) -> list[tuple[str, Any]]:
+        ids: list[tuple[str, Any]] = []
+        if item.get("tmdb_id"):
+            ids.append(("tmdb", int(item["tmdb_id"])))
+        if item.get("imdb_id"):
+            ids.append(("imdb", str(item["imdb_id"])))
+        if item.get("tvdb_id"):
+            ids.append(("tvdb", int(item["tvdb_id"])))
+        return ids
+
+    epoch = datetime(1900, 1, 1, tzinfo=timezone.utc)
+    tail = len(candidate_rank) + 1
+    # Keys ascend in display order (descending sorts are negated).
+    row_key: Any
+    item_key: Any
+    if sort == "source_order":
+        row_key = lambda r: min((candidate_rank[k] for k in row_ids(r) if k in candidate_rank), default=tail)
+        item_key = lambda it: min((candidate_rank[k] for k in item_ids(it) if k in candidate_rank), default=tail)
+    elif sort == "popularity":
+
+        def pop_of(ids: list[tuple[str, Any]], fallback: Any = None) -> float:
+            for k in ids:
+                if k in candidate_index:
+                    return float(candidate_index[k].get("popularity") or 0)
+            return float(fallback or 0)
+
+        row_key = lambda r: -pop_of(row_ids(r))
+        item_key = lambda it: -pop_of(item_ids(it), it.get("popularity"))
+    elif sort == "title":
+        row_key = lambda r: _title_sort_key(getattr(r, "title", None))
+        item_key = lambda it: _title_sort_key(it.get("title"))
+    elif sort in ("release_date", "latest_aired"):
+
+        def row_dt(r: Any) -> datetime:
+            if sort == "latest_aired":
+                basis = release_basis if release_basis in ("latest_episode", "latest_season", "premiered") else "latest_episode"
+                return _row_basis_date(r, section_type, basis, air_dates) or _row_release_date(r, section_type) or epoch
+            if release_basis:
+                return _row_basis_date(r, section_type, str(release_basis), air_dates) or epoch
+            return _row_release_date(r, section_type) or epoch
+
+        row_key = lambda r: -row_dt(r).timestamp()
+        item_key = lambda it: -(_candidate_release_dt(it) or epoch).timestamp()
+    elif sort == "rating":
+        provider = sort_provider if section_type == "movie" else None
+        if section_type == "movie" and not provider:
+            provider = "imdb"
+
+        def row_rating(r: Any) -> float:
+            detail = _row_rating_detail(r, section_type, provider)
+            return detail[0] if detail else float("-inf")
+
+        row_key = lambda r: -row_rating(r)
+        item_key = lambda it: -_candidate_rating_score(it, provider)
+    else:
+        return [None] * len(items)
+
+    keys = [row_key(r) for r in rows]
+    out: list[Optional[int]] = []
+    for item in items:
+        k = item_key(item)
+        out.append(sum(1 for rk in keys if rk <= k))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1820,15 +2191,73 @@ def _row_summary(
 # Pipeline
 # ---------------------------------------------------------------------------
 
+
+def _row_catalog_signature(row: Any, section_type: str) -> tuple[int | None, int | None]:
+    if section_type == "movie":
+        try:
+            tmdb = int(row.tmdbid or 0) or None
+        except (TypeError, ValueError):
+            tmdb = None
+        return (tmdb, None)
+    try:
+        tmdb = int(getattr(row, "sonarr_tmdbid", 0) or 0) or None
+    except (TypeError, ValueError):
+        tmdb = None
+    try:
+        tvdb = int(getattr(row, "tvdbid", 0) or 0) or None
+    except (TypeError, ValueError):
+        tvdb = None
+    return (tmdb, tvdb)
+
+
+def _definition_is_upcoming(definition: dict[str, Any]) -> bool:
+    for src in definition.get("sources") or []:
+        if isinstance(src, dict) and str(src.get("type") or "") == "tmdb_upcoming":
+            return True
+
+    def walk(node: Any) -> bool:
+        if isinstance(node, dict):
+            if (
+                str(node.get("field") or "") == "release_window"
+                and str(node.get("op") or "").strip().lower() == "upcoming"
+            ):
+                return True
+            for child in node.get("children") or []:
+                if walk(child):
+                    return True
+            return False
+        if isinstance(node, list):
+            return any(walk(item) for item in node)
+        return False
+
+    return walk(definition.get("filters"))
+
+
+def _candidate_unreleased(candidate: dict[str, Any]) -> bool:
+    from datetime import date
+
+    raw = str(candidate.get("date") or "").strip()
+    if len(raw) < 10:
+        return False
+    try:
+        return date(int(raw[:4]), int(raw[5:7]), int(raw[8:10])) > date.today()
+    except (TypeError, ValueError):
+        return False
+
+
 def _evaluate(
     definition: dict[str, Any],
     section_id: int,
     section_type: str,
     *,
     resolve: bool,
+    collection_key: str | None = None,
+    auto_add: dict[str, Any] | None = None,
+    missing_preview_detail: bool = False,
 ) -> dict[str, Any]:
     normalized = validate_definition(definition)
     media_type = _media_type_for_section(section_type)
+    cap_split = bool(auto_add and collection_key)
 
     candidates = _gather_source_candidates(normalized["sources"], media_type)
     id_sets = _candidate_id_sets(candidates) if candidates is not None else None
@@ -1836,6 +2265,7 @@ def _evaluate(
     rows = _load_catalog_rows(section_type, id_sets)
     matched_count = len(_dedupe_rows(rows, section_type))
     file_state = _catalog_file_state(rows, section_type)
+    missing_cap = MISSING_FROM_ARR_CAP if not cap_split else max(MISSING_FROM_ARR_CAP, 200)
     missing_items, missing_count, missing_prefilter, missing_gaps = _missing_from_arr_items(
         candidates,
         rows,
@@ -1845,6 +2275,8 @@ def _evaluate(
         genre_map=_tmdb_genre_map(media_type),
         sort=normalized["sort"],
         sort_provider=normalized.get("sort_provider"),
+        cap=missing_cap,
+        preserve_source_order=False,
     )
 
     air_dates = (
@@ -1862,24 +2294,136 @@ def _evaluate(
     rows, pinned_out = _apply_exclude_pins(rows, normalized["pins"], section_type)
     rows = _merge_include_pins(rows, normalized["pins"], section_type)
 
-    rows = _sort_rows(
-        rows,
-        normalized["sort"],
-        section_type,
-        _candidate_index(candidates),
-        air_dates,
-        normalized.get("sort_provider"),
-    )
-    explicit_limit = normalized["limit"]
-    if explicit_limit is None:
-        # Unset limit means no per-collection cap (Collection Sets / open-ended recipes).
-        rows, pinned_in = rows, 0
-        if normalized["pins"].get("include"):
-            include_ids = _pin_id_sets(normalized["pins"]["include"])
-            pinned_in = sum(1 for row in rows if _row_matches_ids(row, section_type, include_ids))
+    owned_selected = None
+    held_count = 0
+    to_add_count = 0
+    to_add_items: list[dict[str, Any]] = []
+    missing_limit = int(auto_add.get("missing_limit") or 10) if cap_split else 0
+    result_extra_preview: dict[str, Any] = {}
+
+    if cap_split:
+        from services.collections.auto_add import held_placeholders
+
+        held_sigs = held_placeholders(collection_key=collection_key or "", media_type=media_type)
+        owned_rows = [r for r in rows if _row_catalog_signature(r, section_type) not in held_sigs]
+        held_rows = [r for r in rows if _row_catalog_signature(r, section_type) in held_sigs]
+        include_library = bool(normalized.get("include_library", True))
+        library_limit = normalized["limit"]
+        if not include_library:
+            library_cap = 0
+        elif library_limit is None:
+            library_cap = MAX_COLLECTION_ITEMS
+        else:
+            library_cap = min(int(library_limit), MAX_COLLECTION_ITEMS)
+        held_cap = min(missing_limit, MAX_COLLECTION_ITEMS)
+
+        cand_idx = _candidate_index(candidates)
+        cand_rank = _candidate_source_rank(candidates)
+        owned_rows = _sort_rows(
+            owned_rows,
+            normalized["sort"],
+            section_type,
+            cand_idx,
+            air_dates,
+            normalized.get("sort_provider"),
+            normalized.get("release_basis"),
+            cand_rank,
+        )
+        held_rows = _sort_rows(
+            held_rows,
+            normalized["sort"],
+            section_type,
+            cand_idx,
+            air_dates,
+            normalized.get("sort_provider"),
+            normalized.get("release_basis"),
+            cand_rank,
+        )
+        owned_rows, pinned_in_owned = _apply_limit_with_pins(
+            owned_rows, normalized["pins"], section_type, library_cap
+        )
+        held_rows, pinned_in_held = _apply_limit_with_pins(
+            held_rows, normalized["pins"], section_type, held_cap
+        )
+        pinned_in = pinned_in_owned + pinned_in_held
+        held_count = len(held_rows)
+        owned_selected = len(owned_rows)
+        rows = _sort_rows(
+            owned_rows + held_rows,
+            normalized["sort"],
+            section_type,
+            cand_idx,
+            air_dates,
+            normalized.get("sort_provider"),
+            normalized.get("release_basis"),
+            cand_rank,
+        )
+
+        upcoming = _definition_is_upcoming(normalized)
+        eligible_missing = [
+            it
+            for it in missing_items
+            if upcoming or not _candidate_unreleased(it)
+        ]
+        add_budget = max(0, missing_limit - held_count)
+        to_add_items = eligible_missing[:add_budget]
+        to_add_count = len(to_add_items)
+        to_add_keys = {
+            key
+            for it in to_add_items
+            if (key := _missing_identity_key(it))
+        }
+        if missing_preview_detail:
+            preview_rows: list[dict[str, Any]] = []
+            preview_source = eligible_missing[:missing_cap]
+            landing = _landing_indexes(
+                rows,
+                preview_source,
+                normalized["sort"],
+                section_type,
+                cand_idx,
+                cand_rank,
+                air_dates,
+                normalized.get("sort_provider"),
+                normalized.get("release_basis"),
+            )
+            for it, slot in zip(preview_source, landing):
+                row = dict(it)
+                key = _missing_identity_key(it)
+                row["would_auto_add"] = bool(key and key in to_add_keys)
+                row["landing_index"] = slot
+                preview_rows.append(row)
+            result_extra_preview = {
+                "missing_from_arr_preview": preview_rows,
+                "missing_from_arr_preview_count": len(preview_rows),
+            }
+        missing_items = to_add_items
+        missing_count = to_add_count
     else:
-        limit = min(int(explicit_limit), MAX_COLLECTION_ITEMS)
-        rows, pinned_in = _apply_limit_with_pins(rows, normalized["pins"], section_type, limit)
+        cand_rank = _candidate_source_rank(candidates)
+        rows = _sort_rows(
+            rows,
+            normalized["sort"],
+            section_type,
+            _candidate_index(candidates),
+            air_dates,
+            normalized.get("sort_provider"),
+            normalized.get("release_basis"),
+            cand_rank,
+        )
+        include_library = bool(normalized.get("include_library", True))
+        if not include_library:
+            rows, pinned_in = [], 0
+        else:
+            explicit_limit = normalized["limit"]
+            if explicit_limit is None:
+                rows, pinned_in = rows, 0
+                if normalized["pins"].get("include"):
+                    include_ids = _pin_id_sets(normalized["pins"]["include"])
+                    pinned_in = sum(1 for row in rows if _row_matches_ids(row, section_type, include_ids))
+            else:
+                limit = min(int(explicit_limit), MAX_COLLECTION_ITEMS)
+                rows, pinned_in = _apply_limit_with_pins(rows, normalized["pins"], section_type, limit)
 
     result: dict[str, Any] = {
         "tmdb_candidates": len(candidates) if candidates is not None else None,
@@ -1898,6 +2442,11 @@ def _evaluate(
         "missing_from_arr_prefilter_count": missing_prefilter,
         "missing_from_arr_filter_gaps": missing_gaps,
         "file_state": file_state,
+        "owned_selected": owned_selected,
+        "held_count": held_count if cap_split else 0,
+        "to_add_count": to_add_count,
+        "missing_limit": missing_limit if cap_split else None,
+        **result_extra_preview,
     }
 
     if resolve:
@@ -1967,7 +2516,17 @@ def preview_definition(
             extra_section_ids=extra_section_ids,
         )
     section_ids = normalize_section_ids(section_id, extra_section_ids)
-    primary = _evaluate(normalized, section_ids[0], section_type, resolve=True)
+    auto_add_effective = _effective_auto_add(normalized, section_type)
+    preview_key = "preview:single" if auto_add_effective else None
+    primary = _evaluate(
+        normalized,
+        section_ids[0],
+        section_type,
+        resolve=True,
+        collection_key=preview_key,
+        auto_add=auto_add_effective,
+        missing_preview_detail=bool(auto_add_effective),
+    )
     sample_rows = primary["rows"][:sample_size]
     file_state = primary.get("file_state") or {}
     sample = [_row_summary(row, section_type, file_state) for row in sample_rows]
@@ -1975,7 +2534,19 @@ def preview_definition(
     plex_errors: list[str] = []
     key_groups = _provider_key_groups(sample_rows, section_type)
     for sid in section_ids:
-        outcome = primary if sid == section_ids[0] else _evaluate(normalized, sid, section_type, resolve=True)
+        outcome = (
+            primary
+            if sid == section_ids[0]
+            else _evaluate(
+                normalized,
+                sid,
+                section_type,
+                resolve=True,
+                collection_key=preview_key,
+                auto_add=auto_add_effective,
+                missing_preview_detail=False,
+            )
+        )
         libraries.append(
             {
                 "plex_section_id": sid,
@@ -2011,6 +2582,12 @@ def preview_definition(
         "missing_from_arr_count": int(primary.get("missing_from_arr_count") or 0),
         "missing_from_arr_prefilter_count": int(primary.get("missing_from_arr_prefilter_count") or 0),
         "missing_from_arr_filter_gaps": primary.get("missing_from_arr_filter_gaps") or [],
+        "owned_selected": primary.get("owned_selected"),
+        "held_count": primary.get("held_count"),
+        "to_add_count": primary.get("to_add_count"),
+        "would_add_total": int(primary.get("to_add_count") or 0),
+        "missing_from_arr_preview": primary.get("missing_from_arr_preview") or [],
+        "missing_from_arr_preview_count": int(primary.get("missing_from_arr_preview_count") or 0),
     }
 
 
@@ -2244,6 +2821,8 @@ def explain_definition_item(
             _candidate_index(candidates),
             full_air_dates,
             normalized.get("sort_provider"),
+            normalized.get("release_basis"),
+            _candidate_source_rank(candidates),
         )
         limit = normalized["limit"] or MAX_COLLECTION_ITEMS
         selected, _ = _apply_limit_with_pins(rows, pins, section_type, limit)
@@ -2311,19 +2890,31 @@ def preview_collection_set_definition(
     set_cfg = normalized["collection_set"]
     set_cfg = sets_mod.validate_collection_set_block(set_cfg, section_type=section_type)
     section_ids = normalize_section_ids(section_id, extra_section_ids)
-    children = sets_mod.expand_collection_set(set_cfg, section_type)
+    auto_add = normalized.get("auto_add")
+    auto_add_effective = _effective_auto_add(normalized, section_type)
+    children = sets_mod.expand_collection_set(set_cfg, section_type, auto_add=auto_add)
     min_items = int(set_cfg.get("min_items") or 0)
 
     collections: list[dict[str, Any]] = []
     catalog_total = 0
     unique_total = 0
+    would_add_total = 0
     per_library_totals: dict[int, int] = {sid: 0 for sid in section_ids}
     plex_error: str | None = None
     sample: list[dict[str, Any]] = []
 
     for child in children:
         # Catalog selection is library-agnostic; membership is checked per section.
-        outcome = _evaluate(child["definition"], section_ids[0], section_type, resolve=False)
+        child_preview_key = f"preview:{child['title']}" if auto_add_effective else None
+        outcome = _evaluate(
+            child["definition"],
+            section_ids[0],
+            section_type,
+            resolve=False,
+            collection_key=child_preview_key,
+            auto_add=auto_add_effective,
+            missing_preview_detail=bool(auto_add_effective),
+        )
         rows = outcome.get("rows") or []
         catalog_count = int(outcome["selected"] or 0)
         key_groups = _provider_key_groups(rows, section_type)
@@ -2345,23 +2936,43 @@ def preview_collection_set_definition(
                     present_any[index] = True
 
         unique_count = sum(1 for hit in present_any if hit)
-        if unique_count < min_items:
-            continue
+        below_min = unique_count < min_items
+        would_add = int(outcome.get("to_add_count") or 0)
 
-        catalog_total += catalog_count
-        unique_total += unique_count
+        file_state = outcome.get("file_state") or {}
+        catalog_placeholder_count = sum(
+            1
+            for row in rows
+            if _row_summary(row, section_type, file_state).get("file_state") in ("placeholder", "mixed")
+        )
+        held_reported = int(outcome.get("held_count") or 0)
+        if not held_reported:
+            held_reported = catalog_placeholder_count
+
+        if not below_min:
+            catalog_total += catalog_count
+            unique_total += unique_count
+            would_add_total += would_add
+
         collections.append(
             {
                 "value": child["value_label"],
                 "title": child["title"],
+                "source": child.get("source") or "library",
                 "selected": unique_count,
+                "owned_selected": outcome.get("owned_selected"),
+                "held_count": held_reported,
+                "would_add": would_add,
                 "matched_in_catalog": outcome["matched_in_catalog"],
                 "after_filters": outcome["after_filters"],
                 "in_target_library": unique_count,
                 "by_library": by_library,
+                "definition": child.get("definition"),
+                "skipped": "below_min" if below_min else None,
+                "min_items": min_items,
             }
         )
-        if len(sample) < sample_size and rows:
+        if not below_min and len(sample) < sample_size and rows:
             file_state = outcome.get("file_state") or {}
             for row_index, row in enumerate(rows):
                 if len(sample) >= sample_size:
@@ -2387,7 +2998,8 @@ def preview_collection_set_definition(
         "set_category": set_cfg["category"],
         "set_dimension": set_cfg["category"],  # legacy alias
         "set_collections": collections,
-        "set_collection_count": len(collections),
+        "set_collection_count": sum(1 for c in collections if not c.get("skipped")),
+        "set_collection_count_total": len(collections),
         "tmdb_candidates": None,
         "matched_in_catalog": catalog_total,
         "after_filters": catalog_total,
@@ -2403,6 +3015,7 @@ def preview_collection_set_definition(
         "missing_from_arr_count": 0,
         "missing_from_arr_prefilter_count": 0,
         "missing_from_arr_filter_gaps": [],
+        "would_add_total": would_add_total,
     }
 
 
@@ -2421,7 +3034,8 @@ def run_collection_set_recipe(
     set_cfg = sets_mod.validate_collection_set_block(
         normalized["collection_set"], section_type=section_type
     )
-    children = sets_mod.expand_collection_set(set_cfg, section_type)
+    auto_add_cfg = normalized.get("auto_add")
+    children = sets_mod.expand_collection_set(set_cfg, section_type, auto_add=auto_add_cfg)
     min_items = int(set_cfg.get("min_items") or 0)
 
     active_titles_by_section: dict[str, list[str]] = {str(sid): [] for sid in section_ids}
@@ -2435,10 +3049,22 @@ def run_collection_set_recipe(
     in_library_total = 0
     unresolved_total = 0
     removed_titles: list[str] = []
+    missing_aggregate: list[dict[str, Any]] = []
+    missing_seen: set[str] = set()
+    auto_add_effective = _effective_auto_add(normalized, section_type)
+    auto_add_runs: list[dict[str, Any]] = []
 
     evaluated: list[dict[str, Any]] = []
     for child in children:
-        base = _evaluate(child["definition"], section_ids[0], section_type, resolve=False)
+        child_key = f"{recipe_id}:{child['title']}" if auto_add_effective else None
+        base = _evaluate(
+            child["definition"],
+            section_ids[0],
+            section_type,
+            resolve=False,
+            collection_key=child_key,
+            auto_add=auto_add_effective,
+        )
         if int(base["selected"] or 0) < min_items:
             continue
         evaluated.append(child)
@@ -2450,7 +3076,15 @@ def run_collection_set_recipe(
             title = child["title"]
             value_label = str(child.get("value_label") or child.get("value") or "")
             current_titles.add(title)
-            outcome = _evaluate(child["definition"], sid, section_type, resolve=True)
+            child_key = f"{recipe_id}:{title}" if auto_add_effective else None
+            outcome = _evaluate(
+                child["definition"],
+                sid,
+                section_type,
+                resolve=True,
+                collection_key=child_key,
+                auto_add=auto_add_effective,
+            )
             if outcome["plex_error"]:
                 raise plex_collections.PlexCollectionsError(outcome["plex_error"])
             known_key = plex_collections.lookup_stored_key(keys_map, sid, title)
@@ -2471,6 +3105,35 @@ def run_collection_set_recipe(
             )
             if sid == section_ids[0]:
                 selected_total += int(outcome["selected"] or 0)
+                for item in outcome.get("missing_from_arr") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    mkey = _missing_identity_key(item)
+                    if mkey and mkey in missing_seen:
+                        continue
+                    if mkey:
+                        missing_seen.add(mkey)
+                    missing_aggregate.append(item)
+                if auto_add_effective and child_key and (outcome.get("missing_from_arr") or []):
+                    from services.collections.auto_add import run_recipe_auto_add, touch_ledger_seen
+
+                    media_type = "movie" if section_type == "movie" else "show"
+                    to_add = outcome.get("missing_from_arr") or []
+                    touch_ledger_seen(
+                        recipe_id=recipe_id,
+                        media_type=media_type,
+                        missing_items=to_add,
+                        collection_key=child_key,
+                    )
+                    auto_add_runs.append(
+                        run_recipe_auto_add(
+                            recipe_id=recipe_id,
+                            section_type=section_type,
+                            auto_add=auto_add_effective,
+                            missing_items=to_add,
+                            collection_key=child_key,
+                        )
+                    )
             in_library_total += int(outcome["in_target_library"] or 0)
             unresolved_total += int(outcome["unresolved"] or 0)
             synced_added += int(sync_stats.get("added") or 0)
@@ -2516,6 +3179,7 @@ def run_collection_set_recipe(
                     "values": set_cfg.get("values") or [],
                     "title_pattern": set_cfg.get("title_pattern"),
                     "sort": set_cfg.get("sort"),
+                    "include_library": set_cfg.get("include_library", True),
                     "limit": set_cfg.get("limit"),
                     "min_items": set_cfg.get("min_items"),
                     "instance_key": set_cfg.get("instance_key"),
@@ -2526,6 +3190,9 @@ def run_collection_set_recipe(
             stored["mode"] = "collection_set"
             stored["collection_set"] = stored_set
             stored["sources"] = [{"type": "catalog"}]
+            aa = definition.get("auto_add")
+            if isinstance(aa, dict):
+                stored["auto_add"] = aa
             recipe.definition = stored
             recipe.plex_collection_keys = keys_map
             session.commit()
@@ -2541,9 +3208,10 @@ def run_collection_set_recipe(
         "selected": selected_total,
         "in_target_library": in_library_total,
         "unresolved": unresolved_total,
-        "missing_from_arr_count": 0,
-        "missing_from_arr_new": None,
-        "missing_from_arr_keys": [],
+        "missing_from_arr_count": len(missing_aggregate),
+        "missing_from_arr": missing_aggregate,
+        "missing_from_arr_new": _new_missing_count(_missing_identity_keys(missing_aggregate), previous_summary),
+        "missing_from_arr_keys": _missing_identity_keys(missing_aggregate),
         "synced": {
             "added": synced_added,
             "removed": synced_removed,
@@ -2557,6 +3225,7 @@ def run_collection_set_recipe(
             "managed_titles": active_titles_by_section,
             "removed_titles": removed_titles,
         },
+        "auto_add": auto_add_runs if auto_add_runs else None,
     }
     logger.info(
         f"Collections: set {recipe_name!r} synced "
@@ -2605,7 +3274,16 @@ def run_recipe(recipe_id: int) -> dict[str, Any]:
                 plex_collection_keys=keys_map,
             )
         else:
-            primary = _evaluate(definition, section_ids[0], section_type, resolve=True)
+            auto_add_cfg = _effective_auto_add(definition, section_type)
+            coll_key = str(recipe_id) if auto_add_cfg else None
+            primary = _evaluate(
+                definition,
+                section_ids[0],
+                section_type,
+                resolve=True,
+                collection_key=coll_key,
+                auto_add=auto_add_cfg,
+            )
             libraries: list[dict[str, Any]] = []
             synced_added = 0
             synced_removed = 0
@@ -2614,7 +3292,18 @@ def run_recipe(recipe_id: int) -> dict[str, Any]:
             in_library_total = 0
             unresolved_total = 0
             for sid in section_ids:
-                outcome = primary if sid == section_ids[0] else _evaluate(definition, sid, section_type, resolve=True)
+                outcome = (
+                    primary
+                    if sid == section_ids[0]
+                    else _evaluate(
+                        definition,
+                        sid,
+                        section_type,
+                        resolve=True,
+                        collection_key=coll_key,
+                        auto_add=auto_add_cfg,
+                    )
+                )
                 if outcome["plex_error"]:
                     raise plex_collections.PlexCollectionsError(outcome["plex_error"])
                 known_key = plex_collections.lookup_stored_key(keys_map, sid, collection_title)
@@ -2660,6 +3349,7 @@ def run_recipe(recipe_id: int) -> dict[str, Any]:
                 "in_target_library": in_library_total,
                 "unresolved": unresolved_total,
                 "missing_from_arr_count": missing_count,
+                "missing_from_arr": missing_items,
                 "missing_from_arr_new": _new_missing_count(missing_keys, previous_summary),
                 "missing_from_arr_keys": missing_keys,
                 "synced": {
@@ -2676,6 +3366,28 @@ def run_recipe(recipe_id: int) -> dict[str, Any]:
                 f"in_library={in_library_total}, added={synced_added}, removed={synced_removed})",
                 extra={"emoji_type": "info"},
             )
+        if summary.get("status") == "ok" and not sets_mod.is_collection_set_definition(definition):
+            auto_add_cfg = _effective_auto_add(definition, section_type)
+            if auto_add_cfg:
+                from services.collections.auto_add import run_recipe_auto_add, touch_ledger_seen
+
+                media_type = "movie" if section_type == "movie" else "show"
+                missing_items = summary.get("missing_from_arr")
+                if not isinstance(missing_items, list):
+                    missing_items = []
+                touch_ledger_seen(
+                    recipe_id=recipe_id,
+                    media_type=media_type,
+                    missing_items=missing_items,
+                    collection_key=str(recipe_id),
+                )
+                summary["auto_add"] = run_recipe_auto_add(
+                    recipe_id=recipe_id,
+                    section_type=section_type,
+                    auto_add=auto_add_cfg,
+                    missing_items=missing_items,
+                    collection_key=str(recipe_id),
+                )
     except (
         tmdb_client.TmdbError,
         list_sources.ListSourceError,

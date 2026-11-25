@@ -1,0 +1,1 @@
+export { CollectionsPanelNext as RecipesListNext } from "./CollectionsPanelNext";

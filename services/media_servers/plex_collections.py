@@ -86,7 +86,21 @@ def list_plex_sections(*, refresh: bool = False) -> list[dict[str, Any]]:
                 "item_count": count,
             }
         )
-    return sections
+    try:
+        from services.collections.managed_plex import annotate_managed_plex_sections
+
+        return annotate_managed_plex_sections(sections)
+    except Exception as exc:
+        from core.logger import logger
+
+        logger.warning(
+            f"Could not annotate managed Plex sections: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+        for row in sections:
+            row.setdefault("managed", True)
+            row.setdefault("managed_role", None)
+        return sections
 
 
 def _get_section(plex, section_id: int):

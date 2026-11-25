@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { ThemeMode } from "../brandTypes";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
 import { BrandCheckbox } from "../BrandCheckbox";
@@ -23,10 +23,152 @@ import { parseTaskSchedule } from "../settings/TaskScheduleEditor";
 import { ToggleSwitch } from "../ToggleSwitch";
 import { CollectionEditor } from "./CollectionEditor";
 import { CollectionSetEditor, isCollectionSetRecipe } from "./CollectionSetEditor";
+import { RecipeBuilder } from "./next/RecipeBuilder";
+import { SetBuilder } from "./next/SetBuilder";
+import { RecipesGroupedList } from "./next/RecipesGroupedList";
+import { SplitAddButton } from "./next/SplitAddButton";
 import { getCollectionTheme } from "./collectionTheme";
 
 /** Scale with main until this floor, then horizontal scroll on main (header, card, footnote move together). */
 const COLLECTIONS_LIST_LAYOUT_CLASS = "w-full min-w-[max(100%,52rem)]";
+
+function CreateCollectionChooserModal(props: {
+  themeMode: ThemeMode;
+  accentHex: string;
+  plexReady: boolean;
+  ioBusy: boolean;
+  onClose: () => void;
+  onPick: (kind: "discover" | "recipe" | "set" | "import") => void;
+}) {
+  const isLight = props.themeMode === "light";
+  const theme = getCollectionTheme(isLight);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") props.onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [props.onClose]);
+
+  const options: {
+    kind: "discover" | "recipe" | "set" | "import";
+    title: string;
+    description: string;
+    icon: string;
+    disabled?: boolean;
+    disabledHint?: string;
+  }[] = [
+    {
+      kind: "discover",
+      title: "Discover preset",
+      description: "Guided setup for trending, popular, upcoming, and genre collections.",
+      icon: "explore",
+      disabled: !props.plexReady || props.ioBusy,
+      disabledHint: "Connect Plex first",
+    },
+    {
+      kind: "recipe",
+      title: "New collection",
+      description: "One rule-based Plex collection (TMDB lists, catalog filters, pins).",
+      icon: "add",
+      disabled: !props.plexReady,
+      disabledHint: "Connect Plex first",
+    },
+    {
+      kind: "set",
+      title: "Collection set",
+      description: "Many collections from one recipe (genres, studios, networks, release timing).",
+      icon: "category",
+      disabled: !props.plexReady,
+      disabledHint: "Connect Plex first",
+    },
+    {
+      kind: "import",
+      title: "Import from JSON",
+      description: "Restore or copy recipes from another Placeholdarr export.",
+      icon: "upload",
+      disabled: !props.plexReady || props.ioBusy,
+      disabledHint: "Connect Plex first",
+    },
+  ];
+
+  const row = (
+    opt: (typeof options)[number],
+    trailing?: ReactNode,
+  ) => (
+    <button
+      key={opt.kind}
+      type="button"
+      disabled={opt.disabled}
+      title={opt.disabled ? opt.disabledHint : undefined}
+      onClick={() => {
+        if (opt.disabled) return;
+        props.onPick(opt.kind);
+      }}
+      className={`flex w-full items-start gap-3 rounded-lg border px-3 py-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
+        isLight ? "border-slate-200 hover:bg-slate-50" : "border-[#424753]/50 hover:bg-[#1e2430]"
+      }`}
+    >
+      <span
+        className="material-symbols-outlined mt-0.5 shrink-0"
+        style={{ fontSize: 22, color: props.accentHex }}
+        aria-hidden
+      >
+        {opt.icon}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className={`block text-[14px] font-semibold ${isLight ? "text-slate-900" : "text-slate-100"}`}>
+          {opt.title}
+        </span>
+        <span className={`mt-0.5 block text-[12px] leading-snug ${theme.muted}`}>{opt.description}</span>
+      </span>
+      {trailing}
+    </button>
+  );
+
+  return (
+    <div
+      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) props.onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="create-collection-modal-title"
+        className={`w-full max-w-md rounded-xl border shadow-lg shadow-black/20 overflow-hidden ${
+          isLight ? "border-slate-200 bg-white" : "border-[#424753]/40 bg-[#171c22]"
+        }`}
+      >
+        <div className={`px-5 py-4 border-b ${isLight ? "border-slate-200" : "border-[#424753]/30"}`}>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2
+                id="create-collection-modal-title"
+                className={`text-[18px] font-bold font-headline ${isLight ? "text-slate-900" : "text-white"}`}
+              >
+                Add collections
+              </h2>
+              <p className={`mt-1 text-[13px] ${theme.muted}`}>Pick how you want to create or import recipes.</p>
+            </div>
+            <button
+              type="button"
+              onClick={props.onClose}
+              className={`shrink-0 text-[13px] font-headline uppercase tracking-wider ${
+                isLight ? "text-slate-500 hover:text-slate-900" : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              Close
+            </button>
+          </div>
+        </div>
+        <div className="px-5 py-4 flex flex-col gap-2">{options.map((opt) => row(opt))}</div>
+      </div>
+    </div>
+  );
+}
 
 function describeRecipeSchedule(sched: ReturnType<typeof parseTaskSchedule>, clock: ClockFormat): string {
   if (!sched.enabled) return "Disabled";
@@ -87,10 +229,16 @@ export function CollectionsPanel(props: {
   onOpenPlexSettings?: () => void;
   /** Navigate to Settings → Optional APIs (TMDB / Trakt / Tautulli). */
   onOpenOptionalApis?: () => void;
+  /** Navigate to Collections → Ordering. */
+  onOpenOrdering?: () => void;
+  /** Navigate to Collections → Discover setup. */
+  onOpenDiscover?: () => void;
   /** True while the recipe editor has unsaved edits (for sidebar leave prompts). */
   onDraftDirty?: (dirty: boolean) => void;
   /** Dashboard clock format (12h / 24h). */
   clockFormat?: ClockFormat | string | null;
+  /** Side-by-side Collections UX redesign (#201). */
+  useNextUi?: boolean;
 }) {
   const accentHex = props.accent.hex;
   const isLight = props.themeMode === "light";
@@ -113,6 +261,7 @@ export function CollectionsPanel(props: {
   const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const [titleConflict, setTitleConflict] = useState<{
     payload: RecipeWritePayload;
     conflicts: CollectionTitleConflict[];
@@ -527,9 +676,44 @@ export function CollectionsPanel(props: {
         </div>
         {plexBanner}
         {setMode ? (
-          <CollectionSetEditor
-            recipe={typeof editing === "string" ? null : editing}
+          props.useNextUi ? (
+            <SetBuilder
+              recipe={typeof editing === "string" ? null : editing}
+              sections={sections}
+              accent={props.accent}
+              themeMode={props.themeMode}
+              saving={saving}
+              saveError={saveError}
+              onSave={(payload) => void handleSave(payload)}
+              onCancel={leaveEditor}
+              onDirtyChange={handleEditorDirty}
+              clockFormat={clockFormat}
+              onOpenOrdering={props.onOpenOrdering}
+            />
+          ) : (
+            <CollectionSetEditor
+              recipe={typeof editing === "string" ? null : editing}
+              sections={sections}
+              accent={props.accent}
+              themeMode={props.themeMode}
+              saving={saving}
+              saveError={saveError}
+              onSave={(payload) => void handleSave(payload)}
+              onCancel={leaveEditor}
+              onDirtyChange={handleEditorDirty}
+              clockFormat={clockFormat}
+            />
+          )
+        ) : props.useNextUi ? (
+          <RecipeBuilder
+            recipe={editing === "new" ? null : editing}
             sections={sections}
+            tmdbConfigured={tmdbConfigured}
+            traktConfigured={traktConfigured}
+            tautulliConfigured={tautulliConfigured}
+            libraryItems={props.libraryItems}
+            libraryLoading={props.libraryLoading}
+            onEnsureLibrary={props.onEnsureLibrary}
             accent={props.accent}
             themeMode={props.themeMode}
             saving={saving}
@@ -538,6 +722,7 @@ export function CollectionsPanel(props: {
             onCancel={leaveEditor}
             onDirtyChange={handleEditorDirty}
             clockFormat={clockFormat}
+            onOpenOrdering={props.onOpenOrdering}
           />
         ) : (
           <CollectionEditor
@@ -666,38 +851,84 @@ export function CollectionsPanel(props: {
         <span className={`text-[12px] font-headline uppercase tracking-widest ${theme.iconMuted}`}>
           Rule-Based Plex Collections
         </span>
+        {props.useNextUi ? (
+          <span className="rounded-full border border-sky-400/40 bg-sky-500/10 px-2 py-0.5 text-[11px] font-headline uppercase tracking-wider text-sky-300">
+            New UX preview
+          </span>
+        ) : null}
       </div>
-      <div className="mb-6 flex flex-col gap-3">
+      <input
+        ref={importInputRef}
+        type="file"
+        accept="application/json,.json"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) void handleImportFile(file);
+        }}
+      />
+      {createMenuOpen ? (
+        <CreateCollectionChooserModal
+          themeMode={props.themeMode}
+          accentHex={accentHex}
+          plexReady={plexReady}
+          ioBusy={ioBusy}
+          onClose={() => setCreateMenuOpen(false)}
+          onPick={(kind) => {
+            setCreateMenuOpen(false);
+            if (kind === "discover") {
+              props.onOpenDiscover?.();
+              return;
+            }
+            if (kind === "import") {
+              importInputRef.current?.click();
+              return;
+            }
+            if (!plexReady) return;
+            setSaveError(null);
+            setEditing(kind === "set" ? "new-set" : "new");
+          }}
+        />
+      ) : null}
+      <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <h1 className={`text-[32px] font-black tracking-tight font-headline ${isLight ? "text-slate-900" : "text-white"}`}>
           Collections
         </h1>
         <div className="flex flex-wrap items-center gap-2">
-          <input
-            ref={importInputRef}
-            type="file"
-            accept="application/json,.json"
-            className="hidden"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) void handleImportFile(file);
-            }}
-          />
+          {props.useNextUi ? (
+            <SplitAddButton
+              themeMode={props.themeMode}
+              accentHex={accentHex}
+              disabled={!plexReady}
+              ioBusy={ioBusy}
+              onPick={(kind) => {
+                if (kind === "discover") {
+                  props.onOpenDiscover?.();
+                  return;
+                }
+                if (kind === "import") {
+                  importInputRef.current?.click();
+                  return;
+                }
+                setSaveError(null);
+                setEditing(kind === "set" ? "new-set" : "new");
+              }}
+            />
+          ) : (
           <button
             type="button"
             disabled={ioBusy || !plexReady}
-            title={!plexReady ? "Configure Plex before importing" : "Import collections from a JSON file"}
-            onClick={() => importInputRef.current?.click()}
-            className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 text-[14px] font-headline uppercase tracking-wider disabled:opacity-40 disabled:cursor-not-allowed ${
-              isLight
-                ? "border-slate-200 text-slate-700 hover:bg-slate-50"
-                : "border-[#424753]/60 text-slate-200 hover:bg-[#1e2430]"
-            }`}
+            title={!plexReady ? "Configure Plex first" : "Create or import a collection recipe"}
+            onClick={() => setCreateMenuOpen(true)}
+            className={`flex items-center gap-1.5 rounded-lg px-4 py-2 text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-40 disabled:cursor-not-allowed`}
+            style={accentFilledStyle(accentHex)}
           >
             <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
-              upload
+              add
             </span>
-            Import
+            Add
           </button>
+          )}
           <button
             type="button"
             disabled={ioBusy || selectedIds.size === 0}
@@ -713,43 +944,6 @@ export function CollectionsPanel(props: {
               download
             </span>
             Export{selectedIds.size ? ` (${selectedIds.size})` : ""}
-          </button>
-          <button
-            type="button"
-            disabled={!plexReady}
-            title={!plexReady ? "Configure Plex in Settings before creating a collection" : undefined}
-            onClick={() => {
-              if (!plexReady) return;
-              setSaveError(null);
-              setEditing("new-set");
-            }}
-            className={`flex items-center gap-1.5 rounded-lg border px-4 py-2 text-[14px] font-headline uppercase tracking-wider disabled:opacity-40 disabled:cursor-not-allowed ${
-              isLight
-                ? "border-slate-200 text-slate-700 hover:bg-slate-50"
-                : "border-[#424753]/60 text-slate-200 hover:bg-[#1e2430]"
-            }`}
-          >
-            <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
-              category
-            </span>
-            Collection Set
-          </button>
-          <button
-            type="button"
-            disabled={!plexReady}
-            title={!plexReady ? "Configure Plex in Settings before creating a collection" : undefined}
-            onClick={() => {
-              if (!plexReady) return;
-              setSaveError(null);
-              setEditing("new");
-            }}
-            className={`flex items-center gap-1.5 rounded-lg px-4 py-2 text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-40 disabled:cursor-not-allowed`}
-            style={accentFilledStyle(accentHex)}
-          >
-            <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
-              add
-            </span>
-            New Collection
           </button>
         </div>
       </div>
@@ -793,6 +987,41 @@ export function CollectionsPanel(props: {
         </div>
       ) : null}
 
+      {props.useNextUi && !loading && recipes.length ? (
+        <RecipesGroupedList
+          themeMode={props.themeMode}
+          accentHex={accentHex}
+          recipes={recipes}
+          sections={sections}
+          plexReady={plexReady}
+          selectedIds={selectedIds}
+          runningIds={runningIds}
+          describeSchedule={(recipe) => formatSchedule(recipe, clockFormat)}
+          describeLastRun={(recipe) => formatLastRun(recipe, clockFormat)}
+          onToggleSelected={toggleSelected}
+          onSetSelected={(ids, on) =>
+            setSelectedIds((prev) => {
+              const next = new Set(prev);
+              for (const id of ids) {
+                if (on) next.add(id);
+                else next.delete(id);
+              }
+              return next;
+            })
+          }
+          onEdit={(recipe) => {
+            setSaveError(null);
+            setEditing(recipe);
+          }}
+          onRun={(recipe) => void handleRun(recipe)}
+          onDelete={(recipe) => {
+            setDeletePlexToo(false);
+            setDeleteConfirm(recipe);
+          }}
+          onToggleEnabled={(recipe, enabled) => void handleToggle(recipe, enabled)}
+          onOpenOrdering={props.onOpenOrdering}
+        />
+      ) : (
       <div className={`${theme.blockCard} w-full overflow-hidden`}>
         {loading ? (
           <div className={`p-10 text-center text-[16px] ${theme.muted}`}>Loading collections…</div>
@@ -1046,6 +1275,7 @@ export function CollectionsPanel(props: {
           </table>
         )}
       </div>
+      )}
 
       <p className={`mt-4 text-[13px] ${theme.muted}`}>
         Enabled collections run automatically on the collections sync schedule (Settings → Library sync). Collections

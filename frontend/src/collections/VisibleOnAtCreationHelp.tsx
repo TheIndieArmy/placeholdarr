@@ -25,8 +25,9 @@ export function VisibleOnAtCreationHelp(props: VisibleOnAtCreationHelpProps) {
             </ul>
           </li>
           <li>
-            Saving or syncing does not change Visible On for a collection that already exists. Post-creation
-            changes still belong in Plex.
+            Saving or syncing does not change Visible On for a collection that already exists. After creation,
+            change order and Recommended / Home / Shared under <strong className="font-semibold">Collections → Ordering</strong>.
+            Ordering can also manage collections that are not owned by Placeholdarr.
           </li>
           <li>
             <span className={props.plexPassClassName}>Plex Pass required to use this feature.</span> With all

@@ -284,6 +284,9 @@ class Settings(BaseSettings):
     TAUTULLI_API_KEY: Optional[str] = None
     # Legacy: how often to run enabled collection recipes. Prefer COLLECTIONS_SYNC_SCHEDULE.
     COLLECTIONS_SYNC_INTERVAL_HOURS: int = 24
+    COLLECTIONS_DISCOVER_PRUNE_ENABLED: bool = False
+    COLLECTIONS_DISCOVER_PRUNE_GRACE_DAYS: int = 14
+    COLLECTIONS_DISCOVER_HUB_ORDER_JSON: str = "{}"
 
     # Dashboard authentication (see services/auth.py). Env AUTH_MODE overrides DB when set.
     AUTH_MODE: str = os.getenv("AUTH_MODE", "builtin").split("#")[0].strip().lower() or "builtin"

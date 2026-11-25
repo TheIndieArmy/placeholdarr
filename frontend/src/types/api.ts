@@ -838,7 +838,15 @@ export interface CollectionFilterBlock {
   min_votes?: number | null;
 }
 
-export type CollectionSortOption = "popularity" | "release_date" | "latest_aired" | "title" | "rating";
+export type CollectionSortOption =
+  | "source_order"
+  | "popularity"
+  | "release_date"
+  | "latest_aired"
+  | "title"
+  | "rating"
+  | "random"
+  | "recent";
 
 /** Boolean filter tree: groups carry and/or and may nest rules or sub-groups (depth ≤ 3). */
 export interface CollectionFilterGroup {
@@ -865,14 +873,43 @@ export interface CollectionPins {
   exclude?: CollectionPinnedItem[];
 }
 
+export interface CollectionAutoAddPruneConfig {
+  enabled?: boolean;
+  grace_days?: number;
+}
+
+export interface CollectionAutoAddConfig {
+  enabled?: boolean;
+  instance_keys?: string[];
+  instance_options?: Record<string, { quality_profile_id: number; root_folder_path: string }>;
+  quality_profile_id?: number;
+  root_folder_path?: string;
+  monitored?: boolean;
+  search?: boolean;
+  tags?: string[];
+  /** Per collection cap on titles not in your library (includes placeholders until a file exists). */
+  missing_limit?: number;
+  /** @deprecated Use missing_limit. */
+  max_per_run?: number;
+  prune?: CollectionAutoAddPruneConfig | null;
+}
+
+/** Discover apply: optional per-library-type auto-add (not stored on recipes as one blob). */
+export type DiscoverAutoAddApply = {
+  movie?: CollectionAutoAddConfig | null;
+  show?: CollectionAutoAddConfig | null;
+};
+
 export interface CollectionSetConfig {
-  category: "genre" | "decade" | "content_rating" | "tag" | "release_timing";
+  category: "genre" | "decade" | "content_rating" | "studio" | "network" | "tag" | "release_timing";
   /** @deprecated Legacy alias; prefer category. Still accepted when loading older recipes. */
-  dimension?: "genre" | "decade" | "content_rating" | "tag" | "release_timing";
+  dimension?: "genre" | "decade" | "content_rating" | "studio" | "network" | "tag" | "release_timing";
   selection_mode: "all" | "include" | "exclude";
   values: string[];
   title_pattern: string;
   sort?: CollectionSortOption | null;
+  /** When false, collections only show titles added via auto-add (not owned library matches). */
+  include_library?: boolean;
   limit?: number | null;
   min_items?: number;
   /** Required when category is tag. */
@@ -900,9 +937,13 @@ export interface CollectionDefinition {
   sources: CollectionSourceBlock[];
   filters: CollectionFilters;
   limit?: number | null;
+  /** When false, the collection omits owned library matches (TMDB / placeholder only). */
+  include_library?: boolean;
   sort?: CollectionSortOption | null;
   /** When sort is rating (movies): which Radarr ratings.* key to order by. */
   sort_provider?: CollectionRatingProvider | null;
+  /** Movie theater/digital/physical or TV air-date mode when sorting by release. */
+  release_basis?: string | null;
   pins?: CollectionPins;
   /**
    * When true, sync may claim an existing unlabeled Plex collection with the same
@@ -911,6 +952,8 @@ export interface CollectionDefinition {
   adopt_existing?: boolean;
   /** Promote the collection as a Plex hub row (Plex Pass). Defaults all off. */
   visible_on?: CollectionVisibleOn | null;
+  /** Opt-in: add Missing from ARR titles during sync (Discover guardrails). */
+  auto_add?: CollectionAutoAddConfig | null;
 }
 
 export interface CollectionRunSummary {
@@ -1003,6 +1046,10 @@ export interface PlexSectionOption {
   title: string;
   type: "movie" | "show";
   item_count: number;
+  /** False when this library is outside Placeholdarr-controlled paths / Arr roots. */
+  managed?: boolean;
+  /** How this instance attaches to the library. */
+  managed_role?: "placeholder" | "real" | "both" | null;
 }
 
 export interface CollectionTmdbMeta {
@@ -1017,15 +1064,20 @@ export interface CollectionBuilderMeta {
   /** key is "{instance_key}:{profile_id}" — matches engine filter values. */
   quality_profiles: { key: string; name: string; instance_key: string; instance_label: string }[];
   languages: string[];
-  /** Distinct Radarr/Sonarr genre names present in the catalog (matches filter evaluation). */
+  /** Catalog genres merged with TMDB when configured. */
   genres: string[];
   /** Distinct Radarr/Sonarr certifications present in the catalog (matches filter evaluation). */
   certifications: string[];
   /** Decade labels (e.g. 1990s) derived from catalog years. */
   decades?: string[];
+  /** Catalog studios merged with curated major-studio list (movies). */
+  studios?: string[];
+  /** Catalog networks merged with curated list (shows). */
+  networks?: string[];
   /** Tags from configured *arr instances for arr_tag sources. */
   arr_tags?: { instance_key: string; instance_label: string; tag_id: number; label: string }[];
   tautulli_configured?: boolean;
+  tmdb_configured?: boolean;
 }
 
 export interface DeterminationExplainStep {
@@ -1128,6 +1180,10 @@ export interface CollectionMissingFromArrItem {
   tvdb_id?: number | null;
   imdb_id?: string | null;
   poster: string | null;
+  /** True when auto-add is on and this title is within the next sync add budget. */
+  would_auto_add?: boolean;
+  /** Slot in the sorted collection where this title lands once added (null when the arrange has no key). */
+  landing_index?: number | null;
 }
 
 export interface CollectionPreviewResponse {
@@ -1138,11 +1194,23 @@ export interface CollectionPreviewResponse {
   set_collections?: {
     value: string;
     title: string;
+    /** Where this child's titles come from; library_fallback means TMDB was wanted but the value did not resolve. */
+    source?: "tmdb" | "library" | "library_fallback" | "arr_tag";
     selected: number;
+    matched_in_catalog?: number;
+    after_filters?: number;
+    owned_selected?: number | null;
+    held_count?: number;
+    would_add?: number;
     in_target_library?: number | null;
     by_library?: Record<string, number>;
+    definition?: CollectionDefinition;
+    skipped?: "below_min" | null;
+    min_items?: number;
   }[];
   set_collection_count?: number;
+  set_collection_count_total?: number;
+  would_add_total?: number;
   tmdb_candidates: number | null;
   matched_in_catalog: number;
   after_filters: number;
@@ -1158,6 +1226,11 @@ export interface CollectionPreviewResponse {
   missing_from_arr_count?: number;
   missing_from_arr_prefilter_count?: number;
   missing_from_arr_filter_gaps?: string[];
+  missing_from_arr_preview?: CollectionMissingFromArrItem[];
+  missing_from_arr_preview_count?: number;
+  owned_selected?: number | null;
+  held_count?: number;
+  to_add_count?: number;
 }
 
 export interface CollectionArrAddInstanceOptions {

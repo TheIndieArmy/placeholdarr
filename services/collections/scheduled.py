@@ -25,6 +25,13 @@ def run_collections_sync(*, trigger: str = "scheduled") -> dict:
         # Manual trigger forces all active recipes; scheduled ticks only run due ones
         # (the job ticks at the smallest per-recipe interval, so most ticks skip most recipes).
         results = run_all_enabled_recipes(force=(trigger == "manual"), default_interval_hours=default_hours)
+        try:
+            from services.collections.prune import run_discover_prune
+
+            prune_summary = run_discover_prune(dry_run=False)
+            results["discover_prune"] = prune_summary
+        except Exception as exc:
+            logger.warning(f"Collections Discover prune skipped: {exc}", extra={"emoji_type": "warning"})
         status = "done" if results.get("failed", 0) == 0 else "failed"
         error_message = None
         if status == "failed":

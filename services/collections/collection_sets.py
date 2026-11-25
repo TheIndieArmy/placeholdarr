@@ -2,11 +2,13 @@
 
 Categories (v1):
 - genre, decade, content_rating — catalog metadata shelves
+- studio (movies), network (shows) — one shelf per studio or network
 - tag — one collection per Radarr/Sonarr tag (browsing buckets)
 - release_timing — Upcoming / released this week|month|year|decade (shared release-date basis)
 """
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Any, Optional
 
 from sqlalchemy import text
@@ -18,6 +20,8 @@ SET_CATEGORIES = (
     "genre",
     "decade",
     "content_rating",
+    "studio",
+    "network",
     "tag",
     "release_timing",
 )
@@ -29,6 +33,8 @@ DEFAULT_TITLE_PATTERNS = {
     "genre": "Genre · {value}",
     "decade": "Decade · {value}",
     "content_rating": "Rated · {value}",
+    "studio": "Studio · {value}",
+    "network": "Network · {value}",
     "tag": "Tag · {value}",
     "release_timing": "{value}",
 }
@@ -37,6 +43,8 @@ CATEGORY_LABELS = {
     "genre": "Genre",
     "decade": "Decade",
     "content_rating": "Content rating",
+    "studio": "Studio",
+    "network": "Network",
     "tag": "Tag",
     "release_timing": "Release timing",
 }
@@ -134,6 +142,10 @@ def validate_collection_set_block(raw: Any, *, section_type: str | None = None) 
         raise CollectionSetValidationError(
             f"collection_set category must be one of {', '.join(SET_CATEGORIES)}"
         )
+    if section_type == "movie" and category == "network":
+        raise CollectionSetValidationError("network category applies to TV libraries only")
+    if section_type == "show" and category == "studio":
+        raise CollectionSetValidationError("studio category applies to movie libraries only")
 
     selection_mode = str(raw.get("selection_mode") or "all").strip().lower()
     if selection_mode not in SET_SELECTION_MODES:
@@ -168,6 +180,8 @@ def validate_collection_set_block(raw: Any, *, section_type: str | None = None) 
         values.append(label)
     if selection_mode == "include" and not values:
         raise CollectionSetValidationError("include mode requires at least one value")
+    if selection_mode == "exclude" and not values:
+        raise CollectionSetValidationError("exclude mode requires at least one value to skip")
 
     title_pattern = str(raw.get("title_pattern") or default_title_pattern(category)).strip()
     if "{value}" not in title_pattern:
@@ -179,14 +193,20 @@ def validate_collection_set_block(raw: Any, *, section_type: str | None = None) 
     else:
         sort = "title"
 
+    include_library = raw.get("include_library")
+    if include_library is None:
+        include_library = True
+    else:
+        include_library = bool(include_library)
+
     limit = raw.get("limit")
     if limit is not None:
         try:
             limit = int(limit)
         except (TypeError, ValueError) as exc:
             raise CollectionSetValidationError("collection_set limit must be an integer") from exc
-        if limit < 1:
-            raise CollectionSetValidationError("collection_set limit must be >= 1")
+        if include_library and limit < 1:
+            raise CollectionSetValidationError("collection_set limit must be >= 1 when library titles are enabled")
 
     min_items = raw.get("min_items", 1)
     try:
@@ -228,6 +248,7 @@ def validate_collection_set_block(raw: Any, *, section_type: str | None = None) 
         "values": values,
         "title_pattern": title_pattern,
         "sort": sort,
+        "include_library": include_library,
         "limit": limit,
         "min_items": min_items,
         "instance_key": instance_key or None,
@@ -262,7 +283,11 @@ def discover_category_values(
                 "ORDER BY genre"
             )
         with session_scope() as session:
-            return [{"id": str(row[0]), "label": str(row[0])} for row in session.execute(sql) if row[0]]
+            catalog = [str(row[0]) for row in session.execute(sql) if row[0]]
+        from services.collections.discover_defaults import merge_picker_values, picker_genre_names
+
+        merged = merge_picker_values(catalog, picker_genre_names(section_type))
+        return [{"id": name, "label": name} for name in merged]
 
     if category == "content_rating":
         if section_type == "movie":
@@ -315,6 +340,34 @@ def discover_category_values(
         except list_sources.ListSourceError as exc:
             raise CollectionSetValidationError(str(exc)) from exc
         return [{"id": str(t["id"]), "label": str(t["label"])} for t in tags]
+
+    if category == "studio":
+        sql = text(
+            "SELECT DISTINCT radarr_studio AS val "
+            "FROM movie WHERE is_deleted = false "
+            "AND radarr_studio IS NOT NULL AND TRIM(radarr_studio) <> '' "
+            "ORDER BY val"
+        )
+        with session_scope() as session:
+            catalog = [str(row[0]).strip() for row in session.execute(sql) if row[0] and str(row[0]).strip()]
+        from services.collections.discover_defaults import discover_picker_studios, merge_picker_values
+
+        merged = merge_picker_values(catalog, discover_picker_studios())
+        return [{"id": name, "label": name} for name in merged]
+
+    if category == "network":
+        sql = text(
+            "SELECT DISTINCT sonarr_network AS val "
+            "FROM series WHERE is_deleted = false "
+            "AND sonarr_network IS NOT NULL AND TRIM(sonarr_network) <> '' "
+            "ORDER BY val"
+        )
+        with session_scope() as session:
+            catalog = [str(row[0]).strip() for row in session.execute(sql) if row[0] and str(row[0]).strip()]
+        from services.collections.discover_defaults import discover_picker_networks, merge_picker_values
+
+        merged = merge_picker_values(catalog, discover_picker_networks())
+        return [{"id": name, "label": name} for name in merged]
 
     if category == "release_timing":
         return [{"id": key, "label": label} for key, label in RELEASE_TIMING_PRESETS]
@@ -369,6 +422,193 @@ def _release_timing_filter(value_id: str, release_basis: str) -> dict[str, Any]:
     return {"field": "release_window", "op": "within_past", "value": days, "basis": release_basis}
 
 
+def _tmdb_sort_for_set_sort(sort: str, section_type: str) -> str:
+    key = str(sort or "title").strip().lower()
+    if key in ("release_date", "recent"):
+        return "primary_release_date.desc" if section_type == "movie" else "first_air_date.desc"
+    if key == "rating":
+        return "vote_average.desc"
+    if key == "title":
+        return "original_title.asc" if section_type == "movie" else "name.asc"
+    return "popularity.desc"
+
+
+def _tmdb_source_limit(limit: int | None, missing_limit: int = 0) -> int:
+    library = int(limit or 20)
+    extra = max(0, int(missing_limit or 0))
+    return max(40, min((library + extra) * 2, 200))
+
+
+def _tmdb_fetch_sort(sort: str, section_type: str, category: str) -> str:
+    """TMDB pool order (Arrange only sorts the Plex shelf)."""
+    if category == "release_timing":
+        return _tmdb_sort_for_set_sort(sort, section_type)
+    return "popularity.desc"
+
+
+def _tmdb_child_definition(
+    sources: list[dict[str, Any]],
+    *,
+    limit: int | None,
+    sort: str,
+    release_basis: str | None = None,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "sources": sources,
+        "filters": [],
+        "limit": limit,
+        "sort": sort or "title",
+        "sort_provider": None,
+        "pins": {"include": [], "exclude": []},
+    }
+    if release_basis:
+        out["release_basis"] = release_basis
+    return out
+
+
+def _pull_new_tmdb_definition(
+    category: str,
+    value_id: str,
+    value_label: str,
+    *,
+    section_type: str,
+    limit: int | None,
+    sort: str,
+    release_basis: str | None,
+    missing_limit: int = 0,
+) -> dict[str, Any] | None:
+    """Mirror hand-built recipes: TMDB source + set sort/limit (auto-add fills Missing from ARR)."""
+    from services.collections.discover_defaults import tmdb_genre_id_for_label
+    from services.collections.tmdb_ids import resolve_company_id, resolve_network_id
+
+    sort_by = _tmdb_fetch_sort(sort, section_type, category)
+    src_limit = _tmdb_source_limit(limit, missing_limit)
+
+    if category == "genre":
+        genre_id = tmdb_genre_id_for_label(section_type, value_label)
+        if genre_id is None:
+            return None
+        return _tmdb_child_definition(
+            [
+                {
+                    "type": "tmdb_discover",
+                    "genre_ids": [genre_id],
+                    "limit": src_limit,
+                    "sort_by": sort_by,
+                }
+            ],
+            limit=limit,
+            sort=sort,
+        )
+
+    if category == "studio":
+        company_id = resolve_company_id(value_label)
+        if company_id is None:
+            return None
+        return _tmdb_child_definition(
+            [
+                {
+                    "type": "tmdb_company",
+                    "tmdb_ref": str(company_id),
+                    "limit": src_limit,
+                    "sort_by": sort_by,
+                }
+            ],
+            limit=limit,
+            sort=sort,
+        )
+
+    if category == "network":
+        if section_type == "movie":
+            return None
+        network_id = resolve_network_id(value_label)
+        if network_id is None:
+            return None
+        return _tmdb_child_definition(
+            [
+                {
+                    "type": "tmdb_discover",
+                    "network_ids": [network_id],
+                    "limit": src_limit,
+                    "sort_by": sort_by,
+                }
+            ],
+            limit=limit,
+            sort=sort,
+        )
+
+    if category == "decade":
+        start, end = decade_bounds(value_id)
+        return _tmdb_child_definition(
+            [
+                {
+                    "type": "tmdb_discover",
+                    "year_from": start,
+                    "year_to": end,
+                    "limit": src_limit,
+                    "sort_by": sort_by,
+                }
+            ],
+            limit=limit,
+            sort=sort,
+        )
+
+    if category == "content_rating":
+        cert = str(value_label or "").strip()
+        if not cert:
+            return None
+        if section_type != "movie":
+            return None
+        return _tmdb_child_definition(
+            [
+                {
+                    "type": "tmdb_discover",
+                    "certification": cert,
+                    "certification_country": "US",
+                    "limit": src_limit,
+                    "sort_by": sort_by,
+                }
+            ],
+            limit=limit,
+            sort=sort,
+        )
+
+    if category == "release_timing":
+        basis = release_basis or default_release_basis(section_type)
+        if value_id == "upcoming":
+            return _tmdb_child_definition(
+                [{"type": "tmdb_upcoming", "limit": src_limit}],
+                limit=limit,
+                sort=sort or "release_date",
+                release_basis=basis,
+            )
+        days = RELEASE_TIMING_DAYS.get(value_id)
+        if days is None:
+            return None
+        today = date.today()
+        start = (today - timedelta(days=days)).isoformat()
+        end = today.isoformat()
+        src: dict[str, Any] = {
+            "type": "tmdb_discover",
+            "limit": src_limit,
+            "sort_by": sort_by,
+        }
+        if section_type == "movie":
+            src["primary_release_date_gte"] = start
+            src["primary_release_date_lte"] = end
+        else:
+            src["first_air_date_gte"] = start
+            src["first_air_date_lte"] = end
+        return _tmdb_child_definition(
+            [src],
+            limit=limit,
+            sort=sort,
+            release_basis=basis,
+        )
+
+    return None
+
+
 def category_filter_or_source(
     category: str,
     value_id: str,
@@ -379,6 +619,8 @@ def category_filter_or_source(
     limit: int | None,
     sort: str,
     release_basis: str | None = None,
+    pull_new: bool = False,
+    missing_limit: int = 0,
 ) -> dict[str, Any]:
     """Build a child recipe definition for one category value."""
     if category == "tag":
@@ -404,8 +646,26 @@ def category_filter_or_source(
             "pins": {"include": [], "exclude": []},
         }
 
+    if pull_new and category != "tag":
+        tmdb_def = _pull_new_tmdb_definition(
+            category,
+            value_id,
+            value_label,
+            section_type=section_type,
+            limit=limit,
+            sort=sort,
+            release_basis=release_basis,
+            missing_limit=missing_limit,
+        )
+        if tmdb_def is not None:
+            return tmdb_def
+
     if category == "genre":
         rule = {"field": "genre", "op": "includes_any", "values": [value_label]}
+    elif category == "studio":
+        rule = {"field": "studio_network", "op": "contains", "value": value_label}
+    elif category == "network":
+        rule = {"field": "studio_network", "op": "contains", "value": value_label}
     elif category == "content_rating":
         rule = {"field": "certification", "op": "in", "values": [value_label]}
     elif category == "decade":
@@ -434,8 +694,17 @@ dimension_filter_or_source = category_filter_or_source
 def expand_collection_set(
     config: dict[str, Any],
     section_type: str,
+    *,
+    auto_add: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Return [{value_id, value_label, title, definition}, ...]."""
+    pull_new = bool(auto_add and auto_add.get("enabled"))
+    missing_limit = 0
+    if pull_new and isinstance(auto_add, dict):
+        try:
+            missing_limit = int(auto_add.get("missing_limit") or auto_add.get("max_per_run") or 10)
+        except (TypeError, ValueError):
+            missing_limit = 10
     category = str(config.get("category") or config.get("dimension") or "")
     discovered = discover_category_values(
         section_type,
@@ -451,25 +720,40 @@ def expand_collection_set(
     out: list[dict[str, Any]] = []
     for item in active:
         title = format_collection_title(pattern, category=category, value=item["label"])
+        definition = category_filter_or_source(
+            category,
+            item["id"],
+            item["label"],
+            section_type=section_type,
+            instance_key=config.get("instance_key"),
+            limit=config.get("limit"),
+            sort=config.get("sort") or "title",
+            release_basis=config.get("release_basis"),
+            pull_new=pull_new,
+            missing_limit=missing_limit,
+        )
+        definition["include_library"] = bool(config.get("include_library", True))
         out.append(
             {
                 "value_id": item["id"],
                 "value_label": item["label"],
                 "value": item["label"],
                 "title": title,
-                "definition": category_filter_or_source(
-                    category,
-                    item["id"],
-                    item["label"],
-                    section_type=section_type,
-                    instance_key=config.get("instance_key"),
-                    limit=config.get("limit"),
-                    sort=config.get("sort") or "title",
-                    release_basis=config.get("release_basis"),
-                ),
+                "definition": definition,
+                "source": _child_source(definition, pull_new=pull_new, category=category),
             }
         )
     return out
+
+
+def _child_source(definition: dict[str, Any], *, pull_new: bool, category: str) -> str:
+    """``tmdb``, ``library``, ``library_fallback`` (TMDB wanted but value unresolved), or ``arr_tag``."""
+    types = {str(s.get("type") or "") for s in definition.get("sources") or []}
+    if types == {"arr_tag"}:
+        return "arr_tag"
+    if types and types <= {"catalog"}:
+        return "library_fallback" if pull_new and category != "tag" else "library"
+    return "tmdb"
 
 
 def previous_managed_titles(

@@ -1948,3 +1948,75 @@ def add_missing_titles(
     # not race RefreshSeries/RefreshMovie and cache an empty episode/movie catalog.
     return [r if r is not None else row("Untitled", "error", "Arr add produced no result") for r in results]
 
+
+def delete_arr_title(
+    *,
+    media_type: str,
+    url: str,
+    api_key: str,
+    arr_id: int,
+    delete_files: bool = False,
+) -> bool:
+    """Remove a movie or series from Radarr/Sonarr without deleting files on disk."""
+    movie = str(media_type).lower() == "movie"
+    suffix = "movie" if movie else "series"
+    base = str(url or "").rstrip("/")
+    endpoint = f"{base}/api/v3/{suffix}/{int(arr_id)}"
+    params = {
+        "deleteFiles": delete_files,
+        "addImportExclusion": False,
+    }
+    result = _request_json("DELETE", endpoint, params=params, api_key=api_key)
+    if result is None:
+        logger.warning(
+            f"Arr delete {suffix} id={arr_id} failed",
+            extra={"emoji_type": "warning"},
+        )
+        return False
+    return True
+
+
+def arr_title_has_tag(
+    *,
+    media_type: str,
+    url: str,
+    api_key: str,
+    arr_id: int,
+    label: str,
+) -> bool:
+    """True when the Arr row exists and includes a tag matching label (case-insensitive)."""
+    movie = str(media_type).lower() == "movie"
+    suffix = "movie" if movie else "series"
+    want = normalize_arr_tag_label(str(label or "")).lower()
+    if not want:
+        return False
+    base = str(url or "").rstrip("/")
+    payload = _request_json(
+        "GET",
+        f"{base}/api/v3/{suffix}/{int(arr_id)}",
+        params={"apikey": api_key},
+        api_key=api_key,
+    )
+    if not isinstance(payload, dict):
+        return False
+    tag_ids = payload.get("tags") or []
+    if not isinstance(tag_ids, list) or not tag_ids:
+        return False
+    tags = _request_json("GET", f"{base}/api/v3/tag", params={"apikey": api_key}, api_key=api_key)
+    if not isinstance(tags, list):
+        return False
+    id_set = {int(t) for t in tag_ids if str(t).isdigit() or isinstance(t, int)}
+    for tag in tags:
+        if not isinstance(tag, dict):
+            continue
+        try:
+            tid = int(tag.get("id"))
+        except (TypeError, ValueError):
+            continue
+        if tid not in id_set:
+            continue
+        name = normalize_arr_tag_label(str(tag.get("label") or "")).lower()
+        if name == want:
+            return True
+    return False
+

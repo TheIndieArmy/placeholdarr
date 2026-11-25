@@ -315,8 +315,16 @@ def fetch_discover(
     media_type: str,
     *,
     genre_ids: Optional[list[int]] = None,
+    company_ids: Optional[list[int]] = None,
+    network_ids: Optional[list[int]] = None,
     year_from: Optional[int] = None,
     year_to: Optional[int] = None,
+    primary_release_date_gte: Optional[str] = None,
+    primary_release_date_lte: Optional[str] = None,
+    first_air_date_gte: Optional[str] = None,
+    first_air_date_lte: Optional[str] = None,
+    certification: Optional[str] = None,
+    certification_country: Optional[str] = None,
     provider_ids: Optional[list[int]] = None,
     watch_region: Optional[str] = None,
     min_vote_average: Optional[float] = None,
@@ -326,22 +334,37 @@ def fetch_discover(
     params: dict[str, Any] = {"sort_by": sort_by}
     if genre_ids:
         params["with_genres"] = ",".join(str(g) for g in genre_ids)
+    if company_ids:
+        params["with_companies"] = "|".join(str(c) for c in company_ids)
+    if network_ids:
+        params["with_networks"] = "|".join(str(n) for n in network_ids)
     if provider_ids:
         params["with_watch_providers"] = "|".join(str(p) for p in provider_ids)
         params["watch_region"] = (watch_region or "US").upper()
     if min_vote_average is not None:
         params["vote_average.gte"] = min_vote_average
         params["vote_count.gte"] = 25
+    if certification:
+        params["certification"] = certification
+        params["certification_country"] = (certification_country or "US").upper()
     if media_type == "movie":
         if year_from:
             params["primary_release_date.gte"] = f"{int(year_from)}-01-01"
         if year_to:
             params["primary_release_date.lte"] = f"{int(year_to)}-12-31"
+        if primary_release_date_gte:
+            params["primary_release_date.gte"] = primary_release_date_gte
+        if primary_release_date_lte:
+            params["primary_release_date.lte"] = primary_release_date_lte
         return _fetch_paged("/discover/movie", params, "movie", limit)
     if year_from:
         params["first_air_date.gte"] = f"{int(year_from)}-01-01"
     if year_to:
         params["first_air_date.lte"] = f"{int(year_to)}-12-31"
+    if first_air_date_gte:
+        params["first_air_date.gte"] = first_air_date_gte
+    if first_air_date_lte:
+        params["first_air_date.lte"] = first_air_date_lte
     return _fetch_paged("/discover/tv", params, "tv", limit)
 
 
@@ -463,6 +486,61 @@ def fetch_collection(collection_ref: str, media_type: str, limit: int = 200) -> 
             break
     _cache_set(cache_key, items)
     return items
+
+
+def search_companies(query: str) -> list[dict[str, Any]]:
+    """TMDB company search results as ``{id, name, origin_country}`` (first page)."""
+    text = str(query or "").strip()
+    if not text:
+        return []
+    cache_key = _cache_key("/search/company", {"query": text})
+    cached = _cache_get(cache_key, _META_CACHE_TTL_SECONDS)
+    if cached is not None:
+        return cached
+    data = _request("/search/company", {"query": text})
+    rows = [
+        {
+            "id": int(raw["id"]),
+            "name": str(raw.get("name") or "").strip(),
+            "origin_country": raw.get("origin_country") or None,
+        }
+        for raw in data.get("results") or []
+        if raw.get("id") and str(raw.get("name") or "").strip()
+    ]
+    _cache_set(cache_key, rows)
+    return rows
+
+
+def fetch_movie_companies(tmdb_id: int) -> list[dict[str, Any]]:
+    """Production companies for one movie as ``{id, name}``."""
+    cache_key = f"meta:movie_companies:{int(tmdb_id)}"
+    cached = _cache_get(cache_key, _META_CACHE_TTL_SECONDS)
+    if cached is not None:
+        return cached
+    data = _request(f"/movie/{int(tmdb_id)}")
+    rows = [
+        {"id": int(c["id"]), "name": str(c.get("name") or "").strip()}
+        for c in data.get("production_companies") or []
+        if c.get("id") and str(c.get("name") or "").strip()
+    ]
+    _cache_set(cache_key, rows)
+    return rows
+
+
+def fetch_tv_networks(tmdb_id: int) -> list[dict[str, Any]]:
+    """Networks for one TV series as ``{id, name}``."""
+    cache_key = f"meta:tv_networks:{int(tmdb_id)}"
+    cached = _cache_get(cache_key, _META_CACHE_TTL_SECONDS)
+    if cached is not None:
+        return cached
+    data = _request(f"/tv/{int(tmdb_id)}")
+    rows = [
+        {"id": int(n["id"]), "name": str(n.get("name") or "").strip()}
+        for n in data.get("networks") or []
+        if n.get("id") and str(n.get("name") or "").strip()
+    ]
+    _cache_set(cache_key, rows)
+    return rows
 
 
 def search_title(title: str, year: Optional[int], media_type: str) -> Optional[int]:

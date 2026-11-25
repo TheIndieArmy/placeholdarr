@@ -54,6 +54,25 @@ def _extract_date(value) -> date | None:
         return None
 
 
+def _extract_datetime(value) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    except Exception:
+        return None
+
+
 def _extract_quality_name(value) -> str | None:
     if value is None:
         return None
@@ -477,6 +496,7 @@ def _movie_fields(entry: Dict, instance_key: str) -> Dict:
         'radarr_premiered': _extract_date(entry.get('inCinemas') or entry.get('physicalRelease')),
         'radarr_payload_raw': entry,
         'radarr_overview': entry.get('overview'),
+        'radarr_added_at': _extract_datetime(entry.get('added')),
         'last_found_in_radarr': datetime.now(timezone.utc),
         'is_deleted': False,
     }
@@ -523,6 +543,7 @@ def _series_fields(entry: Dict, instance_key: str) -> Dict:
         'sonarr_first_aired': _extract_date(entry.get('firstAired')),
         'sonarr_actors': entry.get('actors') if isinstance(entry.get('actors'), list) else None,
         'sonarr_payload_raw': entry,
+        'sonarr_added_at': _extract_datetime(entry.get('added')),
         'last_found_in_sonarr': datetime.now(timezone.utc),
         'is_deleted': False,
     }

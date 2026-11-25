@@ -9,8 +9,57 @@ Sections appear in order: **Unreleased**, **Pre-release** (betas), then **Releas
 
 ## [Unreleased]
 
+### Added
+
+- **Discover preset**: One-click Seerr-style Plex Recommended collections for movies and TV, with preset apply and optional row order (#201).
+- **Collection Sets studio/network**: Movie studio and TV network categories with curated include lists and catalog discovery (#201).
+- **Catalog sorts**: Random and Recently added to Arr arrange options, with Arr added-at synced into the catalog (#201).
+- **Collections auto-add**: Opt-in per-recipe auto-add to Arr on sync with cap, discover tag, and ledger (#201).
+- **Auto-add cap split**: Separate per-collection caps for library titles and not-in-library titles, with placeholders counting toward the latter until a file exists (#201).
+- **Auto-add ledger keys**: `collection_auto_add.collection_keys` tracks which Plex collection added each title (#201).
+- **Per-recipe prune**: Never-played auto-adds prune only when the owning recipe opts in, using that recipe's grace days (#201).
+- **Discover prune**: Opt-in removal of never-played discover auto-adds after a grace period (#201).
+- **Collections Ordering**: Recipes and Ordering subpages; live Plex hub order and Recommended / Home / Shared visibility for any library collection (#201).
+- **Arrange source order**: New sort option keeps TMDB, Trakt, and list fetch order; default for ranked sources on new recipes and Discover trending or popular rows (#201).
+- **Collections UX preview pages**: "Recipes (new)" and "Ordering (new)" sit beside the current pages under `/collections/next/*` for side-by-side comparison (#201).
+- **Recipe builder (new)**: Full-width numbered, collapsible sections (Where, What, Refine, Contents, Arrange, When, Where it appears) with one-line summaries (#201).
+- **Section counts**: Section headers show live counts such as sources found, filters (120 → 34), and titles in the collection plus titles to add (#201).
+- **Preview dock**: A frozen footer shows the collection as one Plex row in final sort order, with live counts and the save or apply buttons (#201).
+- **Would-add posters**: With auto-add on, titles sent on the next sync appear dashed in the dock at the spot they land (#201).
+- **Change animation**: Posters animate in as settings change, with a short +N / −N count (#201).
+- **Full preview sheet**: The dock's Full preview button pulls the complete preview (funnel, In catalog / Missing, Check a title, Add to Radarr/Sonarr) up over the page (#201).
+- **Plex row mock**: The full preview shows the collection's row between its real neighbors on the library's Recommended tab (#201).
+- **Dock options**: Would-add posters, animation, and the Plex row mock can each be turned off from the dock (#201).
+- **Set builder (new)**: Same numbered sections; the dock steps through each collection the set would build (#201).
+- **Set child preview**: The full preview lists every child collection; pick one to see its counts, In catalog / Missing tabs, file-state outlines, and Sync badges. Below-min children stay listed and dimmed (#201).
+- **Discover setup (new)**: Compact row checklist in numbered sections; clicking a row opens its arrange, item, release-date, and genre controls inline, and the dock previews it with Apply alongside (#201).
+- **Discover row preview**: New endpoint previews one Discover row exactly as Apply would create it (#201).
+- **Landing position**: Collection previews report where each would-add title lands in the sorted row (#201).
+- **Recipes list (new)**: Grouped by Plex library with Recipe / Set / Discover badges, type filter chips, and "Shows on" pills read live from Plex (#201).
+- **Add button (new)**: Split button; "New collection" is one click and sets, Discover, and import sit in the menu (#201).
+- **Ordering (new)**: Library tabs, numbered rows with drag or move buttons, visibility pills, inline search to add, undoable removals, and a pending-changes bar with Apply and Discard (#201).
+
+### Changed
+
+- **Collections controlled libraries**: Recipe, Set, and Discover pickers only list Plex libraries this instance controls (placeholder destinations plus Arr root / real-file libraries). Roles show as Placeholders or Real files (#201).
+- **Preview library focus**: Catalog sample keeps All libraries plus per-library chips. The dock and Plex row mock always follow one selected library so the strip matches Visible on for that library (#201).
+- **Collection set pickers**: Genre, studio, and network values merge TMDB or curated lists with catalog so include and all modes match Discover-style pickers (#201).
+- **Collection set auto-add**: Sets share the recipe auto-add toggle and cap; with auto-add on, children use TMDB sources (studio, genre, network, decade, rating, timing) like hand-built recipes (#201).
+- **Collection set editor**: Include-only value picks with category starter examples; removed All/Exclude modes and duplicate hint copy (#201).
+- **Collection set TMDB ids**: Studio and network values resolve to TMDB ids from titles already in your library, then exact-name company search or a short curated network list. No more fuzzy guesses (#201).
+- **Collection set preview source**: Each child row shows TMDB, Library, or "Library only (not on TMDB)" when a value could not be resolved (#201).
+- **Collection set arrange**: Sort, max items, and minimum items on the set editor Display card (#201).
+- **Collections auto-add**: Per-recipe Radarr/Sonarr instance, profile, and root pickers on recipes, sets, and Discover apply; watchlist target fallback removed (#201).
+- **Collection contents UI**: One section per collection with library and non-library toggles, caps, prune, and Arr targets; Display keeps sort and Visible On only (#201).
+- **Include titles you don't have**: Renamed auto-add UI; replaces max per run with not-in-library cap; sets add per-child sync and preview counts (#201).
+- **Discover setup**: Guided Collections page replaces the modal; pick collections per library, multi-select studios and networks, one Apply, then land on Recipes (#201).
+- **Visible On copy**: Recipe and Set editors clarify create-time defaults; later hub changes use Collections → Ordering (#201).
+- **Arrange popularity label**: Popularity sort is labeled by TMDB score; list and chart rank use Source order (#201).
+
 ### Fixed
 
+- **Discover setup hints**: The Discover preset badge and "this side will be skipped" hint now render (#201).
+- **Collections hubs/presets routes**: Register `/hubs`, `/presets/...`, and `/discover/...` before `/{recipe_id}` so Ordering and Discover APIs are not parsed as recipe ids (#201).
 - **Season/series density pack imports**: Episodes with no linked placeholders skip the import-grace countdown and coalesce one density rematerialize per series instead of per-episode finalize (#199).
 
 ## Pre-release

@@ -124,6 +124,17 @@ export async function postJson<T>(path: string, body?: unknown): Promise<T> {
   });
 }
 
+export async function putJson<T>(path: string, body?: unknown): Promise<T> {
+  return fetchJson<T>(path, {
+    method: "PUT",
+    headers: {
+      Accept: "application/json",
+      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
 export async function postNdjson(
   path: string,
   body: unknown,

@@ -1,0 +1,209 @@
+{
+  "format": "placeholdarr-collections",
+  "version": 1,
+  "preset": "discover",
+  "hub_order": {
+    "movie": [
+      "Discover · Trending",
+      "Discover · Popular Movies",
+      "Discover · Recently Released Movies",
+      "Discover · Upcoming Movies",
+      "Discover · Movie Genres"
+    ],
+    "show": [
+      "Discover · Trending",
+      "Discover · Popular Series",
+      "Discover · Recently Aired",
+      "Discover · Upcoming Series",
+      "Discover · Series Genres"
+    ]
+  },
+  "recipes": [
+    {
+      "name": "Discover · Trending",
+      "description": "Movies getting the most attention on TMDB this week.",
+      "enabled": true,
+      "plex_section_type": "movie",
+      "collection_title": "Trending",
+      "definition": {
+        "sources": [{ "type": "tmdb_trending", "window": "week", "limit": 40 }],
+        "filters": [],
+        "limit": 20,
+        "sort": "source_order",
+        "visible_on": { "library": true, "home": false, "shared": false },
+        "pins": { "include": [], "exclude": [] }
+      }
+    },
+    {
+      "name": "Discover · Popular Movies",
+      "description": "All-time favorites and widely followed movies on TMDB.",
+      "enabled": true,
+      "plex_section_type": "movie",
+      "collection_title": "Popular Movies",
+      "definition": {
+        "sources": [{ "type": "tmdb_popular", "limit": 40 }],
+        "filters": [],
+        "limit": 20,
+        "sort": "source_order",
+        "visible_on": { "library": true, "home": false, "shared": false },
+        "pins": { "include": [], "exclude": [] }
+      }
+    },
+    {
+      "name": "Discover · Recently Released Movies",
+      "description": "Movies already out in theaters or on digital, newest release dates first.",
+      "enabled": true,
+      "plex_section_type": "movie",
+      "collection_title": "Recently Released",
+      "definition": {
+        "sources": [
+          {
+            "type": "tmdb_discover",
+            "sort_by": "primary_release_date.desc",
+            "limit": 40
+          }
+        ],
+        "filters": [],
+        "limit": 20,
+        "sort": "release_date",
+        "release_basis": "theater",
+        "visible_on": { "library": true, "home": false, "shared": false },
+        "pins": { "include": [], "exclude": [] }
+      }
+    },
+    {
+      "name": "Discover · Upcoming Movies",
+      "description": "Movies that have not premiered yet.",
+      "enabled": true,
+      "plex_section_type": "movie",
+      "collection_title": "Upcoming Movies",
+      "definition": {
+        "sources": [{ "type": "tmdb_upcoming", "limit": 40 }],
+        "filters": [],
+        "limit": 20,
+        "sort": "release_date",
+        "release_basis": "theater",
+        "visible_on": { "library": true, "home": false, "shared": false },
+        "pins": { "include": [], "exclude": [] }
+      }
+    },
+    {
+      "name": "Discover · Movie Genres",
+      "description": "One Plex collection per genre (starter sets or your pick list).",
+      "enabled": true,
+      "plex_section_type": "movie",
+      "collection_title": "Genres",
+      "definition": {
+        "mode": "collection_set",
+        "collection_set": {
+          "category": "genre",
+          "selection_mode": "include",
+          "values": [],
+          "title_pattern": "{value}",
+          "sort": "random",
+          "limit": 20,
+          "min_items": 5
+        },
+        "sources": [{ "type": "catalog" }],
+        "filters": [],
+        "limit": 20,
+        "sort": "random",
+        "visible_on": { "library": true, "home": false, "shared": false },
+        "pins": { "include": [], "exclude": [] }
+      }
+    },
+    {
+      "name": "Discover · Trending",
+      "description": "Series getting the most attention on TMDB this week.",
+      "enabled": true,
+      "plex_section_type": "show",
+      "collection_title": "Trending",
+      "definition": {
+        "sources": [{ "type": "tmdb_trending", "window": "week", "limit": 40 }],
+        "filters": [],
+        "limit": 20,
+        "sort": "source_order",
+        "visible_on": { "library": true, "home": false, "shared": false },
+        "pins": { "include": [], "exclude": [] }
+      }
+    },
+    {
+      "name": "Discover · Popular Series",
+      "description": "All-time favorites and widely followed series on TMDB.",
+      "enabled": true,
+      "plex_section_type": "show",
+      "collection_title": "Popular Series",
+      "definition": {
+        "sources": [{ "type": "tmdb_popular", "limit": 40 }],
+        "filters": [],
+        "limit": 20,
+        "sort": "source_order",
+        "visible_on": { "library": true, "home": false, "shared": false },
+        "pins": { "include": [], "exclude": [] }
+      }
+    },
+    {
+      "name": "Discover · Recently Aired",
+      "description": "Shows with new seasons or episodes that started airing recently.",
+      "enabled": true,
+      "plex_section_type": "show",
+      "collection_title": "Recently Aired",
+      "definition": {
+        "sources": [
+          {
+            "type": "tmdb_discover",
+            "sort_by": "first_air_date.desc",
+            "limit": 40
+          }
+        ],
+        "filters": [],
+        "limit": 20,
+        "sort": "latest_aired",
+        "release_basis": "latest_episode",
+        "visible_on": { "library": true, "home": false, "shared": false },
+        "pins": { "include": [], "exclude": [] }
+      }
+    },
+    {
+      "name": "Discover · Upcoming Series",
+      "description": "Series on the air now or returning soon.",
+      "enabled": true,
+      "plex_section_type": "show",
+      "collection_title": "Upcoming Series",
+      "definition": {
+        "sources": [{ "type": "tmdb_upcoming", "limit": 40 }],
+        "filters": [],
+        "limit": 20,
+        "sort": "release_date",
+        "release_basis": "premiered",
+        "visible_on": { "library": true, "home": false, "shared": false },
+        "pins": { "include": [], "exclude": [] }
+      }
+    },
+    {
+      "name": "Discover · Series Genres",
+      "description": "One Plex collection per genre (starter sets or your pick list).",
+      "enabled": true,
+      "plex_section_type": "show",
+      "collection_title": "Genres",
+      "definition": {
+        "mode": "collection_set",
+        "collection_set": {
+          "category": "genre",
+          "selection_mode": "include",
+          "values": [],
+          "title_pattern": "{value}",
+          "sort": "random",
+          "limit": 20,
+          "min_items": 5
+        },
+        "sources": [{ "type": "catalog" }],
+        "filters": [],
+        "limit": 20,
+        "sort": "random",
+        "visible_on": { "library": true, "home": false, "shared": false },
+        "pins": { "include": [], "exclude": [] }
+      }
+    }
+  ]
+}

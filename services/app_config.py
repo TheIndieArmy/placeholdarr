@@ -629,6 +629,35 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "COLLECTIONS_DISCOVER_PRUNE_ENABLED",
+            {
+                "section": "Library sync",
+                "label": "Discover auto-add prune",
+                "description": (
+                    "After each Collections sync, remove never-played titles that were auto-added "
+                    "from Discover shelves (tagged placeholdarr-discover) once they have been off "
+                    "every list longer than the grace period. Deletes from Arr without removing files."
+                ),
+                "type": "bool",
+                "restart_required": False,
+            },
+        ),
+        (
+            "COLLECTIONS_DISCOVER_PRUNE_GRACE_DAYS",
+            {
+                "section": "Library sync",
+                "label": "Discover prune grace (days)",
+                "description": (
+                    "How long a Discover auto-add may stay off every collection list before prune "
+                    "can remove it from Arr."
+                ),
+                "type": "int",
+                "min": 1,
+                "max": 365,
+                "restart_required": False,
+            },
+        ),
+        (
             "INCLUDE_SPECIALS",
             {
                 "section": "Library sync",

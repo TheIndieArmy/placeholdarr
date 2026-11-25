@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ThemeMode } from "../brandTypes";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
 import { BrandCheckbox } from "../BrandCheckbox";
@@ -23,7 +23,23 @@ import {
   useCollectionTheme,
 } from "./collectionTheme";
 import { AndOrToggle, ToggleSwitch } from "./ToggleSwitch";
-import { VisibleOnAtCreationHelp } from "./VisibleOnAtCreationHelp";
+import { CollectionShelfContentsSection } from "./CollectionShelfContentsSection";
+import { buildAutoAddPayload, isCollectionAutoAddReady } from "./collectionAutoAddUtils";
+import { collectionArrangeSortOptions } from "./collectionArrangeOptions";
+import { defaultSortForSources, isAutoArrangeSort } from "./collectionSortDefaults";
+import { PinPicker, pinKey } from "./collectionEditorPinPicker";
+import { CatalogSamplePoster, PosterTitleFallback } from "./collectionPreviewPosters";
+import { managedRoleLabel, selectablePlexSections } from "./managedSections";
+import { BuilderSection } from "./next/BuilderSection";
+import { BuilderShell } from "./next/BuilderShell";
+import { useDockPrefs } from "./next/dockPrefs";
+import { buildFilmstrip, filmstripForLibrary } from "./next/filmstrip";
+import { PlexRowMock } from "./next/PlexRowMock";
+import { PreviewLibraryChips } from "./next/PreviewLibraryChips";
+import { RecipePreviewResultView } from "./next/RecipePreviewResultView";
+import { PreviewDock } from "./next/PreviewDock";
+import { PreviewSheet } from "./next/PreviewSheet";
+import { StickyActionBar } from "./next/StickyActionBar";
 import {
   parseTaskSchedule,
   scheduleFromLegacyHours,
@@ -45,7 +61,6 @@ import type {
   CollectionPinnedItem,
   CollectionMissingFromArrItem,
   CollectionPreviewResponse,
-  CollectionPreviewSampleItem,
   CollectionRecipe,
   CollectionRatingProvider,
   CollectionSourceBlock,
@@ -280,7 +295,6 @@ function applyTraktSubtype(block: CollectionSourceBlock, subtype: string): Colle
 
 function collectionEditorSnapshot(parts: {
   name: string;
-  enabled: boolean;
   sectionIds: number[];
   collectionTitle: string;
   runSchedule: TaskScheduleValue | null;
@@ -506,10 +520,6 @@ function AddBlockMenu(props: {
       ) : null}
     </div>
   );
-}
-
-function pinKey(item: { tmdb_id?: number | null; tvdb_id?: number | null; imdb_id?: string | null }): string {
-  return `${item.tmdb_id ?? ""}:${item.tvdb_id ?? ""}:${item.imdb_id ?? ""}`;
 }
 
 function isRuleNode(node: CollectionFilterNode): node is CollectionFilterBlock {
@@ -771,240 +781,6 @@ function ExplainTreeNodeView(props: { node: CollectionExplainNode }) {
   );
 }
 
-function PinPicker(props: {
-  items: CollectionPinnedItem[];
-  accentHex: string;
-  /** In-memory catalog (same cache the top-bar search uses), pre-filtered to the section's media type. */
-  catalog: LibraryItem[];
-  catalogLoading: boolean;
-  placeholder: string;
-  onAdd: (item: CollectionPinnedItem) => void;
-  onRemove: (index: number) => void;
-}) {
-  const theme = useCollectionTheme();
-  const [query, setQuery] = useState("");
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
-  }, [open]);
-
-  const results = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    if (!needle) return [];
-    return props.catalog
-      .filter((item) => item.title.toLowerCase().includes(needle))
-      .sort((left, right) => {
-        const leftStarts = left.title.toLowerCase().startsWith(needle) ? 0 : 1;
-        const rightStarts = right.title.toLowerCase().startsWith(needle) ? 0 : 1;
-        if (leftStarts !== rightStarts) return leftStarts - rightStarts;
-        return left.title.localeCompare(right.title);
-      })
-      .slice(0, 10);
-  }, [props.catalog, query]);
-
-  const pinnedKeys = new Set(props.items.map(pinKey));
-
-  return (
-    <div className="flex flex-col gap-2.5">
-      <div className="relative" ref={ref}>
-        <div className="flex items-center gap-2">
-          <span className={`material-symbols-outlined ${theme.iconMuted}`} style={{ fontSize: 17 }}>
-            search
-          </span>
-          <input
-            className={`${theme.field} flex-1`}
-            value={query}
-            placeholder={props.placeholder}
-            onChange={(e) => {
-              setQuery(e.target.value);
-              setOpen(true);
-            }}
-            onFocus={() => setOpen(true)}
-          />
-          {props.catalogLoading ? (
-            <span className="h-2 w-2 animate-pulse rounded-full" style={{ backgroundColor: props.accentHex }} />
-          ) : null}
-        </div>
-        {open && query.trim() && !results.length && !props.catalogLoading ? (
-          <div className={theme.dropdownEmpty}>No catalog titles match.</div>
-        ) : null}
-        {open && results.length ? (
-          <div className={`${theme.dropdown} max-h-72 overflow-y-auto`}>
-            {results.map((item) => {
-              const candidate: CollectionPinnedItem = {
-                tmdb_id: item.tmdb_id ?? null,
-                tvdb_id: item.tvdb_id ?? null,
-                imdb_id: item.imdb_id ?? null,
-                title: item.title,
-                year: item.year ?? null,
-                poster: item.poster_url ?? null,
-              };
-              const already = pinnedKeys.has(pinKey(candidate));
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  disabled={already}
-                  onClick={() => {
-                    props.onAdd(candidate);
-                    setQuery("");
-                    setOpen(false);
-                  }}
-                  className={`${theme.dropdownItem} items-center gap-2.5 px-3 py-2`}
-                >
-                  {item.poster_url ? (
-                    <img src={item.poster_url} alt="" className={`h-10 w-7 rounded object-cover ${theme.posterFallback}`} />
-                  ) : (
-                    <span
-                      className={`flex h-10 w-7 items-center justify-center rounded material-symbols-outlined ${theme.posterFallback}`}
-                      style={{ fontSize: 14 }}
-                    >
-                      movie
-                    </span>
-                  )}
-                  <span className="flex-1 min-w-0">
-                    <span className={theme.dropdownItemTitle}>{item.title}</span>
-                    <span className={theme.dropdownItemDescription}>{item.year ?? "—"}</span>
-                  </span>
-                  {already ? <span className={`text-[11px] uppercase ${theme.muted}`}>pinned</span> : null}
-                </button>
-              );
-            })}
-          </div>
-        ) : null}
-      </div>
-      {props.items.length ? (
-        <div className="flex flex-wrap gap-2">
-          {props.items.map((item, index) => (
-            <span key={pinKey(item)} className={theme.pinTag}>
-              {item.poster ? (
-                <img src={item.poster} alt="" className="h-8 w-[1.35rem] rounded-sm object-cover" />
-              ) : null}
-              <span className={theme.pinTitle}>
-                {item.title}
-                {item.year ? <span className={theme.pinYear}> ({item.year})</span> : null}
-              </span>
-              <button
-                type="button"
-                onClick={() => props.onRemove(index)}
-                className={`material-symbols-outlined transition-colors ${theme.iconAction}`}
-                style={{ fontSize: 15 }}
-                title="Remove pin"
-              >
-                close
-              </button>
-            </span>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-const POSTER_TITLE_MAX_PX = 18;
-const POSTER_TITLE_MIN_PX = 7;
-const POSTER_TITLE_LINE_HEIGHT = 1.2;
-
-function PosterTitleFallback(props: { title: string; className?: string }) {
-  const wrapRef = useRef<HTMLSpanElement>(null);
-  const [fontPx, setFontPx] = useState(POSTER_TITLE_MAX_PX);
-
-  useLayoutEffect(() => {
-    const el = wrapRef.current;
-    if (!el) return;
-
-    const fit = () => {
-      if (el.clientWidth <= 0 || el.clientHeight <= 0) return;
-      let size = POSTER_TITLE_MAX_PX;
-      el.style.fontSize = `${size}px`;
-      while (
-        size > POSTER_TITLE_MIN_PX &&
-        (el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1)
-      ) {
-        size -= 0.5;
-        el.style.fontSize = `${size}px`;
-      }
-      setFontPx(size);
-    };
-
-    fit();
-    const ro = new ResizeObserver(fit);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [props.title]);
-
-  return (
-    <span
-      ref={wrapRef}
-      className={`flex h-full w-full items-center justify-center overflow-hidden p-1.5 text-center break-words ${props.className ?? ""}`}
-      style={{ fontSize: fontPx, lineHeight: POSTER_TITLE_LINE_HEIGHT }}
-    >
-      {props.title}
-    </span>
-  );
-}
-
-function fileStateOutline(state: CollectionPreviewSampleItem["file_state"]): string {
-  if (state === "file") return "outline outline-2 outline-offset-[-2px] outline-emerald-400";
-  if (state === "placeholder") return "outline outline-2 outline-dashed outline-offset-[-2px] outline-cyan-400";
-  if (state === "mixed") return "outline outline-2 outline-dashed outline-offset-[-2px] outline-violet-400";
-  return "";
-}
-
-function CatalogSamplePoster(props: {
-  item: CollectionPreviewSampleItem;
-  libraries: PlexSectionOption[];
-  dimmed: boolean;
-  showLibraryTicks: boolean;
-}) {
-  const theme = useCollectionTheme();
-  const state = props.item.file_state ?? "none";
-  const chip =
-    state === "file" ? "File" : state === "placeholder" ? "PH" : state === "mixed" ? "Mix" : null;
-  const inSet = new Set(props.item.in_libraries ?? []);
-  return (
-    <div
-      title={`${props.item.title}${props.item.year ? ` (${props.item.year})` : ""}${
-        chip ? ` · ${chip === "PH" ? "Placeholder" : chip === "Mix" ? "File + placeholder" : "Real file"}` : ""
-      }`}
-      className={`relative aspect-[2/3] w-full overflow-hidden rounded-md ${theme.posterFallback} ${fileStateOutline(state)} ${
-        props.dimmed ? "opacity-35" : ""
-      }`}
-    >
-      {props.item.poster ? (
-        <img src={props.item.poster} alt={props.item.title} className="h-full w-full object-cover" loading="lazy" />
-      ) : (
-        <PosterTitleFallback title={props.item.title} className={theme.sampleFallback} />
-      )}
-      {chip ? (
-        <span className="absolute left-0.5 top-0.5 rounded bg-black/70 px-1 text-[8px] font-headline uppercase tracking-wider text-white">
-          {chip}
-        </span>
-      ) : null}
-      {props.showLibraryTicks ? (
-        <span className="absolute inset-x-0 bottom-0 flex flex-wrap gap-0.5 bg-black/55 px-0.5 py-0.5">
-          {props.libraries.map((lib) => (
-            <span
-              key={lib.id}
-              className={`rounded px-0.5 text-[8px] font-headline uppercase leading-none ${
-                inSet.has(lib.id) ? "text-white" : "text-white/35"
-              }`}
-            >
-              {lib.title.slice(0, 3)}
-            </span>
-          ))}
-        </span>
-      ) : null}
-    </div>
-  );
-}
 
 export function CollectionEditor(props: {
   recipe: CollectionRecipe | null;
@@ -1025,13 +801,14 @@ export function CollectionEditor(props: {
   onCancel: () => void;
   onDirtyChange?: (dirty: boolean) => void;
   clockFormat?: string | null;
+  uiVariant?: "classic" | "next";
+  onOpenOrdering?: () => void;
 }) {
   const accentHex = props.accent.hex;
   const isLight = props.themeMode === "light";
   const theme = getCollectionTheme(isLight);
 
   const [name, setName] = useState(props.recipe?.name ?? "");
-  const [enabled, setEnabled] = useState(props.recipe?.enabled ?? true);
   const [sectionIds, setSectionIds] = useState<number[]>(() => {
     const extras = props.recipe?.plex_section_ids?.filter((id) => Number.isFinite(id) && id >= 1) ?? [];
     if (extras.length) return extras;
@@ -1054,7 +831,7 @@ export function CollectionEditor(props: {
   const [definition, setDefinition] = useState<CollectionDefinition>(
     props.recipe?.definition && Array.isArray(props.recipe.definition.sources)
       ? props.recipe.definition
-      : { sources: [], filters: [], limit: 50, sort: "popularity" },
+      : { sources: [], filters: [], limit: 50, sort: defaultSortForSources([]) },
   );
   const [nameCheck, setNameCheck] = useState<
     | { status: "idle" }
@@ -1067,14 +844,13 @@ export function CollectionEditor(props: {
     () =>
       collectionEditorSnapshot({
         name,
-        enabled,
         sectionIds,
         collectionTitle,
         runSchedule: followGlobalSchedule ? null : runSchedule,
         activeWindow,
         definition,
       }),
-    [name, enabled, sectionIds, collectionTitle, followGlobalSchedule, runSchedule, activeWindow, definition],
+    [name, sectionIds, collectionTitle, followGlobalSchedule, runSchedule, activeWindow, definition],
   );
   const initialSnapshotRef = useRef(editorSnapshot);
   const dirty = editorSnapshot !== initialSnapshotRef.current;
@@ -1178,7 +954,11 @@ export function CollectionEditor(props: {
     });
   };
   const removeSource = (index: number) => {
-    setDefinition((prev) => ({ ...prev, sources: prev.sources.filter((_, i) => i !== index) }));
+    setDefinition((prev) => {
+      const sources = prev.sources.filter((_, i) => i !== index);
+      const sort = isAutoArrangeSort(prev.sort) ? defaultSortForSources(sources) : prev.sort;
+      return { ...prev, sources, sort };
+    });
     setSourceValidation((prev) => {
       const next: Record<number, SourceValidationState> = {};
       for (const [key, value] of Object.entries(prev)) {
@@ -1365,7 +1145,11 @@ export function CollectionEditor(props: {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewPane, setPreviewPane] = useState<"catalog" | "missing">("catalog");
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [dockPrefs] = useDockPrefs();
   const [sampleLibraryFilter, setSampleLibraryFilter] = useState<number | null>(null);
+  /** In Plex / dock focus library (always a concrete section when possible). */
+  const [focusLibraryId, setFocusLibraryId] = useState<number | null>(null);
   const [selectedMissing, setSelectedMissing] = useState<Set<string>>(new Set());
   const [arrModalOpen, setArrModalOpen] = useState(false);
   const previewSeq = useRef(0);
@@ -1471,7 +1255,8 @@ export function CollectionEditor(props: {
     name.trim().length > 0 &&
     collectionTitle.trim().length > 0 &&
     sectionId !== null &&
-    definition.sources.length > 0;
+    definition.sources.length > 0 &&
+    isCollectionAutoAddReady(definition.auto_add);
 
   // ----- render helpers -----
   function renderSourceConfig(block: CollectionSourceBlock, index: number) {
@@ -2043,7 +1828,13 @@ export function CollectionEditor(props: {
               options={(builderMeta?.genres ?? []).map((name) => ({ key: name, label: name }))}
               selected={block.values ?? []}
               accentHex={accentHex}
-              emptyHint={builderMeta ? "No genres found in your catalog yet" : "Loading genres…"}
+              emptyHint={
+                builderMeta
+                  ? builderMeta.tmdb_configured
+                    ? "No genres match your search"
+                    : "No catalog genres yet; configure TMDB in Settings for the full list"
+                  : "Loading genres…"
+              }
               onToggle={(key) => {
                 const current = block.values ?? [];
                 update({
@@ -2431,10 +2222,17 @@ export function CollectionEditor(props: {
     );
   }
 
-  const missingCount = preview?.missing_from_arr_count ?? 0;
+  const autoAddConfigured = Boolean(definition.auto_add?.enabled);
+  const autoAddPreviewActive =
+    autoAddConfigured && isCollectionAutoAddReady(definition.auto_add);
+  const missingItems =
+    autoAddConfigured && Array.isArray(preview?.missing_from_arr_preview)
+      ? preview.missing_from_arr_preview
+      : (preview?.missing_from_arr ?? []);
+  const missingCount = missingItems.length || (preview?.missing_from_arr_count ?? 0);
   const missingPrefilter = preview?.missing_from_arr_prefilter_count ?? 0;
   const missingGaps = preview?.missing_from_arr_filter_gaps ?? [];
-  const missingItems = preview?.missing_from_arr ?? [];
+  const missingAutoAddCount = missingItems.filter((item) => item.would_auto_add).length;
   const selectFirstCount = Math.min(
     definition.limit && definition.limit > 0 ? definition.limit : 50,
     ARR_ADD_BATCH_CAP,
@@ -2442,6 +2240,22 @@ export function CollectionEditor(props: {
   );
   const targetLibraries = props.sections.filter((s) => sectionIds.includes(s.id));
   const showLibraryTicks = targetLibraries.length > 1;
+  // Before any library is picked, show both movie and TV controlled libs (type locks after the first pick).
+  const pickerSections = selectablePlexSections(
+    props.sections,
+    sectionIds.length ? sectionType : null,
+    sectionIds,
+  );
+
+  useEffect(() => {
+    if (!sectionIds.length) {
+      setFocusLibraryId(null);
+      return;
+    }
+    if (focusLibraryId == null || !sectionIds.includes(focusLibraryId)) {
+      setFocusLibraryId(sectionIds[0] ?? null);
+    }
+  }, [sectionIds, focusLibraryId]);
   const arrIncludeLabels = arrIncludeConstraintLabels(definition.filters);
   const showMissingPane = missingCount > 0 || missingPrefilter > 0 || missingGaps.length > 0;
   const missingKey = (item: CollectionMissingFromArrItem) =>
@@ -2460,27 +2274,65 @@ export function CollectionEditor(props: {
     },
   ];
 
-  return (
-    <CollectionThemeProvider value={theme}>
-    <div className="flex flex-col gap-6 lg:flex-row lg:items-start">
-      {/* Recipe column — capped so leftover width goes to the preview rail instead of stretching cards */}
-      <div className="flex flex-1 min-w-0 flex-col gap-4 lg:max-w-3xl">
-        {/* Recipe identity + target — picking the library first drives media type, genres, pins, and preview */}
-        <div className={`${theme.identityCard} flex flex-col gap-3`}>
-          <div className="flex flex-wrap items-center gap-4">
+  const useNextLayout = props.uiVariant === "next";
+
+  const handleSaveClick = () => {
+              if (!sectionId) return;
+              const scheduleEnabled = followGlobalSchedule || Boolean(runSchedule.enabled);
+              const autoAddBuilt = buildAutoAddPayload(definition.auto_add);
+              props.onSave({
+                name: name.trim(),
+                enabled: scheduleEnabled,
+                plex_section_id: sectionId,
+                plex_section_ids: sectionIds,
+                plex_section_type: sectionType,
+                collection_title: collectionTitle.trim(),
+                definition: {
+                  ...definition,
+                  auto_add: autoAddBuilt,
+                },
+                run_interval_hours: followGlobalSchedule
+                  ? null
+                  : runSchedule.mode === "interval"
+                    ? runSchedule.interval_hours
+                    : null,
+                run_schedule: followGlobalSchedule ? null : runSchedule,
+                active_window: activeWindow
+                  ? {
+                      start: joinMonthDay(
+                        splitMonthDay(activeWindow.start).month,
+                        splitMonthDay(activeWindow.start).day,
+                      ),
+                      end: joinMonthDay(
+                        splitMonthDay(activeWindow.end).month,
+                        splitMonthDay(activeWindow.end).day,
+                      ),
+                      when_inactive:
+                        activeWindow.when_inactive === "delete"
+                          ? "delete"
+                          : activeWindow.when_inactive === "clear"
+                            ? "clear"
+                            : "keep",
+                    }
+                  : null,
+              });
+  };
+
+  const librariesBlock = (
             <div className="flex flex-col gap-1.5 min-w-[16rem]">
               <span className={theme.label}>Plex libraries</span>
               <p className={`mt-1 mb-2 text-[12px] ${theme.muted}`}>
-                New Placeholdarr destinations from Settings → Paths each map to their own Plex library. Select every
-                library that should get this collection; recipes do not auto-follow destination maps.
+                Only libraries this Placeholdarr controls (placeholder destinations and Arr root / real-file libraries).
+                Select every library that should get this collection; Visible on only shows items from that library.
               </p>
               <p className={`text-[12px] font-normal normal-case tracking-normal ${theme.muted}`}>
                 Same collection name is created in each selected library (same type only).
               </p>
               <div className="flex flex-col gap-1 max-h-40 overflow-y-auto pr-1">
-                {props.sections.map((s) => {
+                {pickerSections.map((s) => {
                   const selected = sectionIds.includes(s.id);
                   const typeLocked = sectionType && s.type !== sectionType && sectionIds.length > 0;
+                  const role = managedRoleLabel(s.managed_role);
                   return (
                     <label
                       key={s.id}
@@ -2504,7 +2356,9 @@ export function CollectionEditor(props: {
                       <span>
                         {s.title}{" "}
                         <span className="opacity-70">
-                          ({s.type === "movie" ? "Movies" : "TV"}, {s.item_count})
+                          ({s.type === "movie" ? "Movies" : "TV"}, {s.item_count}
+                          {role ? ` · ${role}` : ""}
+                          {s.managed === false ? " · not controlled" : ""})
                         </span>
                       </span>
                     </label>
@@ -2512,6 +2366,8 @@ export function CollectionEditor(props: {
                 })}
               </div>
             </div>
+  );
+  const titleBlock = (
             <div className="flex flex-col gap-1.5 min-w-0">
               <label className={`flex flex-wrap items-center gap-2 ${theme.label}`}>
                 Collection title
@@ -2598,6 +2454,8 @@ export function CollectionEditor(props: {
                 </div>
               ) : null}
             </div>
+  );
+  const recipeNameBlock = (
             <label className={`flex items-center gap-2 ${theme.label}`}>
               Recipe name
               <input
@@ -2608,16 +2466,8 @@ export function CollectionEditor(props: {
                 onChange={(e) => setName(e.target.value)}
               />
             </label>
-            <label className={`flex items-center gap-2 ${theme.label} cursor-pointer select-none`}>
-              <span>Enabled (runs on schedule)</span>
-              <ToggleSwitch
-                checked={enabled}
-                onChange={setEnabled}
-                accentHex={accentHex}
-                ariaLabel="Enable scheduled runs"
-              />
-            </label>
-          </div>
+  );
+  const scheduleBlock = (
           <div className="space-y-3">
             <div className={`text-[12px] font-headline uppercase tracking-wider ${theme.muted}`}>Schedule</div>
             <TaskScheduleEditor
@@ -2631,6 +2481,8 @@ export function CollectionEditor(props: {
               onChange={setRunSchedule}
             />
           </div>
+  );
+  const seasonalBlock = (
           <div className="flex flex-wrap items-center gap-4">
             <label className={`flex items-center gap-2 ${theme.label} cursor-pointer select-none`}>
               <span>Seasonal window</span>
@@ -2691,9 +2543,8 @@ export function CollectionEditor(props: {
               </>
             ) : null}
           </div>
-        </div>
-
-        {/* Sources */}
+  );
+  const sourcesBlock = (
         <div className="flex flex-col gap-2.5">
           <div className={theme.sectionLabel}>Sources</div>
           {definition.sources.length === 0 ? (
@@ -2773,15 +2624,16 @@ export function CollectionEditor(props: {
               };
             })}
             onAdd={(key) =>
-              setDefinition((prev) => ({
-                ...prev,
-                sources: [...prev.sources, defaultSourceBlock(key as CollectionSourceType)],
-              }))
+              setDefinition((prev) => {
+                const sources = [...prev.sources, defaultSourceBlock(key as CollectionSourceType)];
+                const sort = isAutoArrangeSort(prev.sort) ? defaultSortForSources(sources) : prev.sort;
+                return { ...prev, sources, sort };
+              })
             }
           />
         </div>
-
-        {/* Filters — simple mode: AND within a group, OR between groups; Advanced: full nesting */}
+  );
+  const filtersBlock = (
         <div className="flex flex-col gap-2.5">
           <div className="flex items-center gap-3">
             <div className={theme.sectionLabel}>
@@ -2897,8 +2749,8 @@ export function CollectionEditor(props: {
             </>
           )}
         </div>
-
-        {/* Pins */}
+  );
+  const pinsBlock = (
         <div className="flex flex-col gap-2.5">
           <div className={theme.sectionLabel}>
             Pins <span className={`normal-case tracking-normal font-normal ${theme.muted}`}>(manual overrides)</span>
@@ -2949,15 +2801,8 @@ export function CollectionEditor(props: {
             </>
           )}
         </div>
-
-        {/* Display: arrange + Plex Visible On */}
-        <BlockCard
-          icon="display_settings"
-          title="Display"
-          subtitle="Order the selection and where it appears in Plex"
-          accentHex={accentHex}
-        >
-          <div className="flex flex-col gap-5">
+  );
+  const arrangeBlock = (
             <div>
               <div className={`mb-2 ${theme.blockTitle}`}>
                 Arrange
@@ -2967,17 +2812,8 @@ export function CollectionEditor(props: {
                   Sort by
                   <BrandSelect
                     triggerClassName="min-w-[8rem] shrink-0"
-                    value={definition.sort ?? "popularity"}
-                    options={[
-                      { value: "popularity", label: "Popularity / list rank" },
-                      { value: "release_date", label: "Release date (newest)" },
-                      {
-                        value: "latest_aired",
-                        label: `Newest content first${sectionType === "show" ? " (latest aired episode)" : ""}`,
-                      },
-                      { value: "rating", label: "Rating (highest first)" },
-                      { value: "title", label: "Title (A–Z, ignoring a/an/the)" },
-                    ]}
+                    value={definition.sort ?? defaultSortForSources(definition.sources)}
+                    options={collectionArrangeSortOptions(sectionType)}
                     onChange={(value) => {
                       const next = value as CollectionDefinition["sort"];
                       setDefinition((prev) => ({
@@ -3023,66 +2859,75 @@ export function CollectionEditor(props: {
                     </span>
                   )
                 ) : null}
-                <label className={`flex items-center gap-2 ${theme.label}`}>
-                  Max items
-                  <NumberInput
-                    value={definition.limit ?? null}
-                    min={1}
-                    max={500}
-                    placeholder="50"
-                    onChange={(v) => setDefinition((prev) => ({ ...prev, limit: v }))}
-                  />
-                </label>
               </div>
             </div>
+  );
+  const contentsBlock = (
+            <CollectionShelfContentsSection
+              themeMode={props.themeMode}
+              accentHex={accentHex}
+              mediaType={sectionType}
+              arrTargetsReady={Boolean(sectionId)}
+              includeLibrary={definition.include_library !== false}
+              libraryLimit={definition.limit ?? null}
+              onIncludeLibraryChange={(next) =>
+                setDefinition((prev) => ({ ...prev, include_library: next }))
+              }
+              onLibraryLimitChange={(next) => setDefinition((prev) => ({ ...prev, limit: next }))}
+              autoAdd={definition.auto_add}
+              disabledReason={
+                definition.sources.length > 0 &&
+                definition.sources.every((s) => s.type === "catalog") &&
+                !definition.auto_add?.enabled
+                  ? "Choose a TMDB source above to add titles you do not have, or enable Titles you don't have here."
+                  : undefined
+              }
+              onAutoAddChange={(next) =>
+                setDefinition((prev) => ({
+                  ...prev,
+                  auto_add: next ?? undefined,
+                }))
+              }
+            />
+  );
 
-            <div className={`border-t pt-4 ${theme.divider}`}>
-              <VisibleOnAtCreationHelp
-                titleClassName={theme.blockTitle}
-                mutedClassName={theme.muted}
-                plexPassClassName={isLight ? "text-amber-800" : "text-amber-200"}
-              />
-              <div className="flex flex-col gap-2">
-                {(
-                  [
-                    { key: "library" as const, label: "Library Recommended" },
-                    { key: "home" as const, label: "Home" },
-                    { key: "shared" as const, label: "Shared users' Home" },
-                  ] as const
-                ).map((opt) => {
-                  const checked = Boolean(definition.visible_on?.[opt.key]);
-                  return (
-                    <label
-                      key={opt.key}
-                      className={`flex items-center gap-2 text-[13px] cursor-pointer ${theme.label}`}
-                    >
-                      <BrandCheckbox
-                        checked={checked}
-                        size="sm"
-                        accentHex={accentHex}
-                        ariaLabel={opt.label}
-                        onChange={(next) =>
-                          setDefinition((prev) => ({
-                            ...prev,
-                            visible_on: {
-                              library: Boolean(prev.visible_on?.library),
-                              home: Boolean(prev.visible_on?.home),
-                              shared: Boolean(prev.visible_on?.shared),
-                              [opt.key]: next,
-                            },
-                          }))
-                        }
-                      />
-                      <span>{opt.label}</span>
-                    </label>
-                  );
-                })}
-              </div>
-            </div>
+  const recipeColumn = (
+      <div className="flex flex-1 min-w-0 flex-col gap-4 lg:max-w-3xl">
+        {/* Recipe identity + target: picking the library first drives media type, genres, pins, and preview */}
+        <div className={`${theme.identityCard} flex flex-col gap-3`}>
+          <div className="flex flex-wrap items-center gap-4">
+            {librariesBlock}
+            {titleBlock}
+            {recipeNameBlock}
+          </div>
+          {scheduleBlock}
+          {seasonalBlock}
+        </div>
+
+        {sourcesBlock}
+
+        {filtersBlock}
+
+        {pinsBlock}
+
+        <BlockCard
+          icon="display_settings"
+          title="Arrange & contents"
+          subtitle="Sort sources and caps for what lands in the collection"
+          accentHex={accentHex}
+        >
+          <div className="flex flex-col gap-5">
+            {arrangeBlock}
+
+            {contentsBlock}
+
+            <p className={`text-[13px] ${theme.muted}`}>
+              Use Collections → Ordering to set where this collection appears in Plex (Library Recommended, Home,
+              and shared users&apos; Home).
+            </p>
           </div>
         </BlockCard>
 
-        {/* Actions */}
         {props.saveError ? (
           <div className="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-2.5 text-[14px] text-red-300">
             {props.saveError}
@@ -3092,42 +2937,7 @@ export function CollectionEditor(props: {
           <button
             type="button"
             disabled={!canSave || props.saving}
-            onClick={() => {
-              if (!sectionId) return;
-              props.onSave({
-                name: name.trim(),
-                enabled,
-                plex_section_id: sectionId,
-                plex_section_ids: sectionIds,
-                plex_section_type: sectionType,
-                collection_title: collectionTitle.trim(),
-                definition,
-                run_interval_hours: followGlobalSchedule
-                  ? null
-                  : runSchedule.mode === "interval"
-                    ? runSchedule.interval_hours
-                    : null,
-                run_schedule: followGlobalSchedule ? null : runSchedule,
-                active_window: activeWindow
-                  ? {
-                      start: joinMonthDay(
-                        splitMonthDay(activeWindow.start).month,
-                        splitMonthDay(activeWindow.start).day,
-                      ),
-                      end: joinMonthDay(
-                        splitMonthDay(activeWindow.end).month,
-                        splitMonthDay(activeWindow.end).day,
-                      ),
-                      when_inactive:
-                        activeWindow.when_inactive === "delete"
-                          ? "delete"
-                          : activeWindow.when_inactive === "clear"
-                            ? "clear"
-                            : "keep",
-                    }
-                  : null,
-              });
-            }}
+            onClick={handleSaveClick}
             className={`rounded-lg px-5 py-2 text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} transition-opacity disabled:opacity-40`}
             style={accentFilledStyle(accentHex)}
           >
@@ -3138,8 +2948,9 @@ export function CollectionEditor(props: {
           </button>
         </div>
       </div>
+  );
 
-      {/* Preview rail — grows with available width */}
+  const previewColumn = (
       <aside className="w-full min-w-0 lg:flex-1 lg:min-w-[20rem]">
         <div className={theme.previewRail}>
           <div className={theme.previewHeader}>
@@ -3359,6 +3170,20 @@ export function CollectionEditor(props: {
                     )}
                     {previewPane === "missing" && showMissingPane ? (
                       <>
+                        {autoAddPreviewActive && missingItems.some((item) => item.would_auto_add) ? (
+                          <div className={`mb-2 flex flex-wrap items-center gap-3 text-[12px] ${theme.muted}`}>
+                            <span className="inline-flex items-center gap-1">
+                              <span className="inline-block h-2.5 w-2.5 rounded-sm outline outline-2 outline-offset-[-1px] outline-amber-400" />
+                              Auto-add on sync
+                            </span>
+                            <span>
+                              {missingAutoAddCount} title{missingAutoAddCount === 1 ? "" : "s"} on next sync
+                              {typeof preview?.to_add_count === "number" && preview.to_add_count !== missingAutoAddCount
+                                ? ` (${preview.to_add_count} in add budget)`
+                                : ""}
+                            </span>
+                          </div>
+                        ) : null}
                         {missingItems.length ? (
                         <div className="mb-3 flex flex-wrap items-center gap-2">
                           <button
@@ -3430,11 +3255,14 @@ export function CollectionEditor(props: {
                           {missingItems.map((item) => {
                             const key = missingKey(item);
                             const selected = selectedMissing.has(key);
+                            const autoAddMark = Boolean(item.would_auto_add);
                             return (
                               <button
                                 type="button"
                                 key={key}
-                                title={`${item.title}${item.year ? ` (${item.year})` : ""}`}
+                                title={`${item.title}${item.year ? ` (${item.year})` : ""}${
+                                  autoAddMark ? " · Auto-add on next sync" : ""
+                                }`}
                                 onClick={() => {
                                   setSelectedMissing((prev) => {
                                     const next = new Set(prev);
@@ -3443,7 +3271,11 @@ export function CollectionEditor(props: {
                                     return next;
                                   });
                                 }}
-                                className={`relative aspect-[2/3] w-full overflow-hidden rounded-md ${theme.posterFallback}`}
+                                className={`relative aspect-[2/3] w-full overflow-hidden rounded-md ${theme.posterFallback} ${
+                                  !selected && autoAddMark
+                                    ? "outline outline-2 outline-offset-[-2px] outline-amber-400"
+                                    : ""
+                                }`}
                                 style={selected ? { boxShadow: `0 0 0 2px ${accentHex}` } : undefined}
                               >
                                 {item.poster ? (
@@ -3456,8 +3288,15 @@ export function CollectionEditor(props: {
                                 ) : (
                                   <PosterTitleFallback title={item.title} />
                                 )}
-                                <span className="absolute left-1 top-1 rounded bg-black/60 px-1 text-[10px] text-white">
-                                  {selected ? "✓" : ""}
+                                <span className="absolute left-1 top-1 flex flex-col gap-0.5">
+                                  {autoAddMark && !selected ? (
+                                    <span className="rounded bg-amber-500/90 px-1 text-[8px] font-headline uppercase tracking-wider text-black">
+                                      Sync
+                                    </span>
+                                  ) : null}
+                                  {selected ? (
+                                    <span className="rounded bg-black/60 px-1 text-[10px] text-white">✓</span>
+                                  ) : null}
                                 </span>
                               </button>
                             );
@@ -3563,7 +3402,257 @@ export function CollectionEditor(props: {
           </div>
         </div>
       </aside>
-    </div>
+  );
+
+  const selectedLibraryNames = sectionIds
+    .map((id) => props.sections.find((s) => s.id === id)?.title)
+    .filter(Boolean)
+    .join(", ");
+  const filterCount = filterGroups.reduce((sum, group) => sum + group.length, 0);
+  const pinCount = includePins.length + excludePins.length;
+  const sortLabel =
+    collectionArrangeSortOptions(sectionType).find(
+      (o) => o.value === (definition.sort ?? defaultSortForSources(definition.sources)),
+    )?.label ?? "";
+  const missingCap = definition.auto_add?.missing_limit ?? definition.auto_add?.max_per_run;
+  const issues = [
+    !sectionIds.length ? "Pick a Plex library" : null,
+    !collectionTitle.trim() ? "Add a collection title" : null,
+    !name.trim() ? "Add a recipe name" : null,
+    !definition.sources.length ? "Add a source" : null,
+    definition.auto_add?.enabled && !isCollectionAutoAddReady(definition.auto_add)
+      ? "Finish Radarr/Sonarr targets"
+      : null,
+  ].filter((v): v is string => Boolean(v));
+
+  const fmtCount = (value: number | null | undefined) => (value == null ? "…" : String(value));
+  const metricWhat = !sectionId
+    ? null
+    : preview?.tmdb_candidates != null
+      ? `${preview.tmdb_candidates} from sources`
+      : preview
+        ? `${fmtCount(preview.matched_in_catalog)} in catalog`
+        : "…";
+  const metricRefine =
+    !sectionId || !preview
+      ? null
+      : `${fmtCount(preview.matched_in_catalog)} → ${fmtCount(preview.after_filters)}${
+          preview.pinned_in ? ` +${preview.pinned_in} pinned` : ""
+        }${preview.pinned_out ? ` −${preview.pinned_out} pinned` : ""}`;
+  const metricContents =
+    !sectionId || !preview
+      ? null
+      : `${fmtCount(preview.selected)} in${
+          autoAddPreviewActive && typeof preview.to_add_count === "number" ? ` + ${preview.to_add_count} to add` : ""
+        }`;
+  const metricArrange = !preview?.sample?.length ? null : `1st: ${preview.sample[0].title}`;
+
+  const nextConfig = (
+    <>
+      {props.saveError ? (
+        <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-2.5 text-[14px] text-red-300">
+          {props.saveError}
+        </div>
+      ) : null}
+      <BuilderSection
+        number={1}
+        title="Where"
+        themeMode={props.themeMode}
+        summary={
+          [selectedLibraryNames || "No library", collectionTitle.trim() ? `"${collectionTitle.trim()}"` : null]
+            .filter(Boolean)
+            .join(" · ")
+        }
+      >
+        <div className="flex flex-col gap-4">
+          {librariesBlock}
+          {titleBlock}
+          {recipeNameBlock}
+        </div>
+      </BuilderSection>
+      <BuilderSection
+        number={2}
+        title="What"
+        themeMode={props.themeMode}
+        metric={metricWhat}
+        summary={
+          definition.sources.length
+            ? definition.sources.map((s) => SOURCE_META[s.type]?.label ?? s.type).join(" + ")
+            : "No sources yet"
+        }
+      >
+        {sourcesBlock}
+      </BuilderSection>
+      <BuilderSection
+        number={3}
+        title="Refine"
+        themeMode={props.themeMode}
+        metric={metricRefine}
+        defaultOpen={filterCount > 0 || pinCount > 0}
+        summary={`${filterCount} filter${filterCount === 1 ? "" : "s"} · ${pinCount} pin${pinCount === 1 ? "" : "s"}`}
+      >
+        <div className="flex flex-col gap-5">
+          {filtersBlock}
+          {pinsBlock}
+        </div>
+      </BuilderSection>
+      <BuilderSection
+        number={4}
+        title="Contents"
+        themeMode={props.themeMode}
+        metric={metricContents}
+        summary={[
+          definition.include_library !== false
+            ? `Library titles${definition.limit ? ` (max ${definition.limit})` : ""}`
+            : "No library titles",
+          definition.auto_add?.enabled
+            ? `Titles you don't have${missingCap ? ` (max ${missingCap})` : ""}`
+            : "Library only",
+        ].join(" · ")}
+      >
+        {contentsBlock}
+      </BuilderSection>
+      <BuilderSection number={5} title="Arrange" themeMode={props.themeMode} summary={sortLabel} metric={metricArrange}>
+        {arrangeBlock}
+      </BuilderSection>
+      <BuilderSection
+        number={6}
+        title="When"
+        themeMode={props.themeMode}
+        defaultOpen={false}
+        summary={[
+          followGlobalSchedule ? "Collections sync schedule" : "Custom schedule",
+          activeWindow ? `Seasonal ${activeWindow.start} to ${activeWindow.end}` : null,
+        ]
+          .filter(Boolean)
+          .join(" · ")}
+      >
+        <div className="flex flex-col gap-4">
+          {scheduleBlock}
+          {seasonalBlock}
+        </div>
+      </BuilderSection>
+      <BuilderSection
+        number={7}
+        title="Where it appears"
+        themeMode={props.themeMode}
+        defaultOpen={false}
+        summary="Plex Recommended, Home, and Shared placement"
+      >
+        <div className="flex flex-col gap-2">
+          <p className={`text-[13px] ${theme.muted}`}>
+            Hub order and Recommended / Home / Shared visibility are managed live in Plex from the Ordering page.
+            Recipe sync never changes them.
+          </p>
+          {props.onOpenOrdering ? (
+            <button
+              type="button"
+              className={`${theme.cancelButton} self-start`}
+              onClick={props.onOpenOrdering}
+            >
+              Open Ordering
+            </button>
+          ) : null}
+        </div>
+      </BuilderSection>
+    </>
+  );
+
+  return (
+    <CollectionThemeProvider value={theme}>
+      {useNextLayout ? (
+        <BuilderShell
+          config={nextConfig}
+          dock={
+            <PreviewDock
+              themeMode={props.themeMode}
+              accentHex={accentHex}
+              preview={preview}
+              loading={previewLoading}
+              error={previewError}
+              emptyMessage={!sectionId ? "Pick a Plex library to see the row." : null}
+              autoAddActive={autoAddPreviewActive}
+              libraries={targetLibraries}
+              focusLibraryId={focusLibraryId}
+              onFocusLibraryChange={setFocusLibraryId}
+              onExpand={() => setSheetOpen(true)}
+              actions={
+                <StickyActionBar
+                  accentHex={accentHex}
+                  issues={issues}
+                  primaryLabel={props.recipe ? "Save changes" : "Create collection"}
+                  primaryDisabled={!canSave}
+                  primaryLoading={props.saving}
+                  onCancel={props.onCancel}
+                  onPrimary={handleSaveClick}
+                />
+              }
+            />
+          }
+          sheet={
+            <PreviewSheet
+              open={sheetOpen}
+              onClose={() => setSheetOpen(false)}
+              themeMode={props.themeMode}
+              title={`Full preview: ${collectionTitle.trim() || "Untitled collection"}`}
+            >
+              {dockPrefs.plexMock ? (
+                <div className="flex flex-col gap-3">
+                  {targetLibraries.length > 1 ? (
+                    <PreviewLibraryChips
+                      themeMode={props.themeMode}
+                      accentHex={accentHex}
+                      libraries={targetLibraries}
+                      value={focusLibraryId}
+                      onChange={(id) => setFocusLibraryId(id ?? targetLibraries[0]?.id ?? null)}
+                      requireLibrary
+                    />
+                  ) : null}
+                  <PlexRowMock
+                    themeMode={props.themeMode}
+                    accentHex={accentHex}
+                    sectionId={focusLibraryId || sectionId || null}
+                    libraryTitle={
+                      props.sections.find((s) => s.id === (focusLibraryId || sectionId))?.title
+                    }
+                    collectionTitle={collectionTitle}
+                    recipeId={props.recipe?.id ?? null}
+                    items={filmstripForLibrary(
+                      buildFilmstrip(preview, dockPrefs.ghosts && autoAddPreviewActive),
+                      focusLibraryId || sectionId || null,
+                    )}
+                    promotedOnCreate={Boolean(definition.visible_on?.library)}
+                  />
+                </div>
+              ) : (
+                <div className={`${getCollectionTheme(props.themeMode === "light").blockCard} p-4`}>
+                  <RecipePreviewResultView
+                    themeMode={props.themeMode}
+                    accentHex={accentHex}
+                    sections={props.sections}
+                    sectionIds={sectionIds}
+                    preview={preview}
+                    loading={previewLoading}
+                    error={previewError}
+                    title={collectionTitle.trim() || "Untitled collection"}
+                    autoAddConfigured={Boolean(definition.auto_add?.enabled)}
+                    autoAddActive={autoAddPreviewActive}
+                    layout="sheet"
+                    libraryFilter={sampleLibraryFilter}
+                    onLibraryFilterChange={setSampleLibraryFilter}
+                  />
+                </div>
+              )}
+              {dockPrefs.plexMock ? previewColumn : null}
+            </PreviewSheet>
+          }
+        />
+      ) : (
+        <div className="flex flex-col gap-6 lg:flex-row lg:items-start">
+          {recipeColumn}
+          {previewColumn}
+        </div>
+      )}
       {arrModalOpen ? (
         <ArrAddModal
           mediaType={sectionType}

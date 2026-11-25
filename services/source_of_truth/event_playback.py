@@ -4087,6 +4087,23 @@ def process_playback_start_event(payload: dict[str, Any], instance: str | None =
         context = _resolve_playback_context(session, payload)
         media_type = str(context.get("media_type") or "unknown")
 
+        try:
+            from services.collections.auto_add import mark_played_for_catalog_match
+
+            if media_type == "movie":
+                mark_played_for_catalog_match(
+                    media_type="movie",
+                    tmdb_id=context.get("tmdb_id"),
+                    imdb_id=str(context.get("imdb_id") or "").strip() or None,
+                )
+            elif media_type == "episode":
+                mark_played_for_catalog_match(
+                    media_type="show",
+                    tvdb_id=context.get("tvdb_id"),
+                )
+        except Exception:
+            pass
+
         logger.info(
             f"Playback routing source={instance or 'unknown'} media_type={media_type} "
             f"kind={context.get('playback_kind')} path={context.get('file_path')}",

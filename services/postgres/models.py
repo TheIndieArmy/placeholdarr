@@ -105,6 +105,7 @@ class Movie(Base):
     updated_at = Column(DateTime(timezone=True), server_default=text('now()'))
     # Last time this movie was observed in Radarr (authoritative DB clock)
     last_found_in_radarr = Column(DateTime(timezone=True), nullable=True)
+    radarr_added_at = Column(DateTime(timezone=True), nullable=True)
 
     subflows = relationship('SubFlow', back_populates='movie')
 
@@ -323,6 +324,28 @@ class CollectionRecipe(Base):
 
     def __repr__(self):
         return f"<CollectionRecipe(id={self.id}, name={self.name!r}, section={self.plex_section_id})>"
+
+
+class CollectionAutoAdd(Base):
+    """Titles auto-added to Arr from a Collections recipe (Discover guardrails)."""
+
+    __tablename__ = "collection_auto_add"
+    __table_args__ = (Index("ix_collection_auto_add_identity", "media_type", "tmdb_id", "tvdb_id", "instance_key"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    media_type = Column(String(16), nullable=False)
+    tmdb_id = Column(Integer, nullable=True)
+    tvdb_id = Column(Integer, nullable=True)
+    imdb_id = Column(String(32), nullable=True)
+    instance_key = Column(String(64), nullable=False)
+    arr_id = Column(Integer, nullable=True)
+    recipe_ids = Column(JSON, nullable=True)
+    """Plex collection keys: recipe id or recipe_id:child title for set children."""
+    collection_keys = Column(JSON, nullable=True)
+    added_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, server_default=text("now()"))
+    last_seen_on_list_at = Column(DateTime(timezone=True), nullable=True)
+    played_at = Column(DateTime(timezone=True), nullable=True)
+    title = Column(String(512), nullable=True)
 
 
 class DashboardStatsSnapshot(Base):
@@ -578,6 +601,7 @@ class Series(Base):
     updated_at = Column(DateTime(timezone=True), server_default=text('now()'))
     # Last time this season metadata was observed in Sonarr
     last_found_in_sonarr = Column(DateTime(timezone=True), nullable=True)
+    sonarr_added_at = Column(DateTime(timezone=True), nullable=True)
     # Series gate: Never/Pinned lock season and episode chips without rewriting their flags
     force_placeholder = Column(Boolean, nullable=False, default=False)
     force_placeholder_despite_sibling = Column(Boolean, nullable=False, default=False)

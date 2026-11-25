@@ -117,7 +117,12 @@ import {
 } from "./library/librarySortSettings";
 import { useLibraryShelves } from "./library/useLibraryShelves";
 import { ConfirmModal } from "./ConfirmModal";
+import { CollectionsOrderingPanel } from "./collections/CollectionsOrderingPanel";
 import { CollectionsPanel } from "./collections/CollectionsPanel";
+import { DiscoverSetupPanel } from "./collections/DiscoverSetupPanel";
+import { CollectionsPanelNext } from "./collections/next/CollectionsPanelNext";
+import { OrderingNext } from "./collections/next/OrderingNext";
+import { DiscoverBuilder } from "./collections/next/DiscoverBuilder";
 import DummyMediaSettings from "./DummyMediaSettings";
 import PosterLayoutDesigner from "./settings/PosterLayoutDesigner";
 import { useActivityTasks } from "./activity/useActivityTasks";
@@ -163,6 +168,13 @@ const ACTIVITY_TASKS_PATH = "/activity/tasks";
 const ACTIVITY_WATCHLIST_PATH = "/activity/watchlist";
 const ACTIVITY_OPERATIONS_PATH = "/activity/operations";
 const ACTIVITY_DEFAULT_PATH = ACTIVITY_PLACEHOLDERS_PATH;
+const COLLECTIONS_RECIPES_PATH = "/collections/recipes";
+const COLLECTIONS_ORDERING_PATH = "/collections/ordering";
+const COLLECTIONS_DISCOVER_PATH = "/collections/discover";
+const COLLECTIONS_NEXT_RECIPES_PATH = "/collections/next/recipes";
+const COLLECTIONS_NEXT_ORDERING_PATH = "/collections/next/ordering";
+const COLLECTIONS_NEXT_DISCOVER_PATH = "/collections/next/discover";
+const COLLECTIONS_DEFAULT_PATH = COLLECTIONS_RECIPES_PATH;
 /** Default home after onboarding / root redirect. */
 const HOME_PATH = LIBRARY_MOVIES_PATH;
 const LIBRARY_MOVIES_FILTER_KEY = "placeholdarr:library-shelf-filter:movies";
@@ -1184,6 +1196,7 @@ export function App() {
   }, []);
 
   const activitySubPage = getActivitySubPage(location.pathname);
+  const collectionsSubPage = getCollectionsSubPage(location.pathname);
 
   const {
     scheduledTasks,
@@ -1966,8 +1979,15 @@ export function App() {
       setLeaveConfirm({ path, kind: "settings" });
       return false;
     }
-    const stayingOnCollections = currentTab === "collections" && path.startsWith("/collections");
-    if (collectionsDraftDirty && currentTab === "collections" && !stayingOnCollections) {
+    const stayingOnRecipes =
+      currentTab === "collections" &&
+      (path === COLLECTIONS_RECIPES_PATH ||
+        path.startsWith(`${COLLECTIONS_RECIPES_PATH}/`) ||
+        path === COLLECTIONS_DISCOVER_PATH ||
+        path.startsWith(`${COLLECTIONS_DISCOVER_PATH}/`) ||
+        path === "/collections" ||
+        path === "/collections/");
+    if (collectionsDraftDirty && currentTab === "collections" && !stayingOnRecipes) {
       setLeaveConfirm({ path, kind: "recipe" });
       return false;
     }
@@ -2290,6 +2310,70 @@ export function App() {
     }
 
     if (currentTab === "collections") {
+      if (location.pathname === "/collections" || location.pathname === "/collections/") {
+        return <Navigate to={COLLECTIONS_DEFAULT_PATH} replace />;
+      }
+      if (collectionsSubPage === "next-ordering") {
+        return (
+          <OrderingNext
+            accent={{ hex: brandAccent.hex, icon: brandAccent.icon }}
+            themeMode={themeMode}
+            onOpenPlexSettings={() => tryNavigate("/settings/media-integrations")}
+            onOpenRecipes={() => tryNavigate(COLLECTIONS_NEXT_RECIPES_PATH)}
+          />
+        );
+      }
+      if (collectionsSubPage === "next-discover") {
+        return (
+          <DiscoverBuilder
+            accent={{ hex: brandAccent.hex, icon: brandAccent.icon }}
+            themeMode={themeMode}
+            onDone={() => tryNavigate(COLLECTIONS_NEXT_RECIPES_PATH)}
+            onOpenPlexSettings={() => tryNavigate("/settings/media-integrations")}
+            onOpenOrdering={() => tryNavigate(COLLECTIONS_NEXT_ORDERING_PATH)}
+          />
+        );
+      }
+      if (collectionsSubPage === "next-recipes") {
+        return (
+          <CollectionsPanelNext
+            accent={{ hex: brandAccent.hex, icon: brandAccent.icon }}
+            themeMode={themeMode}
+            libraryItems={allLibraryItems}
+            libraryLoading={libraryLoading}
+            onEnsureLibrary={ensureLibraryLoaded}
+            onOpenPlexSettings={() => tryNavigate("/settings/media-integrations")}
+            onOpenOptionalApis={() => tryNavigate("/settings/optional-apis")}
+            onOpenOrdering={() => tryNavigate(COLLECTIONS_NEXT_ORDERING_PATH)}
+            onOpenDiscover={() => tryNavigate(COLLECTIONS_NEXT_DISCOVER_PATH)}
+            onDraftDirty={setCollectionsDraftDirty}
+            clockFormat={fieldValues.UI_CLOCK_FORMAT ?? settingsPayload?.sections
+              ?.flatMap((s) => s.fields)
+              .find((f) => f.key === "UI_CLOCK_FORMAT")?.value}
+          />
+        );
+      }
+      if (collectionsSubPage === "ordering") {
+        return (
+          <CollectionsOrderingPanel
+            accent={{ hex: brandAccent.hex, icon: brandAccent.icon }}
+            themeMode={themeMode}
+            onOpenPlexSettings={() => tryNavigate("/settings/media-integrations")}
+            onOpenRecipes={() => tryNavigate(COLLECTIONS_RECIPES_PATH)}
+          />
+        );
+      }
+      if (collectionsSubPage === "discover") {
+        return (
+          <DiscoverSetupPanel
+            accent={{ hex: brandAccent.hex, icon: brandAccent.icon }}
+            themeMode={themeMode}
+            onDone={() => tryNavigate(COLLECTIONS_RECIPES_PATH)}
+            onOpenPlexSettings={() => tryNavigate("/settings/media-integrations")}
+            onOpenOrdering={() => tryNavigate(COLLECTIONS_ORDERING_PATH)}
+          />
+        );
+      }
       return (
         <CollectionsPanel
           accent={{ hex: brandAccent.hex, icon: brandAccent.icon }}
@@ -2299,6 +2383,8 @@ export function App() {
           onEnsureLibrary={ensureLibraryLoaded}
           onOpenPlexSettings={() => tryNavigate("/settings/media-integrations")}
           onOpenOptionalApis={() => tryNavigate("/settings/optional-apis")}
+          onOpenOrdering={() => tryNavigate(COLLECTIONS_ORDERING_PATH)}
+          onOpenDiscover={() => tryNavigate(COLLECTIONS_DISCOVER_PATH)}
           onDraftDirty={setCollectionsDraftDirty}
           clockFormat={fieldValues.UI_CLOCK_FORMAT ?? settingsPayload?.sections
             ?.flatMap((s) => s.fields)
@@ -3110,8 +3196,63 @@ export function App() {
                       </div>
                     ) : null}
 
+                    {isActive("/collections") ? (
+                      <button
+                        type="button"
+                        onClick={() => tryNavigate(COLLECTIONS_DEFAULT_PATH)}
+                        className={navActiveClass}
+                        title="Collections"
+                      >
+                        {navIcon("video_library")}
+                        {navLabel("Collections")}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => tryNavigate(COLLECTIONS_DEFAULT_PATH)}
+                        className={navInactiveClass}
+                        title="Collections"
+                      >
+                        {navIcon("video_library")}
+                        {navLabel("Collections")}
+                      </button>
+                    )}
+                    {currentTab === "collections" ? (
+                      <div className={subWrapClass}>
+                        {(
+                          [
+                            { label: "Recipes", path: COLLECTIONS_RECIPES_PATH, icon: "rule" },
+                            { label: "Ordering", path: COLLECTIONS_ORDERING_PATH, icon: "reorder" },
+                            { label: "Recipes (new)", path: COLLECTIONS_NEXT_RECIPES_PATH, icon: "science" },
+                            { label: "Ordering (new)", path: COLLECTIONS_NEXT_ORDERING_PATH, icon: "science" },
+                          ] as const
+                        ).map(({ label, path, icon }) => {
+                          const isSubActive =
+                            location.pathname === path ||
+                            location.pathname.startsWith(`${path}/`) ||
+                            (path === COLLECTIONS_RECIPES_PATH &&
+                              (location.pathname === COLLECTIONS_DISCOVER_PATH ||
+                                location.pathname.startsWith(`${COLLECTIONS_DISCOVER_PATH}/`))) ||
+                            (path === COLLECTIONS_NEXT_RECIPES_PATH &&
+                              (location.pathname === COLLECTIONS_NEXT_DISCOVER_PATH ||
+                                location.pathname.startsWith(`${COLLECTIONS_NEXT_DISCOVER_PATH}/`)));
+                          return (
+                            <button
+                              key={path}
+                              type="button"
+                              onClick={() => tryNavigate(path)}
+                              className={subBase + (isSubActive ? subActiveClass : subInactiveClass)}
+                              title={label}
+                            >
+                              {subIcon(icon)}
+                              {subLabel(label)}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+
                     {[
-                      { icon: "video_library", label: "Collections", path: "/collections", beta: false },
                       { icon: "calendar_month", label: "Calendar", path: "/calendar", beta: false },
                       { icon: "terminal", label: "Logs", path: "/logs", beta: false },
                       { icon: "settings", label: "Settings", path: "/settings", beta: false },
@@ -15929,6 +16070,19 @@ function getActivitySubPage(pathname: string): ActivitySubPage {
   if (rest === "/watchlist" || rest.startsWith("/watchlist/")) return "watchlist";
   if (rest === "/operations" || rest.startsWith("/operations/")) return "operations";
   return "placeholders";
+}
+
+function getCollectionsSubPage(
+  pathname: string,
+): "recipes" | "ordering" | "discover" | "next-recipes" | "next-ordering" | "next-discover" {
+  const p = pathname.replace(/\/$/, "") || "/";
+  const rest = p.slice("/collections".length) || "/";
+  if (rest === "/next/recipes" || rest.startsWith("/next/recipes/")) return "next-recipes";
+  if (rest === "/next/ordering" || rest.startsWith("/next/ordering/")) return "next-ordering";
+  if (rest === "/next/discover" || rest.startsWith("/next/discover/")) return "next-discover";
+  if (rest === "/ordering" || rest.startsWith("/ordering/")) return "ordering";
+  if (rest === "/discover" || rest.startsWith("/discover/")) return "discover";
+  return "recipes";
 }
 
 function getTabFromPath(pathname: string): DashboardTab {

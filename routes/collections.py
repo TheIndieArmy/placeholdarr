@@ -479,6 +479,24 @@ def _builder_meta_sync(media_type: str) -> dict[str, Any]:
         genres = [str(row[0]) for row in session.execute(genre_sql) if row[0]]
         certifications = [str(row[0]).strip() for row in session.execute(cert_sql) if row[0] and str(row[0]).strip()]
         years = [int(row[0]) for row in session.execute(year_sql) if row[0] is not None]
+        if media_type == "movie":
+            studio_sql = text(
+                "SELECT DISTINCT radarr_studio AS val "
+                "FROM movie WHERE is_deleted = false "
+                "AND radarr_studio IS NOT NULL AND TRIM(radarr_studio) <> '' "
+                "ORDER BY val"
+            )
+            studios = [str(row[0]).strip() for row in session.execute(studio_sql) if row[0]]
+            networks = []
+        else:
+            network_sql = text(
+                "SELECT DISTINCT sonarr_network AS val "
+                "FROM series WHERE is_deleted = false "
+                "AND sonarr_network IS NOT NULL AND TRIM(sonarr_network) <> '' "
+                "ORDER BY val"
+            )
+            networks = [str(row[0]).strip() for row in session.execute(network_sql) if row[0]]
+            studios = []
 
     from services.collections.collection_sets import decade_label
 
@@ -502,6 +520,19 @@ def _builder_meta_sync(media_type: str) -> dict[str, Any]:
         except list_sources.ListSourceError:
             continue
 
+    from services.collections.discover_defaults import (
+        discover_picker_networks,
+        discover_picker_studios,
+        merge_picker_values,
+        picker_genre_names,
+    )
+
+    genres = merge_picker_values(genres, picker_genre_names(media_type))
+    if media_type == "movie":
+        studios = merge_picker_values(studios, discover_picker_studios())
+    else:
+        networks = merge_picker_values(networks, discover_picker_networks())
+
     return {
         "instances": instance_options,
         "quality_profiles": profile_options,
@@ -509,8 +540,11 @@ def _builder_meta_sync(media_type: str) -> dict[str, Any]:
         "genres": genres,
         "certifications": certifications,
         "decades": decades,
+        "studios": studios if media_type == "movie" else [],
+        "networks": networks if media_type != "movie" else [],
         "arr_tags": arr_tags,
         "tautulli_configured": list_sources.tautulli_configured(),
+        "tmdb_configured": bool(tmdb_client.tmdb_configured()),
     }
 
 
@@ -836,6 +870,127 @@ async def explain_item(body: ExplainPayload):
         raise HTTPException(status_code=400, detail=str(exc))
     except (tmdb_client.TmdbError, list_sources.ListSourceError) as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+
+
+class DiscoverApplyPayload(BaseModel):
+    movie_section_id: int | None = Field(None, ge=1)
+    show_section_id: int | None = Field(None, ge=1)
+    shelf_ids: list[str] = Field(default_factory=list)
+    set_values: dict[str, list[str]] | None = None
+    apply_row_order: bool = True
+    auto_add: dict[str, Any] | None = None
+    shelf_layout: dict[str, dict[str, Any]] | None = None
+
+
+class DiscoverShelfPreviewPayload(BaseModel):
+    shelf_id: str = Field(..., min_length=1)
+    section_id: int = Field(..., ge=1)
+    set_values: dict[str, list[str]] | None = None
+    shelf_layout: dict[str, Any] | None = None
+    auto_add: dict[str, Any] | None = None
+
+
+class HubOrderPayload(BaseModel):
+    plex_section_id: int = Field(..., ge=1)
+    recipe_ids: list[int] | None = None
+
+
+class HubsApplyPayload(BaseModel):
+    plex_section_id: int = Field(..., ge=1)
+    ordered_identifiers: list[str] | None = None
+    visibility: list[dict[str, Any]] | None = None
+    promote_rating_keys: list[str] | None = None
+    demote_identifiers: list[str] | None = None
+
+
+# Static /api/collections/... paths must be registered before /{recipe_id}
+# or FastAPI treats "hubs" / "presets" as integer recipe ids.
+@router.get("/api/collections/presets/discover")
+async def discover_preset_preview():
+    from services.collections.preset_discover import preset_preview
+
+    return await asyncio.to_thread(preset_preview)
+
+
+@router.post("/api/collections/presets/discover/apply")
+async def discover_preset_apply(body: DiscoverApplyPayload):
+    from services.collections.preset_discover import apply_discover_preset
+
+    try:
+        return await asyncio.to_thread(
+            apply_discover_preset,
+            movie_section_id=body.movie_section_id,
+            show_section_id=body.show_section_id,
+            shelf_ids=body.shelf_ids,
+            set_values=body.set_values,
+            auto_add=body.auto_add,
+            apply_row_order=body.apply_row_order,
+            shelf_layout=body.shelf_layout,
+        )
+    except RecipeValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/api/collections/presets/discover/shelf-preview")
+async def discover_shelf_preview(body: DiscoverShelfPreviewPayload):
+    from services.collections.preset_discover import shelf_preview
+
+    try:
+        return await asyncio.to_thread(
+            shelf_preview,
+            body.shelf_id,
+            body.section_id,
+            set_values=body.set_values,
+            shelf_layout=body.shelf_layout,
+            auto_add=body.auto_add,
+        )
+    except RecipeValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/api/collections/hub-order/apply")
+async def apply_hub_order(body: HubOrderPayload):
+    from services.collections.hub_order import apply_hub_row_order
+
+    return await asyncio.to_thread(
+        apply_hub_row_order,
+        body.plex_section_id,
+        recipe_ids=body.recipe_ids,
+    )
+
+
+@router.get("/api/collections/hubs")
+async def get_collection_hubs(plex_section_id: int = Query(..., ge=1)):
+    from services.collections.hub_order import HubOrderError, get_hubs_snapshot
+
+    try:
+        return await asyncio.to_thread(get_hubs_snapshot, plex_section_id)
+    except HubOrderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.put("/api/collections/hubs")
+async def put_collection_hubs(body: HubsApplyPayload):
+    from services.collections.hub_order import HubOrderError, apply_hubs_draft
+
+    try:
+        return await asyncio.to_thread(
+            apply_hubs_draft,
+            body.plex_section_id,
+            ordered_identifiers=body.ordered_identifiers,
+            visibility=body.visibility,
+            promote_rating_keys=body.promote_rating_keys,
+            demote_identifiers=body.demote_identifiers,
+        )
+    except HubOrderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/api/collections/discover/prune-preview")
+async def discover_prune_preview():
+    from services.collections.prune import count_prune_candidates
+
+    return await asyncio.to_thread(count_prune_candidates, dry_run=True)
 
 
 @router.get("/api/collections/{recipe_id}")

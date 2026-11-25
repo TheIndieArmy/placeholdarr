@@ -1,4 +1,4 @@
-import { fetchJson, postJson, postNdjson } from "./client";
+import { fetchJson, postJson, postNdjson, putJson } from "./client";
 import type {
   CollectionActiveWindow,
   CollectionArrAddItem,
@@ -133,6 +133,136 @@ export function explainCollectionItem(payload: {
 export function getCollectionArrAddOptions(mediaType: "movie" | "show"): Promise<CollectionArrAddOptionsResponse> {
   const params = new URLSearchParams({ media_type: mediaType });
   return fetchJson(`/api/collections/arr-add-options?${params.toString()}`);
+}
+
+export type DiscoverPresetShelf = {
+  shelf_id: string;
+  name?: string;
+  description?: string | null;
+  plex_section_type?: "movie" | "show";
+  collection_title?: string;
+  kind?: "recipe" | "collection_set";
+  set_category?: string | null;
+  selectable_values?: string[] | null;
+  multi_value_hint?: string | null;
+  default_sort?: string | null;
+  default_limit?: number | null;
+  release_basis_configurable?: boolean;
+  default_release_basis?: string | null;
+};
+
+export type DiscoverShelfLayout = { sort: string; limit: number; release_basis?: string };
+
+export type DiscoverGenrePresetKey = "popular" | "latest" | "upcoming" | "all_time_greats";
+
+export type DiscoverPresetPreview = {
+  shelves?: DiscoverPresetShelf[];
+  recipes: { name?: string; plex_section_type?: string; collection_title?: string }[];
+  hub_order?: { movie?: string[]; show?: string[] };
+  default_limit?: number;
+  tmdb_genres?: { movie?: string[]; show?: string[] };
+  tmdb_configured?: boolean;
+  genre_presets?: Record<"movie" | "show", Record<DiscoverGenrePresetKey, string[]>>;
+  studio_presets?: Record<DiscoverGenrePresetKey, string[]>;
+  default_genre_preset?: DiscoverGenrePresetKey;
+  picker_options?: { studios?: string[]; networks?: string[] };
+  default_studio_values?: string[];
+  default_network_values?: string[];
+  default_movie_release_basis?: string;
+};
+
+export function getDiscoverPresetPreview(): Promise<DiscoverPresetPreview> {
+  return fetchJson("/api/collections/presets/discover");
+}
+
+export function previewDiscoverShelf(payload: {
+  shelf_id: string;
+  section_id: number;
+  set_values?: Record<string, string[]> | null;
+  shelf_layout?: DiscoverShelfLayout | null;
+  auto_add?: Record<string, unknown> | null;
+}): Promise<CollectionPreviewResponse> {
+  return postJson("/api/collections/presets/discover/shelf-preview", payload);
+}
+
+export function applyDiscoverPreset(payload: {
+  movie_section_id?: number | null;
+  show_section_id?: number | null;
+  shelf_ids: string[];
+  set_values?: Record<string, string[]>;
+  apply_row_order?: boolean;
+  auto_add?: Record<string, unknown> | { movie?: Record<string, unknown> | null; show?: Record<string, unknown> | null } | null;
+  shelf_layout?: Record<string, DiscoverShelfLayout>;
+}): Promise<{ ok: boolean; recipe_ids?: { movie: number[]; show: number[] }; hub?: Record<string, unknown> }> {
+  return postJson("/api/collections/presets/discover/apply", payload);
+}
+
+export function applyCollectionHubOrder(payload: {
+  plex_section_id: number;
+  recipe_ids?: number[];
+}): Promise<{ ok: boolean; moved?: number; error?: string }> {
+  return postJson("/api/collections/hub-order/apply", payload);
+}
+
+export type CollectionHubRow = {
+  identifier: string;
+  title: string;
+  rating_key?: string | null;
+  promoted_to_recommended: boolean;
+  promoted_to_home: boolean;
+  promoted_to_shared: boolean;
+  deletable: boolean;
+  placeholdarr_owned?: boolean;
+  recipe_id?: number | null;
+  recipe_name?: string | null;
+};
+
+export type CollectionHubPromoteCandidate = {
+  rating_key: string;
+  title: string;
+  item_count?: number;
+  on_hubs?: boolean;
+  placeholdarr_owned?: boolean;
+  recipe_id?: number | null;
+  recipe_name?: string | null;
+};
+
+export type CollectionHubsSnapshot = {
+  plex_section_id: number;
+  hubs: CollectionHubRow[];
+  collections?: CollectionHubPromoteCandidate[];
+  promote_candidates: CollectionHubPromoteCandidate[];
+};
+
+export function getCollectionHubs(plexSectionId: number): Promise<CollectionHubsSnapshot> {
+  const params = new URLSearchParams({ plex_section_id: String(plexSectionId) });
+  return fetchJson(`/api/collections/hubs?${params.toString()}`);
+}
+
+export function applyCollectionHubs(payload: {
+  plex_section_id: number;
+  ordered_identifiers?: string[] | null;
+  visibility?: {
+    identifier?: string;
+    rating_key?: string;
+    library?: boolean | null;
+    home?: boolean | null;
+    shared?: boolean | null;
+  }[];
+  promote_rating_keys?: string[];
+  demote_identifiers?: string[];
+}): Promise<{
+  ok: boolean;
+  hubs?: CollectionHubRow[];
+  promote_candidates?: CollectionHubPromoteCandidate[];
+  errors?: string[];
+  reorder?: { ok?: boolean; moved?: number; error?: string };
+}> {
+  return putJson("/api/collections/hubs", payload);
+}
+
+export function getDiscoverPrunePreview(): Promise<{ ok: boolean; count: number; grace_days?: number; enabled?: boolean }> {
+  return fetchJson("/api/collections/discover/prune-preview");
 }
 
 export function arrAddItemKey(
