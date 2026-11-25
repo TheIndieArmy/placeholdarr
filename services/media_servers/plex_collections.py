@@ -44,10 +44,28 @@ class CollectionTitleConflict(PlexCollectionsError):
 OWNERSHIP_LABEL = "placeholdarr"
 OWNERSHIP_SUMMARY = "Managed by Placeholdarr."
 
+# plexapi puts every ratingKey in the request URI for createCollection / addItems.
+# Keep each call well under common ~8KB proxy/header limits (~800 keys); 150 is safe.
+MEMBERSHIP_URI_CHUNK_SIZE = 150
+
 # Provider-id -> item index per section so one recipe run does a single section listing.
 _index_lock = threading.Lock()
 _section_index_cache: dict[int, tuple[float, dict[str, dict[str, Any]]]] = {}
 _INDEX_TTL_SECONDS = 300.0
+
+
+def _iter_chunks(items: list[Any], size: int = MEMBERSHIP_URI_CHUNK_SIZE):
+    chunk_size = max(1, int(size or 1))
+    for start in range(0, len(items), chunk_size):
+        yield items[start : start + chunk_size]
+
+
+def _add_items_chunked(collection: Any, items: list[Any]) -> None:
+    """Add items via plexapi addItems without oversized URI query strings."""
+    if not items:
+        return
+    for chunk in _iter_chunks(items):
+        collection.addItems(chunk)
 
 
 def list_plex_sections(*, refresh: bool = False) -> list[dict[str, Any]]:
@@ -621,12 +639,18 @@ def sync_collection(
                 "skipped_unlabeled": False,
             }
         try:
-            created = section.createCollection(collection_title, items=items)
+            first_chunk = items[:MEMBERSHIP_URI_CHUNK_SIZE]
+            remaining = items[MEMBERSHIP_URI_CHUNK_SIZE:]
+            created = section.createCollection(collection_title, items=first_chunk)
+            # Mark ownership before remaining chunks so a mid-add failure can resume on sync.
+            ensure_ownership_markers(created, recipe_id, set_value)
+            if remaining:
+                _add_items_chunked(created, remaining)
+                created.reload()
         except Exception as exc:
             raise PlexCollectionsError(
                 f"Failed to create collection {collection_title!r} in section {section_id}: {exc}"
             ) from exc
-        ensure_ownership_markers(created, recipe_id, set_value)
         _apply_custom_item_order(created, items)
         # Create-time only: never re-apply on later membership syncs.
         apply_collection_visibility(created, visible_on)
@@ -661,7 +685,7 @@ def sync_collection(
 
     try:
         if to_add:
-            existing.addItems(to_add)
+            _add_items_chunked(existing, to_add)
         if to_remove:
             existing.removeItems(to_remove)
         if to_add or to_remove:
